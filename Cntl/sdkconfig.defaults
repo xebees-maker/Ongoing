@@ -1,0 +1,38 @@
+# startup 프로젝트 sdkconfig 기본값
+# ESP32-S3 (Waveshare ESP32-S3-Touch-LCD-1.47) 기준
+
+# ── Flash ────────────────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y        # 실제 탑재 용량 16MB
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y          # 80MHz — 한글 폰트 C 파일 읽기 속도 향상
+
+# ── CPU 주파수 ────────────────────────────────────────────────
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y     # 160MHz → 240MHz (LVGL 렌더링 체감 향상)
+
+# ── PSRAM ────────────────────────────────────────────────────
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_ESP32S3_DATA_CACHE_SIZE_64KB=y     # 데이터 캐시 64KB (기본 32KB → 2배)
+
+# ── FreeRTOS ─────────────────────────────────────────────────
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_UNICORE=n                 # 듀얼코어 유지 (Core0: 앱, Core1: LVGL)
+
+# ── Log 레벨 ─────────────────────────────────────────────────
+# 개발 중: INFO / 릴리즈 시: WARN으로 변경
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ── 파티션 테이블 ─────────────────────────────────────────────
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ── LVGL ─────────────────────────────────────────────────────
+CONFIG_LV_CONF_SKIP=y
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_USE_FONT_PLACEHOLDER=y  # binfont 로드 실패 시 대체 폰트
+CONFIG_LV_USE_BINFONT=y           # LittleFS bin 폰트 로드 활성화
+CONFIG_LV_USE_FS_POSIX=y          # POSIX 파일시스템 드라이버 (VFS → LittleFS)
+CONFIG_LV_USE_FS_MEMFS=y          # lv_binfont_create_from_buffer() 활성화

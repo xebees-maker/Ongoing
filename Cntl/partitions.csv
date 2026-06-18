@@ -1,0 +1,16 @@
+# Waveshare ESP32-S3-Touch-LCD-1.47 커스텀 파티션 테이블
+# Flash 총 크기: 16MB (0x1000000)
+# ESP-IDF v6.0.1 기준
+#
+# 주소 계획:
+#   0x00000000 ~ 0x00008FFF : 부트로더 (ESP-IDF 예약, 36KB)
+#   0x00009000 ~            : 파티션 테이블 시작
+#   0x00010000 ~            : app (8MB)
+#   0x00810000 ~            : fonts LittleFS (7.94MB)
+#   0x01000000              : Flash 끝
+#
+# Name,     Type, SubType,  Offset,     Size
+nvs,        data, nvs,      0x9000,     0x6000,
+phy_init,   data, phy,      0xF000,     0x1000,
+app,        app,  factory,  0x10000,    0x800000,
+fonts,      data, littlefs, 0x810000,   0x7F0000,

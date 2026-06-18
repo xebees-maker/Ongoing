@@ -1,0 +1,28 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "fs.c"
+        "ui_font.c"
+        "ui_main.c"
+        "ui_dashboard.c"
+        "ui_timer.c"
+        "ui_gas.c"
+        "ui_palette.c"
+        "ui_input.c"
+        "ui_screen.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        nvs_flash
+        freertos
+        log
+        bsp_ws_1_47
+        lvgl
+        joltwallet__littlefs
+        esp_adc
+        esp_driver_gpio
+        esp_driver_usb_serial_jtag
+        sensor_dht22
+        sensor_scd41
+)
+

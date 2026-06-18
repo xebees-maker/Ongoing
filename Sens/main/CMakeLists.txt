@@ -1,0 +1,17 @@
+idf_component_register(
+    SRCS
+        "sensor-c6.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        nvs_flash
+        freertos
+        log
+        lvgl
+        bsp_c6
+        sensor_dht22
+        sensor_scd41
+        esp_adc
+        esp_driver_gpio
+        esp_driver_usb_serial_jtag
+)

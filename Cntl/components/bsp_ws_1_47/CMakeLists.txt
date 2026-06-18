@@ -1,0 +1,16 @@
+idf_component_register(
+    SRCS
+        "bsp_ws_1_47.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        driver
+        esp_driver_ledc
+        esp_lcd
+        esp_timer
+        freertos
+        log
+        esp_lcd_jd9853
+        esp_lcd_touch_axs5106
+        lvgl
+)
