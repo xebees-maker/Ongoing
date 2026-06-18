@@ -24,5 +24,6 @@ idf_component_register(
         esp_driver_usb_serial_jtag
         sensor_dht22
         sensor_scd41
+        battery_monitor
 )
 

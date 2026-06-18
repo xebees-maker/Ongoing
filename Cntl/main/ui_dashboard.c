@@ -8,13 +8,10 @@
 
 #include "ui_dashboard.h"
 #include "ui_common.h"
-#include "esp_adc/adc_oneshot.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
 #include "driver/gpio.h"
-#include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
 #include "dht22.h"
+#include "battery.h"
 
 static const char *TAG = "ui_dash";
 
@@ -55,8 +52,7 @@ static const char *TAG = "ui_dash";
 #define BAT_SAMPLE_MS        1000       /* 샘플 주기: 1 Hz */
 #define BAT_SAMPLE_COUNT       11       /* 순환 버퍼: 11개 */
 #define BAT_GAUGE_EVERY        10       /* 게이지 갱신: 10샘플(10초)마다 */
-#define VBAT_DIV_USB          3.0f     /* USB: R19=200K, R21=100K */
-#define VBAT_DIV_BAT          3.0f     /* BAT: R19=200K, R21=100K (GPIO12 실측 확인) */
+#define VBAT_DIV              3.0f     /* R19=200K, R21=100K */
 #define VBAT_FULL_MV          4200.0f
 #define VBAT_EMPTY_MV         3300.0f
 
@@ -65,9 +61,7 @@ static lv_obj_t *s_pct_lbl  = NULL;
 static lv_obj_t *s_chg_icon = NULL;
 static lv_obj_t *s_temp_value = NULL;  /* 1단: 온도 값 표시 */
 static lv_obj_t *s_humi_value = NULL;  /* 2단: 습도 값 표시 */
-static adc_oneshot_unit_handle_t s_adc  = NULL;
-static adc_cali_handle_t         s_cali = NULL;
-static int s_queue[BAT_SAMPLE_COUNT];  /* 순환 버퍼 */
+static int s_queue[BAT_SAMPLE_COUNT];  /* 순환 버퍼 — battery_read_mv() 값(mV) 보관 */
 static int s_queue_head  = 0;          /* 다음 쓸 위치 */
 static int s_queue_count = 0;          /* 현재 보관 개수 */
 static int  s_sample_n    = 0;          /* 게이지 갱신 카운터 */
@@ -80,7 +74,7 @@ static bool s_usb_prev    = false;      /* 이전 USB 연결 상태 */
  * ════════════════════════════════════════════════════════════ */
 static void bat_display_update(int pct)
 {
-    bool charging = usb_serial_jtag_is_connected();
+    bool charging = battery_is_usb_connected();
 
     if (pct < 0) lv_label_set_text(s_pct_lbl, "--%");
     else         lv_label_set_text_fmt(s_pct_lbl, "%d%%", pct);
@@ -109,21 +103,12 @@ static void bat_gauge_refresh(void)
 
     int sum = 0;
     for (int i = 0; i < s_queue_count; i++) sum += s_queue[i];
-    int bat_avg_raw = sum / s_queue_count;
+    int vbat_avg_mv = sum / s_queue_count;
 
-    int vadc_mv = 0;
-    if (s_cali) adc_cali_raw_to_voltage(s_cali, bat_avg_raw, &vadc_mv);
-    else        vadc_mv = (int)((float)bat_avg_raw * 3100.0f / 4095.0f);
+    bool usb = battery_is_usb_connected();
+    int  pct = battery_mv_to_pct(vbat_avg_mv);
 
-    bool usb = usb_serial_jtag_is_connected();
-    float vbat_div = usb ? VBAT_DIV_USB : VBAT_DIV_BAT;
-    float vbat_mv  = (float)vadc_mv * vbat_div;
-    int pct = (int)((vbat_mv - VBAT_EMPTY_MV) / (VBAT_FULL_MV - VBAT_EMPTY_MV) * 100.0f + 0.5f);
-    if (pct < 0)   pct = 0;
-    if (pct > 100) pct = 100;
-
-    ESP_LOGI(TAG, "%s(div=%.0f)  avg=%d  vadc=%dmV  vbat=%.0fmV  pct=%d%%",
-             usb ? "USB" : "BAT", (double)vbat_div, bat_avg_raw, vadc_mv, (double)vbat_mv, pct);
+    ESP_LOGI(TAG, "%s  vbat_avg=%dmV  pct=%d%%", usb ? "USB" : "BAT", vbat_avg_mv, pct);
     s_last_pct = pct;
     bat_display_update(pct);
 }
@@ -137,17 +122,15 @@ static void bat_gauge_refresh(void)
 static void bat_sample_cb(lv_timer_t *t)
 {
     (void)t;
-    if (!s_adc) return;
 
-    /* ADC 읽기 */
-    int raw = 0;
-    if (adc_oneshot_read(s_adc, BAT_ADC_CH, &raw) != ESP_OK) return;
+    int vbat_mv = battery_read_mv();
+    if (vbat_mv == 0) return;
 
     /* 순환 버퍼에 저장 + 누적 max 갱신 */
-    s_queue[s_queue_head] = raw;
+    s_queue[s_queue_head] = vbat_mv;
     s_queue_head  = (s_queue_head + 1) % BAT_SAMPLE_COUNT;
     if (s_queue_count < BAT_SAMPLE_COUNT) s_queue_count++;
-    if (raw > s_all_peak) s_all_peak = raw;
+    if (vbat_mv > s_all_peak) s_all_peak = vbat_mv;
     s_sample_n++;
 
     /* 최초 샘플: 즉시 게이지 갱신 */
@@ -157,7 +140,7 @@ static void bat_sample_cb(lv_timer_t *t)
     }
 
     /* USB 연결/해제: pct 즉시 재계산 + 전체 갱신 */
-    bool usb_now = usb_serial_jtag_is_connected();
+    bool usb_now = battery_is_usb_connected();
     if (usb_now != s_usb_prev) {
         s_usb_prev = usb_now;
         bat_gauge_refresh();
@@ -238,53 +221,6 @@ static void create_battery_widget(lv_obj_t *parent)
     lv_label_set_text(s_pct_lbl, "--%");
     lv_obj_set_style_text_font(s_pct_lbl, UI_FONT_12, 0);
     lv_obj_set_style_text_color(s_pct_lbl, lv_color_hex(CLR_TEXT_LIGHT), 0);
-}
-
-/* ════════════════════════════════════════════════════════════
- * ADC 초기화
- * ════════════════════════════════════════════════════════════ */
-static void bat_adc_init(void)
-{
-    /* GPIO14=LOW: P-MOSFET ON → VBAT 분압기 활성화 */
-    gpio_config_t gcfg = {
-        .pin_bit_mask = (1ULL << BAT_CTRL_PIN),
-        .mode         = GPIO_MODE_OUTPUT,
-        .pull_up_en   = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&gcfg);
-    gpio_set_level(BAT_CTRL_PIN, 0);
-    ESP_LOGI(TAG, "BAT_CTRL GPIO14=LOW");
-
-    /* GPIO12 내부 pull-up 명시적 해제 */
-    gpio_set_pull_mode(GPIO_NUM_12, GPIO_FLOATING);
-
-    adc_oneshot_unit_init_cfg_t cfg = { .unit_id = BAT_ADC_UNIT };
-    if (adc_oneshot_new_unit(&cfg, &s_adc) != ESP_OK) {
-        ESP_LOGE(TAG, "ADC init failed");
-        return;
-    }
-    adc_oneshot_chan_cfg_t ch = {
-        .atten    = BAT_ADC_ATTEN,
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-    };
-    adc_oneshot_config_channel(s_adc, BAT_ADC_CH, &ch);
-
-    /* ESP32-S3 curve fitting 캘리브레이션 */
-    adc_cali_curve_fitting_config_t cali_cfg = {
-        .unit_id  = BAT_ADC_UNIT,
-        .chan     = BAT_ADC_CH,
-        .atten   = BAT_ADC_ATTEN,
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-    };
-    if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_cali) == ESP_OK) {
-        ESP_LOGI(TAG, "ADC calibration OK (curve fitting)");
-    } else {
-        ESP_LOGW(TAG, "ADC calibration unavailable — raw fallback");
-        s_cali = NULL;
-    }
-    ESP_LOGI(TAG, "Battery ADC ready  GPIO12 / ADC2_CH1");
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -369,7 +305,19 @@ void ui_create_dashboard(lv_obj_t *parent)
     lv_obj_t *sec3 = make_section(parent, SEC1_H + SEC2_H, SEC3_H, CLR_SEC3);
     create_battery_widget(sec3);
 
-    bat_adc_init();
+    /* GPIO12 내부 pull-up 명시적 해제 (ADC2_CH1 입력 안정화) */
+    gpio_set_pull_mode(GPIO_NUM_12, GPIO_FLOATING);
+
+    battery_config_t batt_cfg = {
+        .adc_unit    = BAT_ADC_UNIT,
+        .adc_channel = BAT_ADC_CH,
+        .atten       = BAT_ADC_ATTEN,
+        .divider     = VBAT_DIV,
+        .full_mv     = VBAT_FULL_MV,
+        .empty_mv    = VBAT_EMPTY_MV,
+        .ctrl_gpio   = BAT_CTRL_PIN,
+    };
+    battery_init(&batt_cfg);
     lv_timer_create(bat_sample_cb, BAT_SAMPLE_MS, NULL);
 
     dht22_init(GPIO_NUM_1);

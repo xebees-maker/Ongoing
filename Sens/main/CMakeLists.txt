@@ -11,6 +11,8 @@ idf_component_register(
         bsp_c6
         sensor_dht22
         sensor_scd41
+        battery_monitor
+        history_log
         esp_adc
         esp_driver_gpio
         esp_driver_usb_serial_jtag
