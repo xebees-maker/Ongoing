@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "history_log.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        nvs_flash
+        freertos
+        log
+)
