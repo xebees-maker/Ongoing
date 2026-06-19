@@ -15,6 +15,7 @@
 #include "scd41.h"
 #include "battery.h"
 #include "history_log.h"
+#include "wifi_dashboard.h"
 
 static const char *TAG = "sensor-c6";
 
@@ -32,6 +33,22 @@ static const char *TAG = "sensor-c6";
 #define SCD_STALE_MS  20000U   /* scd41.c 내부 워치독(16초)보다 살짝 길게 — 복구 중을 오류로 오인하지 않도록 */
 
 #define BATT_SAMPLE_COUNT  11  /* Cntl ui_dashboard.c와 동일한 이동평균 윈도우 — ADC 노이즈로 인한 출렁임 완화 */
+
+/* usb_serial_jtag_is_connected()는 USB 호스트가 보내는 SOF 패킷 수신 여부로 판단하므로
+ * 데이터 라인이 없는 단순 충전기만 꽂아도 false가 됨 — 보드 차지 LED 관찰 결과
+ * (충전 중=LED 켜짐=전압 상승, 배터리 방전 중=LED 꺼짐=전압 하강) 와 맞춰, 이동평균 전압의
+ * 장기 추세로 "방전 중이 아님(=USB 전원 공급 중으로 간주)"을 보완 판단한다. */
+#define BATT_TREND_SAMPLES     20      /* SAMPLE_MS(3초) * 20 = 약 1분 창 */
+#define BATT_TREND_FALL_MV     15      /* 이 값 이상 떨어지면 "방전 중"으로 판단 (튜닝 필요 — 실측 후 조정) */
+
+/* 배터리마다 충전 IC가 충전을 종료시키는 실제 완충 전압이 다름(실측: 4.02V / 4.08V) —
+ * 고정값으로는 한쪽이 항상 100%를 못 찍으므로, 전원 공급 중에 추세가 평탄해지는 지점을
+ * "이번 배터리의 완충 전압"으로 학습해서 NVS에 저장하고 다음 부팅에도 재사용한다. */
+#define BATT_PLATEAU_BAND_MV    6        /* 추세 창 내 최대-최소가 이 안이면 "평탄"으로 판단 */
+#define BATT_PLATEAU_MIN_MV     3900.0f  /* 평탄해도 이 전압 미만이면 중간 방전 구간 평탄으로 보고 학습 안 함 */
+#define BATT_FULL_MV_DEFAULT    4020.0f  /* NVS에 학습값이 없을 때(최초 부팅) 쓰는 초기값 */
+#define NVS_NS_BATTCAL          "battcal"
+#define NVS_KEY_FULL_MV         "full_mv"
 
 static lv_obj_t *s_temp_lbl     = NULL;
 static lv_obj_t *s_humi_lbl     = NULL;
@@ -53,11 +70,19 @@ static float s_last_scd_temp = 0.0f, s_last_scd_humi = 0.0f;
 static bool  s_last_scd_ok   = false;
 static int   s_last_batt_pct = 0;
 static bool  s_last_batt_ok  = false;
+static bool  s_last_powered  = false;
 static uint32_t s_scd_last_ok_ms = 0;  /* 0 = 부팅 후 아직 한 번도 성공 안 함 */
 
 static int s_batt_queue[BATT_SAMPLE_COUNT];  /* 순환 버퍼 — battery_read_mv() 값(mV) 보관 */
 static int s_batt_queue_head  = 0;
 static int s_batt_queue_count = 0;
+
+static int s_batt_trend[BATT_TREND_SAMPLES];  /* 순환 버퍼 — avg_mv(이동평균) 장기 추세용 */
+static int s_batt_trend_head  = 0;
+static int s_batt_trend_count = 0;
+
+static float s_full_mv             = BATT_FULL_MV_DEFAULT;  /* 학습된(또는 기본) 완충 전압 */
+static int   s_full_mv_persisted   = 0;                     /* NVS에 마지막으로 쓴 값 — 중복 쓰기 방지 */
 
 static bool     s_screen_off    = false;
 static uint32_t s_last_input_ms = 0;
@@ -219,6 +244,49 @@ static void build_detail_screen(void)
     lv_obj_set_style_border_width(s_detail_list, 0, 0);
 }
 
+/* 추세 버퍼가 아직 안 찼으면(부팅 직후) 판단 보류 → true(전원 공급 중으로 간주) —
+ * 충전 중인데 화면이 꺼지는 원래 버그 쪽이 더 나쁘므로, 불확실할 땐 켜진 쪽으로 기본값 */
+static bool battery_trend_is_powered(void)
+{
+    if (s_batt_trend_count < BATT_TREND_SAMPLES) return true;
+
+    int oldest = s_batt_trend[s_batt_trend_head];
+    int newest = s_batt_trend[(s_batt_trend_head + BATT_TREND_SAMPLES - 1) % BATT_TREND_SAMPLES];
+    return (oldest - newest) < BATT_TREND_FALL_MV;
+}
+
+/* 전원 공급 중에 추세 창(약 1분) 전체가 평탄하고 충분히 높은 전압이면 "이번 배터리는
+ * 여기서 완충됨"으로 보고 학습한다. NVS에는 값이 바뀐 경우에만 써서 마모를 줄인다. */
+static void maybe_learn_full_mv(bool powered, int avg_mv)
+{
+    if (!powered) return;
+    if (s_batt_trend_count < BATT_TREND_SAMPLES) return;
+    if ((float)avg_mv < BATT_PLATEAU_MIN_MV) return;
+
+    int mn = s_batt_trend[0], mx = s_batt_trend[0];
+    for (int i = 1; i < BATT_TREND_SAMPLES; i++) {
+        if (s_batt_trend[i] < mn) mn = s_batt_trend[i];
+        if (s_batt_trend[i] > mx) mx = s_batt_trend[i];
+    }
+    if (mx - mn > BATT_PLATEAU_BAND_MV) return;  /* 아직 충전 중 — 평탄하지 않음 */
+
+    if (avg_mv == (int)s_full_mv) return;  /* 이미 이 값으로 학습됨 */
+
+    s_full_mv = (float)avg_mv;
+    battery_set_full_mv(s_full_mv);
+    ESP_LOGI(TAG, "배터리 완충 전압 학습: %d mV", avg_mv);
+
+    if (avg_mv != s_full_mv_persisted) {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NS_BATTCAL, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_i32(h, NVS_KEY_FULL_MV, avg_mv);
+            nvs_commit(h);
+            nvs_close(h);
+            s_full_mv_persisted = avg_mv;
+        }
+    }
+}
+
 static void sample_cb(lv_timer_t *t)
 {
     (void)t;
@@ -275,11 +343,28 @@ static void sample_cb(lv_timer_t *t)
         for (int i = 0; i < s_batt_queue_count; i++) sum += s_batt_queue[i];
         int avg_mv = sum / s_batt_queue_count;
 
+        s_batt_trend[s_batt_trend_head] = avg_mv;
+        s_batt_trend_head = (s_batt_trend_head + 1) % BATT_TREND_SAMPLES;
+        if (s_batt_trend_count < BATT_TREND_SAMPLES) s_batt_trend_count++;
+
+        bool powered = usb || battery_trend_is_powered();
+        maybe_learn_full_mv(powered, avg_mv);
         s_last_batt_pct = battery_mv_to_pct(avg_mv);
-        lv_label_set_text_fmt(s_batt_lbl, "BATT  %d%%  %s", s_last_batt_pct, usb ? "USB" : "BAT");
+        s_last_powered  = powered;
+        lv_label_set_text_fmt(s_batt_lbl, "BATT  %d%%  %s", s_last_batt_pct, powered ? "USB" : "BAT");
     } else {
         lv_label_set_text(s_batt_lbl, "BATT  --");
     }
+
+    /* LCD는 SCD41 실패 시 stale 타임아웃 전까지 마지막 값을 그대로 보여줌 — 웹도 동일하게,
+     * 이번 사이클의 성공/실패(s_last_scd_ok)가 아니라 "아직 stale은 아님"을 ok로 보냄
+     * (5초 주기 센서를 3초마다 폴링하니 매 사이클 실패가 정상이라 그대로 보내면 깜빡임) */
+    bool scd_display_ok = s_scd_last_ok_ms != 0 &&
+                           (lv_tick_get() - s_scd_last_ok_ms) < SCD_STALE_MS;
+
+    wifi_dashboard_set_readings(s_last_dht_temp, s_last_dht_humi, s_last_dht_ok,
+                                 s_last_co2, s_last_scd_temp, s_last_scd_humi, scd_display_ok,
+                                 s_last_batt_pct, s_last_batt_ok, s_last_powered);
 }
 
 static void history_tick_cb(lv_timer_t *t)
@@ -333,9 +418,11 @@ static void screen_timer_cb(lv_timer_t *t)
 {
     (void)t;
 
-    if (battery_is_usb_connected()) {
+    if (battery_is_usb_connected() || battery_trend_is_powered()) {
         /* USB 연결 중에는 유휴 시계를 계속 리셋 — 뽑는 순간 그동안 쌓인 유휴시간으로
-         * 즉시 타임아웃되는 것을 방지 (Cntl ui_screen.c에서 발견된 버그의 수정판) */
+         * 즉시 타임아웃되는 것을 방지 (Cntl ui_screen.c에서 발견된 버그의 수정판).
+         * battery_is_usb_connected()는 호스트 SOF 기반이라 데이터선 없는 충전기를 못 잡아서
+         * battery_trend_is_powered()(전압 추세)로 보완 */
         s_last_input_ms = lv_tick_get();
         if (s_screen_off) {
             bsp_display_set_brightness(BSP_LCD_BRIGHTNESS_DEFAULT);
@@ -376,6 +463,17 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    nvs_handle_t batt_nvs;
+    if (nvs_open(NVS_NS_BATTCAL, NVS_READONLY, &batt_nvs) == ESP_OK) {
+        int32_t learned_mv = 0;
+        if (nvs_get_i32(batt_nvs, NVS_KEY_FULL_MV, &learned_mv) == ESP_OK) {
+            s_full_mv           = (float)learned_mv;
+            s_full_mv_persisted = learned_mv;
+            ESP_LOGI(TAG, "저장된 배터리 완충 전압 불러옴: %d mV", (int)learned_mv);
+        }
+        nvs_close(batt_nvs);
+    }
+
     ESP_ERROR_CHECK(bsp_board_init());
 
     history_log_init();
@@ -395,11 +493,14 @@ void app_main(void)
         .adc_channel = BSP_BATTERY_ADC_CHANNEL,
         .atten       = BSP_BATTERY_ADC_ATTEN,
         .divider     = BSP_BATTERY_DIV,
-        .full_mv     = 4200.0f,
+        .full_mv     = s_full_mv,  /* 기본값 또는 NVS에서 불러온 학습값 — 배터리마다 실제 완충
+                                     * 전압이 다름(실측: 4.02V/4.08V), maybe_learn_full_mv()가 계속 갱신 */
         .empty_mv    = 3300.0f,
         .ctrl_gpio   = GPIO_NUM_NC,
     };
     battery_init(&batt_cfg);
+
+    wifi_dashboard_init();
 
     if (bsp_lvgl_lock(BSP_MUTEX_WAIT_DEFAULT)) {
         s_main_scr = lv_screen_active();

@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "sensor-c6.c"
+        "wifi_dashboard.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -16,4 +17,8 @@ idf_component_register(
         esp_adc
         esp_driver_gpio
         esp_driver_usb_serial_jtag
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_http_server
 )

@@ -86,3 +86,8 @@ bool battery_is_usb_connected(void)
 {
     return usb_serial_jtag_is_connected();
 }
+
+void battery_set_full_mv(float full_mv)
+{
+    s_cfg.full_mv = full_mv;
+}

@@ -1,0 +1,32 @@
+menu "Sens WiFi Dashboard"
+
+    choice SENS_WIFI_MODE
+        prompt "WiFi mode"
+        default SENS_WIFI_MODE_STA
+        help
+            STA: connect to an existing AP (dev/test phase, phone on same network).
+            AP: C6 hosts its own network (production phase, no router needed).
+
+        config SENS_WIFI_MODE_STA
+            bool "Station (join existing WiFi)"
+        config SENS_WIFI_MODE_AP
+            bool "SoftAP (C6 hosts its own network)"
+    endchoice
+
+    config SENS_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            STA mode: SSID to join. AP mode: SSID this device broadcasts.
+            Left empty by default on purpose — this file is committed to git.
+            Set the real value in sdkconfig (gitignored), not here.
+
+    config SENS_WIFI_PASSWORD
+        string "WiFi password"
+        default ""
+        help
+            STA mode: password for the AP being joined. AP mode: password for this device's own network (min 8 chars, or leave empty for open AP).
+            Left empty by default on purpose — this file is committed to git.
+            Set the real value in sdkconfig (gitignored), not here.
+
+endmenu

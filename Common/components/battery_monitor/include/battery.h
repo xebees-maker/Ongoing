@@ -41,6 +41,10 @@ int battery_read_pct(void);
 /** @brief USB(시리얼/JTAG) 연결 여부 — 충전 중 여부 판단에 사용 */
 bool battery_is_usb_connected(void);
 
+/** @brief 배터리별 완충 전압 보정값 갱신 — 학습된 값으로 battery_mv_to_pct() 기준을 바꿈
+ *  (배터리마다 충전 IC가 종료시키는 실제 완충 전압이 달라서 호출측에서 추정한 값을 반영) */
+void battery_set_full_mv(float full_mv);
+
 #ifdef __cplusplus
 }
 #endif
