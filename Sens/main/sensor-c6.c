@@ -16,6 +16,7 @@
 #include "battery.h"
 #include "history_log.h"
 #include "wifi_dashboard.h"
+#include "esp_now_node.h"
 
 static const char *TAG = "sensor-c6";
 
@@ -501,6 +502,7 @@ void app_main(void)
     battery_init(&batt_cfg);
 
     wifi_dashboard_init();
+    esp_now_node_init();
 
     if (bsp_lvgl_lock(BSP_MUTEX_WAIT_DEFAULT)) {
         s_main_scr = lv_screen_active();

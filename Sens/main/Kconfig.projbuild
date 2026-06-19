@@ -29,4 +29,12 @@ menu "Sens WiFi Dashboard"
             Left empty by default on purpose — this file is committed to git.
             Set the real value in sdkconfig (gitignored), not here.
 
+    config SENS_NODE_NAME
+        string "Node name (ESP-NOW identity)"
+        default ""
+        help
+            Human-readable name this node advertises over ESP-NOW and shows on the
+            dashboard. Leave empty to auto-generate "Sens-XXXX" from the MAC address.
+            Set per-device in sdkconfig (gitignored), not here.
+
 endmenu

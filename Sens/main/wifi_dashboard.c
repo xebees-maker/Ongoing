@@ -13,6 +13,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "history_log.h"
+#include "esp_now_node.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,7 +75,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "#close{display:inline-block;margin-bottom:12px;padding:6px 14px;"
         "background:#fff;color:#1a1a2e;border-radius:4px;cursor:pointer}"
         "</style></head><body>"
-        "<h2>C6 Sensor Node</h2>"
+        "<h2 id='node-name'>C6 Sensor Node</h2>"
         "<div id='rows'></div>"
         "<div id='modal'>"
         "<div id='close' onclick=\"closeModal()\">&lt; Back</div>"
@@ -113,6 +114,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "async function tick(){"
         "  if(!rowsBuilt) buildRows();"
         "  const r=await fetch('/api/data'); const d=await r.json();"
+        "  document.getElementById('node-name').textContent=d.name;"
         "  METRICS.forEach((m,i)=>{"
         "    document.getElementById('val'+i).textContent=m.ok(d)?m.row(d):'--';"
         "  });"
@@ -207,9 +209,11 @@ static esp_err_t data_get_handler(httpd_req_t *req)
 {
     char buf[256];
     int n = snprintf(buf, sizeof(buf),
-        "{\"dht_ok\":%s,\"dht_temp\":%.1f,\"dht_humi\":%.1f,"
+        "{\"name\":\"%s\","
+        "\"dht_ok\":%s,\"dht_temp\":%.1f,\"dht_humi\":%.1f,"
         "\"scd_ok\":%s,\"co2\":%d,\"scd_temp\":%.1f,\"scd_humi\":%.1f,"
         "\"batt_ok\":%s,\"batt_pct\":%d,\"powered\":%s}",
+        esp_now_node_get_name(),
         s_readings.dht_ok ? "true" : "false", s_readings.dht_temp, s_readings.dht_humi,
         s_readings.scd_ok ? "true" : "false", s_readings.co2, s_readings.scd_temp, s_readings.scd_humi,
         s_readings.batt_ok ? "true" : "false", s_readings.batt_pct,

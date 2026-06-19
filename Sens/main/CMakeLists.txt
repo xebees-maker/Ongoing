@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "sensor-c6.c"
         "wifi_dashboard.c"
+        "esp_now_node.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -21,4 +22,6 @@ idf_component_register(
         esp_event
         esp_netif
         esp_http_server
+        esp_timer
+        esp_now_link
 )
