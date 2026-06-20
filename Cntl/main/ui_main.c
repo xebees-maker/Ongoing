@@ -7,11 +7,9 @@
 #include "ui_common.h"
 #include "ui_dashboard.h"
 #include "ui_timer.h"
-#include "ui_gas.h"
 #include "ui_input.h"
 #include "ui_screen.h"
-
-#define STR_TAB_GAS "가스"
+#include "ui_nodes.h"
 
 static void tab_changed_cb(lv_event_t *e)
 {
@@ -34,8 +32,8 @@ void ui_init(void)
     lv_obj_align(tabview, LV_ALIGN_TOP_LEFT, UI_ALIGN_OFFSET_NONE, UI_ALIGN_OFFSET_NONE);
 
     lv_obj_t *tab_dashboard = lv_tabview_add_tab(tabview, STR_TAB_DASHBOARD);
-    lv_obj_t *tab_gas       = lv_tabview_add_tab(tabview, STR_TAB_GAS);
     lv_obj_t *tab_timer     = lv_tabview_add_tab(tabview, STR_TAB_TIMER);
+    lv_obj_t *tab_nodes     = lv_tabview_add_tab(tabview, STR_TAB_NODES);
 
     lv_obj_t *tab_bar = lv_tabview_get_tab_bar(tabview);
     lv_obj_set_style_text_font(tab_bar, UI_FONT_12, LV_STATE_DEFAULT);
@@ -48,8 +46,8 @@ void ui_init(void)
     lv_obj_add_event_cb(tabview, tab_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     ui_create_dashboard(tab_dashboard);
-    ui_create_gas(tab_gas);
     ui_create_timer(tab_timer);
+    ui_create_nodes(tab_nodes);
 
     ui_screen_init();
 }

@@ -11,6 +11,7 @@
 #include "fs.h"
 #include "ui_font.h"
 #include "ui_main.h"
+#include "esp_now_hub.h"
 
 static const char *TAG = "main";
 
@@ -61,6 +62,9 @@ void app_main(void)
 
     /* LittleFS 마운트 (폰트 파티션) */
     ESP_ERROR_CHECK(fs_init());
+
+    /* ESP-NOW 허브: WiFi 기동 + Sens 노드 advertise 수신 */
+    esp_now_hub_init();
 
     /* 폰트 로드 + UI 생성 — LVGL 뮤텍스 보호 구간 */
     if (bsp_lvgl_lock(BSP_MUTEX_WAIT_DEFAULT)) {

@@ -1,6 +1,6 @@
 /**
  * @file    ui_dashboard.h
- * @brief   종합 탭 — 3단 레이아웃 (40 : 40 : 20)
+ * @brief   종합 탭 — 배터리/전원 상태
  */
 #pragma once
 

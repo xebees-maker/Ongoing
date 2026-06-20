@@ -6,10 +6,11 @@ idf_component_register(
         "ui_main.c"
         "ui_dashboard.c"
         "ui_timer.c"
-        "ui_gas.c"
         "ui_palette.c"
         "ui_input.c"
         "ui_screen.c"
+        "ui_nodes.c"
+        "esp_now_hub.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -22,8 +23,11 @@ idf_component_register(
         esp_adc
         esp_driver_gpio
         esp_driver_usb_serial_jtag
-        sensor_dht22
-        sensor_scd41
         battery_monitor
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_timer
+        esp_now_link
 )
 

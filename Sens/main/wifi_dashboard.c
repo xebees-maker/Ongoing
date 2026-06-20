@@ -1,9 +1,10 @@
 /**
  * @file    wifi_dashboard.c
- * @brief   C6 센서값을 폰 브라우저로 보기 위한 임시 WiFi 대시보드 (개발/테스트용)
+ * @brief   C6 센서값을 폰 브라우저로 보기 위한 WiFi 대시보드
  *
- * 테스트 단계: STA로 기존 AP에 접속, 같은 네트워크의 폰에서 접속.
- * 양산 단계: SoftAP로 전환(SENS_WIFI_MODE_AP) — Kconfig 선택지로 전환.
+ * SoftAP(SENS_WIFI_MODE_AP)가 기본 운영 방식: 이 노드가 자체 네트워크를 호스팅하며
+ * ESP_NOW_LINK_CHANNEL 고정 채널을 사용해 Cntl 허브와 ESP-NOW로도 통신한다.
+ * STA(기존 AP 접속) 모드는 진단/개발용으로 남겨둔 선택지.
  */
 
 #include "wifi_dashboard.h"
@@ -14,6 +15,7 @@
 #include "esp_log.h"
 #include "history_log.h"
 #include "esp_now_node.h"
+#include "esp_now_link.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -296,11 +298,20 @@ void wifi_dashboard_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
 #else
     wifi_config_t wifi_cfg = { 0 };
-    copy_str(wifi_cfg.ap.ssid, sizeof(wifi_cfg.ap.ssid), CONFIG_SENS_WIFI_SSID);
-    wifi_cfg.ap.ssid_len = strlen(CONFIG_SENS_WIFI_SSID);
+    const char *ssid = CONFIG_SENS_WIFI_SSID;
+    char auto_ssid[32];
+    if (strlen(ssid) == 0) {
+        uint8_t mac[6];
+        esp_wifi_get_mac(WIFI_IF_AP, mac);
+        snprintf(auto_ssid, sizeof(auto_ssid), "Sens-%02X%02X", mac[4], mac[5]);
+        ssid = auto_ssid;
+    }
+    copy_str(wifi_cfg.ap.ssid, sizeof(wifi_cfg.ap.ssid), ssid);
+    wifi_cfg.ap.ssid_len = strlen(ssid);
     copy_str(wifi_cfg.ap.password, sizeof(wifi_cfg.ap.password), CONFIG_SENS_WIFI_PASSWORD);
     wifi_cfg.ap.max_connection = 4;
     wifi_cfg.ap.authmode = (strlen(CONFIG_SENS_WIFI_PASSWORD) == 0) ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+    wifi_cfg.ap.channel = ESP_NOW_LINK_CHANNEL;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_cfg));
 #endif
