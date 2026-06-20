@@ -57,6 +57,7 @@ static lv_obj_t *s_co2_lbl      = NULL;
 static lv_obj_t *s_scd_temp_lbl = NULL;
 static lv_obj_t *s_scd_humi_lbl = NULL;
 static lv_obj_t *s_batt_lbl     = NULL;
+static lv_obj_t *s_net_lbl      = NULL;
 
 static lv_obj_t *s_main_scr     = NULL;
 static lv_obj_t *s_detail_scr   = NULL;
@@ -367,6 +368,10 @@ static void sample_cb(lv_timer_t *t)
     wifi_dashboard_set_readings(s_last_dht_temp, s_last_dht_humi, s_last_dht_ok,
                                  s_last_co2, s_last_scd_temp, s_last_scd_humi, scd_display_ok,
                                  s_last_batt_pct, s_last_batt_ok, s_last_powered);
+
+    char net_status[40];
+    wifi_dashboard_get_net_status(net_status, sizeof(net_status));
+    lv_label_set_text(s_net_lbl, net_status);
 }
 
 static void history_tick_cb(lv_timer_t *t)
@@ -522,6 +527,12 @@ void app_main(void)
         lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
         lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 8);
+
+        s_net_lbl = lv_label_create(s_main_scr);
+        lv_label_set_text(s_net_lbl, "");
+        lv_obj_set_style_text_font(s_net_lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(s_net_lbl, lv_color_hex(0x9AAABB), 0);
+        lv_obj_align(s_net_lbl, LV_ALIGN_TOP_MID, 0, 26);
 
         s_temp_lbl     = make_row(s_main_scr, 40,  HISTORY_METRIC_DHT_TEMP);
         s_humi_lbl     = make_row(s_main_scr, 88,  HISTORY_METRIC_DHT_HUMI);

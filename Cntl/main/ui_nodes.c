@@ -10,11 +10,16 @@
 
 #define NODE_LIST_REFRESH_MS 1000
 
-static lv_obj_t *s_list = NULL;
+static lv_obj_t *s_list      = NULL;
+static lv_obj_t *s_net_label = NULL;
 
 static void node_list_refresh_cb(lv_timer_t *t)
 {
     (void)t;
+
+    char status[40];
+    esp_now_hub_get_net_status(status, sizeof(status));
+    lv_label_set_text(s_net_label, status);
 
     esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
     int count = esp_now_hub_get_nodes(nodes, ESP_NOW_HUB_MAX_NODES);
@@ -46,8 +51,15 @@ void ui_create_nodes(lv_obj_t *parent)
     lv_obj_set_style_pad_all(parent, 0, 0);
     lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
 
+    s_net_label = lv_label_create(parent);
+    lv_obj_set_style_text_font(s_net_label, UI_FONT_12, 0);
+    lv_obj_set_style_text_color(s_net_label, lv_color_hex(COLOR_TEXT_UI), 0);
+    lv_label_set_text(s_net_label, "");
+    lv_obj_align(s_net_label, LV_ALIGN_TOP_MID, 0, 4);
+
     s_list = lv_list_create(parent);
-    lv_obj_set_size(s_list, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_size(s_list, LV_PCT(100), LV_PCT(100) - 24);
+    lv_obj_align(s_list, LV_ALIGN_BOTTOM_MID, 0, 0);
 
     lv_obj_t *btn = lv_list_add_button(s_list, LV_SYMBOL_REFRESH, STR_NODES_EMPTY);
     lv_obj_set_style_text_font(btn, UI_FONT_12, 0);

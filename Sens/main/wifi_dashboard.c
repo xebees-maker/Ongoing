@@ -36,6 +36,24 @@ typedef struct {
 
 static readings_t s_readings = { 0 };
 
+static bool                s_got_ip  = false;
+static esp_netif_ip_info_t s_ip_info = { 0 };
+
+void wifi_dashboard_get_net_status(char *buf, size_t buflen)
+{
+#if CONFIG_SENS_WIFI_MODE_STA
+    if (!s_got_ip) {
+        snprintf(buf, buflen, "STA 연결 중...");
+        return;
+    }
+    wifi_ap_record_t ap_info;
+    int channel = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) ? ap_info.primary : 0;
+    snprintf(buf, buflen, "STA CH%d " IPSTR, channel, IP2STR(&s_ip_info.ip));
+#else
+    snprintf(buf, buflen, "AP CH%d " IPSTR, ESP_NOW_LINK_CHANNEL, IP2STR(&s_ip_info.ip));
+#endif
+}
+
 void wifi_dashboard_set_readings(float dht_temp, float dht_humi, bool dht_ok,
                                   int co2, float scd_temp, float scd_humi, bool scd_ok,
                                   int batt_pct, bool batt_ok, bool powered)
@@ -78,6 +96,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "background:#fff;color:#1a1a2e;border-radius:4px;cursor:pointer}"
         "</style></head><body>"
         "<h2 id='node-name'>C6 Sensor Node</h2>"
+        "<div id='net-status' style='color:#9aa;font-size:0.85em;margin:-8px 0 12px'></div>"
         "<div id='rows'></div>"
         "<div id='modal'>"
         "<div id='close' onclick=\"closeModal()\">&lt; Back</div>"
@@ -117,6 +136,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "  if(!rowsBuilt) buildRows();"
         "  const r=await fetch('/api/data'); const d=await r.json();"
         "  document.getElementById('node-name').textContent=d.name;"
+        "  document.getElementById('net-status').textContent=d.net;"
         "  METRICS.forEach((m,i)=>{"
         "    document.getElementById('val'+i).textContent=m.ok(d)?m.row(d):'--';"
         "  });"
@@ -209,13 +229,16 @@ static esp_err_t history_get_handler(httpd_req_t *req)
 
 static esp_err_t data_get_handler(httpd_req_t *req)
 {
-    char buf[256];
+    char net_status[40];
+    wifi_dashboard_get_net_status(net_status, sizeof(net_status));
+
+    char buf[320];
     int n = snprintf(buf, sizeof(buf),
-        "{\"name\":\"%s\","
+        "{\"name\":\"%s\",\"net\":\"%s\","
         "\"dht_ok\":%s,\"dht_temp\":%.1f,\"dht_humi\":%.1f,"
         "\"scd_ok\":%s,\"co2\":%d,\"scd_temp\":%.1f,\"scd_humi\":%.1f,"
         "\"batt_ok\":%s,\"batt_pct\":%d,\"powered\":%s}",
-        esp_now_node_get_name(),
+        esp_now_node_get_name(), net_status,
         s_readings.dht_ok ? "true" : "false", s_readings.dht_temp, s_readings.dht_humi,
         s_readings.scd_ok ? "true" : "false", s_readings.co2, s_readings.scd_temp, s_readings.scd_humi,
         s_readings.batt_ok ? "true" : "false", s_readings.batt_pct,
@@ -257,10 +280,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_got_ip = false;
         ESP_LOGW(TAG, "WiFi 연결 끊김 — 재시도");
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = (ip_event_got_ip_t *)event_data;
+        s_ip_info = evt->ip_info;
+        s_got_ip  = true;
         ESP_LOGI(TAG, "IP 받음: " IPSTR, IP2STR(&evt->ip_info.ip));
         start_http_server();
     }
@@ -319,6 +345,10 @@ void wifi_dashboard_init(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 
 #if CONFIG_SENS_WIFI_MODE_AP
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_netif && esp_netif_get_ip_info(ap_netif, &s_ip_info) == ESP_OK) {
+        s_got_ip = true;
+    }
     start_http_server();  /* AP는 GOT_IP 이벤트 없이 시작 시점에 이미 자체 IP가 있음 */
 #endif
 }

@@ -11,6 +11,7 @@ idf_component_register(
         "ui_screen.c"
         "ui_nodes.c"
         "esp_now_hub.c"
+        "web_dashboard.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -29,5 +30,6 @@ idf_component_register(
         esp_netif
         esp_timer
         esp_now_link
+        esp_http_server
 )
 
