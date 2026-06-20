@@ -25,6 +25,12 @@ static const char *TAG = "sensor-c6";
 #define SCD41_SDA_PIN    GPIO_NUM_6
 #define SCD41_SCL_PIN    GPIO_NUM_7
 
+/* VBUS 분압(100k+100k, H1 VBUS → IO5) — 실측: USB 연결 시 ADC핀 ~2.3V, 배터리 단독 시 ~0V */
+#define VBUS_SENSE_PIN      GPIO_NUM_5
+#define VBUS_SENSE_CHANNEL  ADC_CHANNEL_5
+#define VBUS_SENSE_ATTEN    ADC_ATTEN_DB_12
+#define VBUS_PRESENT_MV     1200   /* 실측 0V(미연결)/2.3V(연결) 중간보다 한참 아래 — 충분한 마진 */
+
 #define SAMPLE_MS        3000   /* DHT22 최소 호출 간격 2초 이상 — 여유 두고 3초 (진단용) */
 #define HISTORY_TIMER_MS (HISTORY_TICK_SEC * 1000)
 
@@ -35,16 +41,10 @@ static const char *TAG = "sensor-c6";
 
 #define BATT_SAMPLE_COUNT  11  /* Cntl ui_dashboard.c와 동일한 이동평균 윈도우 — ADC 노이즈로 인한 출렁임 완화 */
 
-/* usb_serial_jtag_is_connected()는 USB 호스트가 보내는 SOF 패킷 수신 여부로 판단하므로
- * 데이터 라인이 없는 단순 충전기만 꽂아도 false가 됨 — 보드 차지 LED 관찰 결과
- * (충전 중=LED 켜짐=전압 상승, 배터리 방전 중=LED 꺼짐=전압 하강) 와 맞춰, 이동평균 전압의
- * 장기 추세로 "방전 중이 아님(=USB 전원 공급 중으로 간주)"을 보완 판단한다. */
-#define BATT_TREND_SAMPLES     20      /* SAMPLE_MS(3초) * 20 = 약 1분 창 */
-#define BATT_TREND_FALL_MV     15      /* 이 값 이상 떨어지면 "방전 중"으로 판단 (튜닝 필요 — 실측 후 조정) */
-
 /* 배터리마다 충전 IC가 충전을 종료시키는 실제 완충 전압이 다름(실측: 4.02V / 4.08V) —
  * 고정값으로는 한쪽이 항상 100%를 못 찍으므로, 전원 공급 중에 추세가 평탄해지는 지점을
  * "이번 배터리의 완충 전압"으로 학습해서 NVS에 저장하고 다음 부팅에도 재사용한다. */
+#define BATT_TREND_SAMPLES      20       /* SAMPLE_MS(3초) * 20 = 약 1분 창 — 완충 전압 평탄 구간 학습용 */
 #define BATT_PLATEAU_BAND_MV    6        /* 추세 창 내 최대-최소가 이 안이면 "평탄"으로 판단 */
 #define BATT_PLATEAU_MIN_MV     3900.0f  /* 평탄해도 이 전압 미만이면 중간 방전 구간 평탄으로 보고 학습 안 함 */
 #define BATT_FULL_MV_DEFAULT    4020.0f  /* NVS에 학습값이 없을 때(최초 부팅) 쓰는 초기값 */
@@ -78,7 +78,9 @@ static int s_batt_queue[BATT_SAMPLE_COUNT];  /* 순환 버퍼 — battery_read_m
 static int s_batt_queue_head  = 0;
 static int s_batt_queue_count = 0;
 
-static int s_batt_trend[BATT_TREND_SAMPLES];  /* 순환 버퍼 — avg_mv(이동평균) 장기 추세용 */
+static adc_oneshot_unit_handle_t s_vbus_adc = NULL;
+
+static int s_batt_trend[BATT_TREND_SAMPLES];  /* 순환 버퍼 — avg_mv(이동평균) 완충 전압 학습용 */
 static int s_batt_trend_head  = 0;
 static int s_batt_trend_count = 0;
 
@@ -245,15 +247,15 @@ static void build_detail_screen(void)
     lv_obj_set_style_border_width(s_detail_list, 0, 0);
 }
 
-/* 추세 버퍼가 아직 안 찼으면(부팅 직후) 판단 보류 → true(전원 공급 중으로 간주) —
- * 충전 중인데 화면이 꺼지는 원래 버그 쪽이 더 나쁘므로, 불확실할 땐 켜진 쪽으로 기본값 */
-static bool battery_trend_is_powered(void)
+/* VBUS 분압 직접 측정 — usb_serial_jtag_is_connected()와 달리 데이터선 없는
+ * 단순 충전기도 감지함 (H1 VBUS → 100k/100k 분압 → IO5) */
+static bool vbus_is_present(void)
 {
-    if (s_batt_trend_count < BATT_TREND_SAMPLES) return true;
-
-    int oldest = s_batt_trend[s_batt_trend_head];
-    int newest = s_batt_trend[(s_batt_trend_head + BATT_TREND_SAMPLES - 1) % BATT_TREND_SAMPLES];
-    return (oldest - newest) < BATT_TREND_FALL_MV;
+    if (!s_vbus_adc) return false;
+    int raw = 0;
+    if (adc_oneshot_read(s_vbus_adc, VBUS_SENSE_CHANNEL, &raw) != ESP_OK) return false;
+    int mv = (int)((float)raw * 3100.0f / 4095.0f);
+    return mv >= VBUS_PRESENT_MV;
 }
 
 /* 전원 공급 중에 추세 창(약 1분) 전체가 평탄하고 충분히 높은 전압이면 "이번 배터리는
@@ -334,7 +336,7 @@ static void sample_cb(lv_timer_t *t)
 
     int batt_mv = battery_read_mv();
     s_last_batt_ok = (batt_mv > 0);
-    bool usb = battery_is_usb_connected();
+    bool powered = vbus_is_present();
     if (s_last_batt_ok) {
         s_batt_queue[s_batt_queue_head] = batt_mv;
         s_batt_queue_head = (s_batt_queue_head + 1) % BATT_SAMPLE_COUNT;
@@ -348,7 +350,6 @@ static void sample_cb(lv_timer_t *t)
         s_batt_trend_head = (s_batt_trend_head + 1) % BATT_TREND_SAMPLES;
         if (s_batt_trend_count < BATT_TREND_SAMPLES) s_batt_trend_count++;
 
-        bool powered = usb || battery_trend_is_powered();
         maybe_learn_full_mv(powered, avg_mv);
         s_last_batt_pct = battery_mv_to_pct(avg_mv);
         s_last_powered  = powered;
@@ -419,11 +420,9 @@ static void screen_timer_cb(lv_timer_t *t)
 {
     (void)t;
 
-    if (battery_is_usb_connected() || battery_trend_is_powered()) {
-        /* USB 연결 중에는 유휴 시계를 계속 리셋 — 뽑는 순간 그동안 쌓인 유휴시간으로
-         * 즉시 타임아웃되는 것을 방지 (Cntl ui_screen.c에서 발견된 버그의 수정판).
-         * battery_is_usb_connected()는 호스트 SOF 기반이라 데이터선 없는 충전기를 못 잡아서
-         * battery_trend_is_powered()(전압 추세)로 보완 */
+    if (vbus_is_present()) {
+        /* USB(충전기 포함) 연결 중에는 유휴 시계를 계속 리셋 — 뽑는 순간 그동안 쌓인
+         * 유휴시간으로 즉시 타임아웃되는 것을 방지 (Cntl ui_screen.c에서 발견된 버그의 수정판) */
         s_last_input_ms = lv_tick_get();
         if (s_screen_off) {
             bsp_display_set_brightness(BSP_LCD_BRIGHTNESS_DEFAULT);
@@ -500,6 +499,15 @@ void app_main(void)
         .ctrl_gpio   = GPIO_NUM_NC,
     };
     battery_init(&batt_cfg);
+
+    s_vbus_adc = battery_get_adc_handle();
+    if (s_vbus_adc) {
+        adc_oneshot_chan_cfg_t vbus_ch_cfg = {
+            .atten    = VBUS_SENSE_ATTEN,
+            .bitwidth = ADC_BITWIDTH_DEFAULT,
+        };
+        adc_oneshot_config_channel(s_vbus_adc, VBUS_SENSE_CHANNEL, &vbus_ch_cfg);
+    }
 
     wifi_dashboard_init();
     esp_now_node_init();

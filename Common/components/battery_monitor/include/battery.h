@@ -45,6 +45,10 @@ bool battery_is_usb_connected(void);
  *  (배터리마다 충전 IC가 종료시키는 실제 완충 전압이 달라서 호출측에서 추정한 값을 반영) */
 void battery_set_full_mv(float full_mv);
 
+/** @brief battery_init()이 만든 ADC 유닛 핸들 — 같은 유닛의 다른 채널(예: VBUS 분압)을
+ *  추가로 설정해 쓰고 싶을 때 재사용. battery_init() 호출 후에만 유효 */
+adc_oneshot_unit_handle_t battery_get_adc_handle(void);
+
 #ifdef __cplusplus
 }
 #endif

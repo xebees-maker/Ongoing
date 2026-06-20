@@ -91,3 +91,8 @@ void battery_set_full_mv(float full_mv)
 {
     s_cfg.full_mv = full_mv;
 }
+
+adc_oneshot_unit_handle_t battery_get_adc_handle(void)
+{
+    return s_adc;
+}
