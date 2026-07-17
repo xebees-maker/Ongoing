@@ -35,20 +35,55 @@ static esp_now_hub_node_t *find_or_add_node(const uint8_t *mac)
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
-    if (len < (int)sizeof(esp_now_advertise_t)) return;
+    if (len < 2) return;
+    uint8_t msg_type = data[1];
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
-    const esp_now_advertise_t *msg = (const esp_now_advertise_t *)data;
-    if (msg->version != ESP_NOW_LINK_VERSION || msg->msg_type != ESP_NOW_MSG_ADVERTISE) return;
+    if (msg_type == ESP_NOW_MSG_ADVERTISE) {
+        if (len < (int)sizeof(esp_now_advertise_t)) return;
+        const esp_now_advertise_t *msg = (const esp_now_advertise_t *)data;
+        if (msg->version != ESP_NOW_LINK_VERSION) return;
 
-    esp_now_hub_node_t *n = find_or_add_node(info->src_addr);
-    if (!n) {
-        ESP_LOGW(TAG, "노드 테이블 가득 — %s 무시", msg->name);
-        return;
+        esp_now_hub_node_t *n = find_or_add_node(info->src_addr);
+        if (!n) {
+            ESP_LOGW(TAG, "노드 테이블 가득 — %s 무시", msg->name);
+            return;
+        }
+        memcpy(n->name, msg->name, sizeof(n->name));
+        n->name[ESP_NOW_LINK_NAME_LEN - 1] = '\0';
+        n->last_seen_ms = now_ms;
+
+    } else if (msg_type == ESP_NOW_MSG_PAIR_ACK) {
+        if (len < (int)sizeof(esp_now_pair_ack_t)) return;
+        const esp_now_pair_ack_t *msg = (const esp_now_pair_ack_t *)data;
+        if (msg->version != ESP_NOW_LINK_VERSION) return;
+
+        esp_now_hub_node_t *n = find_or_add_node(info->src_addr);
+        if (!n) return;
+        n->paired = true;
+        n->last_data_ms = now_ms;
+        ESP_LOGI(TAG, "페어링 완료: %s", n->name);
+
+    } else if (msg_type == ESP_NOW_MSG_SENSOR_DATA) {
+        if (len < (int)sizeof(esp_now_sensor_data_t)) return;
+        const esp_now_sensor_data_t *msg = (const esp_now_sensor_data_t *)data;
+        if (msg->version != ESP_NOW_LINK_VERSION) return;
+
+        esp_now_hub_node_t *n = find_or_add_node(info->src_addr);
+        if (!n) return;
+        n->paired       = true;
+        n->last_data_ms = now_ms;
+
+        n->sensor_kind = msg->sensor_kind;
+        n->chan_count  = (msg->chan_count > ESP_NOW_MAX_CHANNELS) ? ESP_NOW_MAX_CHANNELS : msg->chan_count;
+        memcpy(n->chan_type, msg->chan_type, n->chan_count * sizeof(n->chan_type[0]));
+        memcpy(n->chan_ok,   msg->chan_ok,   n->chan_count * sizeof(n->chan_ok[0]));
+        memcpy(n->chan_val,  msg->chan_val,  n->chan_count * sizeof(n->chan_val[0]));
+
+        n->batt_ok  = msg->batt_ok;
+        n->batt_pct = msg->batt_pct;
+        n->powered  = msg->powered;
     }
-
-    memcpy(n->name, msg->name, sizeof(n->name));
-    n->name[ESP_NOW_LINK_NAME_LEN - 1] = '\0';
-    n->last_seen_ms = (uint32_t)(esp_timer_get_time() / 1000);
 }
 
 /* dst는 호출 전에 0으로 초기화돼 있어야 함(wifi_config_t = {0}) — 남는 바이트는 그대로 0 유지 */
@@ -170,11 +205,96 @@ int esp_now_hub_get_nodes(esp_now_hub_node_t *out, int max)
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     int count = 0;
     for (int i = 0; i < s_node_count && count < max; i++) {
-        if (now_ms - s_nodes[i].last_seen_ms <= ESP_NOW_HUB_NODE_TIMEOUT_MS) {
+        uint32_t freshness_ms = s_nodes[i].paired ? s_nodes[i].last_data_ms : s_nodes[i].last_seen_ms;
+        if (now_ms - freshness_ms <= ESP_NOW_HUB_NODE_TIMEOUT_MS) {
             out[count++] = s_nodes[i];
         }
     }
     return count;
+}
+
+void esp_now_hub_pair(const uint8_t *mac)
+{
+    esp_now_hub_node_t *n = find_or_add_node(mac);
+    if (!n || n->paired) return;
+
+    if (!esp_now_is_peer_exist(mac)) {
+        esp_now_peer_info_t peer = { 0 };
+        memcpy(peer.peer_addr, mac, 6);
+#if CONFIG_CNTL_WIFI_MODE_STA
+        peer.ifidx = WIFI_IF_STA;
+#else
+        peer.ifidx = WIFI_IF_AP;
+#endif
+        peer.channel = 0;
+        peer.encrypt = false;
+        if (esp_now_add_peer(&peer) != ESP_OK) {
+            ESP_LOGW(TAG, "%s 피어 등록 실패", n->name);
+            return;
+        }
+    }
+
+    uint8_t hub_mac[6];
+#if CONFIG_CNTL_WIFI_MODE_STA
+    esp_wifi_get_mac(WIFI_IF_STA, hub_mac);
+#else
+    esp_wifi_get_mac(WIFI_IF_AP, hub_mac);
+#endif
+
+    esp_now_pair_request_t req = {
+        .version  = ESP_NOW_LINK_VERSION,
+        .msg_type = ESP_NOW_MSG_PAIR_REQUEST,
+    };
+    memcpy(req.hub_mac, hub_mac, sizeof(req.hub_mac));
+    esp_err_t err = esp_now_send(mac, (const uint8_t *)&req, sizeof(req));
+    ESP_LOGI(TAG, "PAIR_REQUEST -> %s: %s", n->name, esp_err_to_name(err));
+}
+
+static void accumulate_f(bool ok, float val, float *min, float *max, float *sum, int *cnt)
+{
+    if (!ok) return;
+    if (*cnt == 0 || val < *min) *min = val;
+    if (*cnt == 0 || val > *max) *max = val;
+    *sum += val;
+    (*cnt)++;
+}
+
+void esp_now_hub_get_summary(esp_now_hub_summary_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+
+    float type_sum[SENSOR_CHAN_TYPE_COUNT] = { 0 };
+    int   type_cnt[SENSOR_CHAN_TYPE_COUNT] = { 0 };
+    float batt_pct_sum = 0;
+    int   batt_cnt = 0;
+
+    for (int i = 0; i < s_node_count; i++) {
+        esp_now_hub_node_t *n = &s_nodes[i];
+        if (!n->paired || now_ms - n->last_data_ms > ESP_NOW_HUB_NODE_TIMEOUT_MS) continue;
+        out->count++;
+
+        for (int c = 0; c < n->chan_count; c++) {
+            uint8_t type = n->chan_type[c];
+            if (type >= SENSOR_CHAN_TYPE_COUNT) continue;
+            esp_now_hub_channel_agg_t *agg = &out->by_type[type];
+            accumulate_f(n->chan_ok[c], n->chan_val[c],
+                         &agg->val_min, &agg->val_max, &type_sum[type], &type_cnt[type]);
+            if (n->chan_ok[c]) agg->has_data = true;
+        }
+
+        if (n->batt_ok) {
+            if (batt_cnt == 0 || n->batt_pct < out->batt_pct_min) out->batt_pct_min = n->batt_pct;
+            if (batt_cnt == 0 || n->batt_pct > out->batt_pct_max) out->batt_pct_max = n->batt_pct;
+            batt_pct_sum += n->batt_pct;
+            batt_cnt++;
+        }
+    }
+
+    for (int t = 0; t < SENSOR_CHAN_TYPE_COUNT; t++) {
+        out->by_type[t].val_avg = type_cnt[t] ? type_sum[t] / type_cnt[t] : 0;
+    }
+    out->batt_pct_avg = batt_cnt ? batt_pct_sum / batt_cnt : 0;
 }
 
 void esp_now_hub_get_net_status(char *buf, size_t buflen)

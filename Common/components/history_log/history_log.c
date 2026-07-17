@@ -22,13 +22,14 @@ typedef struct {
     uint32_t magic_tick_sec;  /* 기록 당시 HISTORY_TICK_SEC — 빌드 간 변경 감지용 */
 } history_meta_t;
 
-/* metric별 고정소수점 배율 — temp/humi는 0.1 단위 해상도, CO2/배터리는 정수 그대로 */
-static const float s_scale[HISTORY_METRIC_COUNT] = {
-    10.0f,  /* HISTORY_METRIC_DHT_TEMP */
-    10.0f,  /* HISTORY_METRIC_DHT_HUMI */
-    1.0f,   /* HISTORY_METRIC_SCD_CO2  */
-    10.0f,  /* HISTORY_METRIC_SCD_TEMP */
-    10.0f,  /* HISTORY_METRIC_SCD_HUMI */
+/* metric별 고정소수점 배율 — 기본은 0.1 단위 해상도(temp/humi), 배터리는 정수 그대로.
+ * CO2처럼 값 범위가 큰 지표는 history_log_set_scale()로 호출하는 쪽이 낮춰서 씀. */
+static float s_scale[HISTORY_METRIC_COUNT] = {
+    10.0f,  /* HISTORY_METRIC_CH0 */
+    10.0f,  /* HISTORY_METRIC_CH1 */
+    10.0f,  /* HISTORY_METRIC_CH2 */
+    10.0f,  /* HISTORY_METRIC_CH3 */
+    10.0f,  /* HISTORY_METRIC_CH4 */
     1.0f,   /* HISTORY_METRIC_BATT_PCT */
 };
 
@@ -127,6 +128,12 @@ bool history_log_init(void)
 
     s_loaded = true;
     return true;
+}
+
+void history_log_set_scale(history_metric_t metric, float scale)
+{
+    if (metric >= HISTORY_METRIC_COUNT || scale <= 0.0f) return;
+    s_scale[metric] = scale;
 }
 
 void history_log_set_time(time_t now)

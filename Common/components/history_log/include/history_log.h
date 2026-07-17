@@ -26,12 +26,16 @@ extern "C" {
 
 #define HISTORY_TICK_CAPACITY      HISTORY_WINDOW_MONTH_TICKS  /* 720 — 링버퍼 크기 */
 
+/* CH0~CH4는 슬롯일 뿐 의미가 고정되어 있지 않음 — 어떤 센서를 붙였는지는 컴파일 타임에
+ * 정해지므로, 그 의미(라벨/단위/저장 배율)는 호출하는 쪽이 정한다.
+ * 예: 헤드리스 SCD41 노드는 CH0=CO2/CH1=TEMP/CH2=HUMI만 쓰고, 레거시 LCD 콤보 앱(DHT22+SCD41
+ * 동시 장착)은 CH0=DHT_TEMP/CH1=DHT_HUMI/CH2=SCD_CO2/CH3=SCD_TEMP/CH4=SCD_HUMI로 5개 다 씀. */
 typedef enum {
-    HISTORY_METRIC_DHT_TEMP = 0,
-    HISTORY_METRIC_DHT_HUMI,
-    HISTORY_METRIC_SCD_CO2,
-    HISTORY_METRIC_SCD_TEMP,
-    HISTORY_METRIC_SCD_HUMI,
+    HISTORY_METRIC_CH0 = 0,
+    HISTORY_METRIC_CH1,
+    HISTORY_METRIC_CH2,
+    HISTORY_METRIC_CH3,
+    HISTORY_METRIC_CH4,
     HISTORY_METRIC_BATT_PCT,
     HISTORY_METRIC_COUNT,
 } history_metric_t;
@@ -59,6 +63,13 @@ typedef struct {
  * @return 성공 시 true
  */
 bool history_log_init(void);
+
+/**
+ * @brief 지표의 NVS 저장 배율을 재설정 (기본값 10.0, CH0~CH2는 10.0/BATT_PCT는 1.0).
+ *        CO2처럼 값 범위가 커서 *10이 int16 범위(-32768~32767)를 넘는 지표는 반드시
+ *        history_log_record()를 처음 호출하기 전에 1.0으로 낮춰서 호출해야 한다.
+ */
+void history_log_set_scale(history_metric_t metric, float scale);
 
 /** @brief 벽시계 시각을 강제 설정(주입) — settimeofday() 반영 + 다음 커밋부터 영속화 */
 void history_log_set_time(time_t now);

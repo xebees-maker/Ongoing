@@ -24,11 +24,11 @@
 static const char *TAG = "wifi_dash";
 
 typedef struct {
-    float dht_temp, dht_humi;
-    bool  dht_ok;
-    int   co2;
-    float scd_temp, scd_humi;
-    bool  scd_ok;
+    sensor_kind_t sensor_kind;
+    uint8_t chan_count;
+    uint8_t chan_type[ESP_NOW_MAX_CHANNELS];
+    uint8_t chan_ok[ESP_NOW_MAX_CHANNELS];
+    float   chan_val[ESP_NOW_MAX_CHANNELS];
     int   batt_pct;
     bool  batt_ok;
     bool  powered;
@@ -54,17 +54,18 @@ void wifi_dashboard_get_net_status(char *buf, size_t buflen)
 #endif
 }
 
-void wifi_dashboard_set_readings(float dht_temp, float dht_humi, bool dht_ok,
-                                  int co2, float scd_temp, float scd_humi, bool scd_ok,
+void wifi_dashboard_set_readings(sensor_kind_t sensor_kind, uint8_t chan_count,
+                                  const uint8_t *chan_type, const uint8_t *chan_ok,
+                                  const float *chan_val,
                                   int batt_pct, bool batt_ok, bool powered)
 {
-    s_readings.dht_temp = dht_temp;
-    s_readings.dht_humi = dht_humi;
-    s_readings.dht_ok   = dht_ok;
-    s_readings.co2      = co2;
-    s_readings.scd_temp = scd_temp;
-    s_readings.scd_humi = scd_humi;
-    s_readings.scd_ok   = scd_ok;
+    if (chan_count > ESP_NOW_MAX_CHANNELS) chan_count = ESP_NOW_MAX_CHANNELS;
+
+    s_readings.sensor_kind = sensor_kind;
+    s_readings.chan_count  = chan_count;
+    memcpy(s_readings.chan_type, chan_type, chan_count * sizeof(chan_type[0]));
+    memcpy(s_readings.chan_ok,   chan_ok,   chan_count * sizeof(chan_ok[0]));
+    memcpy(s_readings.chan_val,  chan_val,  chan_count * sizeof(chan_val[0]));
     s_readings.batt_pct = batt_pct;
     s_readings.batt_ok  = batt_ok;
     s_readings.powered  = powered;
@@ -75,7 +76,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     static const char page[] =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        "<title>C6 Sensor Node</title>"
+        "<title>Sens Node</title>"
         "<style>"
         "body{font-family:sans-serif;background:#1a1a2e;color:#fff;padding:16px}"
         "h2{margin-top:0}"
@@ -95,7 +96,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "#close{display:inline-block;margin-bottom:12px;padding:6px 14px;"
         "background:#fff;color:#1a1a2e;border-radius:4px;cursor:pointer}"
         "</style></head><body>"
-        "<h2 id='node-name'>C6 Sensor Node</h2>"
+        "<h2 id='node-name'>Sens Node</h2>"
         "<div id='net-status' style='color:#9aa;font-size:0.85em;margin:-8px 0 12px'></div>"
         "<div id='rows'></div>"
         "<div id='modal'>"
@@ -103,26 +104,26 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<h3 id='modal-title'></h3><div id='modal-body'></div>"
         "</div>"
         "<script>"
-        "const METRICS=["
-        "{name:'DH Temp', icon:'\\u{1F321}\\uFE0F', unit:'C',   ok:d=>d.dht_ok, val:d=>d.dht_temp.toFixed(1),"
-        " row:d=>d.dht_temp.toFixed(1)+' C'},"
-        "{name:'DH Humi', icon:'\\u{1F4A7}', unit:'%',   ok:d=>d.dht_ok, val:d=>d.dht_humi.toFixed(0),"
-        " row:d=>d.dht_humi.toFixed(0)+' %'},"
-        "{name:'SCD CO2', icon:'\\u{1F32B}\\uFE0F', unit:'ppm', ok:d=>d.scd_ok, val:d=>String(d.co2),"
-        " row:d=>d.co2+' ppm'},"
-        "{name:'SCD TEMP',icon:'\\u{1F321}\\uFE0F', unit:'C',   ok:d=>d.scd_ok, val:d=>d.scd_temp.toFixed(1),"
-        " row:d=>d.scd_temp.toFixed(1)+' C'},"
-        "{name:'SCD-Humi',icon:'\\u{1F4A7}', unit:'%',   ok:d=>d.scd_ok, val:d=>d.scd_humi.toFixed(0),"
-        " row:d=>d.scd_humi.toFixed(0)+' %'},"
-        "{name:'BATT',    icon:'\\u{1F50B}', unit:'%',   ok:d=>d.batt_ok,val:d=>d.batt_pct.toFixed(0),"
-        " row:d=>d.batt_pct+'% '+(d.powered?'USB':'BAT')},"
-        "];"
-        "let rowsBuilt=false;"
-        "function buildRows(){"
+        /* sensor_channel_type_t(esp_now_link.h)와 값이 일치해야 함 */
+        "const CHAN_LABEL={"
+        "1:{name:'Temp',icon:'\\u{1F321}\\uFE0F',unit:'C',  fmt:v=>v.toFixed(1)},"
+        "2:{name:'Humi',icon:'\\u{1F4A7}',unit:'%',  fmt:v=>v.toFixed(0)},"
+        "3:{name:'CO2', icon:'\\u{1F32B}\\uFE0F',unit:'ppm',fmt:v=>String(Math.round(v))},"
+        "};"
+        "const BATT_METRIC_IDX=5;"  /* HISTORY_METRIC_BATT_PCT — history_log.h와 값 일치 */
+        "let builtCount=-1;"
+        "function metricsFor(d){"
+        "  const m=d.channels.map(c=>({name:CHAN_LABEL[c.type].name, icon:CHAN_LABEL[c.type].icon,"
+        "    unit:CHAN_LABEL[c.type].unit, ok:c.ok, row:CHAN_LABEL[c.type].fmt(c.val)+' '+CHAN_LABEL[c.type].unit}));"
+        "  m.push({name:'BATT', icon:'\\u{1F50B}', unit:'%', ok:d.batt_ok,"
+        "    row:d.batt_pct+'% '+(d.powered?'USB':'BAT')});"
+        "  return m;"
+        "}"
+        "function buildRows(metrics){"
         "  const c=document.getElementById('rows'); c.innerHTML='';"
-        "  METRICS.forEach((m,i)=>{"
+        "  metrics.forEach((m,i)=>{"
         "    const r=document.createElement('div');"
-        "    r.className='row'; r.id='row'+i; r.onclick=()=>openDetail(i);"
+        "    r.className='row'; r.id='row'+i; r.onclick=()=>openDetail(i, i===metrics.length-1);"
         "    r.innerHTML="
         "      '<span class=\"icon\">'+m.icon+'</span>'+"
         "      '<span class=\"label\">'+m.name+'</span>'+"
@@ -130,20 +131,24 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "      '<span class=\"chev\">&gt;</span>';"
         "    c.appendChild(r);"
         "  });"
-        "  rowsBuilt=true;"
+        "  builtCount=metrics.length;"
         "}"
+        "let lastMetrics=[];"
         "async function tick(){"
-        "  if(!rowsBuilt) buildRows();"
         "  const r=await fetch('/api/data'); const d=await r.json();"
+        "  const metrics=metricsFor(d);"
+        "  lastMetrics=metrics;"
+        "  if(builtCount!==metrics.length) buildRows(metrics);"
         "  document.getElementById('node-name').textContent=d.name;"
         "  document.getElementById('net-status').textContent=d.net;"
-        "  METRICS.forEach((m,i)=>{"
-        "    document.getElementById('val'+i).textContent=m.ok(d)?m.row(d):'--';"
+        "  metrics.forEach((m,i)=>{"
+        "    document.getElementById('val'+i).textContent=m.ok?m.row:'--';"
         "  });"
         "}"
-        "async function openDetail(i){"
-        "  const m=METRICS[i];"
-        "  const r=await fetch('/api/history?metric='+i); const wins=await r.json();"
+        "async function openDetail(i, isBatt){"
+        "  const m=lastMetrics[i];"
+        "  const metricIdx=isBatt?BATT_METRIC_IDX:i;"
+        "  const r=await fetch('/api/history?metric='+metricIdx); const wins=await r.json();"
         "  document.getElementById('modal-title').textContent=m.name;"
         "  const body=document.getElementById('modal-body'); body.innerHTML='';"
         "  wins.forEach(w=>{"
@@ -232,15 +237,16 @@ static esp_err_t data_get_handler(httpd_req_t *req)
     char net_status[40];
     wifi_dashboard_get_net_status(net_status, sizeof(net_status));
 
-    char buf[320];
-    int n = snprintf(buf, sizeof(buf),
-        "{\"name\":\"%s\",\"net\":\"%s\","
-        "\"dht_ok\":%s,\"dht_temp\":%.1f,\"dht_humi\":%.1f,"
-        "\"scd_ok\":%s,\"co2\":%d,\"scd_temp\":%.1f,\"scd_humi\":%.1f,"
-        "\"batt_ok\":%s,\"batt_pct\":%d,\"powered\":%s}",
-        esp_now_node_get_name(), net_status,
-        s_readings.dht_ok ? "true" : "false", s_readings.dht_temp, s_readings.dht_humi,
-        s_readings.scd_ok ? "true" : "false", s_readings.co2, s_readings.scd_temp, s_readings.scd_humi,
+    char buf[512];
+    int n = snprintf(buf, sizeof(buf), "{\"name\":\"%s\",\"net\":\"%s\",\"channels\":[",
+                      esp_now_node_get_name(), net_status);
+    for (int i = 0; i < s_readings.chan_count; i++) {
+        n += snprintf(buf + n, sizeof(buf) - n, "%s{\"type\":%d,\"ok\":%s,\"val\":%.1f}",
+                      i == 0 ? "" : ",", s_readings.chan_type[i],
+                      s_readings.chan_ok[i] ? "true" : "false", s_readings.chan_val[i]);
+    }
+    n += snprintf(buf + n, sizeof(buf) - n,
+        "],\"batt_ok\":%s,\"batt_pct\":%d,\"powered\":%s}",
         s_readings.batt_ok ? "true" : "false", s_readings.batt_pct,
         s_readings.powered ? "true" : "false");
     httpd_resp_set_type(req, "application/json");

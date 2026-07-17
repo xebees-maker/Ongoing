@@ -1,3 +1,41 @@
+menu "Sens Sensor Node"
+
+    choice SENS_BUILD_TARGET
+        prompt "Build target"
+        default SENS_BUILD_HEADLESS
+        help
+            Legacy LCD: original Waveshare ESP32-C6-Touch-LCD-1.47 combo app
+            (DHT22+SCD41 together, LVGL screen). Kept as-is for existing hardware.
+
+            Headless: new single-sensor node for LOLIN C3 Pico (no display).
+            One sensor per physical device, picked below.
+
+        config SENS_BUILD_LEGACY_LCD
+            bool "Legacy: Waveshare C6 LCD combo (DHT22+SCD41)"
+        config SENS_BUILD_HEADLESS
+            bool "Headless: LOLIN C3 Pico single-sensor node"
+    endchoice
+
+    choice SENS_SENSOR_TYPE
+        prompt "Sensor attached to this node"
+        depends on SENS_BUILD_HEADLESS
+        default SENS_SENSOR_SCD41
+        help
+            Only meaningful for the headless build — picks which single sensor
+            driver gets compiled in and how ESP-NOW channels are reported.
+
+        config SENS_SENSOR_SCD41
+            bool "SCD41 (CO2 + temp + humi)"
+        config SENS_SENSOR_DHT22
+            bool "DHT22 (temp + humi)"
+        config SENS_SENSOR_SHT45
+            bool "SHT45 (temp + humi)"
+        config SENS_SENSOR_SHT40
+            bool "SHT40 (temp + humi)"
+    endchoice
+
+endmenu
+
 menu "Sens WiFi Dashboard"
 
     choice SENS_WIFI_MODE

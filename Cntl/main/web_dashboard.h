@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * Cntl 웹 대시보드 — 지금은 자리표시자("CNTL"만 표시). Sens의 wifi_dashboard.c처럼
- * 나중에 종합/노드별 데이터를 보여주는 본격적인 대시보드로 키울 자리.
+ * Cntl 웹 대시보드 — 페어링된 Sens 노드들의 종합(max/min/avg) + 노드별 센서값을
+ * /api/data(JSON)로 제공하고 1초 폴링 HTML로 보여준다.
  */
 void web_dashboard_start(void);

@@ -73,6 +73,7 @@ static bool  s_last_scd_ok   = false;
 static int   s_last_batt_pct = 0;
 static bool  s_last_batt_ok  = false;
 static bool  s_last_powered  = false;
+static bool  s_scd_display_ok = false;
 static uint32_t s_scd_last_ok_ms = 0;  /* 0 = 부팅 후 아직 한 번도 성공 안 함 */
 
 static int s_batt_queue[BATT_SAMPLE_COUNT];  /* 순환 버퍼 — battery_read_mv() 값(mV) 보관 */
@@ -91,14 +92,15 @@ static int   s_full_mv_persisted   = 0;                     /* NVS에 마지막�
 static bool     s_screen_off    = false;
 static uint32_t s_last_input_ms = 0;
 
+/* CH0=DHT_TEMP, CH1=DHT_HUMI, CH2=SCD_CO2, CH3=SCD_TEMP, CH4=SCD_HUMI — history_log.h 참고 */
 static const char *metric_name(history_metric_t m)
 {
     switch (m) {
-        case HISTORY_METRIC_DHT_TEMP: return "DH Temp";
-        case HISTORY_METRIC_DHT_HUMI: return "DH Humi";
-        case HISTORY_METRIC_SCD_CO2:  return "SCD CO2";
-        case HISTORY_METRIC_SCD_TEMP: return "SCD TEMP";
-        case HISTORY_METRIC_SCD_HUMI: return "SCD-Humi";
+        case HISTORY_METRIC_CH0:      return "DH Temp";
+        case HISTORY_METRIC_CH1:      return "DH Humi";
+        case HISTORY_METRIC_CH2:      return "SCD CO2";
+        case HISTORY_METRIC_CH3:      return "SCD TEMP";
+        case HISTORY_METRIC_CH4:      return "SCD-Humi";
         case HISTORY_METRIC_BATT_PCT: return "BATT";
         default: return "?";
     }
@@ -107,12 +109,12 @@ static const char *metric_name(history_metric_t m)
 static const char *metric_unit(history_metric_t m)
 {
     switch (m) {
-        case HISTORY_METRIC_DHT_TEMP:
-        case HISTORY_METRIC_SCD_TEMP: return "C";
-        case HISTORY_METRIC_DHT_HUMI:
-        case HISTORY_METRIC_SCD_HUMI:
+        case HISTORY_METRIC_CH0:
+        case HISTORY_METRIC_CH3: return "C";
+        case HISTORY_METRIC_CH1:
+        case HISTORY_METRIC_CH4:
         case HISTORY_METRIC_BATT_PCT: return "%";
-        case HISTORY_METRIC_SCD_CO2:  return "ppm";
+        case HISTORY_METRIC_CH2:  return "ppm";
         default: return "";
     }
 }
@@ -364,9 +366,24 @@ static void sample_cb(lv_timer_t *t)
      * (5초 주기 센서를 3초마다 폴링하니 매 사이클 실패가 정상이라 그대로 보내면 깜빡임) */
     bool scd_display_ok = s_scd_last_ok_ms != 0 &&
                            (lv_tick_get() - s_scd_last_ok_ms) < SCD_STALE_MS;
+    s_scd_display_ok = scd_display_ok;
 
-    wifi_dashboard_set_readings(s_last_dht_temp, s_last_dht_humi, s_last_dht_ok,
-                                 s_last_co2, s_last_scd_temp, s_last_scd_humi, scd_display_ok,
+    /* DHT22+SCD41 콤보 — 5채널 그대로 ESP-NOW/웹 대시보드에 실어보냄 */
+    uint8_t chan_type[5] = {
+        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT,
+        SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT,
+    };
+    uint8_t chan_ok[5] = {
+        s_last_dht_ok, s_last_dht_ok,
+        scd_display_ok, scd_display_ok, scd_display_ok,
+    };
+    float chan_val[5] = {
+        s_last_dht_temp, s_last_dht_humi,
+        (float)s_last_co2, s_last_scd_temp, s_last_scd_humi,
+    };
+    esp_now_node_set_readings(SENSOR_KIND_DHT22_SCD41_COMBO, 5, chan_type, chan_ok, chan_val,
+                               s_last_batt_ok, s_last_batt_pct, s_last_powered);
+    wifi_dashboard_set_readings(SENSOR_KIND_DHT22_SCD41_COMBO, 5, chan_type, chan_ok, chan_val,
                                  s_last_batt_pct, s_last_batt_ok, s_last_powered);
 
     char net_status[40];
@@ -379,13 +396,13 @@ static void history_tick_cb(lv_timer_t *t)
     (void)t;
 
     if (s_last_dht_ok) {
-        history_log_record(HISTORY_METRIC_DHT_TEMP, s_last_dht_temp);
-        history_log_record(HISTORY_METRIC_DHT_HUMI, s_last_dht_humi);
+        history_log_record(HISTORY_METRIC_CH0, s_last_dht_temp);
+        history_log_record(HISTORY_METRIC_CH1, s_last_dht_humi);
     }
     if (s_last_scd_ok) {
-        history_log_record(HISTORY_METRIC_SCD_CO2,  (float)s_last_co2);
-        history_log_record(HISTORY_METRIC_SCD_TEMP, s_last_scd_temp);
-        history_log_record(HISTORY_METRIC_SCD_HUMI, s_last_scd_humi);
+        history_log_record(HISTORY_METRIC_CH2, (float)s_last_co2);
+        history_log_record(HISTORY_METRIC_CH3, s_last_scd_temp);
+        history_log_record(HISTORY_METRIC_CH4, s_last_scd_humi);
     }
     if (s_last_batt_ok) {
         history_log_record(HISTORY_METRIC_BATT_PCT, (float)s_last_batt_pct);
@@ -482,6 +499,7 @@ void app_main(void)
     ESP_ERROR_CHECK(bsp_board_init());
 
     history_log_init();
+    history_log_set_scale(HISTORY_METRIC_CH2, 1.0f);  /* CH2=SCD CO2 — *10이면 int16 범위 초과 */
     if (history_log_now() < 1700000000) {  /* 2023년 이전 = 아직 시각 미주입 */
         struct tm seed_tm = {
             .tm_year = 2026 - 1900, .tm_mon = 5, .tm_mday = 18,
@@ -534,11 +552,11 @@ void app_main(void)
         lv_obj_set_style_text_color(s_net_lbl, lv_color_hex(0x9AAABB), 0);
         lv_obj_align(s_net_lbl, LV_ALIGN_TOP_MID, 0, 26);
 
-        s_temp_lbl     = make_row(s_main_scr, 40,  HISTORY_METRIC_DHT_TEMP);
-        s_humi_lbl     = make_row(s_main_scr, 88,  HISTORY_METRIC_DHT_HUMI);
-        s_co2_lbl      = make_row(s_main_scr, 136, HISTORY_METRIC_SCD_CO2);
-        s_scd_temp_lbl = make_row(s_main_scr, 184, HISTORY_METRIC_SCD_TEMP);
-        s_scd_humi_lbl = make_row(s_main_scr, 232, HISTORY_METRIC_SCD_HUMI);
+        s_temp_lbl     = make_row(s_main_scr, 40,  HISTORY_METRIC_CH0);
+        s_humi_lbl     = make_row(s_main_scr, 88,  HISTORY_METRIC_CH1);
+        s_co2_lbl      = make_row(s_main_scr, 136, HISTORY_METRIC_CH2);
+        s_scd_temp_lbl = make_row(s_main_scr, 184, HISTORY_METRIC_CH3);
+        s_scd_humi_lbl = make_row(s_main_scr, 232, HISTORY_METRIC_CH4);
         s_batt_lbl     = make_row(s_main_scr, 280, HISTORY_METRIC_BATT_PCT);
 
         lv_obj_set_style_text_color(s_temp_lbl,     lv_color_hex(0xFFFFFF), 0);

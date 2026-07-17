@@ -180,6 +180,9 @@ static bool data_ready(void)
     }
     if (crc8(resp, 2) != resp[2]) {
         ESP_LOGW(TAG, "data_ready: CRC 불일치");
+        note_failure();  /* 통신은 됐지만 데이터가 깨짐 — 연속 실패 카운트에 포함시켜야
+                           * REINIT_FAIL_THRESHOLD로 재초기화가 걸림(안 그러면 이 경로는
+                           * note_failure()도 check_stale()도 안 타서 영원히 복구 안 됨) */
         return false;
     }
 
@@ -208,6 +211,7 @@ bool scd41_read(int *co2_ppm, float *temperature, float *humidity)
     for (int w = 0; w < 3; w++) {
         if (crc8(&resp[w * 3], 2) != resp[w * 3 + 2]) {
             ESP_LOGW(TAG, "CRC 불일치 (word %d)", w);
+            note_failure();  /* data_ready()와 동일 이유 — CRC 실패도 실패로 집계해야 함 */
             return false;
         }
     }
