@@ -85,7 +85,7 @@ static int s_batt_trend_count = 0;
 static float s_full_mv           = BATT_FULL_MV_DEFAULT;
 static int   s_full_mv_persisted = 0;
 
-static adc_oneshot_unit_handle_t s_vbus_adc = NULL;
+static adc_oneshot_unit_handle_t s_vin_adc = NULL;
 
 static bool sensor_init(void)
 {
@@ -114,13 +114,16 @@ static bool sensor_read(float out[SENSOR_CHAN_COUNT])
 #endif
 }
 
-static bool vbus_is_present(void)
+/* J3 헤더 "V"(VIN) 핀을 외부 100k+100k 분압해서 GPIO1로 읽음 — USB 미연결 시
+ * Q1(P-FET)이 VBAT을 거의 그대로 통과, USB 연결 시 D1을 거친 VBUS(~4.6~4.7V)로
+ * 전환되므로 배터리 완충 전압보다 확실히 높은 지점에 임계값을 둔다. */
+static bool vin_indicates_usb(void)
 {
-    if (!s_vbus_adc) return false;
+    if (!s_vin_adc) return false;
     int raw = 0;
-    if (adc_oneshot_read(s_vbus_adc, BSP_C3_VBUS_ADC_CHANNEL, &raw) != ESP_OK) return false;
+    if (adc_oneshot_read(s_vin_adc, BSP_C3_VIN_ADC_CHANNEL, &raw) != ESP_OK) return false;
     int mv = (int)((float)raw * 3100.0f / 4095.0f);
-    return mv >= BSP_C3_VBUS_PRESENT_MV;
+    return mv >= BSP_C3_VIN_PRESENT_MV;
 }
 
 /* sensor-c6.c의 maybe_learn_full_mv()와 동일 로직 — 전원 공급 중 전압이 오래 평탄하면
@@ -178,7 +181,7 @@ static void sample_cb(void *arg)
 
     int batt_mv = battery_read_mv();
     s_last_batt_ok = (batt_mv > 0);
-    bool powered = vbus_is_present();
+    bool powered = vin_indicates_usb();
     s_last_powered = powered;
 
     if (s_last_batt_ok) {
@@ -280,13 +283,13 @@ void app_main(void)
     };
     battery_init(&batt_cfg);
 
-    s_vbus_adc = battery_get_adc_handle();
-    if (s_vbus_adc) {
-        adc_oneshot_chan_cfg_t vbus_ch_cfg = {
-            .atten    = BSP_C3_VBUS_ADC_ATTEN,
+    s_vin_adc = battery_get_adc_handle();
+    if (s_vin_adc) {
+        adc_oneshot_chan_cfg_t vin_ch_cfg = {
+            .atten    = BSP_C3_VIN_ADC_ATTEN,
             .bitwidth = ADC_BITWIDTH_DEFAULT,
         };
-        adc_oneshot_config_channel(s_vbus_adc, BSP_C3_VBUS_ADC_CHANNEL, &vbus_ch_cfg);
+        adc_oneshot_config_channel(s_vin_adc, BSP_C3_VIN_ADC_CHANNEL, &vin_ch_cfg);
     }
 
     status_led_init(BSP_C3_LED_BLUE);

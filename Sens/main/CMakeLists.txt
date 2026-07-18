@@ -19,32 +19,43 @@ else()
     )
 endif()
 
+# bsp_c6는 esp32c3 타깃에서 REQUIRES에 넣으면 안 됨 — REQUIRES는 main이 그 컴포넌트를
+# 실제로 쓰는지와 무관하게 그 컴포넌트 자신의 SRCS(bsp_c6.c)를 통째로 컴파일하게 만드는데,
+# bsp_c6.h가 GPIO_NUM_22/23을 하드코딩해서 이 핀이 없는 esp32c3에선 컴파일 자체가 깨짐.
+# IDF_TARGET은(Kconfig CONFIG_* 와 달리) REQUIRES 조기 확장 단계에서도 이미 값이 있어서
+# 여기서 조건부로 걸어도 안전하다.
+set(sens_requires
+    nvs_flash
+    freertos
+    log
+    lvgl
+    bsp_c3_pico
+    status_led
+    sensor_dht22
+    sensor_scd41
+    sensor_sht4x
+    battery_monitor
+    history_log
+    esp_adc
+    esp_driver_gpio
+    esp_driver_i2c
+    esp_driver_usb_serial_jtag
+    esp_wifi
+    esp_event
+    esp_netif
+    esp_http_server
+    esp_timer
+    esp_now_link
+)
+if(NOT IDF_TARGET STREQUAL "esp32c3")
+    list(APPEND sens_requires bsp_c6)
+endif()
+
 idf_component_register(
     SRCS
         ${sens_srcs}
     INCLUDE_DIRS
         "."
     REQUIRES
-        nvs_flash
-        freertos
-        log
-        lvgl
-        bsp_c6
-        bsp_c3_pico
-        status_led
-        sensor_dht22
-        sensor_scd41
-        sensor_sht4x
-        battery_monitor
-        history_log
-        esp_adc
-        esp_driver_gpio
-        esp_driver_i2c
-        esp_driver_usb_serial_jtag
-        esp_wifi
-        esp_event
-        esp_netif
-        esp_http_server
-        esp_timer
-        esp_now_link
+        ${sens_requires}
 )
