@@ -46,6 +46,7 @@ set(sens_requires
     esp_http_server
     esp_timer
     esp_now_link
+    esp_pm
 )
 if(NOT IDF_TARGET STREQUAL "esp32c3")
     list(APPEND sens_requires bsp_c6)

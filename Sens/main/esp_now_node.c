@@ -12,8 +12,8 @@
 static const char *TAG = "esp_now_node";
 
 /* 개발 단계 광고/SENSOR_DATA 주기. 양산 단계에서는 늘어남(history_log 틱 컨벤션과 동일) */
-#define ADVERTISE_PERIOD_US    (1000 * 1000)
-#define SENSOR_DATA_PERIOD_US  (1000 * 1000)
+#define ADVERTISE_PERIOD_US        (1000 * 1000)
+#define SENSOR_DATA_PERIOD_US_DEFAULT  (1000 * 1000)
 
 /* paired 중 연속 이만큼 전송 실패하면 페어링을 끊긴 것으로 보고 advertising으로 복귀.
  * Cntl 허브의 ESP_NOW_HUB_NODE_TIMEOUT_MS(3초=3주기)와 같은 리듬 */
@@ -35,6 +35,7 @@ static uint8_t s_hub_mac[6] = { 0 };
 static int     s_send_fail_count = 0;
 
 static gpio_num_t s_led_pin = GPIO_NUM_NC;
+static uint64_t   s_sensor_data_period_us = SENSOR_DATA_PERIOD_US_DEFAULT;
 
 static const uint8_t s_broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -143,7 +144,16 @@ static void start_sensor_data_timer(void)
         };
         ESP_ERROR_CHECK(esp_timer_create(&timer_args, &s_sensor_data_timer));
     }
-    ESP_ERROR_CHECK(esp_timer_start_periodic(s_sensor_data_timer, SENSOR_DATA_PERIOD_US));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(s_sensor_data_timer, s_sensor_data_period_us));
+}
+
+void esp_now_node_set_data_period_ms(uint32_t ms)
+{
+    s_sensor_data_period_us = (uint64_t)ms * 1000ULL;
+    if (s_sensor_data_timer && esp_timer_is_active(s_sensor_data_timer)) {
+        esp_timer_stop(s_sensor_data_timer);
+        esp_timer_start_periodic(s_sensor_data_timer, s_sensor_data_period_us);
+    }
 }
 
 static void resolve_name(void)

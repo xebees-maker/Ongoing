@@ -31,3 +31,11 @@ void esp_now_node_set_readings(sensor_kind_t sensor_kind, uint8_t chan_count,
  *        생략하면(호출 안 하면) LED 갱신 없이 동작.
  */
 void esp_now_node_set_status_led(gpio_num_t pin);
+
+/**
+ * @brief 페어링 후 SENSOR_DATA 전송 주기 변경 (기본 1초). 센서 샘플링 인터벌을 늘린
+ *        빌드(예: SCD41 절전모드, 10초)에서 라디오도 같이 그 주기로 늦춰서 절전 효과가
+ *        나게 하려는 용도 — esp_now_node_init() 전후 아무 때나 호출 가능, 이미 타이머가
+ *        돌고 있으면 즉시 새 주기로 재시작한다.
+ */
+void esp_now_node_set_data_period_ms(uint32_t ms);

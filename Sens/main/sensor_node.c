@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_pm.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <time.h>
@@ -27,6 +28,14 @@
     static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
         SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT,
     };
+    /* 절전모드 1단계 — SCD41만 single-shot 듀티사이클 (다른 센서는 나중에).
+     * 확정된 인터벌 후보(추후 Cntl UI 피커에서 이 중 하나로 지정): 5초/15초/1분/3분/10분,
+     * 기본 15초 — SCD41 single-shot 자체 소요시간(5초)의 배수라 1초 폴링 타이머와 딱 맞음.
+     * (기존 스펙엔 10초/30초였으나 5초 배수로 재조정 — project_sens_sleep_mode_spec 메모리 참고)
+     * 이번 패스는 기본값 15초 고정, Cntl 설정 push 프로토콜은 다음 작업. */
+    #define SCD41_CYCLE_MS        15000
+    static bool     s_scd41_pending     = false;
+    static uint32_t s_scd41_trigger_ms  = 0;
 #elif CONFIG_SENS_SENSOR_DHT22
     #include "dht22.h"
     #define SENSOR_KIND_CURRENT  SENSOR_KIND_DHT22
@@ -90,7 +99,11 @@ static adc_oneshot_unit_handle_t s_vin_adc = NULL;
 static bool sensor_init(void)
 {
 #if CONFIG_SENS_SENSOR_SCD41
-    return scd41_init(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL);
+    if (!scd41_init(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) return false;
+    /* scd41_init()은 항상 continuous 모드로 시작함 — single-shot 듀티사이클을 쓰려면
+     * 꺼야 함(둘이 동시에 돌면 안 됨). NACK이어도 무시: 이미 정지 상태였다는 뜻일 뿐. */
+    scd41_stop_periodic_measurement();
+    return true;
 #elif CONFIG_SENS_SENSOR_DHT22
     dht22_init(BSP_C3_DHT22_PIN);
     return true;
@@ -102,11 +115,26 @@ static bool sensor_init(void)
 static bool sensor_read(float out[SENSOR_CHAN_COUNT])
 {
 #if CONFIG_SENS_SENSOR_SCD41
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!s_scd41_pending) {
+        if (s_scd41_trigger_ms == 0 || (now_ms - s_scd41_trigger_ms) >= SCD41_CYCLE_MS) {
+            if (scd41_trigger_single_shot()) {
+                s_scd41_pending    = true;
+                s_scd41_trigger_ms = now_ms;
+            }
+        }
+        return false;  /* 이번 tick엔 새 값 없음 — 측정 중이거나 아직 트리거할 때가 아님 */
+    }
+
     int co2 = 0;
     float t = 0.0f, h = 0.0f;
-    bool ok = scd41_read(&co2, &t, &h);
-    if (ok) { out[0] = (float)co2; out[1] = t; out[2] = h; }
-    return ok;
+    bool read_ok = false;
+    if (!scd41_poll_single_shot(&co2, &t, &h, &read_ok)) {
+        return false;  /* 아직 측정 중 */
+    }
+    s_scd41_pending = false;  /* 이번 사이클 종료(성공/실패 무관) — 다음 tick에 새로 트리거 판단 */
+    if (read_ok) { out[0] = (float)co2; out[1] = t; out[2] = h; }
+    return read_ok;
 #elif CONFIG_SENS_SENSOR_DHT22
     return dht22_read(&out[0], &out[1]);
 #else  /* SHT45 / SHT40 */
@@ -201,9 +229,12 @@ static void sample_cb(void *arg)
         s_last_batt_pct = battery_mv_to_pct(avg_mv);
     }
 
-    /* 센서 이상(stale)이면 배터리 표시 대신 Blue LED로 "주의" 신호를 잠깐 대신 보여줌 —
-     * 센서가 복구되면 자동으로 배터리 패턴으로 되돌아감 */
-    if (!s_display_ok) {
+    /* 충전 중(USB 전원)이 최우선 — 센서 이상이어도 지금 당장 배선/센서를 만지고 있을
+     * 가능성이 높은 상태라 "충전 중"이 더 유용한 정보. 그다음 센서 이상(stale), 마지막
+     * 배터리% — 센서가 복구되거나 충전이 끝나면 자동으로 하위 패턴으로 되돌아감 */
+    if (powered) {
+        status_led_set_pattern(BSP_C3_LED_BLUE, LED_PATTERN_ON);
+    } else if (!s_display_ok) {
         status_led_set_pattern(BSP_C3_LED_BLUE, LED_PATTERN_BURST_TRIPLE);
     } else if (s_last_batt_ok) {
         status_led_set_pattern(BSP_C3_LED_BLUE, batt_pct_to_led_pattern(s_last_batt_pct));
@@ -235,6 +266,19 @@ static void history_tick_cb(void *arg)
 
 void app_main(void)
 {
+#if CONFIG_SENS_SENSOR_SCD41
+    /* Automatic Light Sleep — PM 서브시스템이 FreeRTOS idle 구간마다 알아서 light sleep에
+     * 들어갔다 나옴. 기존 esp_timer 콜백(샘플링/ESP-NOW/LED heartbeat) 구조는 안 건드림 —
+     * DFS(주파수 스케일링)는 안 하고 light sleep만 켬(min==max). 다른 센서 빌드는 이번
+     * 패스 범위 밖이라 그대로 둠. */
+    esp_pm_config_t pm_cfg = {
+        .max_freq_mhz = 160,
+        .min_freq_mhz = 160,
+        .light_sleep_enable = true,
+    };
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_cfg));
+#endif
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -298,11 +342,23 @@ void app_main(void)
     wifi_dashboard_init();
     esp_now_node_set_status_led(BSP_C3_LED_GREEN);
     esp_now_node_init();
+#if CONFIG_SENS_SENSOR_SCD41
+    /* 센서를 15초에 한 번만 재는데 라디오가 1초마다 계속 쏘면 절전 효과가 없음 —
+     * SCD41 절전모드 경로만 전송 주기를 샘플 주기(SCD41_CYCLE_MS)에 맞춤 */
+    esp_now_node_set_data_period_ms(SCD41_CYCLE_MS);
+#endif
 
     const esp_timer_create_args_t sample_args = { .callback = sample_cb, .name = "sample" };
     esp_timer_handle_t sample_timer;
     ESP_ERROR_CHECK(esp_timer_create(&sample_args, &sample_timer));
+#if CONFIG_SENS_SENSOR_SCD41
+    /* SCD41의 single-shot 트리거/폴링 상태머신이 1초 단위 배수(5초 측정시간, 15초 주기)로
+     * 설계돼 있어서, 공용 SAMPLE_MS(3000, DHT22 등 다른 센서용)보다 촘촘한 1초 틱이 필요 —
+     * 안 그러면 3초 배수가 아닌 경계에서 최대 2초까지 밀리는 오차가 생김(실측 확인됨) */
+    ESP_ERROR_CHECK(esp_timer_start_periodic(sample_timer, 1000 * 1000));
+#else
     ESP_ERROR_CHECK(esp_timer_start_periodic(sample_timer, SAMPLE_MS * 1000));
+#endif
 
     const esp_timer_create_args_t history_args = { .callback = history_tick_cb, .name = "history_tick" };
     esp_timer_handle_t history_timer;

@@ -14,18 +14,24 @@ static const char *TAG = "scd41";
 #define CMD_WAKE_UP                     0x36F6
 #define CMD_STOP_PERIODIC_MEASUREMENT   0x3F86
 #define CMD_START_PERIODIC_MEASUREMENT  0x21B1
+#define CMD_MEASURE_SINGLE_SHOT         0x219D  /* Sensirion SCD4x single-shot — 데이터시트 대조 권장 */
 #define CMD_GET_DATA_READY_STATUS       0xE4B8
 #define CMD_READ_MEASUREMENT            0xEC05
 
 #define I2C_TIMEOUT_MS         1000
 #define REINIT_FAIL_THRESHOLD  3       /* 연속 통신 실패 횟수 — 도달 시 측정 재시작 시퀀스 재실행 */
 #define STALE_TIMEOUT_MS       16000   /* 마지막 성공 측정 이후 이만큼 지나면 무에러 idle 고착으로 간주 */
+#define SINGLE_SHOT_DURATION_MS  5000  /* 데이터시트 기준 single-shot 측정 소요시간 */
 
 static i2c_master_dev_handle_t  s_dev = NULL;
 static i2c_master_bus_handle_t  s_bus = NULL;
 static int                      s_fail_count = 0;
 static bool                     s_reinit_in_progress = false;
 static TickType_t               s_last_success_tick = 0;
+
+/* single-shot 듀티사이클 상태 — continuous 모드(위 워치독들)와는 별개 경로 */
+static bool      s_single_shot_pending      = false;
+static TickType_t s_single_shot_trigger_tick = 0;
 
 static bool start_measurement_sequence(void);
 
@@ -129,8 +135,17 @@ static bool start_measurement_sequence(void)
 
 bool scd41_init(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
 {
+    /* LP_I2C_SCLK_DEFAULT는 LP_I2C 페리페럴이 있는 칩(esp32c6 등)의 port 1 전용 —
+     * esp32c3는 LP_I2C 자체가 없어서(SOC_I2C_NUM=1) 이 매크로도 미정의. 칩 역량
+     * 매크로로 분기해서 legacy C6 콤보 보드 동작은 그대로 유지한다. */
+    i2c_clock_source_t clk_src = I2C_CLK_SRC_DEFAULT;
+#if SOC_LP_I2C_SUPPORTED
+    if (i2c_port == 1) {
+        clk_src = (i2c_clock_source_t)LP_I2C_SCLK_DEFAULT;
+    }
+#endif
     i2c_master_bus_config_t bus_cfg = {
-        .clk_source            = (i2c_clock_source_t)LP_I2C_SCLK_DEFAULT,  /* I2C port 1 = LP_I2C, 일반 클럭 소스 미지원 */
+        .clk_source            = clk_src,
         .i2c_port              = i2c_port,
         .scl_io_num            = scl_gpio,
         .sda_io_num            = sda_gpio,
@@ -193,11 +208,13 @@ static bool data_ready(void)
     return ready;
 }
 
-bool scd41_read(int *co2_ppm, float *temperature, float *humidity)
+/* CMD_READ_MEASUREMENT 전송 + 9바이트 수신/CRC검증/변환 — continuous(scd41_read)와
+ * single-shot(scd41_poll_single_shot) 양쪽이 공유하는 실제 읽기 본문. 호출 전에 데이터가
+ * 준비됐다는 건 호출자가 이미 확인했다고 가정(continuous는 data_ready(), single-shot은
+ * 트리거 후 경과시간). success/failure 카운트(note_success/note_failure)는 continuous
+ * 모드의 워치독(force_reinit)에서만 의미가 있지만, 실패 로그 자체는 공통으로 남긴다. */
+static bool read_measurement_frame(int *co2_ppm, float *temperature, float *humidity)
 {
-    if (!s_dev) return false;
-    if (!data_ready()) return false;
-
     if (!send_cmd(CMD_READ_MEASUREMENT)) return false;
     vTaskDelay(pdMS_TO_TICKS(1));
 
@@ -227,5 +244,38 @@ bool scd41_read(int *co2_ppm, float *temperature, float *humidity)
     if (humidity)     *humidity   = 100.0f * ((float)humi_raw / 65536.0f);
 
     ESP_LOGI(TAG, "co2=%u ppm  temp_raw=%u  humi_raw=%u", co2_raw, temp_raw, humi_raw);
+    return true;
+}
+
+bool scd41_read(int *co2_ppm, float *temperature, float *humidity)
+{
+    if (!s_dev) return false;
+    if (!data_ready()) return false;
+    return read_measurement_frame(co2_ppm, temperature, humidity);
+}
+
+bool scd41_stop_periodic_measurement(void)
+{
+    if (!s_dev) return false;
+    return send_cmd(CMD_STOP_PERIODIC_MEASUREMENT);
+}
+
+bool scd41_trigger_single_shot(void)
+{
+    if (!s_dev) return false;
+    if (!send_cmd(CMD_MEASURE_SINGLE_SHOT)) return false;
+    s_single_shot_pending      = true;
+    s_single_shot_trigger_tick = xTaskGetTickCount();
+    return true;
+}
+
+bool scd41_poll_single_shot(int *co2_ppm, float *temperature, float *humidity, bool *out_ok)
+{
+    if (!s_dev || !s_single_shot_pending) return false;
+    if ((xTaskGetTickCount() - s_single_shot_trigger_tick) < pdMS_TO_TICKS(SINGLE_SHOT_DURATION_MS)) {
+        return false;  /* 아직 측정 중 — I2C 트래픽 없이 조용히 리턴 */
+    }
+    *out_ok = read_measurement_frame(co2_ppm, temperature, humidity);
+    s_single_shot_pending = false;  /* 성공/실패 무관 이번 사이클 종료 — 다음 트리거는 호출자 책임 */
     return true;
 }
