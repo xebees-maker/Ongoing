@@ -15,6 +15,13 @@ static const char *TAG = "esp_now_node";
 #define ADVERTISE_PERIOD_US        (1000 * 1000)
 #define SENSOR_DATA_PERIOD_US_DEFAULT  (1000 * 1000)
 
+/* Cntl의 채널을 모를 때(외부망 STA로 붙어 채널이 고정 상수가 아닌 경우) 채널 1~13을
+ * 순차 스캔하면서 각 채널에서 이 주기로 광고를 쏜다 — Cntl로부터 ADVERTISE_ACK를 받으면
+ * 그 채널에 고정하고 이 빠른 스캔 주기 대신 평소 ADVERTISE_PERIOD_US로 되돌아간다. */
+#define SCAN_DWELL_US       (300 * 1000)
+#define SCAN_CHANNEL_MIN    1
+#define SCAN_CHANNEL_MAX    13
+
 /* paired 중 연속 이만큼 전송 실패하면 페어링을 끊긴 것으로 보고 advertising으로 복귀.
  * Cntl 허브의 ESP_NOW_HUB_NODE_TIMEOUT_MS(3초=3주기)와 같은 리듬 */
 #define SEND_FAIL_THRESHOLD    3
@@ -33,6 +40,9 @@ static esp_timer_handle_t s_unpaired_failed_timer = NULL;  /* one-shot */
 static bool    s_paired = false;
 static uint8_t s_hub_mac[6] = { 0 };
 static int     s_send_fail_count = 0;
+
+static bool    s_channel_locked = false;
+static uint8_t s_scan_channel   = SCAN_CHANNEL_MIN;
 
 static gpio_num_t s_led_pin = GPIO_NUM_NC;
 static uint64_t   s_sensor_data_period_us = SENSOR_DATA_PERIOD_US_DEFAULT;
@@ -57,7 +67,15 @@ static void enter_advertising(bool immediately_failed)
     if (s_sensor_data_timer) {
         esp_timer_stop(s_sensor_data_timer);  /* 실행 중 아니면 무해하게 실패 */
     }
-    esp_timer_start_periodic(s_advertise_timer, ADVERTISE_PERIOD_US);
+
+    /* Cntl 채널을 다시 모르는 상태로 리셋 — 페어링이 끊긴 사이 Cntl이 채널을 바꿨을 수
+     * 있으므로(외부망 STA 재연결 등) 매번 채널 1번부터 다시 스캔한다. */
+    s_channel_locked = false;
+    s_scan_channel   = SCAN_CHANNEL_MIN;
+    esp_wifi_set_channel(s_scan_channel, WIFI_SECOND_CHAN_NONE);
+
+    esp_timer_stop(s_advertise_timer);  /* 실행 중 아니면 무해하게 실패 */
+    esp_timer_start_periodic(s_advertise_timer, SCAN_DWELL_US);
 
     if (immediately_failed) {
         /* 방금까지 paired였다가 끊긴 경우 — 굳이 "막 시작한 advertising"처럼
@@ -175,13 +193,25 @@ static void resolve_name(void)
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
-    if (s_paired || len < (int)sizeof(esp_now_pair_request_t)) {
+    if (len < 2) return;
+    uint8_t msg_type = data[1];
+
+    if (!s_paired && !s_channel_locked && msg_type == ESP_NOW_MSG_ADVERTISE_ACK) {
+        if (len < (int)sizeof(esp_now_advertise_ack_t)) return;
+        /* Cntl을 찾았다 — 지금 채널에 고정하고 빠른 스캔을 멈춘다. 정식 페어링은
+         * 사람이 Cntl UI에서 트리거하는 PAIR_REQUEST/PAIR_ACK로 별도 진행 */
+        s_channel_locked = true;
+        esp_timer_stop(s_advertise_timer);
+        esp_timer_start_periodic(s_advertise_timer, ADVERTISE_PERIOD_US);
+        ESP_LOGI(TAG, "Cntl 채널 확인됨(CH%d) — 스캔 중지, 페어링 대기", s_scan_channel);
         return;
     }
+
+    if (s_paired || msg_type != ESP_NOW_MSG_PAIR_REQUEST) {
+        return;
+    }
+    if (len < (int)sizeof(esp_now_pair_request_t)) return;
     const esp_now_pair_request_t *req = (const esp_now_pair_request_t *)data;
-    if (req->msg_type != ESP_NOW_MSG_PAIR_REQUEST) {
-        return;
-    }
 
     memcpy(s_hub_mac, req->hub_mac, sizeof(s_hub_mac));
 
@@ -216,6 +246,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
 static void advertise_timer_cb(void *arg)
 {
+    /* 지금 라디오가 있는 채널(enter_advertising()이 SCAN_CHANNEL_MIN으로 맞춰둔 채널,
+     * 또는 아래에서 옮긴 채널)에 먼저 광고를 쏘고, 그다음에 다음 채널로 넘어간다 —
+     * 순서를 바꾸면(먼저 옮기고 나중에 쏘면) 맨 처음 채널에서는 광고가 한 번도
+     * 안 나가는 채로 넘어가버림 */
     esp_now_advertise_t msg = {
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_ADVERTISE,
@@ -227,7 +261,16 @@ static void advertise_timer_cb(void *arg)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "광고 전송 실패: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "광고 전송: %s", s_name);
+        ESP_LOGI(TAG, "광고 전송: %s (CH%d)", s_name, s_scan_channel);
+    }
+
+    if (!s_channel_locked) {
+        /* Cntl 채널을 아직 모름 — 다음 채널로 옮겨서 다음 틱에 거기서 광고해본다.
+         * ADVERTISE_ACK를 받으면 recv_cb가 s_channel_locked=true로 바꾸고 이 타이머를
+         * ADVERTISE_PERIOD_US로 재시작하므로, 그 이후엔 이 분기를 안 탐(채널 고정 유지) */
+        s_scan_channel++;
+        if (s_scan_channel > SCAN_CHANNEL_MAX) s_scan_channel = SCAN_CHANNEL_MIN;
+        esp_wifi_set_channel(s_scan_channel, WIFI_SECOND_CHAN_NONE);
     }
 }
 

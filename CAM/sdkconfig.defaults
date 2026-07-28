@@ -1,0 +1,34 @@
+# CAM 프로젝트 sdkconfig 기본값
+# ESP32-S3 (Waveshare ESP32-S3-CAM-OVxxxx) 기준
+# sdkconfig 자체는 .gitignore로 빠져있어서(레포 공통 규칙), 새로 체크아웃했을 때 이 파일이
+# 실기에서 확인된 최소 설정을 재현해준다 — project_cam_dvp_corruption_investigation /
+# project_cam_esp_now_production 메모리에 각 값의 근거가 남아있음.
+
+# ── Flash ────────────────────────────────────────────────────
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y   # 보드 실제 탑재 용량(2MB 기본값으론 storage 파티션이 안 들어감)
+
+# ── CPU 주파수 ────────────────────────────────────────────────
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y   # 160MHz → 240MHz
+
+# ── PSRAM ────────────────────────────────────────────────────
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# ── 파티션 테이블 ─────────────────────────────────────────────
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# ── 카메라 센서/촬영 ───────────────────────────────────────────
+# 물려있는 센서에 맞춰 CAM_SENSOR_OV5640/OV3660 중 하나로(둘 다 XCLK/fb_count/기본 해상도가
+# 자동으로 갈림, main/Kconfig.projbuild 참고). 센서 바꾸면 이 값 바꾸고 재빌드/재플래시.
+CONFIG_CAM_SENSOR_OV5640=y
+CONFIG_CAM_CAPTURE_30M=y   # 운영 주기(30분) — 개발 중엔 CAM_CAPTURE_10S로 바꿔서 테스트
+
+# ── esp32-camera JPEG 프레임버퍼 ────────────────────────────────
+# 실기에서 기본 자동계산(width*height/5)이 고해상도 JPEG엔 너무 작아서 FB-OVF 나는 걸 확인 —
+# 2MB로 충분히 여유있게. (주의: 이 값은 managed_components/espressif__esp32-camera/Kconfig의
+# 선언된 default를 직접 고쳐뒀어야 실제로 반영됨 — sdkconfig만 바꾸면 재구성마다 8192로
+# 되돌아가는 kconfgen 이슈가 있었음, 그래서 그 Kconfig 파일도 예외적으로 git에 강제 추적함)
+CONFIG_CAMERA_JPEG_MODE_FRAME_SIZE_CUSTOM=y
+CONFIG_CAMERA_JPEG_MODE_FRAME_SIZE=2097152

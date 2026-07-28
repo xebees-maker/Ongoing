@@ -1,0 +1,13 @@
+## cam-node 프로젝트 의존성
+## ESP-IDF v6.0.1 기준. 2026-07-22: 웨이브셰어 공식 "06_usb_host_uvc" 예제(esp32-camera,
+## XCLK 20MHz + fb_count=2)를 USB UVC 웹캠으로 재현해서 OV5640/OV3660 둘 다 깨끗한 영상
+## 확인 완료 — esp32-camera 드라이버/센서/DVP 배선 전부 정상, 원인은 우리가 썼던
+## XCLK 24MHz/fb_count=1 설정이었던 것으로 확인됨. 이제 이 값(20MHz/2)을 콘솔 기반
+## shot/ls/get 파이프라인에 적용해 검증 — project_cam_dvp_corruption_investigation 메모리 참고.
+
+dependencies:
+  idf:
+    version: ">=5.4"
+
+  espressif/esp32-camera:
+    version: "^2.0.0"

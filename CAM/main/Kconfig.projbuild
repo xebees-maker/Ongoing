@@ -1,0 +1,67 @@
+menu "CAM Node"
+
+    choice CAM_SENSOR_VARIANT
+        prompt "카메라 센서"
+        default CAM_SENSOR_OV5640
+        help
+            소스는 하나지만 XCLK/fb_count는 센서마다 실기에서 다르게 검증됐다(둘 다 정확히
+            반대로 하면 촬영 실패/부팅 무응답 재현 — project_cam_esp_now_production 메모리
+            참고). 물려있는 센서에 맞춰 이 값을 고르고 재빌드/재플래시할 것 — 런타임 자동
+            전환은 지원하지 않음(센서 식별 이전에 이미 XCLK가 정해져 있어야 해서).
+
+        config CAM_SENSOR_OV5640
+            bool "OV5640 (XCLK 24MHz, fb_count 1, 최대 5MP)"
+        config CAM_SENSOR_OV3660
+            bool "OV3660 (XCLK 20MHz, fb_count 2, 최대 QXGA)"
+    endchoice
+
+    choice CAM_CAPTURE_INTERVAL
+        prompt "촬영 주기"
+        default CAM_CAPTURE_10S
+        help
+            블랙박스처럼 이 주기마다 정지사진 1장을 찍어 SD에 저장한다. 10초는 개발/테스트
+            전용(빠르게 확인용) — 실제 운영은 30분/1시간/3시간/10시간 중 선택.
+
+        config CAM_CAPTURE_10S
+            bool "10초 (개발용)"
+        config CAM_CAPTURE_30M
+            bool "30분"
+        config CAM_CAPTURE_1H
+            bool "1시간"
+        config CAM_CAPTURE_3H
+            bool "3시간"
+        config CAM_CAPTURE_10H
+            bool "10시간"
+    endchoice
+
+    choice CAM_JPEG_FRAMESIZE
+        prompt "JPEG 해상도"
+        default CAM_JPEG_5MP if CAM_SENSOR_OV5640
+        default CAM_JPEG_QXGA if CAM_SENSOR_OV3660
+        default CAM_JPEG_UXGA
+        help
+            esp32-camera(driver/include/sensor.h framesize_t) 기준 해상도. 위 카메라 센서
+            선택에 따라 그 센서의 실제 최대 해상도(QXGA=OV3660/5MP=OV5640)가 기본값으로
+            자동 선택되지만, 테스트용으로 더 낮은 해상도를 골라도 됨.
+
+        config CAM_JPEG_VGA
+            bool "VGA (640x480)"
+        config CAM_JPEG_SVGA
+            bool "SVGA (800x600)"
+        config CAM_JPEG_XGA
+            bool "XGA (1024x768)"
+        config CAM_JPEG_UXGA
+            bool "UXGA (1600x1200)"
+        config CAM_JPEG_QXGA
+            bool "QXGA (2048x1536) — OV3660 최대"
+        config CAM_JPEG_QSXGA
+            bool "QSXGA (2560x1920)"
+        config CAM_JPEG_5MP
+            bool "5MP (2592x1944) — OV5640 최대"
+    endchoice
+
+    config CAM_NODE_NAME
+        string "노드 이름 (비우면 MAC 뒤 4자리로 자동 생성 — Cam-XXXX)"
+        default ""
+
+endmenu

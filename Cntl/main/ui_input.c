@@ -4,7 +4,7 @@
  */
 
 #include "ui_input.h"
-#include "bsp_ws_1_47.h"
+#include "bsp_ws_1_85c.h"
 #include <string.h>
 
 #define MAX_GLOBAL    4

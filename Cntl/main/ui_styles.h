@@ -30,6 +30,7 @@
 #define STR_TAB_CHECK           "체크"
 #define STR_TAB_TIMER           "타이머"
 #define STR_TAB_NODES           "노드"
+#define STR_TAB_SENSOR_SUMMARY  "센서 요약"
 
 #define STR_NODES_EMPTY         "탐색 중..."
 #define STR_NODES_AGO_FMT       "%lu초 전"

@@ -10,6 +10,7 @@ idf_component_register(
         "ui_input.c"
         "ui_screen.c"
         "ui_nodes.c"
+        "ui_node_tabs.c"
         "esp_now_hub.c"
         "web_dashboard.c"
     INCLUDE_DIRS
@@ -18,7 +19,7 @@ idf_component_register(
         nvs_flash
         freertos
         log
-        bsp_ws_1_47
+        bsp_ws_1_85c
         lvgl
         joltwallet__littlefs
         esp_adc
@@ -31,5 +32,6 @@ idf_component_register(
         esp_timer
         esp_now_link
         esp_http_server
+        esp_rom
 )
 

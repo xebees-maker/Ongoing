@@ -10,6 +10,7 @@
 #include "ui_input.h"
 #include "ui_screen.h"
 #include "ui_nodes.h"
+#include "ui_node_tabs.h"
 
 static void tab_changed_cb(lv_event_t *e)
 {
@@ -48,6 +49,7 @@ void ui_init(void)
     ui_create_dashboard(tab_dashboard);
     ui_create_timer(tab_timer);
     ui_create_nodes(tab_nodes);
+    ui_node_tabs_init(tabview);
 
     ui_screen_init();
 }

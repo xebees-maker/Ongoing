@@ -1,0 +1,30 @@
+idf_component_register(
+    SRCS
+        "cam_node.c"
+        "esp_now_cam.c"
+        "cam_storage.c"
+        "dev_console.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        nvs_flash
+        freertos
+        log
+        status_led
+        esp_pm
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_timer
+        esp_now_link
+        esp32-camera
+        bsp_esp32s3_cam
+        io_expander_ch32v003
+        fatfs
+        sdmmc
+        esp_driver_sdmmc
+        console
+        mbedtls
+        esp_rom
+        esp_driver_usb_serial_jtag
+)

@@ -1,0 +1,9 @@
+{
+  "folders": [
+    { "name": "Cntl (S3)", "path": "Cntl" },
+    { "name": "Sens (C6)", "path": "Sens" },
+    { "name": "CAM (S3)", "path": "CAM" },
+    { "name": "Common", "path": "Common" }
+  ],
+  "settings": {}
+}

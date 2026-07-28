@@ -1,17 +1,25 @@
 /**
  * @file    ui_nodes.c
- * @brief   노드 탭 — ESP-NOW로 advertise 중인 미페어링 Sens 노드 목록 (1초 갱신)
+ * @brief   노드 탭 — ESP-NOW 노드 목록 (1초 갱신). 미페어링 노드를 탭하면 페어링을 시도한다.
  */
 
 #include "ui_nodes.h"
 #include "ui_common.h"
 #include "esp_now_hub.h"
 #include "esp_timer.h"
+#include <string.h>
 
 #define NODE_LIST_REFRESH_MS 1000
 
 static lv_obj_t *s_list      = NULL;
 static lv_obj_t *s_net_label = NULL;
+static uint8_t   s_btn_macs[ESP_NOW_HUB_MAX_NODES][6];
+
+static void node_btn_clicked_cb(lv_event_t *e)
+{
+    uint8_t *mac = (uint8_t *)lv_event_get_user_data(e);
+    esp_now_hub_pair(mac);
+}
 
 static void node_list_refresh_cb(lv_timer_t *t)
 {
@@ -34,15 +42,20 @@ static void node_list_refresh_cb(lv_timer_t *t)
     }
 
     for (int i = 0; i < count; i++) {
+        uint32_t freshness_ms = nodes[i].paired ? nodes[i].last_data_ms : nodes[i].last_seen_ms;
         char ago[16];
         lv_snprintf(ago, sizeof(ago), STR_NODES_AGO_FMT,
-                    (unsigned long)((now_ms - nodes[i].last_seen_ms) / 1000));
+                    (unsigned long)((now_ms - freshness_ms) / 1000));
 
         char label[48];
-        lv_snprintf(label, sizeof(label), "%s  -  %s", nodes[i].name, ago);
+        lv_snprintf(label, sizeof(label), "%s%s  -  %s",
+                    nodes[i].name, nodes[i].paired ? " (페어링됨)" : "", ago);
 
-        lv_obj_t *btn = lv_list_add_button(s_list, LV_SYMBOL_WIFI, label);
+        lv_obj_t *btn = lv_list_add_button(s_list, nodes[i].paired ? LV_SYMBOL_OK : LV_SYMBOL_WIFI, label);
         lv_obj_set_style_text_font(btn, UI_FONT_12, 0);
+
+        memcpy(s_btn_macs[i], nodes[i].mac, 6);
+        lv_obj_add_event_cb(btn, node_btn_clicked_cb, LV_EVENT_CLICKED, s_btn_macs[i]);
     }
 }
 

@@ -31,15 +31,19 @@ static const char *TAG = "ui_dash";
 #define CLR_TEXT_LIGHT  0xFFFFFF
 #define CLR_CHG         0x2ECC71
 
-/* ── ADC / GPIO ── */
-#define BAT_CTRL_PIN     GPIO_NUM_14    /* P-MOSFET 게이트: LOW=ON → 분압기 활성화 */
-#define BAT_ADC_UNIT     ADC_UNIT_2
-#define BAT_ADC_CH       ADC_CHANNEL_1  /* GPIO12 = ADC2_CH1 (BAT_ADC) */
+/* ── ADC / GPIO ──
+ * 1.85C V2 회로도 기준 — 1.47 보드(GPIO12=ADC2_CH1, GPIO14 P-MOSFET 게이트)와
+ * 핀이 다름. 1.85C는 BAT_ADC가 GPIO8(=ADC1_CH7)로 직결, R2=200K/R11=100K
+ * 분압(비율 3.0, 1.47과 동일 비율이라 VBAT_DIV/FULL/EMPTY는 그대로) — 게이팅
+ * MOSFET 없이 항시 분압 중이라 ctrl_gpio 불필요(GPIO_NUM_NC). */
+#define BAT_CTRL_PIN     GPIO_NUM_NC    /* 1.85C는 게이팅 MOSFET 없음 — 상시 분압 */
+#define BAT_ADC_UNIT     ADC_UNIT_1
+#define BAT_ADC_CH       ADC_CHANNEL_7  /* GPIO8 = ADC1_CH7 (BAT_ADC) */
 #define BAT_ADC_ATTEN    ADC_ATTEN_DB_12
 #define BAT_SAMPLE_MS        1000       /* 샘플 주기: 1 Hz */
 #define BAT_SAMPLE_COUNT       11       /* 순환 버퍼: 11개 */
 #define BAT_GAUGE_EVERY        10       /* 게이지 갱신: 10샘플(10초)마다 */
-#define VBAT_DIV              3.0f     /* R19=200K, R21=100K */
+#define VBAT_DIV              3.0f     /* R2=200K, R11=100K */
 #define VBAT_FULL_MV          4200.0f
 #define VBAT_EMPTY_MV         3300.0f
 
@@ -227,9 +231,6 @@ void ui_create_dashboard(lv_obj_t *parent)
     lv_obj_set_style_pad_all(sec, 0, 0);
     lv_obj_clear_flag(sec, LV_OBJ_FLAG_SCROLLABLE);
     create_battery_widget(sec);
-
-    /* GPIO12 내부 pull-up 명시적 해제 (ADC2_CH1 입력 안정화) */
-    gpio_set_pull_mode(GPIO_NUM_12, GPIO_FLOATING);
 
     battery_config_t batt_cfg = {
         .adc_unit    = BAT_ADC_UNIT,

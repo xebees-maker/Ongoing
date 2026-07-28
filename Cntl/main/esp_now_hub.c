@@ -2,18 +2,31 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_rom_crc.h"
 #include "web_dashboard.h"
 
 static const char *TAG = "esp_now_hub";
 
 static esp_now_hub_node_t s_nodes[ESP_NOW_HUB_MAX_NODES];
 static int s_node_count = 0;
+
+/* CAM 사진 청크 재조립 — 최종 보관/열람 방법(SD? 웹 스트리밍?)은 아직 미정이라 일단
+ * 힙 버퍼에 재조립만 하고 완료 로그 남긴 뒤 해제. 한 번에 한 파일만 재조립(CAM이
+ * 순차로 META→CHUNK*→다음 META 순서로 보내는 걸 전제 — esp_now_cam.c의 send_one_photo
+ * 참고, 파일 여러 개를 동시에 인터리브해서 보내지 않음). */
+static uint32_t s_photo_file_id       = 0;
+static uint32_t s_photo_total_size    = 0;
+static uint16_t s_photo_total_chunks  = 0;
+static uint16_t s_photo_chunks_recv   = 0;
+static uint32_t s_photo_expected_crc32 = 0;
+static uint8_t *s_photo_buffer        = NULL;
 
 static const uint8_t s_broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -53,6 +66,37 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         n->name[ESP_NOW_LINK_NAME_LEN - 1] = '\0';
         n->last_seen_ms = now_ms;
 
+        /* 사람이 페어링 버튼을 누르기 전이라도 즉시 응답 — 채널 스캔 중인 노드가 "Cntl을
+         * 찾았다"를 알고 지금 채널에 고정하기 위한 용도(정식 페어링과는 별개). Cntl의 채널이
+         * 더 이상 고정 상수가 아니게 되면서(외부망 STA 등) 노드가 채널을 스캔해서 찾아야
+         * 하는데, 응답이 늦으면(사람이 페어링 누를 때까지 기다리면) 그 사이 노드가 이미
+         * 다른 채널로 넘어가버려서 응답이 전달 안 됨. */
+        if (!esp_now_is_peer_exist(info->src_addr)) {
+            esp_now_peer_info_t peer = { 0 };
+            memcpy(peer.peer_addr, info->src_addr, 6);
+#if CONFIG_CNTL_WIFI_MODE_STA
+            peer.ifidx = WIFI_IF_STA;
+#else
+            peer.ifidx = WIFI_IF_AP;
+#endif
+            peer.channel = 0;
+            peer.encrypt = false;
+            if (esp_now_add_peer(&peer) != ESP_OK) {
+                ESP_LOGW(TAG, "%s ADVERTISE_ACK용 피어 등록 실패", msg->name);
+                return;
+            }
+        }
+        esp_now_advertise_ack_t ack = {
+            .version  = ESP_NOW_LINK_VERSION,
+            .msg_type = ESP_NOW_MSG_ADVERTISE_ACK,
+        };
+#if CONFIG_CNTL_WIFI_MODE_STA
+        esp_wifi_get_mac(WIFI_IF_STA, ack.hub_mac);
+#else
+        esp_wifi_get_mac(WIFI_IF_AP, ack.hub_mac);
+#endif
+        esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+
     } else if (msg_type == ESP_NOW_MSG_PAIR_ACK) {
         if (len < (int)sizeof(esp_now_pair_ack_t)) return;
         const esp_now_pair_ack_t *msg = (const esp_now_pair_ack_t *)data;
@@ -83,6 +127,74 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         n->batt_ok  = msg->batt_ok;
         n->batt_pct = msg->batt_pct;
         n->powered  = msg->powered;
+
+    } else if (msg_type == ESP_NOW_MSG_PHOTO_META) {
+        if (len < (int)sizeof(esp_now_photo_meta_t)) return;
+        const esp_now_photo_meta_t *msg = (const esp_now_photo_meta_t *)data;
+        if (msg->version != ESP_NOW_LINK_VERSION) return;
+
+        if (s_photo_buffer) {
+            ESP_LOGW(TAG, "이전 사진(id=%u) DONE 없이 새 META 도착 — 이전 것 버림",
+                     (unsigned)s_photo_file_id);
+            free(s_photo_buffer);
+            s_photo_buffer = NULL;
+        }
+        s_photo_buffer = malloc(msg->total_size);
+        if (!s_photo_buffer) {
+            ESP_LOGE(TAG, "사진 재조립 버퍼 할당 실패 (%u bytes)", (unsigned)msg->total_size);
+            return;
+        }
+        s_photo_file_id        = msg->file_id;
+        s_photo_total_size     = msg->total_size;
+        s_photo_total_chunks   = msg->total_chunks;
+        s_photo_chunks_recv    = 0;
+        s_photo_expected_crc32 = msg->crc32;
+        ESP_LOGI(TAG, "PHOTO_META id=%u size=%u chunks=%u", (unsigned)msg->file_id,
+                 (unsigned)msg->total_size, msg->total_chunks);
+
+    } else if (msg_type == ESP_NOW_MSG_PHOTO_CHUNK) {
+        if (len < (int)sizeof(esp_now_photo_chunk_t)) return;
+        const esp_now_photo_chunk_t *msg = (const esp_now_photo_chunk_t *)data;
+        if (msg->version != ESP_NOW_LINK_VERSION) return;
+        if (!s_photo_buffer || msg->file_id != s_photo_file_id) {
+            ESP_LOGW(TAG, "META 없이(또는 다른 file_id) CHUNK 도착 — 무시");
+            return;
+        }
+        size_t offset = (size_t)msg->chunk_idx * ESP_NOW_PHOTO_CHUNK_DATA_LEN;
+        if (offset + msg->chunk_len > s_photo_total_size) {
+            ESP_LOGW(TAG, "CHUNK %u가 버퍼 범위 초과 — 무시", msg->chunk_idx);
+            return;
+        }
+        memcpy(s_photo_buffer + offset, msg->data, msg->chunk_len);
+        s_photo_chunks_recv++;
+
+    } else if (msg_type == ESP_NOW_MSG_PHOTO_DONE) {
+        if (len < (int)sizeof(esp_now_photo_done_t)) return;
+        if (s_photo_buffer) {
+            /* 최종 보관/열람 방법(SD? 웹 스트리밍?)은 아직 미정 — 지금은 완료 여부만
+             * 로그로 확인하고 버퍼는 해제. 청크 개수가 맞다고 내용까지 맞다고 보지 않고
+             * CAM이 보내온 CRC32와 재조립 결과를 직접 비교한다 — "크기/개수 일치 ≠ 내용
+             * 일치"는 이번 CAM 프로젝트에서 실제로 겪은 버그라 이 경로에도 똑같이 적용
+             * (project_cam_dvp_corruption_investigation 메모리 참고). */
+            if (s_photo_chunks_recv == s_photo_total_chunks) {
+                uint32_t crc = esp_rom_crc32_le(0, s_photo_buffer, s_photo_total_size);
+                if (crc == s_photo_expected_crc32) {
+                    ESP_LOGI(TAG, "사진 재조립 완료+CRC 일치: id=%u size=%u (청크 %u/%u)",
+                             (unsigned)s_photo_file_id, (unsigned)s_photo_total_size,
+                             s_photo_chunks_recv, s_photo_total_chunks);
+                    /* TODO: 최종 저장/웹 대시보드 전달 — 아직 미정, 지금은 무결성 확인까지만 */
+                } else {
+                    ESP_LOGW(TAG, "사진 재조립 CRC 불일치: id=%u 기대=0x%08x 실제=0x%08x — 손상, 버림",
+                             (unsigned)s_photo_file_id, (unsigned)s_photo_expected_crc32, (unsigned)crc);
+                }
+            } else {
+                ESP_LOGW(TAG, "사진 재조립 불완전: id=%u (청크 %u/%u만 도착)",
+                         (unsigned)s_photo_file_id, s_photo_chunks_recv, s_photo_total_chunks);
+            }
+            free(s_photo_buffer);
+            s_photo_buffer = NULL;
+        }
+        ESP_LOGI(TAG, "PHOTO_DONE 수신 (요청 전체 종료)");
     }
 }
 

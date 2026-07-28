@@ -6,7 +6,7 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
-#include "bsp_ws_1_47.h"
+#include "bsp_ws_1_85c.h"
 #include "draw/lv_draw_buf_private.h"
 #include "fs.h"
 #include "ui_font.h"

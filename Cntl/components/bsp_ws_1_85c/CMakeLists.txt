@@ -1,0 +1,18 @@
+idf_component_register(
+    SRCS
+        "bsp_ws_1_85c.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        driver
+        esp_driver_i2c
+        esp_driver_ledc
+        esp_lcd
+        esp_timer
+        log
+        freertos
+        espressif__esp_lcd_st77916
+        esp_lcd_touch_cst816
+        io_expander_tca9554
+        lvgl
+)
