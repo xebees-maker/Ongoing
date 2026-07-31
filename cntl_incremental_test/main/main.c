@@ -2,7 +2,7 @@
 
 #include "esp_log.h"
 #include "esp_lv_adapter.h"
-#include "lv_demos.h"
+#include "ui_main.h"
 #include "waveshare_rgb_lcd_port.h"
 #include "nvs_flash.h"
 #include "fs.h"
@@ -170,9 +170,9 @@ void app_main(void)
         esp_lv_adapter_unlock();
     }
 
-    ESP_LOGI(TAG, "Starting LVGL widgets demo");
+    ESP_LOGI(TAG, "Starting Cntl UI");
     if (esp_lv_adapter_lock(-1) == ESP_OK) {
-        lv_demo_widgets();
+        ui_init();
         esp_lv_adapter_unlock();
     }
 

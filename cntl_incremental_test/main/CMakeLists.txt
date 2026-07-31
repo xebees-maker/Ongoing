@@ -3,6 +3,8 @@ idf_component_register(
         "main.c"
         "fs.c"
         "ui_font.c"
+        "ui_strings.c"
+        "ui_main.c"
         "../components/waveshare_rgb_lcd_port.c"
     INCLUDE_DIRS
         "."
