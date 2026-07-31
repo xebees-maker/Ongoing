@@ -51,6 +51,9 @@ esp_err_t cam_storage_open_read(uint32_t file_id, FILE **out_fp, uint32_t *out_s
 /** @brief 저장된 모든 사진을 삭제 (개발용 clear 명령) @return 삭제한 개수, 실패 시 음수 */
 int cam_storage_delete_all(void);
 
+/** @brief file_id에 해당하는 파일 하나만 삭제(목록에서 삭제 버튼 눌렀을 때) */
+esp_err_t cam_storage_delete(uint32_t file_id);
+
 #ifdef __cplusplus
 }
 #endif

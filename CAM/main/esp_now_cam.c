@@ -46,6 +46,18 @@ static gpio_num_t s_led_pin = GPIO_NUM_NC;
 static const uint8_t s_broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 /* --- 사진 전송 --- */
+/* recv_cb(WiFi 태스크)에서 바로 처리하기엔 무거운 요청(촬영/파일 I/O/여러 건 전송)을
+ * 전용 태스크로 넘기는 큐 — PHOTO_REQUEST와 PHOTO_LIST_REQUEST 둘 다 여기로 옴 */
+typedef enum {
+    CAM_TASK_REQ_PHOTO = 0,
+    CAM_TASK_REQ_LIST  = 1,
+} cam_task_req_kind_t;
+
+typedef struct {
+    cam_task_req_kind_t      kind;
+    esp_now_photo_request_t  photo_req;  /* kind==CAM_TASK_REQ_PHOTO일 때만 유효 */
+} cam_task_request_t;
+
 static QueueHandle_t s_photo_request_queue = NULL;
 static SemaphoreHandle_t s_send_done_sem   = NULL;
 static volatile bool s_awaiting_chunk_ack  = false;
@@ -207,20 +219,69 @@ static bool send_one_photo(uint32_t file_id)
     return ok;
 }
 
+/* 목록 요청 — 파일 내용 전송 없이 file_id/크기만 하나씩 알려줌. 최대 500장까지 있을 수
+ * 있는 순회+개별 send()라 recv_cb(WiFi 태스크)에서 바로 안 하고 여기서 처리 */
+static void send_photo_list(void)
+{
+    uint32_t ids[CAM_STORAGE_MAX_FILES];
+    int count = cam_storage_list(PHOTO_REQUEST_MODE_ALL, 0, ids, CAM_STORAGE_MAX_FILES);
+    ESP_LOGI(TAG, "PHOTO_LIST_REQUEST -> %d개 항목 전송", count);
+
+    int sent = 0;
+    for (int i = 0; i < count && s_paired; i++) {
+        uint32_t size = 0;
+        char kind = 0;
+        if (cam_storage_stat(ids[i], &size, &kind) != ESP_OK) continue;
+        esp_now_photo_list_entry_t entry = {
+            .version   = ESP_NOW_LINK_VERSION,
+            .msg_type  = ESP_NOW_MSG_PHOTO_LIST_ENTRY,
+            .file_id   = ids[i],
+            .file_size = size,
+        };
+        esp_now_send(s_hub_mac, (const uint8_t *)&entry, sizeof(entry));
+        sent++;
+        vTaskDelay(pdMS_TO_TICKS(5));  /* CHUNK 전송과 동일한 이유 — ESP-NOW 큐 과부하 방지 */
+    }
+
+    esp_now_photo_list_done_t done = {
+        .version  = ESP_NOW_LINK_VERSION,
+        .msg_type = ESP_NOW_MSG_PHOTO_LIST_DONE,
+        .count    = (uint16_t)sent,
+    };
+    esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));
+    ESP_LOGI(TAG, "PHOTO_LIST_DONE 전송(%d개)", sent);
+}
+
 static void photo_transfer_task(void *arg)
 {
     (void)arg;
-    esp_now_photo_request_t req;
+    cam_task_request_t item;
     for (;;) {
-        if (xQueueReceive(s_photo_request_queue, &req, portMAX_DELAY) != pdTRUE) continue;
+        if (xQueueReceive(s_photo_request_queue, &item, portMAX_DELAY) != pdTRUE) continue;
         if (!s_paired) continue;
+
+        if (item.kind == CAM_TASK_REQ_LIST) {
+            send_photo_list();
+            continue;
+        }
+
+        esp_now_photo_request_t req = item.photo_req;
 
         /* Cntl이 기존 저장분 대신 "지금 당장 새로 찍어서" 원하는 경우 — esp_camera_fb_get()이
          * 최대 수 초 블로킹될 수 있어서 recv_cb(콜백 컨텍스트)에서 바로 처리하지 않고 여기
-         * (전용 태스크)까지 큐로 넘겨서 처리한다. 찍고 나면 방금 그 1장만 LATEST로 보낸다. */
+         * (전용 태스크)까지 큐로 넘겨서 처리한다. 찍고 나면 방금 그 1장만 LATEST로 보낸다.
+         * 접수 확인(RECEIVED)은 recv_cb에서 이미 보냈고, 여기선 촬영 결과(성공/실패)만 알림 —
+         * Cntl UI가 진행 팝업에서 "촬영 완료/실패" 단계를 표시하는 데 씀 */
         if (req.mode == PHOTO_REQUEST_MODE_CAPTURE_NOW) {
             ESP_LOGI(TAG, "CAPTURE_NOW 요청 — 즉시 촬영");
-            if (!cam_node_capture_now()) {
+            bool captured = cam_node_capture_now();
+            esp_now_capture_status_t status = {
+                .version  = ESP_NOW_LINK_VERSION,
+                .msg_type = ESP_NOW_MSG_CAPTURE_STATUS,
+                .status   = captured ? CAM_CAPTURE_STATUS_SUCCESS : CAM_CAPTURE_STATUS_FAILED,
+            };
+            esp_now_send(s_hub_mac, (const uint8_t *)&status, sizeof(status));
+            if (!captured) {
                 ESP_LOGW(TAG, "즉시 촬영 실패 — 보낼 사진 없이 DONE만 전송");
                 esp_now_photo_done_t done = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_DONE };
                 esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));
@@ -273,9 +334,58 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (!s_paired || len < (int)sizeof(esp_now_photo_request_t)) return;
         esp_now_photo_request_t req;
         memcpy(&req, data, sizeof(req));
-        if (xQueueSend(s_photo_request_queue, &req, 0) != pdTRUE) {
+
+        /* 지금촬영은 접수 확인을 여기서 바로 보냄(전용 태스크가 큐에서 뽑아 처리하기까지의
+         * 지연과 별개로, Cntl UI 진행 팝업의 "1단계: 명령 전달" 즉시 반영용) */
+        if (req.mode == PHOTO_REQUEST_MODE_CAPTURE_NOW) {
+            esp_now_capture_status_t status = {
+                .version  = ESP_NOW_LINK_VERSION,
+                .msg_type = ESP_NOW_MSG_CAPTURE_STATUS,
+                .status   = CAM_CAPTURE_STATUS_RECEIVED,
+            };
+            esp_now_send(s_hub_mac, (const uint8_t *)&status, sizeof(status));
+        }
+
+        cam_task_request_t item = { .kind = CAM_TASK_REQ_PHOTO, .photo_req = req };
+        if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
             ESP_LOGW(TAG, "PHOTO_REQUEST 큐 가득 — 이전 전송 아직 진행중, 무시");
         }
+        return;
+    }
+
+    if (msg_type == ESP_NOW_MSG_PHOTO_LIST_REQUEST) {
+        if (!s_paired || len < (int)sizeof(esp_now_photo_list_request_t)) return;
+        cam_task_request_t item = { .kind = CAM_TASK_REQ_LIST };
+        if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "PHOTO_LIST_REQUEST 큐 가득 — 무시");
+        }
+        return;
+    }
+
+    if (msg_type == ESP_NOW_MSG_PHOTO_DELETE_REQUEST) {
+        if (!s_paired || len < (int)sizeof(esp_now_photo_delete_request_t)) return;
+        esp_now_photo_delete_request_t req;
+        memcpy(&req, data, sizeof(req));
+        esp_err_t err = cam_storage_delete(req.file_id);
+        ESP_LOGI(TAG, "PHOTO_DELETE_REQUEST id=%u: %s", (unsigned)req.file_id, esp_err_to_name(err));
+        esp_now_photo_delete_ack_t ack = {
+            .version  = ESP_NOW_LINK_VERSION,
+            .msg_type = ESP_NOW_MSG_PHOTO_DELETE_ACK,
+            .file_id  = req.file_id,
+            .success  = (err == ESP_OK) ? 1 : 0,
+        };
+        esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
+        return;
+    }
+
+    /* Cntl이 연결 해제했다는 통보 — 우리 쪽 hub로 등록된 상대가 보낸 것만 인정하고
+     * 페어링 전(광고/채널스캔) 상태로 돌아감. 이게 없으면 Cntl이 끊어도 CAM은 몰라서
+     * keepalive를 계속 보내 Cntl 목록에서 "연결됨"으로 되돌아가버림(실기로 확인됨). */
+    if (msg_type == ESP_NOW_MSG_UNPAIR) {
+        if (!s_paired || len < (int)sizeof(esp_now_unpair_t)) return;
+        if (memcmp(info->src_addr, s_hub_mac, sizeof(s_hub_mac)) != 0) return;
+        ESP_LOGI(TAG, "Cntl이 연결 해제함 — 광고 재개");
+        enter_advertising(false);
         return;
     }
 
@@ -343,7 +453,7 @@ void esp_now_cam_init(void)
     resolve_name();
     ESP_LOGI(TAG, "노드 이름: %s (MAC " MACSTR ")", s_name, MAC2STR(s_mac));
 
-    s_photo_request_queue = xQueueCreate(2, sizeof(esp_now_photo_request_t));
+    s_photo_request_queue = xQueueCreate(4, sizeof(cam_task_request_t));
     s_send_done_sem       = xSemaphoreCreateBinary();
     xTaskCreate(photo_transfer_task, "photo_tx", 4096, NULL, 5, NULL);
 

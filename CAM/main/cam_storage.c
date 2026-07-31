@@ -161,6 +161,17 @@ int cam_storage_list(photo_request_mode_t mode, uint32_t param, uint32_t *out_fi
         return 1;
     }
 
+    if (mode == PHOTO_REQUEST_MODE_BY_ID) {
+        if (max < 1) return 0;
+        for (int i = 0; i < total; i++) {
+            if (all_ids[i] == param) {
+                out_file_ids[0] = param;
+                return 1;
+            }
+        }
+        return 0;  /* 목록 가져온 뒤 사용자가 고르기 전에 이미 지워진 경우 등 */
+    }
+
     uint32_t cutoff = 0;
     if (mode == PHOTO_REQUEST_MODE_RECENT_HOURS) {
         uint32_t now = (uint32_t)time(NULL);
@@ -208,6 +219,14 @@ esp_err_t cam_storage_open_read(uint32_t file_id, FILE **out_fp, uint32_t *out_s
 
     *out_fp   = fp;
     *out_size = (uint32_t)size;
+    return ESP_OK;
+}
+
+esp_err_t cam_storage_delete(uint32_t file_id)
+{
+    char path[64];
+    if (!resolve_path(file_id, path, sizeof(path), NULL)) return ESP_ERR_NOT_FOUND;
+    if (remove(path) != 0) return ESP_FAIL;
     return ESP_OK;
 }
 

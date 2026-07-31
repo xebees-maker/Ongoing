@@ -225,3 +225,8 @@ esp_err_t waveshare_rgb_lcd_backlight_on(void)
     ESP_ERROR_CHECK(i2c_write_byte(s_ch422g_data_dev, 0x1E));
     return ESP_OK;
 }
+
+i2c_master_bus_handle_t waveshare_rgb_lcd_get_i2c_bus(void)
+{
+    return s_i2c_bus;
+}

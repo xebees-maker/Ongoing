@@ -84,4 +84,8 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(uint8_t frame_buffer_count,
 
 esp_err_t waveshare_rgb_lcd_backlight_on(void);
 
+/* 터치(GT911)/CH422G가 쓰는 I2C 버스 핸들 — waveshare_esp32_s3_rgb_lcd_init() 호출 후에만
+ * 유효. 보드에 실장된 PCF85063A RTC도 같은 버스(GPIO8/9)라 이 핸들을 그대로 재사용 */
+i2c_master_bus_handle_t waveshare_rgb_lcd_get_i2c_bus(void);
+
 #endif

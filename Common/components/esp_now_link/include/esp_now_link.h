@@ -23,6 +23,21 @@ typedef enum {
     ESP_NOW_MSG_PHOTO_META = 7,
     ESP_NOW_MSG_PHOTO_CHUNK = 8,
     ESP_NOW_MSG_PHOTO_DONE = 9,
+    ESP_NOW_MSG_CAM_CONFIG_SET = 10,  /* Cntl -> CAM: 화이트밸런스/자동촬영 주기 설정 푸시 */
+    ESP_NOW_MSG_UNPAIR = 11,          /* Cntl -> 노드: Cntl이 연결 해제했음을 알림(2026-07-31
+                                        * 추가 — 이게 없으면 노드는 자기가 여전히 페어링된 줄
+                                        * 알고 keepalive를 계속 보냄, 사용자가 실기로 확인) */
+    ESP_NOW_MSG_CAPTURE_STATUS = 12,       /* CAM -> Cntl: 지금촬영 진행상태(접수/성공/실패) —
+                                             * Cntl UI가 진행 팝업에 단계별로 표시하려고 추가 */
+    ESP_NOW_MSG_PHOTO_LIST_REQUEST = 13,   /* Cntl -> CAM: 저장된 사진 "목록"만 요청(내용 전송 없음) */
+    ESP_NOW_MSG_PHOTO_LIST_ENTRY = 14,     /* CAM -> Cntl: 목록 항목 1개(파일당 1개씩 반복 전송) */
+    ESP_NOW_MSG_PHOTO_LIST_DONE = 15,      /* CAM -> Cntl: 목록 전송 끝 */
+    ESP_NOW_MSG_PHOTO_DELETE_REQUEST = 16, /* Cntl -> CAM: 특정 사진 삭제 요청 */
+    ESP_NOW_MSG_PHOTO_DELETE_ACK = 17,     /* CAM -> Cntl: 삭제 결과 */
+    ESP_NOW_MSG_SET_TIME = 18,             /* Cntl -> 노드: 페어링 완료 시각 유닉스 타임스탬프
+                                             * 전달(2026-07-31 추가 — Cntl은 보드 실장 PCF85063A
+                                             * RTC가 있지만 CAM/Sens는 없어서, 페어링될 때마다
+                                             * Cntl이 자기 시각을 상대에게 알려줌) */
 } esp_now_msg_type_t;
 
 typedef struct __attribute__((packed)) {
@@ -52,6 +67,14 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
     uint8_t node_mac[6];
 } esp_now_pair_ack_t;
+
+/* Cntl -> 노드(유니캐스트): 사용자가 Cntl에서 연결 해제함. 받은 노드는 다시 페어링 전
+ * 상태(광고/채널스캔)로 돌아가고 keepalive를 멈춰야 함 — 그 전엔 노드가 자기 상태를 알 방법이
+ * 없어서 계속 페어링된 걸로 믿고 keepalive를 보냈음(실기로 확인된 문제, 2026-07-31). */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_unpair_t;
 
 /* 채널 종류 — 노드가 실제로 붙인 센서가 무엇을 재는지에 대응.
  * 새 센서가 새로운 물리량을 재면 여기에 하나 추가하면 됨(프로토콜 구조 자체는 안 바뀜). */
@@ -98,13 +121,14 @@ typedef enum {
     PHOTO_REQUEST_MODE_RECENT_HOURS = 1,  /* 최근 N시간 이내 것 전부 (param=시간 수) */
     PHOTO_REQUEST_MODE_LATEST = 2,        /* 가장 최근 1장만 */
     PHOTO_REQUEST_MODE_CAPTURE_NOW = 3,   /* 기존 파일 무시하고 즉시 새로 촬영한 뒤 그 1장만 전송 */
+    PHOTO_REQUEST_MODE_BY_ID = 4,         /* param=file_id — 목록에서 고른 특정 사진 1장만 전송 */
 } photo_request_mode_t;
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
     uint8_t  mode;    /* photo_request_mode_t */
-    uint32_t param;   /* RECENT_HOURS일 때만 유효, 나머지 모드는 무시 */
+    uint32_t param;   /* RECENT_HOURS=시간 수, BY_ID=file_id, 나머지 모드는 무시 */
 } esp_now_photo_request_t;
 
 typedef struct __attribute__((packed)) {
@@ -131,3 +155,79 @@ typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
 } esp_now_photo_done_t;
+
+/* 지금촬영(CAPTURE_NOW) 진행 상태 — Cntl UI가 진행 팝업 단계 표시에 씀.
+ * RECEIVED: CAM이 요청을 접수(아직 촬영 전). SUCCESS/FAILED: 촬영 자체의 성공/실패
+ * (전송은 SUCCESS 뒤에 기존 META/CHUNK/DONE으로 이어짐, FAILED면 곧바로 DONE만 옴). */
+typedef enum {
+    CAM_CAPTURE_STATUS_RECEIVED = 0,
+    CAM_CAPTURE_STATUS_SUCCESS  = 1,
+    CAM_CAPTURE_STATUS_FAILED   = 2,
+} cam_capture_status_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+    uint8_t status;  /* cam_capture_status_t */
+} esp_now_capture_status_t;
+
+/* 사진 "목록"만 요청 — META/CHUNK로 실제 JPEG 내용을 보내는 것과 무관하게, 저장된 파일들의
+ * file_id(=촬영 시각의 유닉스 타임스탬프)와 크기만 가볍게 나열해서 알려줌. 목록에서 하나를
+ * 고르면 그때 PHOTO_REQUEST(mode=BY_ID, param=file_id)로 실제 내용을 따로 요청. */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_photo_list_request_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint32_t file_id;    /* 파일명의 타임스탬프 — 촬영시각 표시에 그대로 씀 */
+    uint32_t file_size;
+} esp_now_photo_list_entry_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint16_t count;
+} esp_now_photo_list_done_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint32_t file_id;
+} esp_now_photo_delete_request_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint32_t file_id;
+    uint8_t  success;
+} esp_now_photo_delete_ack_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint32_t unix_time;
+} esp_now_set_time_t;
+
+/* CAM 원격 설정 — 화이트밸런스는 esp32-camera sensor_t::set_wb_mode()의 모드값(0~4)과
+ * 그대로 일치시킴(0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home). 촬영 주기는 초 단위,
+ * 0=자동촬영 끔 — CAM의 기존 Kconfig 프리셋(10초/30분/1시간/3시간/10시간)과 동일한 값을
+ * Cntl UI에서 골라 보냄(펌웨어 재빌드 없이 런타임으로 바뀌도록 하는 게 목적이지 임의의
+ * 자유 입력 주기를 지원하려는 게 아님). */
+typedef enum {
+    CAM_WB_AUTO = 0,
+    CAM_WB_SUNNY = 1,
+    CAM_WB_CLOUDY = 2,
+    CAM_WB_OFFICE = 3,
+    CAM_WB_HOME = 4,
+    CAM_WB_MODE_COUNT,
+} cam_wb_mode_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint8_t  wb_mode;               /* cam_wb_mode_t */
+    uint32_t capture_interval_sec;  /* 0 = 자동 촬영 끔 */
+} esp_now_cam_config_t;
