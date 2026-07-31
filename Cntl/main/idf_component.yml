@@ -11,6 +11,10 @@ dependencies:
     version: ">=1.1.0"
   espressif/esp_lcd_st77916:
     version: ">=2.0.2"
+  espressif/esp_lcd_touch_gt911:
+    version: ">=1.1.0"
+  espressif/esp_lvgl_adapter:
+    version: "^0.6.3"
 
   joltwallet/littlefs:
     version: ">=1.22.1"

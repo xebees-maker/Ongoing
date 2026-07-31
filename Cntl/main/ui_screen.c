@@ -8,7 +8,7 @@
 
 #include "ui_screen.h"
 #include "ui_input.h"
-#include "bsp_ws_1_85c.h"
+#include "bsp_ws_4_3b.h"
 #include "driver/usb_serial_jtag.h"
 #include "lvgl.h"
 

@@ -5,5 +5,7 @@
     { "name": "CAM (S3)", "path": "CAM" },
     { "name": "Common", "path": "Common" }
   ],
-  "settings": {}
+  "settings": {
+    "powershell.cwd": "Cntl (S3)"
+  }
 }

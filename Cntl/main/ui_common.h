@@ -6,7 +6,7 @@
 #define UI_COMMON_H
 
 #include "lvgl.h"
-#include "bsp_ws_1_85c.h"
+#include "bsp_ws_4_3b.h"
 #include "esp_log.h"
 #include "ui_styles.h"
 #include "ui_palette.h"

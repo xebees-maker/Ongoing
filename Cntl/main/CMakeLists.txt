@@ -19,7 +19,7 @@ idf_component_register(
         nvs_flash
         freertos
         log
-        bsp_ws_1_85c
+        bsp_ws_4_3b
         lvgl
         joltwallet__littlefs
         esp_adc

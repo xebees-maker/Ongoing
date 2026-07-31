@@ -6,12 +6,14 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
-#include "bsp_ws_1_85c.h"
+#include "bsp_ws_4_3b.h"
 #include "draw/lv_draw_buf_private.h"
 #include "fs.h"
 #include "ui_font.h"
 #include "ui_main.h"
 #include "esp_now_hub.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "main";
 
@@ -42,12 +44,15 @@ void app_main(void)
     /* BSP 초기화 (LCD + 터치 + LVGL + 백라이트) */
     ESP_ERROR_CHECK(bsp_board_init());
 
-    /* LVGL PSRAM 풀 추가 + POSIX 드라이버 등록 */
+    /* LVGL PSRAM 풀 추가 + POSIX 드라이버 등록 — 위젯/스타일 객체는 원래 몇 KB
+     * 단위로 작게 쓰는데, 이전 360x360(1.85C) 시절 3MB를 그대로 물려받았음.
+     * 800x480 프레임버퍼+폰트(2MB)까지 겹치면 PSRAM 여유가 빠듯해져서 1MB로 줄임. */
+#define LVGL_PSRAM_POOL_SIZE (1 * 1024 * 1024)
     if (bsp_lvgl_lock(BSP_MUTEX_WAIT_DEFAULT)) {
-        void *psram_pool = heap_caps_malloc(3 * 1024 * 1024, MALLOC_CAP_SPIRAM);
+        void *psram_pool = heap_caps_malloc(LVGL_PSRAM_POOL_SIZE, MALLOC_CAP_SPIRAM);
         if (psram_pool) {
-            lv_mem_add_pool(psram_pool, 3 * 1024 * 1024);
-            ESP_LOGI(TAG, "LVGL PSRAM pool: 3MB");
+            lv_mem_add_pool(psram_pool, LVGL_PSRAM_POOL_SIZE);
+            ESP_LOGI(TAG, "LVGL PSRAM pool: 1MB");
         }
         lv_fs_posix_init();
         ESP_LOGI(TAG, "POSIX driver registered");
@@ -63,9 +68,6 @@ void app_main(void)
     /* LittleFS 마운트 (폰트 파티션) */
     ESP_ERROR_CHECK(fs_init());
 
-    /* ESP-NOW 허브: WiFi 기동 + Sens 노드 advertise 수신 */
-    esp_now_hub_init();
-
     /* 폰트 로드 + UI 생성 — LVGL 뮤텍스 보호 구간 */
     if (bsp_lvgl_lock(BSP_MUTEX_WAIT_DEFAULT)) {
         ESP_ERROR_CHECK(ui_font_init());
@@ -76,4 +78,7 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "UI ready");
+
+    /* ESP-NOW 허브: WiFi 기동 + Sens 노드 advertise 수신 */
+    esp_now_hub_init();
 }
