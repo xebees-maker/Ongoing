@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "esp_console.h"
@@ -60,10 +61,15 @@ static int cmd_ls(int argc, char **argv)
 
     printf("BEGIN_LS\n");
     for (int i = 0; i < count; i++) {
-        uint32_t size = 0;
+        uint32_t size = 0, capture_time = 0;
         char kind = '?';
-        if (cam_storage_stat(ids[i], &size, &kind) == ESP_OK) {
-            printf("%c %u  %u bytes\n", kind, (unsigned)ids[i], (unsigned)size);
+        if (cam_storage_stat(ids[i], &size, &kind, &capture_time) == ESP_OK) {
+            time_t t = (time_t)capture_time;
+            struct tm tm_buf;
+            char time_buf[20];
+            gmtime_r(&t, &tm_buf);
+            strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+            printf("%c %u  %s  %u bytes\n", kind, (unsigned)ids[i], time_buf, (unsigned)size);
         }
     }
     printf("총 %d개\n", count);

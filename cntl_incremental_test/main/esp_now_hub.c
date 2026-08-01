@@ -1,5 +1,6 @@
 #include "esp_now_hub.h"
 #include "esp_now_photo.h"
+#include "rtc_sync.h"
 
 #include <string.h>
 #include <assert.h>
@@ -128,12 +129,22 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         xSemaphoreGive(s_nodes_mutex);
         if (became_paired) {
             ESP_LOGI(TAG, "페어링 완료: %s", name_copy);
+            /* CAM/Sens는 자체 RTC가 없어서 페어링될 때마다 Cntl 시각을 알려줌 — 이게
+             * 없으면 CAM의 시계가 부팅 시각(1970-01-01 근처)에 멈춰있어서 사진 파일명
+             * (촬영시각 유닉스 타임스탬프)이 전부 1월 1일로 찍힘(2026-08-01 실기에서 확인) */
+            esp_now_set_time_t set_time = {
+                .version   = ESP_NOW_LINK_VERSION,
+                .msg_type  = ESP_NOW_MSG_SET_TIME,
+                .unix_time = rtc_sync_get_unix_time(),
+            };
+            esp_err_t err = esp_now_send(info->src_addr, (const uint8_t *)&set_time, sizeof(set_time));
+            ESP_LOGI(TAG, "SET_TIME(%u) 전송: %s", (unsigned)set_time.unix_time, esp_err_to_name(err));
         }
 
     } else if (msg_type == ESP_NOW_MSG_PHOTO_META || msg_type == ESP_NOW_MSG_PHOTO_CHUNK ||
                msg_type == ESP_NOW_MSG_PHOTO_DONE || msg_type == ESP_NOW_MSG_CAPTURE_STATUS ||
                msg_type == ESP_NOW_MSG_PHOTO_LIST_ENTRY || msg_type == ESP_NOW_MSG_PHOTO_LIST_DONE ||
-               msg_type == ESP_NOW_MSG_PHOTO_DELETE_ACK) {
+               msg_type == ESP_NOW_MSG_PHOTO_DELETE_ACK || msg_type == ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK) {
         /* ESP-NOW는 recv_cb를 하나만 등록할 수 있어서, 사진 관련 프로토콜(전송/목록/삭제/
          * 지금촬영 진행상태) 처리는 전부 esp_now_photo.c로 넘김 */
         esp_now_photo_on_recv(msg_type, data, len);

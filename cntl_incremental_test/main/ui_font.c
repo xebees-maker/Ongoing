@@ -8,6 +8,7 @@
 #include "libs/tiny_ttf/lv_tiny_ttf.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "ui_log.h"
 #include <stdio.h>
 #include <sys/stat.h>
 
@@ -18,6 +19,7 @@ static size_t   s_ttf_size = 0;
 
 static lv_font_t *s_font_12 = NULL;
 static lv_font_t *s_font_18 = NULL;
+static lv_font_t *s_font_24 = NULL;
 static lv_font_t *s_font_30 = NULL;
 
 static esp_err_t load_ttf_to_psram(void)
@@ -25,6 +27,7 @@ static esp_err_t load_ttf_to_psram(void)
     struct stat st;
     if (stat(UI_FONT_TTF_VFS_PATH, &st) != 0) {
         ESP_LOGE(TAG, "stat failed: %s", UI_FONT_TTF_VFS_PATH);
+        ui_log_add_err(UI_ERR_FONT_FILE_MISSING, "폰트 파일 없음: %s", UI_FONT_TTF_VFS_PATH);
         return ESP_FAIL;
     }
     s_ttf_size = (size_t)st.st_size;
@@ -32,12 +35,14 @@ static esp_err_t load_ttf_to_psram(void)
     s_ttf_buf = heap_caps_malloc(s_ttf_size, MALLOC_CAP_SPIRAM);
     if (!s_ttf_buf) {
         ESP_LOGE(TAG, "PSRAM alloc failed: %u KB", (unsigned)(s_ttf_size / 1024));
+        ui_log_add_err(UI_ERR_FONT_BUF_ALLOC, "폰트 버퍼 할당 실패(%u KB)", (unsigned)(s_ttf_size / 1024));
         return ESP_FAIL;
     }
 
     FILE *f = fopen(UI_FONT_TTF_VFS_PATH, "rb");
     if (!f) {
         ESP_LOGE(TAG, "fopen failed");
+        ui_log_add_err(UI_ERR_FONT_FILE_OPEN, "폰트 파일 열기 실패");
         heap_caps_free(s_ttf_buf);
         s_ttf_buf = NULL;
         return ESP_FAIL;
@@ -52,8 +57,12 @@ static lv_font_t *create_font(uint8_t size)
 {
     lv_font_t *f = lv_tiny_ttf_create_data_ex(s_ttf_buf, s_ttf_size, size,
                                            LV_FONT_KERNING_NORMAL, LV_TINY_TTF_CACHE_GLYPH_CNT);
-    if (!f) ESP_LOGE(TAG, "Failed: %dpt", size);
-    else    ESP_LOGI(TAG, "OK: %dpt", size);
+    if (!f) {
+        ESP_LOGE(TAG, "Failed: %dpt", size);
+        ui_log_add_err(UI_ERR_FONT_CREATE, "폰트 생성 실패(%dpt)", size);
+    } else {
+        ESP_LOGI(TAG, "OK: %dpt", size);
+    }
     return f;
 }
 
@@ -63,9 +72,10 @@ esp_err_t ui_font_init(void)
 
     s_font_12 = create_font(12);
     s_font_18 = create_font(18);
+    s_font_24 = create_font(24);
     s_font_30 = create_font(30);
 
-    if (!s_font_12 || !s_font_18 || !s_font_30) return ESP_FAIL;
+    if (!s_font_12 || !s_font_18 || !s_font_24 || !s_font_30) return ESP_FAIL;
     return ESP_OK;
 }
 
@@ -74,6 +84,7 @@ const lv_font_t *ui_font_get(uint8_t size)
     switch (size) {
         case 12: return s_font_12;
         case 18: return s_font_18;
+        case 24: return s_font_24;
         case 30: return s_font_30;
         default: return s_font_12;
     }
@@ -83,6 +94,7 @@ void ui_font_deinit(void)
 {
     if (s_font_12) { lv_tiny_ttf_destroy(s_font_12); s_font_12 = NULL; }
     if (s_font_18) { lv_tiny_ttf_destroy(s_font_18); s_font_18 = NULL; }
+    if (s_font_24) { lv_tiny_ttf_destroy(s_font_24); s_font_24 = NULL; }
     if (s_font_30) { lv_tiny_ttf_destroy(s_font_30); s_font_30 = NULL; }
     if (s_ttf_buf) { heap_caps_free(s_ttf_buf); s_ttf_buf = NULL; }
 }

@@ -1,12 +1,16 @@
 #include "rtc_sync.h"
 #include "waveshare_rgb_lcd_port.h"
 #include "pcf85063a.h"
+#include "fs.h"
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
 #include "esp_log.h"
+
+#define TIME_SYNC_PATH  FS_MOUNT_POINT "/time_sync.txt"
 
 static const char *TAG = "rtc_sync";
 
@@ -39,6 +43,24 @@ static bool parse_build_datetime(struct tm *out)
     out->tm_min  = min;
     out->tm_sec  = sec;
     return true;
+}
+
+/* 빌드+플래시 스크립트가 매번 PC의 현재 로컬(벽시계) 시각을, 마치 UTC인 것처럼 그
+ * 숫자 그대로 유닉스 초로 변환해서 이 파일에 써넣음 — 이 코드베이스는 타임존 개념이
+ * 아예 없어서(RTC/gmtime_r 전부 "그냥 숫자") 진짜 UTC를 넣으면 표시 시각이 어긋남
+ * (2026-08-01 실기에서 확인: UTC 넣었더니 KST 대비 9시간 어긋나서 보임).
+ * RTC엔 배터리가 없어서 전원이 끊기면 리셋되므로, 이 값을 한 번 쓰고 지우는 대신 계속
+ * 남겨두고 "RTC 현재값보다 미래일 때만" 앞으로 당기는 데 씀 — 정상 재부팅(RTC가 이미
+ * 맞음)에서는 이 오래된 파일값이 RTC를 거꾸로 되돌리지 않게 하기 위함 */
+static bool read_time_sync_file(uint32_t *out)
+{
+    FILE *f = fopen(TIME_SYNC_PATH, "r");
+    if (!f) return false;
+    unsigned long val = 0;
+    bool ok = fscanf(f, "%lu", &val) == 1;
+    fclose(f);
+    if (ok) *out = (uint32_t)val;
+    return ok;
 }
 
 esp_err_t rtc_sync_init(void)
@@ -89,8 +111,31 @@ esp_err_t rtc_sync_init(void)
         .tm_min  = rtc_time.min,
         .tm_sec  = rtc_time.sec,
     };
-    time_t t = mktime(&tm_val);
-    struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
+    time_t rtc_unix = mktime(&tm_val);
+
+    uint32_t file_unix = 0;
+    if (read_time_sync_file(&file_unix) && (time_t)file_unix > rtc_unix) {
+        struct tm file_tm;
+        time_t file_t = (time_t)file_unix;
+        gmtime_r(&file_t, &file_tm);
+        pcf85063a_datetime_t seed = {
+            .year  = (uint16_t)(file_tm.tm_year + 1900),
+            .month = (uint8_t)(file_tm.tm_mon + 1),
+            .day   = (uint8_t)file_tm.tm_mday,
+            .dotw  = 0,
+            .hour  = (uint8_t)file_tm.tm_hour,
+            .min   = (uint8_t)file_tm.tm_min,
+            .sec   = (uint8_t)file_tm.tm_sec,
+        };
+        esp_err_t set_err = pcf85063a_set_time_date(&s_rtc_dev, seed);
+        ESP_LOGI(TAG, "%s의 플래시 시점 PC 시각이 더 최신 — RTC 전진: %s",
+                 TIME_SYNC_PATH, esp_err_to_name(set_err));
+        rtc_time = seed;
+        tm_val = file_tm;
+        rtc_unix = file_t;
+    }
+
+    struct timeval tv = { .tv_sec = rtc_unix, .tv_usec = 0 };
     settimeofday(&tv, NULL);
 
     ESP_LOGI(TAG, "RTC 시각: %04u-%02u-%02u %02u:%02u:%02u",

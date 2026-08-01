@@ -38,6 +38,8 @@ typedef enum {
                                              * 전달(2026-07-31 추가 — Cntl은 보드 실장 PCF85063A
                                              * RTC가 있지만 CAM/Sens는 없어서, 페어링될 때마다
                                              * Cntl이 자기 시각을 상대에게 알려줌) */
+    ESP_NOW_MSG_PHOTO_DELETE_ALL_REQUEST = 19,  /* Cntl -> CAM: 저장된 사진 전체 삭제 요청 */
+    ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK = 20,      /* CAM -> Cntl: 삭제 결과(삭제된 개수) */
 } esp_now_msg_type_t;
 
 typedef struct __attribute__((packed)) {
@@ -140,7 +142,11 @@ typedef struct __attribute__((packed)) {
     uint32_t crc32;
 } esp_now_photo_meta_t;
 
-#define ESP_NOW_PHOTO_CHUNK_DATA_LEN 200  /* 헤더 포함 210바이트 — ESP-NOW v1.0 250바이트 한도 여유 */
+/* 200(v1.0 250바이트 한도 기준)에서 1200으로 증설(2026-08-01) — 양쪽 다 이미 ESP-NOW
+ * v2.0으로 붙어있어서(부팅로그 "espnow [version: 2.0] init") 실제 한도는
+ * ESP_NOW_MAX_DATA_LEN_V2=1470바이트. 헤더 10바이트 포함 1210 < 1470로 여유 있게 설정 —
+ * 청크 개수가 1/6로 줄어서 전송 시간도 그만큼 단축(340KB 사진 기준 1704개→284개) */
+#define ESP_NOW_PHOTO_CHUNK_DATA_LEN 1200
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;
@@ -172,8 +178,18 @@ typedef struct __attribute__((packed)) {
 } esp_now_capture_status_t;
 
 /* 사진 "목록"만 요청 — META/CHUNK로 실제 JPEG 내용을 보내는 것과 무관하게, 저장된 파일들의
- * file_id(=촬영 시각의 유닉스 타임스탬프)와 크기만 가볍게 나열해서 알려줌. 목록에서 하나를
- * 고르면 그때 PHOTO_REQUEST(mode=BY_ID, param=file_id)로 실제 내용을 따로 요청. */
+ * file_id/kind/촬영시각/크기만 가볍게 나열해서 알려줌. 목록에서 하나를 고르면 그때
+ * PHOTO_REQUEST(mode=BY_ID, param=file_id)로 실제 내용을 따로 요청.
+ *
+ * file_id는 더 이상 타임스탬프가 아님(2026-08-01 재설계 — 사용자 지적: "정석대로 가자,
+ * 파일명에서 날짜/시간을 뽑지 말고 파일정보(파일명/날짜시간/크기)를 따로 받아야지"). CAM
+ * 파일명은 <kind><4자리 base36 순번>.jpg(예: "M002A.jpg") — 순번은 수동(M)/자동(T)
+ * 촬영이 공유하는 전역 카운터(0~36^4-1=1,679,615, 별도 카운터 파일 없이 SD에서 가장
+ * 최근(mtime) 파일의 seq+1부터 이어감, CAM_STORAGE_MAX_FILES=500개 순환삭제 한도 대비
+ * 충분히 여유). file_id는 이 순번 그 자체이고, kind는 이 순번이 M/T 파일 어느 쪽인지
+ * 별도 필드로 알려줌(같은 순번이 두 kind에 동시에 존재할 수 없어서 file_id+kind면 항상
+ * 유일하게 식별됨). 촬영시각은 파일의 FAT 수정시각을 그대로 읽어서 capture_time으로
+ * 별도 전달함 — file_id를 파싱해서 시각을 뽑아내지 않음. */
 typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
@@ -182,7 +198,9 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
-    uint32_t file_id;    /* 파일명의 타임스탬프 — 촬영시각 표시에 그대로 씀 */
+    uint32_t file_id;        /* CAM의 M/T 공용 순번 — 위 설명 참고 */
+    uint8_t  kind;            /* cam_capture_kind_t: 'M' 또는 'T' */
+    uint32_t capture_time;   /* 파일의 FAT 수정시각(유닉스 타임스탬프) — 촬영시각 표시용 */
     uint32_t file_size;
 } esp_now_photo_list_entry_t;
 
@@ -190,6 +208,10 @@ typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
     uint16_t count;
+    uint32_t sd_total_kb;  /* CAM SD카드 전체 용량(KB) — 목록 옆에 사용량 %로 보여주려고
+                             * 추가(2026-08-01). 0이면 CAM이 조회 실패했다는 뜻(구버전 CAM과도
+                             * 호환 — 안 채워진 필드는 그냥 0으로 옴) */
+    uint32_t sd_used_kb;   /* 사용 중인 용량(KB) */
 } esp_now_photo_list_done_t;
 
 typedef struct __attribute__((packed)) {
@@ -210,6 +232,18 @@ typedef struct __attribute__((packed)) {
     uint8_t  msg_type;
     uint32_t unix_time;
 } esp_now_set_time_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+} esp_now_photo_delete_all_request_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint8_t  success;        /* SD/디렉터리 접근 자체가 실패했으면 0(이 경우 deleted_count 무의미) */
+    uint16_t deleted_count;
+} esp_now_photo_delete_all_ack_t;
 
 /* CAM 원격 설정 — 화이트밸런스는 esp32-camera sensor_t::set_wb_mode()의 모드값(0~4)과
  * 그대로 일치시킴(0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home). 촬영 주기는 초 단위,

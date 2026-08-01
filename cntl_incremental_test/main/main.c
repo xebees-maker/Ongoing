@@ -14,8 +14,10 @@
 #include "esp_now_hub.h"
 #include "esp_now_photo.h"
 #include "esp_lv_decoder.h"
+#include "ui_log.h"
 #include "rtc_sync.h"
 #include <string.h>
+#include <stdlib.h>
 
 static const char *TAG = "lvgl9_demo";
 
@@ -28,16 +30,44 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
+/* 원본 해상도 그대로 원격에서 보기 — Cntl은 캐시된 압축 JPEG 바이트를 그대로 던져줄 뿐,
+ * 디코드는 요청한 브라우저가 함(PC/폰은 메모리 여유가 있어서 원본을 그대로 풀 수 있음,
+ * Cntl 자체 화면은 PSRAM이 부족해서 못 함 — 2026-08-01). 기기에서 한 번도 안 열어본
+ * (캐시에 없는) 사진은 404 — 웹 요청으로 새로 CAM에서 받아오는 건 이번 범위 밖 */
+static esp_err_t photo_get_handler(httpd_req_t *req)
+{
+    char query[32] = { 0 };
+    char id_str[16] = { 0 };
+    uint32_t file_id = 0;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "id", id_str, sizeof(id_str));
+        file_id = (uint32_t)strtoul(id_str, NULL, 10);
+    }
+
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    if (file_id == 0 || !esp_now_photo_cache_get(file_id, &data, &len)) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "photo not cached — open it on the device first");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "image/jpeg");
+    return httpd_resp_send(req, (const char *)data, len);
+}
+
 static void web_dashboard_start_stub(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed");
+        ui_log_add_err(UI_ERR_HTTPD_START, "웹서버 시작 실패");
         return;
     }
     static const httpd_uri_t root_uri = { .uri = "/", .method = HTTP_GET, .handler = root_get_handler };
     httpd_register_uri_handler(server, &root_uri);
+    static const httpd_uri_t photo_uri = { .uri = "/photo", .method = HTTP_GET, .handler = photo_get_handler };
+    httpd_register_uri_handler(server, &photo_uri);
     ESP_LOGI(TAG, "Web dashboard (stub) started");
 }
 
@@ -54,6 +84,8 @@ static void font_buf_free(void *buf)
 
 void app_main(void)
 {
+    ui_log_init();  /* 통계 탭 로그박스용 — 최대한 먼저(이후 관심 지점들이 여기 씀) */
+
     /* Cntl 통합 테스트 1단계: NVS init (Cntl main.c와 동일) */
     esp_err_t nvs_ret = nvs_flash_init();
     if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -61,6 +93,10 @@ void app_main(void)
         nvs_ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_ret);
+
+    /* LittleFS "assets" 파티션 마운트 — LCD/I2C와 무관해서 최대한 먼저: 언어 설정
+     * (/assets/settings.bin)과 RTC 시드값(/assets/time_sync.txt) 둘 다 이 안에 있음 */
+    ESP_ERROR_CHECK(fs_init());
 
     /* 영구 저장 설정값(언어 등) 복원 — UI 생성(ui_init) 전에 해야 라벨이 처음부터
      * 올바른 언어로 뜸 */
@@ -83,9 +119,6 @@ void app_main(void)
      * 읽어와야 로고 부제(시계)가 처음부터 맞는 값으로 뜸 */
     esp_err_t rtc_ret = rtc_sync_init();
     ESP_LOGI(TAG, "rtc_sync_init: %s", rtc_ret == ESP_OK ? "OK" : "FAILED");
-
-    /* Cntl 통합 테스트 2단계: LittleFS "fonts" 파티션 마운트만(폰트 로드는 아직 안 함, 3단계) */
-    ESP_ERROR_CHECK(fs_init());
 
     esp_lv_adapter_config_t adapter_config = ESP_LV_ADAPTER_DEFAULT_CONFIG();
     adapter_config.task_stack_size = 12 * 1024;

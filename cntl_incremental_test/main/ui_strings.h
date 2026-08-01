@@ -15,7 +15,8 @@ typedef enum {
 } ui_lang_t;
 
 typedef enum {
-    STR_TAB_DASHBOARD = 0,
+    STR_LOGO_TITLE = 0,
+    STR_TAB_DASHBOARD,
     STR_TAB_STATISTICS,
     STR_TAB_OPTION,
     STR_GROUP_CNTL,
@@ -41,26 +42,39 @@ typedef enum {
     STR_BTN_RENEW_LIST,
     STR_PANEL_LIST,
     STR_PANEL_PICTURE,
-    STR_BTN_CLOSE,
     STR_MSG_DELETE_PHOTO_CONFIRM,
     STR_CAPTURE_STAGE1_PROGRESS,
     STR_CAPTURE_STAGE1_DONE,
     STR_CAPTURE_STAGE2_SUCCESS,
     STR_CAPTURE_STAGE2_FAILED,
+    STR_CAPTURE_STAGE2_NORESPONSE,
     STR_CAPTURE_STAGE3_PROGRESS,
     STR_CAPTURE_STAGE3_DONE,
-    STR_CAPTURE_STAGE3_FAILED,
-    STR_CAPTURE_STAGE4_PROGRESS,
-    STR_CAPTURE_STAGE4_DONE,
+    STR_CAPTURE_STAGE3_UNKNOWN,
+    STR_FETCH_CONNECTING,
+    STR_FETCH_PROGRESS_FMT,
+    STR_FETCH_PROGRESS_ETA_FMT,
+    STR_FETCH_DONE,
+    STR_FETCH_FAILED,
+    STR_FETCH_STALLED,
+    STR_BTN_DELETE_ALL,
+    STR_MSG_DELETE_ALL_CONFIRM,
+    STR_DELETEALL_STAGE1_PROGRESS,
+    STR_DELETEALL_STAGE1_DONE,
+    STR_DELETEALL_STAGE1_FAILED,
+    STR_DELETEALL_STAGE1_NORESPONSE,
+    STR_DELETEALL_STAGE2_PROGRESS,
+    STR_DELETEALL_STAGE2_DONE,
+    STR_DELETEALL_STAGE2_UNKNOWN,
     STR_COUNT,
 } ui_str_id_t;
 
-/* NVS("cntl_cfg" 네임스페이스)에서 저장된 언어값을 불러옴 — app_main()에서 UI 생성 전에
- * 한 번 호출. 저장된 값이 없으면 기본값(UI_LANG_KO) 유지. */
+/* /assets/settings.bin에서 저장된 언어값을 불러옴 — app_main()에서 fs_init() 이후,
+ * UI 생성 전에 한 번 호출. 파일이 없으면 기본값(UI_LANG_KO) 유지. */
 void        ui_lang_load(void);
 
-/* 현재 언어를 바꾸고 즉시 NVS에 저장 — 다른 영구 저장할 설정값도 이 파일에 같은
- * 패턴(load/set 쌍)으로 추가하면 됨 */
+/* 현재 언어를 바꾸고 즉시 /assets/settings.bin에 저장 — 다른 영구 저장할 설정값도
+ * 이 파일에 같은 패턴(load/set 쌍)으로 추가하면 됨 */
 void        ui_lang_set(ui_lang_t lang);
 ui_lang_t   ui_lang_get(void);
 const char *ui_str(ui_str_id_t id);

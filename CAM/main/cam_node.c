@@ -294,14 +294,19 @@ void app_main(void)
         ESP_LOGE(TAG, "카메라 초기화 실패");
     }
 
-    /* Cntl과는 ESP-NOW로만 붙음(Sens와 동일 원칙) — WiFi 라디오는 AP 모드로만 올림,
-     * 로컬 HTTP 대시보드는 없음(진단용 웹서비스는 이번 패스 범위 밖) */
+    /* Cntl과는 ESP-NOW로만 붙음 — 로컬 HTTP 대시보드도, AP도 안 씀(Cntl도 STA,
+     * esp_now_hub.c:171). AP 모드였을 때는 100ms마다 비콘을 계속 내보내야 했는데,
+     * 지금촬영 중 esp_camera_fb_get()의 긴 블로킹과 겹치면서 WiFi 스택 내부
+     * (ieee80211_hostap_send_beacon_process, AP 전용 코드)가 실기에서 크래시하는 걸
+     * 확인함(2026-08-01, Guru Meditation LoadProhibited) — max_connection=0으로 닫아도
+     * 재현되어 원인이 "외부 접속 시도"가 아니라 비콘 송신 코드 자체였음이 드러남.
+     * STA는 비콘을 안 보내므로 이 크래시 코드 경로가 아예 없음 */
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_ap();
+    esp_netif_create_default_wifi_sta();
     wifi_init_config_t wifi_init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wifi_init_cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
 
     esp_now_cam_set_status_led(GPIO_NUM_NC);  /* TODO: 실기 LED GPIO 확정되면 채우기 */

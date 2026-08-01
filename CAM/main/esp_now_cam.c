@@ -4,6 +4,8 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
+#include <sys/time.h>
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "esp_mac.h"
@@ -49,8 +51,9 @@ static const uint8_t s_broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF 
 /* recv_cb(WiFi 태스크)에서 바로 처리하기엔 무거운 요청(촬영/파일 I/O/여러 건 전송)을
  * 전용 태스크로 넘기는 큐 — PHOTO_REQUEST와 PHOTO_LIST_REQUEST 둘 다 여기로 옴 */
 typedef enum {
-    CAM_TASK_REQ_PHOTO = 0,
-    CAM_TASK_REQ_LIST  = 1,
+    CAM_TASK_REQ_PHOTO       = 0,
+    CAM_TASK_REQ_LIST        = 1,
+    CAM_TASK_REQ_DELETE_ALL  = 2,
 } cam_task_req_kind_t;
 
 typedef struct {
@@ -229,27 +232,34 @@ static void send_photo_list(void)
 
     int sent = 0;
     for (int i = 0; i < count && s_paired; i++) {
-        uint32_t size = 0;
+        uint32_t size = 0, capture_time = 0;
         char kind = 0;
-        if (cam_storage_stat(ids[i], &size, &kind) != ESP_OK) continue;
+        if (cam_storage_stat(ids[i], &size, &kind, &capture_time) != ESP_OK) continue;
         esp_now_photo_list_entry_t entry = {
-            .version   = ESP_NOW_LINK_VERSION,
-            .msg_type  = ESP_NOW_MSG_PHOTO_LIST_ENTRY,
-            .file_id   = ids[i],
-            .file_size = size,
+            .version      = ESP_NOW_LINK_VERSION,
+            .msg_type     = ESP_NOW_MSG_PHOTO_LIST_ENTRY,
+            .file_id      = ids[i],
+            .kind         = (uint8_t)kind,
+            .capture_time = capture_time,
+            .file_size    = size,
         };
         esp_now_send(s_hub_mac, (const uint8_t *)&entry, sizeof(entry));
         sent++;
         vTaskDelay(pdMS_TO_TICKS(5));  /* CHUNK 전송과 동일한 이유 — ESP-NOW 큐 과부하 방지 */
     }
 
+    uint32_t sd_total_kb = 0, sd_used_kb = 0;
+    cam_storage_get_sd_usage(&sd_total_kb, &sd_used_kb);  /* 실패해도 0/0으로 채워져서 그대로 보냄 */
+
     esp_now_photo_list_done_t done = {
-        .version  = ESP_NOW_LINK_VERSION,
-        .msg_type = ESP_NOW_MSG_PHOTO_LIST_DONE,
-        .count    = (uint16_t)sent,
+        .version     = ESP_NOW_LINK_VERSION,
+        .msg_type    = ESP_NOW_MSG_PHOTO_LIST_DONE,
+        .count       = (uint16_t)sent,
+        .sd_total_kb = sd_total_kb,
+        .sd_used_kb  = sd_used_kb,
     };
     esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));
-    ESP_LOGI(TAG, "PHOTO_LIST_DONE 전송(%d개)", sent);
+    ESP_LOGI(TAG, "PHOTO_LIST_DONE 전송(%d개, SD %u/%uKB)", sent, (unsigned)sd_used_kb, (unsigned)sd_total_kb);
 }
 
 static void photo_transfer_task(void *arg)
@@ -265,29 +275,41 @@ static void photo_transfer_task(void *arg)
             continue;
         }
 
+        if (item.kind == CAM_TASK_REQ_DELETE_ALL) {
+            int deleted = cam_storage_delete_all();
+            esp_now_photo_delete_all_ack_t ack = {
+                .version       = ESP_NOW_LINK_VERSION,
+                .msg_type      = ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK,
+                .success       = (deleted >= 0) ? 1 : 0,
+                .deleted_count = (uint16_t)(deleted >= 0 ? deleted : 0),
+            };
+            esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
+            ESP_LOGI(TAG, "PHOTO_DELETE_ALL_ACK(성공=%d, %d개) 전송: %s", ack.success, deleted, esp_err_to_name(err));
+            continue;
+        }
+
         esp_now_photo_request_t req = item.photo_req;
 
-        /* Cntl이 기존 저장분 대신 "지금 당장 새로 찍어서" 원하는 경우 — esp_camera_fb_get()이
-         * 최대 수 초 블로킹될 수 있어서 recv_cb(콜백 컨텍스트)에서 바로 처리하지 않고 여기
-         * (전용 태스크)까지 큐로 넘겨서 처리한다. 찍고 나면 방금 그 1장만 LATEST로 보낸다.
-         * 접수 확인(RECEIVED)은 recv_cb에서 이미 보냈고, 여기선 촬영 결과(성공/실패)만 알림 —
-         * Cntl UI가 진행 팝업에서 "촬영 완료/실패" 단계를 표시하는 데 씀 */
+        /* Cntl이 "지금 당장 새로 찍어라" 요청한 경우 — esp_camera_fb_get()이 최대 수 초
+         * 블로킹될 수 있어서 recv_cb(콜백 컨텍스트)에서 바로 처리하지 않고 여기(전용 태스크)
+         * 까지 큐로 넘겨서 처리한다. 접수 확인(RECEIVED)은 recv_cb에서 이미 보냈고, 여기선
+         * 촬영 결과(성공/실패)만 알리고 끝 — 사진 자체는 자동 전송 안 함(2026-08-01, 촬영과
+         * 전송을 분리: 예전엔 성공하면 곧바로 LATEST로 자동 전송했는데, 그 전송이 느리고
+         * (200바이트/청크) 실기에서 자주 실패해서 지금촬영 팝업이 안 끝나는 문제가 있었음.
+         * 이제 사진을 실제로 보려면 목록에서 선택해야 함(fetch_by_id) — 그쪽은 독립된
+         * 진행 팝업으로 따로 다룸) */
         if (req.mode == PHOTO_REQUEST_MODE_CAPTURE_NOW) {
-            ESP_LOGI(TAG, "CAPTURE_NOW 요청 — 즉시 촬영");
+            ESP_LOGI(TAG, "CAPTURE_NOW 요청 — 즉시 촬영 시작");
             bool captured = cam_node_capture_now();
+            ESP_LOGI(TAG, "CAPTURE_NOW 촬영 결과: %s", captured ? "성공" : "실패");
             esp_now_capture_status_t status = {
                 .version  = ESP_NOW_LINK_VERSION,
                 .msg_type = ESP_NOW_MSG_CAPTURE_STATUS,
                 .status   = captured ? CAM_CAPTURE_STATUS_SUCCESS : CAM_CAPTURE_STATUS_FAILED,
             };
-            esp_now_send(s_hub_mac, (const uint8_t *)&status, sizeof(status));
-            if (!captured) {
-                ESP_LOGW(TAG, "즉시 촬영 실패 — 보낼 사진 없이 DONE만 전송");
-                esp_now_photo_done_t done = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_DONE };
-                esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));
-                continue;
-            }
-            req.mode = PHOTO_REQUEST_MODE_LATEST;
+            esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&status, sizeof(status));
+            ESP_LOGI(TAG, "CAPTURE_STATUS(%s) 전송: %s", captured ? "SUCCESS" : "FAILED", esp_err_to_name(err));
+            continue;
         }
 
         uint32_t ids[CAM_STORAGE_MAX_FILES];
@@ -306,7 +328,7 @@ static void photo_transfer_task(void *arg)
 
 static void resolve_name(void)
 {
-    esp_wifi_get_mac(WIFI_IF_AP, s_mac);
+    esp_wifi_get_mac(WIFI_IF_STA, s_mac);
 #if defined(CONFIG_CAM_NODE_NAME)
     if (strlen(CONFIG_CAM_NODE_NAME) > 0) {
         snprintf(s_name, sizeof(s_name), "%s", CONFIG_CAM_NODE_NAME);
@@ -343,7 +365,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 .msg_type = ESP_NOW_MSG_CAPTURE_STATUS,
                 .status   = CAM_CAPTURE_STATUS_RECEIVED,
             };
-            esp_now_send(s_hub_mac, (const uint8_t *)&status, sizeof(status));
+            esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&status, sizeof(status));
+            ESP_LOGI(TAG, "CAPTURE_STATUS(RECEIVED) 전송: %s", esp_err_to_name(err));
         }
 
         cam_task_request_t item = { .kind = CAM_TASK_REQ_PHOTO, .photo_req = req };
@@ -358,6 +381,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         cam_task_request_t item = { .kind = CAM_TASK_REQ_LIST };
         if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
             ESP_LOGW(TAG, "PHOTO_LIST_REQUEST 큐 가득 — 무시");
+        }
+        return;
+    }
+
+    if (msg_type == ESP_NOW_MSG_PHOTO_DELETE_ALL_REQUEST) {
+        if (!s_paired || len < (int)sizeof(esp_now_photo_delete_all_request_t)) return;
+        cam_task_request_t item = { .kind = CAM_TASK_REQ_DELETE_ALL };
+        if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "PHOTO_DELETE_ALL_REQUEST 큐 가득 — 무시");
         }
         return;
     }
@@ -389,6 +421,19 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         return;
     }
 
+    /* CAM은 자체 RTC가 없어서 부팅하면 시계가 1970-01-01 근처 — Cntl이 페어링될 때마다
+     * 자기 시각을 알려주면 그걸로 시스템 클록을 맞춤(사진 file_id가 이 시각 기준이라
+     * 정확한 촬영시각 표시에 필요, 2026-08-01 추가) */
+    if (msg_type == ESP_NOW_MSG_SET_TIME) {
+        if (!s_paired || len < (int)sizeof(esp_now_set_time_t)) return;
+        if (memcmp(info->src_addr, s_hub_mac, sizeof(s_hub_mac)) != 0) return;
+        const esp_now_set_time_t *msg = (const esp_now_set_time_t *)data;
+        struct timeval tv = { .tv_sec = (time_t)msg->unix_time, .tv_usec = 0 };
+        settimeofday(&tv, NULL);
+        ESP_LOGI(TAG, "SET_TIME 수신 — 시각 동기화: %u", (unsigned)msg->unix_time);
+        return;
+    }
+
     if (s_paired || msg_type != ESP_NOW_MSG_PAIR_REQUEST) return;
     if (len < (int)sizeof(esp_now_pair_request_t)) return;
     const esp_now_pair_request_t *req = (const esp_now_pair_request_t *)data;
@@ -397,7 +442,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     esp_now_peer_info_t peer = { 0 };
     memcpy(peer.peer_addr, s_hub_mac, sizeof(peer.peer_addr));
-    peer.ifidx   = WIFI_IF_AP;
+    peer.ifidx   = WIFI_IF_STA;
     peer.channel = 0;
     peer.encrypt = false;
     if (!esp_now_is_peer_exist(s_hub_mac)) {
@@ -455,7 +500,9 @@ void esp_now_cam_init(void)
 
     s_photo_request_queue = xQueueCreate(4, sizeof(cam_task_request_t));
     s_send_done_sem       = xSemaphoreCreateBinary();
-    xTaskCreate(photo_transfer_task, "photo_tx", 4096, NULL, 5, NULL);
+    /* 4096으로는 촬영(esp_camera_fb_get)+SD 저장(FATFS) 경로에서 스택 오버플로우 실기 확인
+     * (2026-08-01) — 여유있게 증설 */
+    xTaskCreate(photo_transfer_task, "photo_tx", 12288, NULL, 5, NULL);
 
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
@@ -463,7 +510,7 @@ void esp_now_cam_init(void)
 
     esp_now_peer_info_t peer = { 0 };
     memcpy(peer.peer_addr, s_broadcast_addr, sizeof(peer.peer_addr));
-    peer.ifidx   = WIFI_IF_AP;
+    peer.ifidx   = WIFI_IF_STA;
     peer.channel = 0;
     peer.encrypt = false;
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));

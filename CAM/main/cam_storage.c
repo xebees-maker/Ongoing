@@ -16,18 +16,54 @@ static const char *TAG = "cam_storage";
 
 static sdmmc_card_t *s_card = NULL;
 
-static void file_path(uint32_t file_id, char kind, char *out, size_t out_len)
+/* file_id 재설계(2026-08-01, 사용자 지시) — 예전엔 유닉스 타임스탬프(10자리)를 그대로
+ * file_id 겸 파일명으로 써서 파일명이 길었고, Cntl이 file_id를 촬영시각으로 역해석하는
+ * 편법을 씀. 이제 file_id = M/T 공용(전역) 순번 하나뿐 — 4자리 base36(0-9,A-Z,
+ * 36^4=1,679,616개, 상주 파일 상한 500개 대비 충분히 여유)으로 파일명에 그대로 씀.
+ * 별도 카운터 파일 없이, SD를 훑어서 가장 최근(mtime) 파일의 seq+1부터 계속 이어감
+ * (2026-08-01, 사용자 지시 — "마지막 날짜/시간의 파일명에서 계속 순환 증가시키면 됨").
+ * M/T가 순번을 공유해서 같은 seq가 두 kind에 동시에 존재할 수 없으므로 file_id만으로
+ * 유일하게 식별됨(kind는 resolve_path에서 둘 다 시도해서 찾음). 촬영시각은 file_id에서
+ * 뽑는 대신 파일의 FAT mtime을 그대로 읽어서 별도로 전달(정렬/최근시간 필터/오래된순
+ * 삭제도 전부 mtime 기준 — file_id 자체엔 이제 시간 순서 정보가 없음) */
+#define CAM_STORAGE_SEQ_BASE   36u
+#define CAM_STORAGE_SEQ_DIGITS 4
+#define CAM_STORAGE_SEQ_MOD    1679616u  /* 36^4 */
+
+static const char s_base36_digits[37] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+static void encode_seq(uint32_t seq, char *out /* 5바이트: 4자리+NUL */)
 {
-    snprintf(out, out_len, "%s/%c%010u.jpg", BSP_CAM_SD_MOUNT_POINT, kind, (unsigned)file_id);
+    seq %= CAM_STORAGE_SEQ_MOD;
+    for (int i = CAM_STORAGE_SEQ_DIGITS - 1; i >= 0; i--) {
+        out[i] = s_base36_digits[seq % CAM_STORAGE_SEQ_BASE];
+        seq /= CAM_STORAGE_SEQ_BASE;
+    }
+    out[CAM_STORAGE_SEQ_DIGITS] = '\0';
 }
 
-/* file_id만으로는 M(수동)/T(자동) 중 어느 쪽 파일인지 몰라서 둘 다 순서대로 존재 확인 —
- * 수동 촬영이 우선(같은 초에 자동 촬영과 겹치는 드문 경우 수동을 우선 취급) */
+/* 0-9/A-Z 아니면 -1 */
+static int decode_base36_digit(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    return -1;
+}
+
+static void file_path_kind(uint32_t file_id, char kind, char *out, size_t out_len)
+{
+    char seq_str[CAM_STORAGE_SEQ_DIGITS + 1];
+    encode_seq(file_id, seq_str);
+    snprintf(out, out_len, "%s/%c%s.jpg", BSP_CAM_SD_MOUNT_POINT, kind, seq_str);
+}
+
+/* file_id(=순번)만으로는 M/T 중 어느 쪽인지 몰라서 둘 다 시도 — M/T가 순번을 공유하는 한
+ * 같은 seq가 두 kind에 동시에 존재할 수 없어서 결과는 항상 유일함 */
 static bool resolve_path(uint32_t file_id, char *out, size_t out_len, char *out_kind)
 {
     const char kinds[2] = { CAM_CAPTURE_KIND_MANUAL, CAM_CAPTURE_KIND_AUTO };
     for (int i = 0; i < 2; i++) {
-        file_path(file_id, kinds[i], out, out_len);
+        file_path_kind(file_id, kinds[i], out, out_len);
         struct stat st;
         if (stat(out, &st) == 0) {
             if (out_kind) *out_kind = kinds[i];
@@ -37,9 +73,18 @@ static bool resolve_path(uint32_t file_id, char *out, size_t out_len, char *out_
     return false;
 }
 
-/* /sdcard 안의 <M|T><10자리 숫자>.jpg 패턴 파일들을 전부 훑어서 file_id 배열에 채움
- * (정렬 안 된 상태로) — cam_storage_list()와 용량 관리(오래된 것부터 삭제)가 공유 */
-static int scan_all_files(uint32_t *ids, int max)
+typedef struct {
+    uint32_t file_id;
+    char     kind;
+    time_t   mtime;   /* FAT 수정시각 — 정렬/필터/순환삭제/다음 순번 결정 전부 이 기준 */
+} file_entry_t;
+
+/* 파일명 길이 = kind(1) + 순번(CAM_STORAGE_SEQ_DIGITS) + ".jpg"(4) */
+#define CAM_STORAGE_FNAME_LEN (1 + CAM_STORAGE_SEQ_DIGITS + 4)
+
+/* /sdcard 안의 <M|T><4자리 base36>.jpg 패턴 파일들을 전부 훑어서 배열에 채움(정렬 안 된
+ * 상태로) — cam_storage_list()/용량 관리/다음 순번 결정이 공유 */
+static int scan_all_files(file_entry_t *entries, int max)
 {
     DIR *dir = opendir(BSP_CAM_SD_MOUNT_POINT);
     if (!dir) return -1;
@@ -48,46 +93,66 @@ static int scan_all_files(uint32_t *ids, int max)
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL && count < max) {
         size_t len = strlen(ent->d_name);
-        if (len != 15 /* "M0123456789.jpg" */) continue;
-        if (ent->d_name[0] != CAM_CAPTURE_KIND_MANUAL && ent->d_name[0] != CAM_CAPTURE_KIND_AUTO) continue;
-        if (strcmp(ent->d_name + 11, ".jpg") != 0) continue;
+        if (len != CAM_STORAGE_FNAME_LEN /* "M002A.jpg" */) continue;
+        char kind = ent->d_name[0];
+        if (kind != CAM_CAPTURE_KIND_MANUAL && kind != CAM_CAPTURE_KIND_AUTO) continue;
+        if (strcmp(ent->d_name + 1 + CAM_STORAGE_SEQ_DIGITS, ".jpg") != 0) continue;
 
-        bool all_digits = true;
-        for (int i = 1; i <= 10; i++) {
-            if (ent->d_name[i] < '0' || ent->d_name[i] > '9') { all_digits = false; break; }
+        uint32_t seq = 0;
+        bool ok = true;
+        for (int i = 1; i <= CAM_STORAGE_SEQ_DIGITS; i++) {
+            int d = decode_base36_digit(ent->d_name[i]);
+            if (d < 0) { ok = false; break; }
+            seq = seq * CAM_STORAGE_SEQ_BASE + (uint32_t)d;
         }
-        if (!all_digits) continue;
+        if (!ok) continue;
 
-        ids[count++] = (uint32_t)strtoul(ent->d_name + 1, NULL, 10);
+        char path[64];
+        snprintf(path, sizeof(path), "%s/%.*s", BSP_CAM_SD_MOUNT_POINT, CAM_STORAGE_FNAME_LEN, ent->d_name);
+        struct stat st;
+        if (stat(path, &st) != 0) continue;
+
+        entries[count].file_id = seq;
+        entries[count].kind    = kind;
+        entries[count].mtime   = st.st_mtime;
+        count++;
     }
     closedir(dir);
     return count;
 }
 
-static int cmp_u32(const void *a, const void *b)
+static int cmp_by_mtime(const void *a, const void *b)
 {
-    uint32_t va = *(const uint32_t *)a, vb = *(const uint32_t *)b;
-    return (va > vb) - (va < vb);
+    const file_entry_t *ea = (const file_entry_t *)a, *eb = (const file_entry_t *)b;
+    if (ea->mtime < eb->mtime) return -1;
+    if (ea->mtime > eb->mtime) return 1;
+    return 0;
 }
 
-static void enforce_capacity(void)
+/* 상한 넘으면 오래된 것부터 순환삭제하고, 다음에 쓸 순번(가장 최근 파일의 seq+1, 파일이
+ * 하나도 없으면 0)을 반환 — 스캔을 한 번만 해서 용량관리와 순번결정을 같이 처리 */
+static uint32_t enforce_capacity_and_get_next_seq(void)
 {
-    uint32_t ids[CAM_STORAGE_MAX_FILES + 1];
-    int count = scan_all_files(ids, CAM_STORAGE_MAX_FILES + 1);
-    if (count <= CAM_STORAGE_MAX_FILES) return;
+    file_entry_t all[CAM_STORAGE_MAX_FILES + 1];
+    int count = scan_all_files(all, CAM_STORAGE_MAX_FILES + 1);
+    if (count <= 0) return 0;
 
-    qsort(ids, count, sizeof(ids[0]), cmp_u32);
-    int to_delete = count - CAM_STORAGE_MAX_FILES;
-    for (int i = 0; i < to_delete; i++) {
-        char path[64];
-        char kind;
-        if (!resolve_path(ids[i], path, sizeof(path), &kind)) continue;
-        if (remove(path) == 0) {
-            ESP_LOGI(TAG, "순환 삭제: %s", path);
-        } else {
-            ESP_LOGW(TAG, "순환 삭제 실패: %s", path);
+    qsort(all, count, sizeof(all[0]), cmp_by_mtime);  /* 오래된 것부터 */
+
+    if (count > CAM_STORAGE_MAX_FILES) {
+        int to_delete = count - CAM_STORAGE_MAX_FILES;
+        for (int i = 0; i < to_delete; i++) {
+            char path[64];
+            file_path_kind(all[i].file_id, all[i].kind, path, sizeof(path));
+            if (remove(path) == 0) {
+                ESP_LOGI(TAG, "순환 삭제: %s", path);
+            } else {
+                ESP_LOGW(TAG, "순환 삭제 실패: %s", path);
+            }
         }
     }
+
+    return (all[count - 1].file_id + 1) % CAM_STORAGE_SEQ_MOD;
 }
 
 esp_err_t cam_storage_init(void)
@@ -121,13 +186,26 @@ esp_err_t cam_storage_init(void)
     return ESP_OK;
 }
 
+esp_err_t cam_storage_get_sd_usage(uint32_t *out_total_kb, uint32_t *out_used_kb)
+{
+    uint64_t total_bytes = 0, free_bytes = 0;
+    esp_err_t err = esp_vfs_fat_info(BSP_CAM_SD_MOUNT_POINT, &total_bytes, &free_bytes);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SD 용량 조회 실패: %s", esp_err_to_name(err));
+        *out_total_kb = 0;
+        *out_used_kb  = 0;
+        return err;
+    }
+    *out_total_kb = (uint32_t)(total_bytes / 1024);
+    *out_used_kb  = (uint32_t)((total_bytes - free_bytes) / 1024);
+    return ESP_OK;
+}
+
 esp_err_t cam_storage_save_capture(const uint8_t *jpeg_data, size_t len, cam_capture_kind_t kind, uint32_t *out_file_id)
 {
-    enforce_capacity();
-
-    uint32_t file_id = (uint32_t)time(NULL);
+    uint32_t seq = enforce_capacity_and_get_next_seq();
     char path[64];
-    file_path(file_id, (char)kind, path, sizeof(path));
+    file_path_kind(seq, (char)kind, path, sizeof(path));
 
     FILE *fp = fopen(path, "wb");
     if (!fp) {
@@ -143,28 +221,28 @@ esp_err_t cam_storage_save_capture(const uint8_t *jpeg_data, size_t len, cam_cap
         return ESP_FAIL;
     }
 
-    if (out_file_id) *out_file_id = file_id;
+    if (out_file_id) *out_file_id = seq;
     ESP_LOGI(TAG, "캡처 저장: %s (%u bytes)", path, (unsigned)len);
     return ESP_OK;
 }
 
 int cam_storage_list(photo_request_mode_t mode, uint32_t param, uint32_t *out_file_ids, int max)
 {
-    uint32_t all_ids[CAM_STORAGE_MAX_FILES];
-    int total = scan_all_files(all_ids, CAM_STORAGE_MAX_FILES);
+    file_entry_t all[CAM_STORAGE_MAX_FILES];
+    int total = scan_all_files(all, CAM_STORAGE_MAX_FILES);
     if (total < 0) return -1;
-    qsort(all_ids, total, sizeof(all_ids[0]), cmp_u32);
+    qsort(all, total, sizeof(all[0]), cmp_by_mtime);  /* 오래된 것부터 */
 
     if (mode == PHOTO_REQUEST_MODE_LATEST) {
         if (total == 0 || max < 1) return 0;
-        out_file_ids[0] = all_ids[total - 1];
+        out_file_ids[0] = all[total - 1].file_id;
         return 1;
     }
 
     if (mode == PHOTO_REQUEST_MODE_BY_ID) {
         if (max < 1) return 0;
         for (int i = 0; i < total; i++) {
-            if (all_ids[i] == param) {
+            if (all[i].file_id == param) {
                 out_file_ids[0] = param;
                 return 1;
             }
@@ -172,22 +250,22 @@ int cam_storage_list(photo_request_mode_t mode, uint32_t param, uint32_t *out_fi
         return 0;  /* 목록 가져온 뒤 사용자가 고르기 전에 이미 지워진 경우 등 */
     }
 
-    uint32_t cutoff = 0;
+    time_t cutoff = 0;
     if (mode == PHOTO_REQUEST_MODE_RECENT_HOURS) {
-        uint32_t now = (uint32_t)time(NULL);
-        uint32_t window = param * 3600U;
+        time_t now = time(NULL);
+        time_t window = (time_t)param * 3600;
         cutoff = (window < now) ? (now - window) : 0;
     }
 
     int count = 0;
     for (int i = 0; i < total && count < max; i++) {
-        if (mode == PHOTO_REQUEST_MODE_RECENT_HOURS && all_ids[i] < cutoff) continue;
-        out_file_ids[count++] = all_ids[i];
+        if (mode == PHOTO_REQUEST_MODE_RECENT_HOURS && all[i].mtime < cutoff) continue;
+        out_file_ids[count++] = all[i].file_id;
     }
     return count;
 }
 
-esp_err_t cam_storage_stat(uint32_t file_id, uint32_t *out_size, char *out_kind)
+esp_err_t cam_storage_stat(uint32_t file_id, uint32_t *out_size, char *out_kind, uint32_t *out_capture_time)
 {
     char path[64];
     char kind;
@@ -198,6 +276,7 @@ esp_err_t cam_storage_stat(uint32_t file_id, uint32_t *out_size, char *out_kind)
 
     if (out_size) *out_size = (uint32_t)st.st_size;
     if (out_kind) *out_kind = kind;
+    if (out_capture_time) *out_capture_time = (uint32_t)st.st_mtime;
     return ESP_OK;
 }
 
@@ -239,12 +318,12 @@ int cam_storage_delete_all(void)
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
         size_t len = strlen(ent->d_name);
-        if (len != 15) continue;
+        if (len != CAM_STORAGE_FNAME_LEN) continue;
         if (ent->d_name[0] != CAM_CAPTURE_KIND_MANUAL && ent->d_name[0] != CAM_CAPTURE_KIND_AUTO) continue;
-        if (strcmp(ent->d_name + 11, ".jpg") != 0) continue;
+        if (strcmp(ent->d_name + 1 + CAM_STORAGE_SEQ_DIGITS, ".jpg") != 0) continue;
 
         char path[64];
-        snprintf(path, sizeof(path), "%s/%.15s", BSP_CAM_SD_MOUNT_POINT, ent->d_name);
+        snprintf(path, sizeof(path), "%s/%.*s", BSP_CAM_SD_MOUNT_POINT, CAM_STORAGE_FNAME_LEN, ent->d_name);
         if (remove(path) == 0) deleted++;
     }
     closedir(dir);

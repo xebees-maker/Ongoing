@@ -1,14 +1,15 @@
 #include "ui_strings.h"
-#include "nvs.h"
+#include "fs.h"
 #include "esp_log.h"
+#include <stdio.h>
 
 static const char *TAG = "ui_strings";
-static const char *NVS_NAMESPACE = "cntl_cfg";
-static const char *NVS_KEY_LANG  = "lang";
+#define SETTINGS_PATH  FS_MOUNT_POINT "/settings.bin"
 
 static ui_lang_t s_lang = UI_LANG_KO;
 
 static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
+    [STR_LOGO_TITLE]     = { "플렉스팜", "FlexFarm" },
     [STR_TAB_DASHBOARD]  = { "상황판", "Dashboard" },
     [STR_TAB_STATISTICS] = { "통계",   "Statistics" },
     [STR_TAB_OPTION]     = { "설정",   "Option" },
@@ -34,31 +35,45 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_BTN_CAPTURE_NOW]         = { "지금촬영",                 "Manual shot" },
     [STR_BTN_RENEW_LIST]          = { "목록갱신",                 "Renew list" },
     [STR_PANEL_LIST]              = { "목록",                     "List" },
-    [STR_PANEL_PICTURE]           = { "사진",                     "Picture" },
-    [STR_BTN_CLOSE]                  = { "닫기",                       "Close" },
+    [STR_PANEL_PICTURE]           = { "미리보기 - 원본은 웹으로 볼 수 있습니다.", "Thumbnail - Full size image only on Web" },
     [STR_MSG_DELETE_PHOTO_CONFIRM]   = { "이 사진을 삭제할까요?",       "Delete this photo?" },
     [STR_CAPTURE_STAGE1_PROGRESS]    = { "1. 카메라에 명령 전달 중...", "1. Sending command to camera..." },
     [STR_CAPTURE_STAGE1_DONE]        = { "1. 카메라에 명령 전달 완료", "1. Command delivered" },
     [STR_CAPTURE_STAGE2_SUCCESS]     = { "2. 촬영 완료",               "2. Capture complete" },
     [STR_CAPTURE_STAGE2_FAILED]      = { "2. 촬영 실패",               "2. Capture failed" },
-    [STR_CAPTURE_STAGE3_PROGRESS]    = { "3. 영상 가져오는 중...",     "3. Receiving photo..." },
-    [STR_CAPTURE_STAGE3_DONE]        = { "3. 영상 가져오기 완료",     "3. Photo received" },
-    [STR_CAPTURE_STAGE3_FAILED]      = { "3. 영상 가져오기 실패",     "3. Photo transfer failed" },
-    [STR_CAPTURE_STAGE4_PROGRESS]    = { "4. 목록 갱신 중...",         "4. Refreshing list..." },
-    [STR_CAPTURE_STAGE4_DONE]        = { "4. 목록 갱신 완료",         "4. List refreshed" },
+    [STR_CAPTURE_STAGE2_NORESPONSE]  = { "2. 카메라 응답 없음",        "2. No response from camera" },
+    [STR_CAPTURE_STAGE3_PROGRESS]    = { "3. 목록 갱신 중...",         "3. Refreshing list..." },
+    [STR_CAPTURE_STAGE3_DONE]        = { "3. 목록 갱신 완료",         "3. List refreshed" },
+    [STR_CAPTURE_STAGE3_UNKNOWN]     = { "3. 상태 확인 불가 — 목록갱신으로 다시 확인하세요",
+                                          "3. Unable to verify — use Renew list to check again" },
+    [STR_FETCH_CONNECTING]           = { "사진 가져오는 중...",         "Fetching photo..." },
+    [STR_FETCH_PROGRESS_FMT]         = { "사진 가져오는 중... %d%%",   "Fetching photo... %d%%" },
+    [STR_FETCH_PROGRESS_ETA_FMT]     = { "사진 가져오는 중... %d%% (약 %d초 남음)",
+                                          "Fetching photo... %d%% (~%ds left)" },
+    [STR_FETCH_DONE]                 = { "가져오기 완료",               "Photo received" },
+    [STR_FETCH_FAILED]               = { "가져오기 실패",               "Failed to fetch photo" },
+    [STR_FETCH_STALLED]              = { "응답 없음 — 연결 상태를 확인하세요", "No response — check connection" },
+    [STR_BTN_DELETE_ALL]             = { "모두 지우기",                 "Delete all" },
+    [STR_MSG_DELETE_ALL_CONFIRM]     = { "모두 지울까요?",             "Delete all photos?" },
+    [STR_DELETEALL_STAGE1_PROGRESS]  = { "1. 삭제 중...",               "1. Deleting..." },
+    [STR_DELETEALL_STAGE1_DONE]      = { "1. 삭제 완료",               "1. Deleted" },
+    [STR_DELETEALL_STAGE1_FAILED]    = { "1. 삭제 실패",               "1. Delete failed" },
+    [STR_DELETEALL_STAGE1_NORESPONSE] = { "1. 카메라 응답 없음",        "1. No response from camera" },
+    [STR_DELETEALL_STAGE2_PROGRESS]  = { "2. 목록 갱신 중...",         "2. Refreshing list..." },
+    [STR_DELETEALL_STAGE2_DONE]      = { "2. 목록 갱신 완료",         "2. List refreshed" },
+    [STR_DELETEALL_STAGE2_UNKNOWN]   = { "2. 상태 확인 불가 — 목록갱신으로 다시 확인하세요",
+                                          "2. Unable to verify — use Renew list to check again" },
 };
 
 void ui_lang_load(void)
 {
-    nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
-        return;  /* 네임스페이스가 아직 없음 — 첫 부팅, 기본값(UI_LANG_KO) 유지 */
-    }
+    FILE *f = fopen(SETTINGS_PATH, "rb");
+    if (!f) return;  /* 파일 없음 — 첫 부팅, 기본값(UI_LANG_KO) 유지 */
     uint8_t val = 0;
-    if (nvs_get_u8(h, NVS_KEY_LANG, &val) == ESP_OK && val < UI_LANG_COUNT) {
+    if (fread(&val, 1, 1, f) == 1 && val < UI_LANG_COUNT) {
         s_lang = (ui_lang_t)val;
     }
-    nvs_close(h);
+    fclose(f);
 }
 
 void ui_lang_set(ui_lang_t lang)
@@ -66,14 +81,14 @@ void ui_lang_set(ui_lang_t lang)
     if (lang >= UI_LANG_COUNT) return;
     s_lang = lang;
 
-    nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
-        ESP_LOGW(TAG, "언어 설정 저장 실패(nvs_open)");
+    FILE *f = fopen(SETTINGS_PATH, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "언어 설정 저장 실패(fopen)");
         return;
     }
-    nvs_set_u8(h, NVS_KEY_LANG, (uint8_t)lang);
-    nvs_commit(h);
-    nvs_close(h);
+    uint8_t val = (uint8_t)lang;
+    fwrite(&val, 1, 1, f);
+    fclose(f);
 }
 
 ui_lang_t ui_lang_get(void)
