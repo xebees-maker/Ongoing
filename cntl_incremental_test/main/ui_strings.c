@@ -63,6 +63,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_DELETEALL_STAGE2_DONE]      = { "2. 목록 갱신 완료",         "2. List refreshed" },
     [STR_DELETEALL_STAGE2_UNKNOWN]   = { "2. 상태 확인 불가 — 목록갱신으로 다시 확인하세요",
                                           "2. Unable to verify — use Renew list to check again" },
+    [STR_LIST_RENEW_PROGRESS]        = { "목록 갱신 중...",             "Refreshing list..." },
+    [STR_LIST_EMPTY]                 = { "사진 없음",                   "No Picture" },
 };
 
 void ui_lang_load(void)

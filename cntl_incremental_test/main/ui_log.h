@@ -38,10 +38,14 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_CHUNK_MISSING        3002  /* 청크 누락 — 재조립 실패 */
 #define UI_ERR_CRC_MISMATCH         3003  /* CRC 불일치 — 재조립 실패 */
 #define UI_ERR_DECODE_FAIL          3004  /* JPEG 디코드 실패(사진 표시 불가) */
+#define UI_ERR_LIST_COUNT_MISMATCH  3005  /* 목록 항목 일부 유실 — 재요청/포기 */
+#define UI_ERR_FETCH_NORESPONSE     3006  /* 사진 가져오기 요청 후 CAM 무응답(진행 정체) */
+#define UI_ERR_LIST_NORESPONSE      3007  /* 목록 갱신 요청 후 CAM 무응답(타임아웃) */
 
 #define UI_ERR_DELETE_FAILED        4001  /* CAM이 삭제 실패로 응답 */
 #define UI_ERR_DELETE_ALL_FAILED    4002  /* CAM이 전체삭제 실패로 응답 */
 #define UI_ERR_CAPTURE_FAILED       4003  /* CAM이 촬영 실패로 응답 */
+#define UI_ERR_CAPTURE_NORESPONSE   4004  /* 지금촬영 요청 후 CAM 무응답 */
 
 #define UI_ERR_FONT_FILE_MISSING    5001  /* 폰트 파일 없음(stat 실패) */
 #define UI_ERR_FONT_BUF_ALLOC       5002  /* 폰트 파일 로드용 PSRAM 할당 실패 */

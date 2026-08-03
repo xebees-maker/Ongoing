@@ -92,7 +92,15 @@ static lv_obj_t   *s_capture_stage_label[3];
  * 플레이스홀더에 표시, 삭제 버튼은 확인 팝업 거쳐서 삭제 */
 static esp_now_photo_list_item_t s_current_list[ESP_NOW_PHOTO_LIST_MAX];
 static int                        s_current_list_count = 0;
-static lv_obj_t                  *s_selected_row = NULL;
+
+/* 선택 상태의 진짜 모델은 file_id(s_selected_file_id) — s_selected_row는 그 모델을 지금
+ * 그려진 목록 위에 표시하기 위한 뷰 캐시일 뿐(2026-08-02, 사용자 지적: "View는 Model의
+ * 그림자일 뿐이야"). 목록이 다시 그려지면(refresh_photo_list_ui) 행 객체는 매번 새로
+ * 만들어지므로 s_selected_row 포인터는 그때마다 무효가 되지만, s_selected_file_id는
+ * 그대로 유지되고 다시 그릴 때 그 file_id를 찾아 강조표시만 복원함(재요청 없이) */
+static lv_obj_t  *s_selected_row = NULL;
+static uint32_t   s_selected_file_id = 0;
+static bool       s_has_selected_file_id = false;
 
 /* 통계 탭 로그박스 — 시리얼 모니터가 리셋을 유발하는 문제 때문에(2026-08-01) ui_log 모듈에
  * 쌓인 로그를 화면에서 직접 보는 용도로 벤더 데모(analytics 위젯) 대신 넣음 */
@@ -522,50 +530,80 @@ static void refresh_photo_list_ui(int select_index);  /* capture 팝업이 완�
 static void show_fetch_progress_popup(void);  /* 아래 공용 진행팝업 모듈 정의 뒤에 구현 */
 static void display_photo(uint32_t file_id);  /* 아래 정의 — 캐시 히트 시 여기서 바로 씀 */
 
-static void cb_photo_row_select(lv_event_t *e)
+/* CAM의 실제 파일명 표기(base36 4자리, 0-9A-Z, CAM/main/cam_storage.c의 encode_seq()와
+ * 동일 인코딩)를 그대로 미러링 — 예전엔 file_id를 %u로 그냥 10진수로 찍어서 CAM SD카드의
+ * 실제 파일명("M0001.jpg")과 목록에 보이는 숫자가 달랐음(2026-08-02, 사용자 지적: CNTL이
+ * 임의로 번호를 매기는 것처럼 보였던 원인) */
+static void encode_file_seq_base36(uint32_t seq, char *out /* 5바이트: 4자리+NUL */)
 {
-    uint32_t file_id = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
-    lv_obj_t *row = lv_event_get_target(e);
+    static const char digits[37] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    seq %= 1679616u;  /* 36^4 — CAM_STORAGE_SEQ_MOD와 동일 */
+    for (int i = 3; i >= 0; i--) {
+        out[i] = digits[seq % 36];
+        seq /= 36;
+    }
+    out[4] = '\0';
+}
 
-    /* 이미 선택된 행을 다시 탭하면 아무것도 안 함(2026-08-01, 사용자 요청) — 선택이
-     * 안 바뀌었는데 재조회/재표시할 이유가 없음 */
-    if (s_selected_row == row) return;
+/* Model: 선택 상태 그 자체(s_selected_file_id) 하나만 바꿈 — View/Action은 절대 안 건드림.
+ * OnTap(cb_photo_row_select)/목록 재구성(refresh_photo_list_ui) 둘 다 "선택이 바뀌었다"는
+ * 사실만 여기로 알림 */
+static void set_selected_file_id(uint32_t file_id)
+{
+    s_selected_file_id = file_id;
+    s_has_selected_file_id = true;
+}
 
-    if (s_selected_row) {
+/* reconcile_selection — "View/Action은 Model의 그림자일 뿐"(2026-08-02, 사용자 지적)을
+ * 실제로 구현: file_id를 인자로 안 받고 s_selected_file_id(모델)를 직접 읽어서 반영함.
+ * 호출부(OnTap 등)가 "무엇을 선택했는지"를 여기 전달하는 게 아니라, 여기가 모델을 스스로
+ * 관찰해서 반응하는 구조 — 그래야 "탭 이벤트 안에서 가져오기를 처리한다"는 게 안 됨(사용자가
+ * 세 번째로 지적한 부분). 강조표시(뷰)는 매번 모델과 동기화하고, 가져오기(액션)는 마지막으로
+ * 반영했던 값(s_synced_file_id)과 실제로 달라졌을 때만 함 — 이전 사진을 들고 있다가
+ * 재사용하는 캐시 개념 없이, 선택이 바뀔 때마다 무조건 새로 받아옴(2026-08-02, 사용자 지시) */
+static uint32_t s_synced_file_id = 0;
+static bool     s_has_synced_file_id = false;
+
+static void reconcile_selection(lv_obj_t *row, bool show_popup)
+{
+    if (s_selected_row && s_selected_row != row) {
         lv_obj_set_style_bg_opa(s_selected_row, LV_OPA_TRANSP, 0);
     }
     lv_obj_set_style_bg_color(row, lv_palette_main(LV_PALETTE_BLUE), 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_30, 0);
     s_selected_row = row;
+
+    if (s_has_synced_file_id && s_synced_file_id == s_selected_file_id) return;  /* 이미 반영됨 — 끝 */
+    s_synced_file_id = s_selected_file_id;
+    s_has_synced_file_id = true;
+
     if (!s_has_paired_cam) return;
 
-    ui_log_add("TAP file_id=%u", (unsigned)file_id);
-
-    /* 이미 가져온 사진이면 재조회 없이 캐시에서 바로 표시(2026-08-01, 사용자 요청) */
-    const uint8_t *cached_data = NULL;
-    size_t cached_len = 0;
-    if (esp_now_photo_cache_get(file_id, &cached_data, &cached_len)) {
-        ui_log_add("TAP -> 캐시 HIT file_id=%u len=%u", (unsigned)file_id, (unsigned)cached_len);
-        display_photo(file_id);
-        return;
-    }
-    ui_log_add("TAP -> 캐시 MISS file_id=%u, 재요청", (unsigned)file_id);
+    ui_log_add("SELECT file_id=%u", (unsigned)s_selected_file_id);
 
     /* 새 요청을 걸기 전에, 직전 사진이 방금 도착했는데(READY) 아직 판넬에 반영 안 된
      * 상태면 먼저 반영하고 넘어감 — esp_now_photo_fetch_by_id()가 새 요청 시작하면서
      * 상태를 무조건 IDLE로 되돌리는데, 그 전에 이걸 안 하면 방금 받은 사진이 화면에
-     * 한 번도 안 뜨고 유실됨(캐시엔 들어가 있어서 나중에 다시 선택하면 뜨긴 하지만, 이번
-     * 탭에서는 이전 화면 그대로 남아 보임 — 2026-08-01 실기에서 확인, 반응속도에 따라
-     * 재현율이 들쭉날쭉했던 이유) */
+     * 한 번도 안 뜨고 유실됨(2026-08-01 실기에서 확인) */
     if (esp_now_photo_get_state() == ESP_NOW_PHOTO_STATE_READY) {
         uint32_t pending_id = esp_now_photo_get_ready_file_id();
-        ui_log_add("TAP: 대기중 READY(file_id=%u) 먼저 반영", (unsigned)pending_id);
+        ui_log_add("SELECT: 대기중 READY(file_id=%u) 먼저 반영", (unsigned)pending_id);
         display_photo(pending_id);
         esp_now_photo_ready_ack();
     }
 
-    esp_now_photo_fetch_by_id(s_paired_cam_mac, file_id);
-    show_fetch_progress_popup();
+    esp_now_photo_fetch_by_id(s_paired_cam_mac, s_selected_file_id);
+    if (show_popup) show_fetch_progress_popup();
+}
+
+/* OnTap — Model만 바꾸고(set_selected_file_id) reconcile_selection에 반영을 맡김. 탭
+ * 핸들러 자신은 "어떤 행이 눌렸는지" 알아내는 것 이상은 하지 않음 */
+static void cb_photo_row_select(lv_event_t *e)
+{
+    uint32_t file_id = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    lv_obj_t *row = lv_event_get_target(e);
+    set_selected_file_id(file_id);
+    reconcile_selection(row, true);
 }
 
 static void cb_photo_delete_confirm(void *ctx)
@@ -606,7 +644,21 @@ static void refresh_photo_list_ui(int select_index)
 
     lv_indev_reset(NULL, s_photo_list);
     lv_obj_clean(s_photo_list);
+    /* 뷰 캐시(행 객체 포인터)만 리셋 — 선택 모델(s_selected_file_id)은 목록이 다시
+     * 그려져도 그대로 유지, 아래 루프에서 강조표시만 다시 그림(2026-08-02) */
     s_selected_row = NULL;
+
+    if (s_current_list_count == 0) {
+        /* 목록이 진짜 0장인지, 갱신 요청 자체가 응답을 못 받은 건지 구분이 안 된다는
+         * 사용자 지적(2026-08-02) — 이 함수는 CAM한테서 실제로 목록이 도착했을 때만
+         * 불리므로(무응답이면 아예 호출 안 됨) 여기 도달했다는 건 "진짜 0장"이 확정된
+         * 것. 그걸 회색 문구로 명시 */
+        lv_obj_t *empty_lbl = lv_label_create(s_photo_list);
+        lv_label_set_text(empty_lbl, ui_str(STR_LIST_EMPTY));
+        lv_obj_set_style_text_font(empty_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_set_style_text_color(empty_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
+        return;
+    }
 
     for (int i = 0; i < s_current_list_count; i++) {
         lv_obj_t *row = lv_obj_create(s_photo_list);
@@ -630,9 +682,12 @@ static void refresh_photo_list_ui(int select_index)
         char time_buf[24];
         strftime(time_buf, sizeof(time_buf), "%m-%d %H:%M:%S", &tm_buf);
 
+        char seq_str[5];
+        encode_file_seq_base36(s_current_list[i].file_id, seq_str);
+
         char buf[56];
-        snprintf(buf, sizeof(buf), "%c%u  %s (%uKB)",
-                 (char)s_current_list[i].kind, (unsigned)s_current_list[i].file_id, time_buf,
+        snprintf(buf, sizeof(buf), "%c%s  %s (%uKB)",
+                 (char)s_current_list[i].kind, seq_str, time_buf,
                  (unsigned)(s_current_list[i].file_size / 1024));
 
         lv_obj_t *label = lv_label_create(row);
@@ -651,6 +706,14 @@ static void refresh_photo_list_ui(int select_index)
         lv_label_set_text(del_lbl, LV_SYMBOL_TRASH);
 
         if (i == select_index) {
+            /* 새로운 선택(예: 지금촬영 직후 최신 항목) — Model만 바꾸고 반영은
+             * reconcile_selection에 위임. 지금촬영 팝업이 이미 떠 있는 상태에서 호출되므로
+             * 진행팝업은 또 안 띄움(show_popup=false) */
+            set_selected_file_id(s_current_list[i].file_id);
+            reconcile_selection(row, false);
+        } else if (s_has_selected_file_id && s_current_list[i].file_id == s_selected_file_id) {
+            /* 이미 선택돼 있던(모델 기준) 항목이 목록 재구성으로 다시 그려진 것뿐 —
+             * 강조표시(뷰)만 모델에 맞춰 복원, 재요청은 안 함(2026-08-02) */
             lv_obj_set_style_bg_color(row, lv_palette_main(LV_PALETTE_BLUE), 0);
             lv_obj_set_style_bg_opa(row, LV_OPA_30, 0);
             s_selected_row = row;
@@ -911,17 +974,27 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
         bool timedout  = !resolved && lv_tick_elaps(s_capture_popup_stage_start_ms) > CAM_RESPONSE_TIMEOUT_MS;
         if (!resolved && !timedout) return false;
 
-        if (resolved) {
-            bool ok = (stage == ESP_NOW_CAPTURE_STAGE_CAPTURED);
-            set_stage_label(s_capture_stage_label, 0, STR_CAPTURE_STAGE1_DONE, green);
-            set_stage_label(s_capture_stage_label, 1, ok ? STR_CAPTURE_STAGE2_SUCCESS : STR_CAPTURE_STAGE2_FAILED,
-                             ok ? green : red);
-            esp_now_photo_capture_stage_clear();
-        } else {
+        if (!resolved) {
+            /* 진짜 무응답 — CAM과 통신 자체가 안 되는 상태라 이어서 목록을 확인해봤자
+             * 똑같이 타임아웃될 뿐이라 의미 없음(2026-08-02, 사용자 지적: "응답이 없는데
+             * 목록 갱신 중은 왜 하는거야?"). 여기서 바로 닫음.
+             * 라벨에 NORESPONSE를 써도 이 함수가 true를 반환하는 즉시 progress_popup_tick이
+             * 같은 틱 안에서 팝업을 지워버려서 화면엔 실제로 한 번도 안 그려짐(2026-08-02,
+             * 사용자 지적: "그냥 대기 프로그레스만 돌다가 닫혀") — ui_log_add_err의
+             * 토스트/경고아이콘이 실제 사용자에게 보이는 유일한 통보 경로라 반드시 호출 */
             set_stage_label(s_capture_stage_label, 1, STR_CAPTURE_STAGE2_NORESPONSE, red);
+            ui_log_add_err(UI_ERR_CAPTURE_NORESPONSE, "지금촬영 요청에 CAM 응답 없음(타임아웃)");
+            return true;
         }
-        /* 2단계가 성공/실패/무응답 무엇이든 목록은 항상 다시 확인 — 지금 안 찍혔어도
-         * 무해(목록이 그대로 옴)하고, 무응답이었는데 실은 찍혔을 가능성도 이걸로 확인됨 */
+
+        bool ok = (stage == ESP_NOW_CAPTURE_STAGE_CAPTURED);
+        set_stage_label(s_capture_stage_label, 0, STR_CAPTURE_STAGE1_DONE, green);
+        set_stage_label(s_capture_stage_label, 1, ok ? STR_CAPTURE_STAGE2_SUCCESS : STR_CAPTURE_STAGE2_FAILED,
+                         ok ? green : red);
+        esp_now_photo_capture_stage_clear();
+
+        /* 2단계가 성공이든 실패든(무응답은 위에서 이미 처리하고 끝났음) 목록은 항상
+         * 다시 확인 — 실패 응답이어도 목록 갱신 자체는 무해(목록이 그대로 옴) */
         request_photo_list_sync();
         s_capture_popup_stage = CAPTURE_POPUP_STAGE_SYNC_LIST;
         s_capture_popup_stage_start_ms = lv_tick_get();
@@ -1002,8 +1075,13 @@ static bool fetch_popup_tick_fn(lv_obj_t *box)
         s_fetch_last_received = received;
         s_fetch_last_progress_ms = lv_tick_get();
     } else if (lv_tick_elaps(s_fetch_last_progress_ms) > CAM_RESPONSE_TIMEOUT_MS) {
+        /* 라벨에 STALLED를 써도 true 반환 즉시 팝업이 같은 틱에서 지워져서 실제로는
+         * 한 번도 화면에 안 그려짐(2026-08-02, 사용자 지적 — capture_popup_tick_fn의
+         * NORESPONSE와 동일한 문제) — ui_log_add_err의 토스트가 실제 통보 경로 */
         lv_label_set_text(s_fetch_progress_label, ui_str(STR_FETCH_STALLED));
         lv_obj_set_style_text_color(s_fetch_progress_label, lv_palette_main(LV_PALETTE_RED), 0);
+        ui_log_add_err(UI_ERR_FETCH_NORESPONSE, "사진 가져오기 진행 정체(%u/%u청크, 타임아웃)",
+                        (unsigned)received, (unsigned)total);
         return true;
     }
 
@@ -1046,11 +1124,40 @@ static void show_fetch_progress_popup(void)
     start_progress_popup(box);
 }
 
+/* 목록갱신 버튼 — 예전엔 요청만 보내고 끝이라 응답이 없어도 사용자가 알 방법이
+ * 없었음(2026-08-02, 사용자 지적: "아무 짓도 안하는 건지 목록이 없는 건지 모르겠다") —
+ * 지금촬영/모두지우기/사진가져오기와 같은 공용 진행팝업+타임아웃 토스트로 통일 */
+static uint32_t s_renew_list_start_ms;
+
+static bool renew_list_tick_fn(lv_obj_t *box)
+{
+    (void)box;
+    if (sync_photo_list_tick(-1)) return true;
+    if (lv_tick_elaps(s_renew_list_start_ms) > CAM_RESPONSE_TIMEOUT_MS) {
+        ui_log_add_err(UI_ERR_LIST_NORESPONSE, "목록 갱신 요청에 CAM 응답 없음(타임아웃)");
+        return true;
+    }
+    return false;
+}
+
 static void cb_renew_list(lv_event_t *e)
 {
     (void)e;
     if (!s_has_paired_cam) return;
     esp_now_photo_list_request(s_paired_cam_mac);
+
+    s_renew_list_start_ms = lv_tick_get();
+    lv_obj_t *box = show_progress_popup(renew_list_tick_fn);
+
+    lv_obj_t *spinner = lv_spinner_create(box);
+    lv_obj_set_size(spinner, 40, 40);
+    lv_obj_align(spinner, LV_ALIGN_TOP_MID, 0, 0);
+
+    lv_obj_t *label = lv_label_create(box);
+    lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(label, ui_str(STR_LIST_RENEW_PROGRESS));
+
+    start_progress_popup(box);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -1146,6 +1253,12 @@ static void reset_camera_ui_state(void)
     lv_indev_reset(NULL, s_photo_list);
     lv_obj_clean(s_photo_list);
     s_selected_row = NULL;
+    s_has_selected_file_id = false;  /* 연결이 끊기면 선택 모델도 완전히 비움(재연결 후
+                                       * 예전 목록에 있던 file_id가 새 목록에 우연히 같은
+                                       * 값으로 있어도 잘못 선택된 것처럼 보이지 않게) */
+    s_has_synced_file_id = false;    /* reconcile_selection의 "마지막 반영값" 기록도 같이
+                                       * 비움 — 안 그러면 재연결 후 같은 file_id를 다시
+                                       * 선택했을 때 "이미 반영됨"으로 오판해 새로 안 가져옴 */
     lv_label_set_text(s_list_info_label, "");
 
     if (s_photo_image) {
@@ -1295,8 +1408,15 @@ static void refresh_clock(lv_timer_t *t)
     time_t now = time(NULL);
     struct tm tm_buf;
     localtime_r(&now, &tm_buf);
-    char buf[12];
-    strftime(buf, sizeof(buf), "%H:%M:%S", &tm_buf);
+    char time_buf[12];
+    strftime(time_buf, sizeof(time_buf), "%H:%M:%S", &tm_buf);
+
+    /* 시간 옆에 WiFi 채널을 항상 같이 표기(2026-08-02, 사용자 지시) — 공유기
+     * 자동채널선택으로 세션 중간에 채널이 바뀌는 걸 실기에서 확인했는데, 그동안은
+     * 시리얼 없이 확인할 방법이 없어서 헤맸음. 통계탭 로그처럼 찾아봐야 하는 곳이
+     * 아니라 항상 보이는 자리에 둠 */
+    char buf[20];
+    snprintf(buf, sizeof(buf), "%s - CH%u", time_buf, (unsigned)esp_now_hub_get_wifi_channel());
     lv_label_set_text(s_clock_label, buf);
 }
 

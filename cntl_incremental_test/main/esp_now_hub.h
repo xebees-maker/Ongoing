@@ -37,6 +37,11 @@ typedef struct {
 
 void esp_now_hub_init(void);
 
+/* 지금 Cntl이 실제로 붙어있는 WiFi 채널 — ESP-NOW도 이 채널을 그대로 씀(같은 라디오).
+ * 공유기 자동채널선택으로 세션 중간에 바뀔 수 있어서(2026-08-02 실기에서 확인) 화면에
+ * 상시 표시하는 용도로 추가 */
+uint8_t esp_now_hub_get_wifi_channel(void);
+
 /* kind로 필터링해서 살아있는(timeout 이내) 노드만 out에 채워서 개수 반환 —
  * kind=HUB_NODE_KIND_UNKNOWN이면 전체(필터 없음) */
 int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max);

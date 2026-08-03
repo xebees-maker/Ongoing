@@ -121,11 +121,17 @@ static int scan_all_files(file_entry_t *entries, int max)
     return count;
 }
 
-static int cmp_by_mtime(const void *a, const void *b)
+/* 정렬/최신판정/순환삭제는 전부 file_id 기준(2026-08-02, 사용자 지시: "mtime으로 개체를
+ * 처리하는 건 아주 잘못된거야. 무조건 ID로 해야지") — file_id 자체가 이미 M/T 공용으로
+ * 촬영마다 1씩 증가하는 순번이라 mtime(FAT는 보통 2초 단위라 연속촬영 시 자주 겹침)보다
+ * 오히려 더 정확한 순서 기준임. mtime은 실제 시각이 필요한 곳(capture_time 표시,
+ * RECENT_HOURS 필터의 now-N시간 컷오프 비교)에만 남겨둠 — file_id 자체엔 절대시각
+ * 정보가 없어서 그 두 용도는 mtime이 아니면 할 수가 없음. */
+static int cmp_by_file_id(const void *a, const void *b)
 {
     const file_entry_t *ea = (const file_entry_t *)a, *eb = (const file_entry_t *)b;
-    if (ea->mtime < eb->mtime) return -1;
-    if (ea->mtime > eb->mtime) return 1;
+    if (ea->file_id < eb->file_id) return -1;
+    if (ea->file_id > eb->file_id) return 1;
     return 0;
 }
 
@@ -137,7 +143,7 @@ static uint32_t enforce_capacity_and_get_next_seq(void)
     int count = scan_all_files(all, CAM_STORAGE_MAX_FILES + 1);
     if (count <= 0) return 0;
 
-    qsort(all, count, sizeof(all[0]), cmp_by_mtime);  /* 오래된 것부터 */
+    qsort(all, count, sizeof(all[0]), cmp_by_file_id);  /* 오래된 것부터 */
 
     if (count > CAM_STORAGE_MAX_FILES) {
         int to_delete = count - CAM_STORAGE_MAX_FILES;
@@ -231,7 +237,7 @@ int cam_storage_list(photo_request_mode_t mode, uint32_t param, uint32_t *out_fi
     file_entry_t all[CAM_STORAGE_MAX_FILES];
     int total = scan_all_files(all, CAM_STORAGE_MAX_FILES);
     if (total < 0) return -1;
-    qsort(all, total, sizeof(all[0]), cmp_by_mtime);  /* 오래된 것부터 */
+    qsort(all, total, sizeof(all[0]), cmp_by_file_id);  /* 오래된 것부터 */
 
     if (mode == PHOTO_REQUEST_MODE_LATEST) {
         if (total == 0 || max < 1) return 0;

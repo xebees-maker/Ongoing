@@ -40,7 +40,29 @@ typedef enum {
                                              * Cntl이 자기 시각을 상대에게 알려줌) */
     ESP_NOW_MSG_PHOTO_DELETE_ALL_REQUEST = 19,  /* Cntl -> CAM: 저장된 사진 전체 삭제 요청 */
     ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK = 20,      /* CAM -> Cntl: 삭제 결과(삭제된 개수) */
+    ESP_NOW_MSG_HUB_RESET = 21,             /* Cntl -> 전체 브로드캐스트: Cntl이 방금 부팅함
+                                              * (2026-08-02 추가). 노드가 이미 페어링된 줄 알고
+                                              * ADVERTISE를 멈춘 채 keepalive만 보내는 중이면(=
+                                              * 원래 상대인 Cntl이 소프트리셋 등으로 재부팅해서
+                                              * 노드 테이블이 비어버린 상태) UNPAIR와 마찬가지로
+                                              * 강제로 재광고 모드로 돌아가게 함 — ESP-NOW의
+                                              * send_cb 성공/실패는 물리 계층 ACK 기준이라
+                                              * 애플리케이션이 그 keepalive를 무시하고 있어도
+                                              * 노드 쪽에서는 "성공"으로만 보여서 스스로는 절대
+                                              * 이 상태를 못 벗어남(실기로 확인) */
+    ESP_NOW_MSG_PHOTO_CHUNK_NACK = 22,      /* Cntl -> CAM: 청크 일련번호(chunk_idx) 기준으로
+                                              * 못 받은 것만 콕 집어 재전송 요청(2026-08-03 —
+                                              * 아래 esp_now_photo_chunk_nack_t 주석 참고).
+                                              * 이름은 PHOTO_로 남겨뒀지만 구조(일련번호 기반
+                                              * 스트리밍+선택적 재전송)는 사진 전용이 아니라
+                                              * 나중에 다른 대용량 전송(Sens 등)에도 그대로
+                                              * 재사용 가능한 일반적인 패턴 */
 } esp_now_msg_type_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_hub_reset_t;
 
 typedef struct __attribute__((packed)) {
     uint8_t version;
@@ -161,6 +183,27 @@ typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
 } esp_now_photo_done_t;
+
+/* 청크 전송 신뢰성 재설계(2026-08-03) — "핸드셰이크처럼 매 청크마다 응답을 기다리면서도,
+ * 정작 그 응답이 로컬 라디오의 물리계층 ACK일 뿐 상대 애플리케이션이 실제로 받았다는
+ * 진짜 확인이 아니었던" 이전 설계를 버림(사용자 지적: "그거 handshake도 아니고 streaming도
+ * 아니고 최악의 조합이야"). 신뢰도 높은 브로드캐스팅에서 흔히 쓰는 방식으로 교체:
+ * 1) 송신측은 청크마다 응답을 기다리지 않고 그냥 순서대로 쭉 보냄(스트리밍) — chunk_idx가
+ *    이미 일련번호 역할을 함(esp_now_photo_chunk_t 참고).
+ * 2) DONE(한 바퀴 다 보냈다는 신호)까지 받으면, 수신측은 어느 chunk_idx가 비었는지
+ *    확인해서 그 목록만 콕 집어 NACK으로 재전송 요청.
+ * 3) 송신측은 요청받은 것만 다시 보내고 다시 DONE — 이걸 정해진 횟수만큼 반복.
+ * 이러면 매 청크 왕복 대기가 없어서 빠르고, 신뢰성은 "진짜 못 받은 것"을 정확히 짚어서
+ * 다시 받는 방식이라 로컬 라디오 ACK의 애매함에 의존하지 않음. */
+#define ESP_NOW_PHOTO_NACK_MAX_INDICES 400  /* ESP-NOW v2 1470B 한도 안에서 여유있게 잡은 값 —
+                                              * 헤더(10B) + 400*2B = 810B < 1470B */
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint32_t file_id;
+    uint16_t missing_count;  /* missing_idx[0..missing_count) 유효 */
+    uint16_t missing_idx[ESP_NOW_PHOTO_NACK_MAX_INDICES];
+} esp_now_photo_chunk_nack_t;
 
 /* 지금촬영(CAPTURE_NOW) 진행 상태 — Cntl UI가 진행 팝업 단계 표시에 씀.
  * RECEIVED: CAM이 요청을 접수(아직 촬영 전). SUCCESS/FAILED: 촬영 자체의 성공/실패

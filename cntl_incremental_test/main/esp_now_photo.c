@@ -20,15 +20,14 @@ static SemaphoreHandle_t s_mutex;
 /* ────────────────────────────────────────────────────────────
  * 1. 단일 사진 수신(capture_now/fetch_by_id 공용)
  * ──────────────────────────────────────────────────────────── */
-/* 실측 JPEG 크기 650~670KB에 여유를 둔 고정 상한 — 부팅 시 한 번만 할당하고 절대
- * free/realloc 안 함(2026-08-01, recv 버퍼/캐시 슬롯/판넬·뷰어 디코드 버퍼 모두 동일 원칙 —
- * 반복 사용하는 버퍼는 처음에 한 번만 잡고 계속 재사용, 매번 free+malloc 하지 않기).
- * 800KB였던 걸 720KB로 축소(2026-08-01) — 실기 로그로 이 보드의 실제 여유 PSRAM이
- * 폰트 로드 직후 기준 ~2.4MB뿐임을 확인(기존에 참고하던 "6.7MB usable"은 이 빌드
- * 기준 틀린 수치였음, 화면 프레임버퍼+폰트가 이미 5.5MB 이상을 씀) — recv_buf+캐시
- * 슬롯 2개(같은 크기) 셋이 이 예산 안에 다 들어가야 해서 실측 최대치(670KB) 대비
- * 여유를 줄임 */
-#define PHOTO_RECV_BUF_CAP (720 * 1024)
+/* 부팅 시 한 번만 할당하고 절대 free/realloc 안 함(2026-08-01, recv 버퍼/캐시 슬롯/판넬
+ * 디코드 버퍼 모두 동일 원칙 — 반복 사용하는 버퍼는 처음에 한 번만 잡고 계속 재사용).
+ * 720KB로는 실기에서 큰 사진(고엔트로피 장면)이 넘쳐서 3001 에러가 남 — 720KB->1024KB로
+ * 확장(2026-08-02). 캐시 슬롯이 2->1로 줄면서(아래 참고) recv_buf+캐시슬롯 합이 이제 버퍼
+ * 3개가 아니라 2개라, 실측 여유PSRAM(캐시슬롯[1] 할당 직후 161,560B, 구성 3버퍼 기준)으로
+ * 역산한 전체 가용치(~2.42MB) 안에서 1024KB씩 잡아도 ~270KB 여유가 남음(과거 6.7MB 기준
+ * 계산은 틀렸었으니 이 실측치를 기준으로 삼음) */
+#define PHOTO_RECV_BUF_CAP (1024 * 1024)
 static uint8_t  *s_recv_buf = NULL;   /* ESP-NOW 태스크만 건드림, 밖으로 포인터가 안 나감 */
 static size_t     s_recv_cap = 0;
 static uint32_t   s_file_id = 0;
@@ -36,20 +35,45 @@ static uint32_t   s_total_size = 0;
 static uint16_t   s_total_chunks = 0;
 static uint32_t   s_expected_crc = 0;
 static uint16_t   s_chunks_received = 0;
+static uint8_t    s_photo_cam_mac[6] = { 0 };  /* NACK을 돌려보낼 대상 — 요청 시점에 저장 */
+
+/* 청크 신뢰성 재설계(2026-08-03) — "핸드셰이크처럼 청크마다 응답을 기다리는데 정작 그
+ * 응답이 로컬 라디오 ACK일 뿐이라 진짜 확인이 아니었던" 예전 방식을 버리고, 신뢰도 높은
+ * 브로드캐스팅에서 쓰는 스트리밍+선택적 재전송(NACK) 방식으로 교체(사용자 설계 지시,
+ * esp_now_link.h의 esp_now_photo_chunk_nack_t 주석 참고). 어느 chunk_idx를 받았는지
+ * 비트맵으로 추적해뒀다가 DONE 도착 시 빠진 것만 콕 집어 CAM에 재전송 요청 */
+#define PHOTO_MAX_CHUNKS ((PHOTO_RECV_BUF_CAP + ESP_NOW_PHOTO_CHUNK_DATA_LEN - 1) / ESP_NOW_PHOTO_CHUNK_DATA_LEN)
+static uint8_t    s_chunk_bitmap[(PHOTO_MAX_CHUNKS + 7) / 8];
+#define PHOTO_NACK_MAX_ROUNDS 3
+static int        s_nack_rounds_used = 0;
+
+static inline void chunk_bitmap_clear(void) { memset(s_chunk_bitmap, 0, sizeof(s_chunk_bitmap)); }
+static inline void chunk_bitmap_set(uint16_t idx)
+{
+    if (idx >= PHOTO_MAX_CHUNKS) return;
+    s_chunk_bitmap[idx / 8] |= (uint8_t)(1u << (idx % 8));
+}
+static inline bool chunk_bitmap_test(uint16_t idx)
+{
+    if (idx >= PHOTO_MAX_CHUNKS) return false;
+    return (s_chunk_bitmap[idx / 8] >> (idx % 8)) & 1;
+}
 
 static volatile esp_now_photo_state_t s_state = ESP_NOW_PHOTO_STATE_IDLE;
 static uint32_t s_ready_file_id = 0;  /* READY 상태일 때 방금 캐시에 들어간 file_id */
 
-/* 압축 JPEG 원본 캐시 — 판넬(작게)/뷰어(크게)/웹(원본 그대로) 셋이 각자 필요한 만큼
- * 이 압축본에서 디코드해서 씀. 슬롯 버퍼도 recv 버퍼와 같은 이유로 부팅 시 고정
- * 할당(PHOTO_RECV_BUF_CAP과 동일 용량 — 캐시에 들어가는 것도 결국 같은 종류의 사진
- * 압축본이라 같은 상한이면 충분)해두고 매번 memcpy만 함, malloc/free 없음(2026-08-01
- * — 예전엔 handle_done()에서 완료될 때마다 heap_caps_malloc으로 새 복사본을 만들었는데,
- * 이게 판넬(320x240)/뷰어(1600x960, ~3.3MB) 고정버퍼까지 도입하고 나서 PSRAM 여유가
- * 빠듯해지자 두 번째 사진부터 바로 실패했음 — 실기 로그로 확인: "완료본 버퍼 할당 실패").
- * 슬롯 수는 6→3→2로 축소 — 뷰어 버퍼(~3.3MB)가 이미 크게 자리를 차지해서 여유를
- * 더 뒀음(FIFO 교체, LRU까지는 불필요) */
-#define PHOTO_CACHE_SLOTS 2
+/* 압축 JPEG 원본 캐시 — 방금 수신 완료된 사진 1장을 판넬/웹이 재조회 없이 디코드해 쓸
+ * 수 있게 담아두는 "완료본 보관소". 슬롯 버퍼는 recv 버퍼와 같은 이유로 부팅 시 고정
+ * 할당해두고 매번 memcpy만 함, malloc/free 없음(2026-08-01).
+ * 슬롯 수 1개로 축소(2026-08-02, 기존 2개) — 예전엔 "이미 선택했던 사진을 다시 선택하면
+ * 재요청 안 함" 용도로 최근 2장을 들고 있었는데, 사용자가 그 설계를 뒤집음: "탭은
+ * Select하기 위한 것일 뿐, 실제 action(가져오기)은 select가 바뀔 때만, 그리고 바뀌면
+ * 무조건 새로 가져온다 — 이전 사진을 들고 있는 개념 자체가 없다"(ui_main.c의
+ * reconcile_selection 참고). 즉 "여러 장을 기억해뒀다 재사용"할 일이 이제 없어서 슬롯은
+ * "지금 막 도착한 사진 1장"만 있으면 충분 — 이 슬롯은 재요청 회피용이 아니라 순전히
+ * display_photo/웹 다운로드가 읽어가는 데이터 소스 역할만 함. 여기서 아낀 만큼
+ * PHOTO_RECV_BUF_CAP을 키우는 데 씀(위 참고) */
+#define PHOTO_CACHE_SLOTS 1
 #define PHOTO_CACHE_SLOT_CAP PHOTO_RECV_BUF_CAP
 typedef struct {
     bool     used;
@@ -110,6 +134,16 @@ static volatile esp_now_photo_list_state_t s_list_state = ESP_NOW_PHOTO_LIST_STA
 static uint32_t                   s_sd_total_kb = 0;  /* 최근 목록 응답에 실려온 CAM SD 용량 */
 static uint32_t                   s_sd_used_kb  = 0;
 
+/* 목록 항목(PHOTO_LIST_ENTRY)은 청크와 달리 ACK/재전송이 없는 단발성 esp_now_send라
+ * 유실될 수 있음 — 유실된 게 하필 마지막 항목(=file_id 오름차순으로 보내므로 항상
+ * 최신 사진)이면 Cntl 목록에서 최신 사진이 통째로 빠지고, 그 앞의(이미 봤던) 사진이
+ * index 0으로 보여서 "선택은 되는데 안 가져옴"처럼 보임(2026-08-02 실기에서 확인).
+ * LIST_DONE의 count와 실제 수신 개수를 대조해 다르면 재요청 — 청크의 3회 재시도와
+ * 같은 원칙 */
+#define PHOTO_LIST_MAX_RETRIES 2
+static uint8_t  s_list_cam_mac[6];
+static int      s_list_retry_count = 0;
+
 void esp_now_photo_init(void)
 {
     s_mutex = xSemaphoreCreateMutex();
@@ -154,12 +188,15 @@ static void start_single_receive(const uint8_t *cam_mac, uint8_t mode, uint32_t 
      * 남은시간이 거꾸로 증가) — 새 요청 시작 시점에 바로 지움 */
     s_chunks_received = 0;
     s_total_chunks    = 0;
+    chunk_bitmap_clear();
+    s_nack_rounds_used = 0;
     /* file_id도 요청 시점에 바로 갱신(현재 유일한 호출부인 fetch_by_id는 mode=BY_ID,
      * param=file_id) — META 도착 전까지 s_file_id가 "이전" 요청 값 그대로 남아있으면
      * 그 사이에 이전 요청의 뒤늦은 CHUNK/DONE이 도착했을 때 file_id가 우연히 일치해서
      * 지금 받는 중인 걸로 잘못 받아들여지는 경우가 있었음(2026-08-01, 실기에서 다른
      * 사진을 선택해도 엉뚱한 사진이 뜨는 문제로 확인) */
     s_file_id = param;
+    memcpy(s_photo_cam_mac, cam_mac, sizeof(s_photo_cam_mac));
     xSemaphoreGive(s_mutex);
 
     esp_now_photo_request_t req = {
@@ -204,6 +241,13 @@ void esp_now_photo_fetch_by_id(const uint8_t *cam_mac, uint32_t file_id)
      * 사용자 의도는 "새로 시작"이므로 강제로 흘려보냄(capture_now에서 겪었던 것과 같은
      * 이유 — RECEIVING에 타임아웃이 없어서 한번 걸리면 이후 요청이 계속 씹힘) */
     s_state = ESP_NOW_PHOTO_STATE_IDLE;
+    /* s_file_id를 여기서 바로 새 file_id로 맞춰둠(META 도착 전에 미리) — CAM은 취소
+     * 프로토콜이 없어서 사용자가 빠르게 다른 사진을 다시 선택하면 CAM이 이전 요청을
+     * 여전히 전송 중일 수 있음(2026-08-02, CAM 쪽엔 세대번호로 스스로 중단하게 고침).
+     * 그 사이 이전 file_id의 뒤늦은 청크가 도착했을 때 s_file_id가 아직 옛 값 그대로면
+     * handle_chunk()의 file_id 일치 검사를 통과해서 새 수신버퍼에 잘못 섞여 들어갈 수
+     * 있음 — 미리 새 file_id로 바꿔두면 옛 청크는 자동으로 불일치 처리되어 버려짐 */
+    s_file_id = file_id;
     xSemaphoreGive(s_mutex);
     start_single_receive(cam_mac, PHOTO_REQUEST_MODE_BY_ID, file_id);
 }
@@ -217,13 +261,19 @@ static void handle_meta(const uint8_t *data, int len)
     ui_log_add("META file_id=%u size=%u chunks=%u",
                (unsigned)meta->file_id, (unsigned)meta->total_size, (unsigned)meta->total_chunks);
 
+    /* s_state 하나만 뮤텍스로 짧게 감싸고 s_file_id/s_total_chunks 등 나머지 필드는 밖에서
+     * 건드리던 게 진짜 경합이었음(2026-08-03, 사용자 지적: "CNTL의 수신단 구현이 이상한 것
+     * 같아") — LVGL UI 태스크(esp_now_photo_fetch_by_id, 새 선택 시 s_file_id를 미리 바꿈)와
+     * 이 함수(ESP-NOW 콜백 태스크)가 같은 필드들을 서로 다른 락 구간에서 만지고 있어서
+     * "확인"과 "그 확인을 근거로 쓰기"가 원자적이지 않았음. 이제 관련 필드 전부를 하나의
+     * 락 구간 안에서 같이 바꿈 */
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (meta->total_size > s_recv_cap || !s_recv_buf) {
+        s_state = ESP_NOW_PHOTO_STATE_ERROR;
+        xSemaphoreGive(s_mutex);
         ESP_LOGE(TAG, "사진이 고정 수신 버퍼보다 큼(%u > %u bytes) — 버림",
                  (unsigned)meta->total_size, (unsigned)s_recv_cap);
         ui_log_add_err(UI_ERR_META_TOO_BIG, "사진 수신 실패(용량초과) %u > %u", (unsigned)meta->total_size, (unsigned)s_recv_cap);
-        xSemaphoreTake(s_mutex, portMAX_DELAY);
-        s_state = ESP_NOW_PHOTO_STATE_ERROR;
-        xSemaphoreGive(s_mutex);
         return;
     }
     s_file_id         = meta->file_id;
@@ -231,9 +281,9 @@ static void handle_meta(const uint8_t *data, int len)
     s_total_chunks     = meta->total_chunks;
     s_expected_crc     = meta->crc32;
     s_chunks_received  = 0;
-
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_state = ESP_NOW_PHOTO_STATE_RECEIVING;
+    chunk_bitmap_clear();
+    s_nack_rounds_used = 0;
+    s_state            = ESP_NOW_PHOTO_STATE_RECEIVING;
     xSemaphoreGive(s_mutex);
 }
 
@@ -242,15 +292,27 @@ static void handle_chunk(const uint8_t *data, int len)
     if (len < (int)sizeof(esp_now_photo_chunk_t)) return;
     const esp_now_photo_chunk_t *chunk = (const esp_now_photo_chunk_t *)data;
 
+    /* 확인(state/file_id 일치)과 실제 쓰기(memcpy)를 같은 락 구간 안에서 — 그 사이에
+     * esp_now_photo_fetch_by_id()가 끼어들어 s_file_id/s_state를 새 요청으로 바꿔버리면,
+     * 이 청크가 이미 낡은 요청 것인데도 그 사실을 놓치고 새 수신버퍼에 잘못 쓰일 수 있었음 */
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    esp_now_photo_state_t st = s_state;
-    xSemaphoreGive(s_mutex);
-    if (st != ESP_NOW_PHOTO_STATE_RECEIVING || chunk->file_id != s_file_id || !s_recv_buf) return;
-
+    if (s_state != ESP_NOW_PHOTO_STATE_RECEIVING || chunk->file_id != s_file_id || !s_recv_buf) {
+        xSemaphoreGive(s_mutex);
+        return;
+    }
     size_t offset = (size_t)chunk->chunk_idx * ESP_NOW_PHOTO_CHUNK_DATA_LEN;
-    if (offset + chunk->chunk_len > s_recv_cap) return;  /* 손상된/엉뚱한 청크 — 무시 */
+    if (offset + chunk->chunk_len > s_recv_cap) {
+        xSemaphoreGive(s_mutex);
+        return;  /* 손상된/엉뚱한 청크 — 무시 */
+    }
     memcpy(s_recv_buf + offset, chunk->data, chunk->chunk_len);
-    s_chunks_received++;
+    /* NACK 재전송 라운드에서 같은 청크가 다시 올 수 있음(예: 재전송분과 뒤늦은 원본이
+     * 둘 다 도착) — 비트맵으로 "새로 받은 것"만 카운트해서 중복 집계 방지 */
+    if (!chunk_bitmap_test(chunk->chunk_idx)) {
+        chunk_bitmap_set(chunk->chunk_idx);
+        s_chunks_received++;
+    }
+    xSemaphoreGive(s_mutex);
 }
 
 static void handle_done(const uint8_t *data, int len)
@@ -276,8 +338,34 @@ static void handle_done(const uint8_t *data, int len)
     }
 
     if (s_chunks_received != s_total_chunks || s_total_size == 0 || !s_recv_buf) {
-        ESP_LOGW(TAG, "청크 누락(%u/%u) — 사진 버림", s_chunks_received, s_total_chunks);
-        ui_log_add_err(UI_ERR_CHUNK_MISSING, "사진 수신 실패(청크 누락 %u/%u)", s_chunks_received, s_total_chunks);
+        /* 청크 누락(2026-08-03 재설계) — 예전엔 여기서 바로 실패 처리했는데, 이제 빠진
+         * chunk_idx를 정확히 짚어서 NACK으로 재전송을 요청함(신뢰도 높은 브로드캐스팅
+         * 방식, 사용자 설계 지시). 라운드가 남아있으면 RECEIVING 상태를 유지한 채
+         * 여기서 그냥 리턴 — CAM이 재전송 후 다시 보내는 DONE이 이 함수를 다시 호출함.
+         * 라운드를 다 썼는데도 안 맞으면 그때 진짜 실패 처리 */
+        if (s_nack_rounds_used < PHOTO_NACK_MAX_ROUNDS) {
+            s_nack_rounds_used++;
+            /* static — 808바이트짜리 구조체를 스택에 두지 않음. CAM 쪽 스택 오버플로우를
+             * 방금 실기로 겪은 뒤라(2026-08-03) 이런 큰 지역변수는 되도록 피함 */
+            static esp_now_photo_chunk_nack_t nack;
+            nack.version  = ESP_NOW_LINK_VERSION;
+            nack.msg_type = ESP_NOW_MSG_PHOTO_CHUNK_NACK;
+            nack.file_id  = s_file_id;
+            uint16_t n = 0;
+            for (uint16_t idx = 0; idx < s_total_chunks && n < ESP_NOW_PHOTO_NACK_MAX_INDICES; idx++) {
+                if (!chunk_bitmap_test(idx)) nack.missing_idx[n++] = idx;
+            }
+            nack.missing_count = n;
+            esp_err_t err = esp_now_send(s_photo_cam_mac, (const uint8_t *)&nack, sizeof(nack));
+            ESP_LOGW(TAG, "청크 누락(%u/%u) — NACK 전송(%u개, 라운드 %d/%d): %s",
+                     s_chunks_received, s_total_chunks, n, s_nack_rounds_used, PHOTO_NACK_MAX_ROUNDS,
+                     esp_err_to_name(err));
+            ui_log_add("NACK 전송 %u개(라운드 %d/%d) file_id=%u", n, s_nack_rounds_used,
+                       PHOTO_NACK_MAX_ROUNDS, (unsigned)s_file_id);
+            return;
+        }
+        ESP_LOGW(TAG, "청크 누락(%u/%u) — NACK 라운드 소진, 사진 버림", s_chunks_received, s_total_chunks);
+        ui_log_add_err(UI_ERR_CHUNK_MISSING, "사진 수신 실패(청크 누락 %u/%u, 재전송 후에도)", s_chunks_received, s_total_chunks);
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_state = ESP_NOW_PHOTO_STATE_ERROR;
         xSemaphoreGive(s_mutex);
@@ -410,13 +498,8 @@ void esp_now_photo_capture_stage_clear(void)
 /* ════════════════════════════════════════════════════════════
  * 사진 목록
  * ════════════════════════════════════════════════════════════ */
-void esp_now_photo_list_request(const uint8_t *cam_mac)
+static void send_list_request_raw(const uint8_t *cam_mac)
 {
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_list_state = ESP_NOW_PHOTO_LIST_STATE_REQUESTING;
-    s_list_count = 0;
-    xSemaphoreGive(s_mutex);
-
     esp_now_photo_list_request_t req = {
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_PHOTO_LIST_REQUEST,
@@ -424,6 +507,18 @@ void esp_now_photo_list_request(const uint8_t *cam_mac)
     esp_err_t err = esp_now_send(cam_mac, (const uint8_t *)&req, sizeof(req));
     ESP_LOGI(TAG, "PHOTO_LIST_REQUEST 전송: %s", esp_err_to_name(err));
     if (err != ESP_OK) ui_log_add_err(UI_ERR_SEND_LIST_REQ, "목록 요청 전송 실패: %s", esp_err_to_name(err));
+}
+
+void esp_now_photo_list_request(const uint8_t *cam_mac)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_list_state = ESP_NOW_PHOTO_LIST_STATE_REQUESTING;
+    s_list_count = 0;
+    s_list_retry_count = 0;
+    memcpy(s_list_cam_mac, cam_mac, sizeof(s_list_cam_mac));
+    xSemaphoreGive(s_mutex);
+
+    send_list_request_raw(cam_mac);
 }
 
 static void handle_list_entry(const uint8_t *data, int len)
@@ -449,6 +544,22 @@ static void handle_list_done(const uint8_t *data, int len)
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     if (s_list_state == ESP_NOW_PHOTO_LIST_STATE_REQUESTING) {
+        if (done->count != s_list_count && s_list_retry_count < PHOTO_LIST_MAX_RETRIES) {
+            s_list_retry_count++;
+            int got = s_list_count, want = done->count, retry = s_list_retry_count;
+            uint8_t mac_copy[6];
+            memcpy(mac_copy, s_list_cam_mac, sizeof(mac_copy));
+            s_list_count = 0;  /* 재요청이라 처음부터 새로 받음 */
+            xSemaphoreGive(s_mutex);
+            ui_log_add_err(UI_ERR_LIST_COUNT_MISMATCH, "목록 %d/%d개만 수신 — 재요청(%d/%d)",
+                            got, want, retry, PHOTO_LIST_MAX_RETRIES);
+            send_list_request_raw(mac_copy);
+            return;
+        }
+        if (done->count != s_list_count) {
+            ui_log_add_err(UI_ERR_LIST_COUNT_MISMATCH, "목록 %d/%d개만 수신 — 재시도 포기, 있는 것만 표시",
+                            s_list_count, done->count);
+        }
         s_list_state  = ESP_NOW_PHOTO_LIST_STATE_READY;
         s_sd_total_kb = done->sd_total_kb;
         s_sd_used_kb  = done->sd_used_kb;

@@ -1,6 +1,7 @@
 #include "esp_now_hub.h"
 #include "esp_now_photo.h"
 #include "rtc_sync.h"
+#include "ui_log.h"
 
 #include <string.h>
 #include <assert.h>
@@ -119,10 +120,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * 안 갱신돼서 5초 타임아웃 뒤 리스트에서 완전히 사라져버림 */
             n->last_seen_ms = now_ms;
             /* 재연결(paired=true로 되돌리는 것)만 user_unpaired로 막음 — 사용자가
-             * esp_now_hub_pair()를 다시 불러야(리스트에서 다시 연결 허용) 풀림 */
+             * esp_now_hub_pair()를 다시 불러야(리스트에서 다시 연결 허용) 풀림.
+             * became_paired는 "방금 막 페어링됨(false->true 전환)"일 때만 true여야 함 —
+             * 예전엔 n->paired가 이미 true였어도 PAIR_ACK(1초 keepalive)가 올 때마다 매번
+             * true로 잡혀서, 페어링된 CAM/Sens에 SET_TIME을 1초마다 무한정 계속 보내고
+             * 있었음(2026-08-03, CAM 시리얼 로그로 발견 — 8초 사이에 SET_TIME이 9번 옴) */
+            bool was_paired = n->paired;
             if (!n->user_unpaired) {
                 n->paired = true;
-                became_paired = true;
+                became_paired = !was_paired;
                 strncpy(name_copy, n->name, sizeof(name_copy) - 1);
             }
         }
@@ -182,6 +188,14 @@ static void wifi_bringup(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    /* WiFi 절전(모뎀 슬립) 끔(2026-08-02) — 부팅 로그에 "wifi:pm start, type: 1"이 찍혀서
+     * 기본값(절전 켜짐)으로 동작 중이었음을 확인. 절전 중엔 라디오가 공유기 비콘 주기에
+     * 맞춰서만 깨어나는데, CAM이 보내는 ESP-NOW 청크는 그 주기와 무관하게 아무 때나
+     * 도착해서 라디오가 자는 타이밍에 온 청크를 놓침 — 사진 가져오기 청크 누락(3002)의
+     * 실제 원인으로 추정(실기에서 확인된 증상: 느리고 ETA가 들쭉날쭉하다 결국 실패).
+     * Cntl은 상시전원(배터리 아님)이라 절전을 꺼도 손해가 없음 */
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 }
 
 void esp_now_hub_init(void)
@@ -203,7 +217,38 @@ void esp_now_hub_init(void)
     peer.encrypt = false;
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));
 
+    /* Cntl 재부팅 신호 브로드캐스트(2026-08-02, 타이밍 재수정 2026-08-03) — CAM/Sens가
+     * 소프트리셋 전에 이미 페어링돼 있었다면 Cntl의 노드 테이블은 방금 비워졌는데도 그쪽은
+     * 여전히 자기가 페어링된 줄 알고 ADVERTISE 없이 keepalive만 보냄(esp_now_link.h의
+     * ESP_NOW_MSG_HUB_RESET 주석 참고) — 그 상태론 재광고를 스스로 트리거할 방법이 없어서
+     * Cntl이 먼저 알려줘야 함.
+     * 원래 IP_EVENT_STA_GOT_IP(공유기 완전 연결 시점)에서 보냈는데, 이게 사용자 실제
+     * 워크플로우("항상 소프트리셋 -> 연결 -> 목록 -> 사진")와 충돌하는 레이스가 있었음
+     * (2026-08-03 실기에서 확인): 공유기 재연결이 느릴 때(인증 backoff 등, 실기에서
+     * "Association refused... comeback time" 확인된 적 있음) 사용자가 CAM과 방금 새로
+     * 페어링을 끝낸 뒤에야 이 브로드캐스트가 뒤늦게 나가서, 이번 부팅에서 막 정상적으로
+     * 맺어진 페어링을 "예전 거"로 오인하고 걷어차버림(사용자 지적: "연결됨으로 상태가
+     * 바뀌고... 목록을 가져왔잖아, 연결 됐던 거 아냐?"). 지금은 여기, ESP-NOW 자체가 막
+     * 켜진 시점(공유기 연결 여부와 무관, 부팅 극초반)에 보내서 사람이 화면을 터치해서
+     * 페어링할 수 있는 어떤 시점보다도 반드시 먼저 나가도록 함 — 802.11 채널 고정 자체는
+     * 공유기 인증 절차 초반(esp_wifi_connect 시작 시점)에 이미 이뤄지므로 채널 문제도
+     * 없음 */
+    esp_now_hub_reset_t reset_msg = {
+        .version  = ESP_NOW_LINK_VERSION,
+        .msg_type = ESP_NOW_MSG_HUB_RESET,
+    };
+    esp_err_t reset_err = esp_now_send(s_broadcast_addr, (const uint8_t *)&reset_msg, sizeof(reset_msg));
+    ESP_LOGI(TAG, "HUB_RESET 브로드캐스트: %s", esp_err_to_name(reset_err));
+
     ESP_LOGI(TAG, "ESP-NOW 허브 시작됨 (STA)");
+}
+
+uint8_t esp_now_hub_get_wifi_channel(void)
+{
+    uint8_t channel = 0;
+    wifi_second_chan_t second_chan;
+    esp_wifi_get_channel(&channel, &second_chan);
+    return channel;
 }
 
 int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max)
