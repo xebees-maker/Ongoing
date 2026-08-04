@@ -187,8 +187,22 @@ static void resend_chunks(uint32_t file_id, const esp_now_photo_chunk_nack_t *na
         size_t n = fread(chunk.data, 1, ESP_NOW_PHOTO_CHUNK_DATA_LEN, fp);
         chunk.chunk_idx = idx;
         chunk.chunk_len = (uint16_t)n;
-        esp_now_send(s_hub_mac, (const uint8_t *)&chunk, sizeof(chunk));
-        vTaskDelay(pdMS_TO_TICKS(2));
+        /* 최초 스트리밍 루프와 동일한 NO_MEM 재시도+페이싱(2026-08-04) — 이 함수는 그
+         * 수정 이전의 2ms/재시도없음 그대로 남아있었음. 큐가 꽉 차서 재전송 자체가
+         * 조용히 실패하면 NACK 라운드를 다 써도 복구가 안 되고, 심하면 Cntl이 DONE을
+         * 영영 못 받아 8초 정체(UI_ERR_FETCH_NORESPONSE=3006)로 이어질 수 있음 — 아래
+         * DONE 재전송 수정과 함께 봐야 하는 짝 */
+        esp_err_t err;
+        int attempt;
+        for (attempt = 0; attempt < 6; attempt++) {
+            err = esp_now_send(s_hub_mac, (const uint8_t *)&chunk, sizeof(chunk));
+            if (err != ESP_ERR_ESPNOW_NO_MEM) break;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "재전송 실패: chunk[%u] -> %s(시도 %d회)", idx, esp_err_to_name(err), attempt + 1);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
     fclose(fp);
     ESP_LOGI(TAG, "NACK 재전송 완료: file_id=%u %u개 청크", (unsigned)file_id, (unsigned)nack->missing_count);
@@ -273,27 +287,44 @@ static bool send_one_photo(uint32_t file_id, uint32_t my_generation)
          * 확인하는 거라 이런 즉시-거부까지 매번 NACK 라운드로 넘기면 낭비가 크므로, 여기서
          * 짧게 대기했다가 같은 청크를 바로 재시도(큐잉 자체가 안 된 거라 재전송이 아니라
          * 최초 시도의 연장) */
+        /* 2026-08-04 실기 로그로 확인: 5ms/10회 재시도로는 큐가 회복이 안 됨 — 청크
+         * 32~69 중 36개가 재시도를 전부 소진하고도 여전히 NO_MEM(한 번 포화되면 그
+         * 뒤로 계속 포화 상태였다는 뜻, 일시적 버스트가 아님). 재시도 간격을 5ms->20ms로
+         * 늘려서 큐가 실제로 비워질 시간을 줌(대신 최대 시도는 10->6으로 줄여서 한
+         * 청크가 막힐 때 최악의 경우 지연시간은 비슷하게 유지: 6*20=120ms vs 기존 10*5=50ms,
+         * 약간 늘었지만 사진 1장(수십~수백 청크) 기준 감내 가능한 수준) */
         esp_err_t chunk_err;
         int attempt;
-        for (attempt = 0; attempt < 10; attempt++) {
+        for (attempt = 0; attempt < 6; attempt++) {
             chunk_err = esp_now_send(s_hub_mac, (const uint8_t *)&chunk, sizeof(chunk));
             if (chunk_err != ESP_ERR_ESPNOW_NO_MEM) break;
-            vTaskDelay(pdMS_TO_TICKS(5));
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
         if (idx < 3 || chunk_err != ESP_OK) {
             /* 처음 몇 개만 상세 로그(전부 찍으면 수백 줄 쏟아짐) + 실패는 항상 로그 */
             ESP_LOGI(TAG, "CKPT: 청크[%u/%u] -> %s(시도 %d회)", idx, total_chunks, esp_err_to_name(chunk_err), attempt + 1);
         }
-        vTaskDelay(pdMS_TO_TICKS(4));  /* 큐 과부하 방지 페이싱 — 2ms는 너무 빨랐음(위 주석) */
+        vTaskDelay(pdMS_TO_TICKS(10));  /* 큐 과부하 방지 페이싱 — 4ms도 여전히 너무 빨랐음
+                                          * (2026-08-04 실기 로그, 위 재시도 주석 참고) */
     }
     fclose(fp);
     ESP_LOGI(TAG, "CKPT: 청크 전송 루프 완료(%u개)", total_chunks);
 
     /* 한 바퀴 다 보냈다는 신호 + NACK 대기/재전송 라운드 — 이게 이 전송의 실제 신뢰성
      * 보장 지점(스트리밍 자체엔 신뢰성이 없음, 위 함수 설명 참고) */
+    /* DONE도 META처럼 3번 반복 전송(2026-08-04) — 예전엔 딱 1번만 보냈는데, 청크가
+     * 전부 정상 도착해도 이 마지막 DONE 하나가 무선에서 유실되면 Cntl은 청크를 다
+     * 갖고도 handle_done()이 아예 안 불려서 진행률이 안 바뀐 채로 8초 뒤 UI 정체
+     * 타임아웃(UI_ERR_FETCH_NORESPONSE=3006)으로 빠짐 — "청크는 다 갔는데 결국
+     * 타임아웃"이라는 관찰과 정확히 일치. handle_done()은 RECEIVING 상태가 아니면
+     * 그냥 무시하고 리턴하니 중복 수신은 안전함(esp_now_photo.c 참고) */
     esp_now_photo_done_t done = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_DONE };
-    esp_err_t done_err = esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));
-    ESP_LOGI(TAG, "CKPT: DONE 전송 -> %s, NACK 대기 시작", esp_err_to_name(done_err));
+    for (int i = 0; i < 3; i++) {
+        esp_err_t done_err = esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));
+        ESP_LOGI(TAG, "CKPT: DONE 전송[%d] -> %s", i, esp_err_to_name(done_err));
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    ESP_LOGI(TAG, "CKPT: NACK 대기 시작");
 
     /* static — 808바이트짜리 구조체를 photo_tx 태스크 스택에 두지 않음(24KB로 늘리긴
      * 했지만 큰 지역변수는 습관적으로 피함, 2026-08-03) */
@@ -312,7 +343,10 @@ static bool send_one_photo(uint32_t file_id, uint32_t my_generation)
         resend_chunks(file_id, &nack);
 
         if (s_request_generation != my_generation) return false;
-        esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));  /* 재확인 요청 */
+        for (int i = 0; i < 3; i++) {
+            esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));  /* 재확인 요청 — 동일 이유로 3회 */
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
     }
     ESP_LOGI(TAG, "CKPT: NACK 라운드 소진");
     return true;  /* 라운드 소진 — 남은 판단은 Cntl 쪽 최종 타임아웃/에러 처리에 맡김 */

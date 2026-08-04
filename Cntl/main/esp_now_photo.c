@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char *TAG = "esp_now_photo";
 
@@ -356,7 +357,16 @@ static void handle_done(const uint8_t *data, int len)
                 if (!chunk_bitmap_test(idx)) nack.missing_idx[n++] = idx;
             }
             nack.missing_count = n;
-            esp_err_t err = esp_now_send(s_photo_cam_mac, (const uint8_t *)&nack, sizeof(nack));
+            /* META/DONE과 같은 이유로 NACK도 3번 반복 전송(2026-08-04) — 실기 로그로 확인:
+             * CAM이 청크 3개를 못 보내고 DONE까지 보냈는데, Cntl이 보낸 NACK을 CAM이
+             * 한 번도 못 받아("NACK 안 옴") CAM은 "다 받았다"고 오판하고 끝내버림. 채널이
+             * 붐빌 때 이 방향(Cntl->CAM) 전송도 똑같이 유실될 수 있다는 뜻 — 단발성 전송은
+             * 이 프로토콜에서 전부 신뢰할 수 없다는 걸 재확인 */
+            esp_err_t err = ESP_FAIL;
+            for (int i = 0; i < 3; i++) {
+                err = esp_now_send(s_photo_cam_mac, (const uint8_t *)&nack, sizeof(nack));
+                vTaskDelay(pdMS_TO_TICKS(5));
+            }
             ESP_LOGW(TAG, "청크 누락(%u/%u) — NACK 전송(%u개, 라운드 %d/%d): %s",
                      s_chunks_received, s_total_chunks, n, s_nack_rounds_used, PHOTO_NACK_MAX_ROUNDS,
                      esp_err_to_name(err));
