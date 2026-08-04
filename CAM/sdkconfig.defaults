@@ -7,6 +7,12 @@
 # ── Flash ────────────────────────────────────────────────────
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y   # 보드 실제 탑재 용량(2MB 기본값으론 storage 파티션이 안 들어감)
 
+# ── 콘솔(USB-Serial-JTAG) ───────────────────────────────────────
+# dev_console.c가 esp_console_new_repl_usb_serial_jtag()를 직접 쓰므로 primary 콘솔이
+# USB_SERIAL_JTAG여야 컴파일됨(Kconfig 기본값 UART_DEFAULT로는 헤더 가드에 걸려 빌드 실패).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
 # ── CPU 주파수 ────────────────────────────────────────────────
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y   # 160MHz → 240MHz
 
@@ -22,7 +28,7 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 # ── 카메라 센서/촬영 ───────────────────────────────────────────
 # 물려있는 센서에 맞춰 CAM_SENSOR_OV5640/OV3660 중 하나로(둘 다 XCLK/fb_count/기본 해상도가
 # 자동으로 갈림, main/Kconfig.projbuild 참고). 센서 바꾸면 이 값 바꾸고 재빌드/재플래시.
-CONFIG_CAM_SENSOR_OV5640=y
+CONFIG_CAM_SENSOR_OV3660=y
 CONFIG_CAM_CAPTURE_30M=y   # 운영 주기(30분) — 개발 중엔 CAM_CAPTURE_10S로 바꿔서 테스트
 
 # ── esp32-camera JPEG 프레임버퍼 ────────────────────────────────

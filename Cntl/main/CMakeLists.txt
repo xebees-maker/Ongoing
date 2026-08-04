@@ -3,35 +3,35 @@ idf_component_register(
         "main.c"
         "fs.c"
         "ui_font.c"
+        "ui_strings.c"
         "ui_main.c"
-        "ui_dashboard.c"
-        "ui_timer.c"
-        "ui_palette.c"
-        "ui_input.c"
-        "ui_screen.c"
-        "ui_nodes.c"
-        "ui_node_tabs.c"
+        "ui_log.c"
         "esp_now_hub.c"
-        "web_dashboard.c"
+        "esp_now_photo.c"
+        "rtc_sync.c"
+        "../components/waveshare_rgb_lcd_port.c"
     INCLUDE_DIRS
         "."
+        "../components"
     REQUIRES
         nvs_flash
-        freertos
-        log
-        bsp_ws_4_3b
-        lvgl
-        joltwallet__littlefs
-        esp_adc
-        esp_driver_gpio
-        esp_driver_usb_serial_jtag
-        battery_monitor
         esp_wifi
         esp_event
         esp_netif
-        esp_timer
-        esp_now_link
         esp_http_server
-        esp_rom
-)
+        esp_now_link
+        esp_timer
+        waveshare__pcf85063a
+    PRIV_REQUIRES
+        esp_new_jpeg)
 
+idf_build_get_property(build_components BUILD_COMPONENTS)
+if("lvgl" IN_LIST build_components)
+    idf_component_get_property(lvgl_lib lvgl COMPONENT_LIB)
+elseif("lvgl__lvgl" IN_LIST build_components)
+    idf_component_get_property(lvgl_lib lvgl__lvgl COMPONENT_LIB)
+endif()
+
+if(lvgl_lib)
+    target_compile_options(${lvgl_lib} PRIVATE -Wno-format)
+endif()

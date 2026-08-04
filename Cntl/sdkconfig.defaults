@@ -1,45 +1,46 @@
-# startup 프로젝트 sdkconfig 기본값
-# ESP32-S3 (Waveshare ESP32-S3-Touch-LCD-1.47) 기준
+CONFIG_IDF_TARGET="esp32s3"
 
-# ── Flash ────────────────────────────────────────────────────
-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y        # 실제 탑재 용량 16MB
-CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
-CONFIG_ESPTOOLPY_FLASHFREQ_80M=y          # 80MHz — 한글 폰트 C 파일 읽기 속도 향상
+# Cntl 통합 테스트 2단계: 커스텀 파티션 테이블(fonts LittleFS 파티션 포함), Cntl과 동일
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 
-# ── CPU 주파수 ────────────────────────────────────────────────
-CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y     # 160MHz → 240MHz (LVGL 렌더링 체감 향상)
-
-# ── PSRAM ────────────────────────────────────────────────────
+CONFIG_FREERTOS_HZ=1000
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
-CONFIG_ESP32S3_DATA_CACHE_64KB=y           # 데이터 캐시 64KB (기본 32KB → 2배) —
-                                            # 예전 이름이 CONFIG_..._SIZE_64KB로 오타나서
-                                            # 계속 무시되고 32KB/32B로 폴백되고 있었음(2026-07-30 확인)
-CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y       # 캐시 라인 64B(기본 32B) — 벤더 데모와 동일값,
-                                            # RGB 패널 드라이버의 캐시 sync 정렬과 관련
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_SPIRAM_MEMTEST=n
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+# Cntl 통합 테스트 3단계: TinyTTF 런타임 폰트 로드(NanumGothic)
+CONFIG_LV_USE_TINY_TTF=y
+CONFIG_LV_TINY_TTF_CACHE_GLYPH_CNT=128
+CONFIG_LV_TINY_TTF_CACHE_KERNING_CNT=256
 
-# ── FreeRTOS ─────────────────────────────────────────────────
-CONFIG_FREERTOS_HZ=1000
-CONFIG_FREERTOS_UNICORE=n                 # 듀얼코어 유지 (Core0: 앱, Core1: LVGL)
-
-# ── Log 레벨 ─────────────────────────────────────────────────
-# 개발 중: INFO / 릴리즈 시: WARN으로 변경
-CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-
-# ── 파티션 테이블 ─────────────────────────────────────────────
-CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-
-# ── LVGL ─────────────────────────────────────────────────────
-CONFIG_LV_CONF_SKIP=y
+CONFIG_LV_OS_FREERTOS=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_DEF_REFR_PERIOD=15
+CONFIG_LV_OBJ_STYLE_CACHE=y
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
 CONFIG_LV_COLOR_DEPTH_16=y
-CONFIG_LV_OS_FREERTOS=y            # 기본 LV_OS_NONE 대신 — 벤더 데모와 동일, 드로우
-                                    # 유닛 2개 이상 쓰려면 OS 지원 필수(컴파일 에러로 확인)
-CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2  # 벤더 데모와 동일(기본 1) — 소프트웨어 렌더 스레드 2개
+CONFIG_LV_USE_DEMO_WIDGETS=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
-CONFIG_LV_USE_FONT_PLACEHOLDER=y  # binfont 로드 실패 시 대체 폰트
-CONFIG_LV_USE_BINFONT=y           # LittleFS bin 폰트 로드 활성화
-CONFIG_LV_USE_FS_POSIX=y          # POSIX 파일시스템 드라이버 (VFS → LittleFS)
-CONFIG_LV_USE_FS_MEMFS=y          # lv_binfont_create_from_buffer() 활성화
+CONFIG_LV_FONT_MONTSERRAT_24=y
+# CONFIG_LV_MEM_CUSTOM is not set
+# CONFIG_LV_USE_FONT_COMPRESSED is not set
+# CONFIG_LV_USE_IMGFONT is not set
+# CONFIG_LV_COLOR_SCREEN_TRANSP is not set
+# CONFIG_LV_USE_LOG is not set
+# CONFIG_LV_LOG_PRINTF is not set
+# CONFIG_LV_USE_PERF_MONITOR is not set
+# CONFIG_LV_USE_DEMO_BENCHMARK is not set
+# CONFIG_LV_USE_DEMO_STRESS is not set
+# CONFIG_LV_USE_DEMO_MUSIC is not set
+# CONFIG_LV_DEMO_MUSIC_AUTO_PLAY is not set

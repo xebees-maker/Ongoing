@@ -1,20 +1,19 @@
-## startup 프로젝트 의존성
-## ESP-IDF v6.0.1 기준
-
 dependencies:
   idf:
-    version: ">=6.0.0"
+    version: ">=5.5.0"
 
-  espressif/esp_lvgl_port:
-    version: ">=2.7.0"
-  espressif/esp_lcd_touch:
-    version: ">=1.1.0"
-  espressif/esp_lcd_st77916:
-    version: ">=2.0.2"
-  espressif/esp_lcd_touch_gt911:
-    version: ">=1.1.0"
+  lvgl/lvgl:
+    version: "^9"
+    public: true
+
   espressif/esp_lvgl_adapter:
-    version: "^0.6.3"
+    version: "^0.5.2"
+
+  espressif/esp_lcd_touch_gt911:
+    version: "^1"
 
   joltwallet/littlefs:
     version: ">=1.22.1"
+
+  waveshare/pcf85063a:
+    version: "^2.0.0"
