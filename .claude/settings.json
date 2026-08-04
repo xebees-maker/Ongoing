@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "PowerShell(git *)",
+      "Read",
+      "Edit(Docs/handoff_*.md)",
+      "Edit(Docs/한일_*.txt)",
+      "Write(Docs/handoff_*.md)",
+      "Write(Docs/한일_*.txt)",
+      "Write(Docs/claude_memory_*.zip)",
+      "PowerShell(Compress-Archive*)",
+      "Edit(C:\\Users\\xebee\\.claude\\projects\\C--Projects-Ongoing\\memory\\**)",
+      "Write(C:\\Users\\xebee\\.claude\\projects\\C--Projects-Ongoing\\memory\\**)"
+    ]
+  }
+}

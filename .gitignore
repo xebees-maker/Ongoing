@@ -18,8 +18,9 @@ dependencies.lock
 __pycache__/
 *.pyc
 
-# Claude Code memory (local only)
-.claude/
+# Claude Code memory (local only) — settings.json is the exception, it travels with git
+.claude/*
+!.claude/settings.json
 
 # Build/flash logs
 build_log.txt
