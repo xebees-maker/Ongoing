@@ -147,6 +147,17 @@ static bool camera_capture_one(cam_capture_kind_t kind)
 {
     xSemaphoreTake(s_capture_mutex, portMAX_DELAY);
 
+    /* DMA 프레임 버퍼 슬롯(fb_count개)은 esp_camera_fb_get()+fb_return()으로 소비해야만
+     * ISR이 새로 채운다 — 촬영 사이 유휴 시간엔 아무도 안 비우므로 부팅 시점(또는 그
+     * 이전 촬영 처리 중)에 찍힌 오래된 프레임이 큐에 그대로 멈춰있다가 나옴. fb_count=2면
+     * 정확히 "요청 2번 전" 프레임이 나오는 게 실기로 확인됨(2026-08-05, 1/2/3/4 숫자
+     * 화면으로 재현) — 진짜로 저장할 프레임을 받기 전에 큐를 fb_count개만큼 미리
+     * 비워서 신선하게 만듦 */
+    for (int i = 0; i < CAM_VIDEO_FB_COUNT; i++) {
+        camera_fb_t *stale = esp_camera_fb_get();
+        if (stale) esp_camera_fb_return(stale);
+    }
+
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
         ESP_LOGW(TAG, "esp_camera_fb_get 실패");
