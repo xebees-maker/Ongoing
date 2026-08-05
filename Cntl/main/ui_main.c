@@ -69,9 +69,18 @@ static lv_obj_t          *s_photo_image         = NULL;  /* s_photo_box 안의 l
 static esp_now_hub_node_t s_dash_nodes[ESP_NOW_HUB_MAX_NODES];
 static esp_now_hub_node_t s_dash_nodes_prev[ESP_NOW_HUB_MAX_NODES];
 static int                s_dash_count_prev = -1;  /* -1: 아직 비교 대상 없음(첫 실행은 항상 그림) */
-static uint8_t            s_paired_cam_mac[6];
-static bool               s_has_paired_cam = false;  /* 지금촬영 버튼이 쏠 대상 */
-static bool                s_camera_was_connected = false;  /* 연결 끊김 "순간" 감지용(edge trigger) */
+static uint8_t            s_selected_cam_mac[6];
+static bool               s_has_selected_cam = false;  /* 지금촬영/목록/삭제 등이 쏠 대상 —
+                                                            이제 "자동으로 찾은 유일한 CAM"이
+                                                            아니라 "드롭다운에서 선택된 CAM"
+                                                            (2026-08-05, 여러 CAM 동시 페어링
+                                                            지원) */
+
+/* CAM 선택 드롭다운(camera_toolbar 맨 앞) — 이 앱 첫 lv_dropdown 사용. 옵션 문자열의 각
+ * 줄(인덱스)이 어느 mac인지는 LVGL이 몰라서 별도로 같이 들고 있어야 함 */
+static lv_obj_t          *s_camera_select_dd = NULL;
+static uint8_t            s_cam_dd_macs[ESP_NOW_HUB_MAX_NODES][6];
+static int                s_cam_dd_count = 0;
 
 /* 대시보드 썸네일(판넬) 디코드 버퍼 — 목표 해상도가 고정(320x240)이라 매번 free+새로
  * alloc 하지 않고 ui_init()에서 한 번만 잡아서 계속 재사용, 내용만 덮어쓰고 LVGL 이미지
@@ -581,7 +590,7 @@ static void reconcile_selection(lv_obj_t *row, bool show_popup)
     s_synced_file_id = s_selected_file_id;
     s_has_synced_file_id = true;
 
-    if (!s_has_paired_cam) return;
+    if (!s_has_selected_cam) return;
 
     ui_log_add("SELECT file_id=%u", (unsigned)s_selected_file_id);
 
@@ -594,7 +603,7 @@ static void reconcile_selection(lv_obj_t *row, bool show_popup)
      * (2026-08-05, 선택-도착 불일치 버그 수정) */
     consume_ready_photo_if_current();
 
-    esp_now_photo_fetch_by_id(s_paired_cam_mac, s_selected_file_id);
+    esp_now_photo_fetch_by_id(s_selected_cam_mac, s_selected_file_id);
     if (show_popup) show_fetch_progress_popup();
 }
 
@@ -611,9 +620,9 @@ static void cb_photo_row_select(lv_event_t *e)
 static void cb_photo_delete_confirm(void *ctx)
 {
     uint32_t file_id = (uint32_t)(uintptr_t)ctx;
-    if (s_has_paired_cam) {
-        esp_now_photo_delete(s_paired_cam_mac, file_id);
-        esp_now_photo_list_request(s_paired_cam_mac);  /* 삭제 반영된 목록으로 갱신 */
+    if (s_has_selected_cam) {
+        esp_now_photo_delete(s_selected_cam_mac, file_id);
+        esp_now_photo_list_request(s_selected_cam_mac);  /* 삭제 반영된 목록으로 갱신 */
     }
 }
 
@@ -628,7 +637,7 @@ static void cb_photo_delete_btn(lv_event_t *e)
     show_photo_delete_confirm(file_id);
 }
 
-/* 목록 제목 옆 "N개 XX%" / "N Pic. XX%" 라벨 — 언어 전환 시(refresh_lang_texts)와
+/* 목록 제목 옆 "N개 XX%" / "N Pics XX%" 라벨 — 언어 전환 시(refresh_lang_texts)와
  * 목록 갱신 시(refresh_photo_list_ui) 둘 다에서 다시 그려야 해서 분리(2026-08-04).
  * "개(Pic.)" 표기는 괄호 안이 영문 모드일 때만 쓰는 표기라는 뜻이었음(사용자 정정:
  * 한글모드="N개", 영문모드="N Pic.", 둘 다 같이 보이면 안 됨) */
@@ -640,9 +649,9 @@ static void update_list_info_label(void)
     char info_buf[32];
     if (sd_total_kb > 0) {
         unsigned pct = (unsigned)((uint64_t)sd_used_kb * 100 / sd_total_kb);
-        snprintf(info_buf, sizeof(info_buf), en ? "%d Pic.  %u%%" : "%d개  %u%%", s_current_list_count, pct);
+        snprintf(info_buf, sizeof(info_buf), en ? "%d Pics  %u%%" : "%d개  %u%%", s_current_list_count, pct);
     } else {
-        snprintf(info_buf, sizeof(info_buf), en ? "%d Pic." : "%d개", s_current_list_count);
+        snprintf(info_buf, sizeof(info_buf), en ? "%d Pics" : "%d개", s_current_list_count);
     }
     lv_label_set_text(s_list_info_label, info_buf);
 }
@@ -737,7 +746,7 @@ static void refresh_photo_list_ui(int select_index)
  * 요청은 한 번만 보내면 되고 tick은 매 폴링(200ms/1s)마다 불러 도착 여부만 확인하기 때문. */
 static void request_photo_list_sync(void)
 {
-    esp_now_photo_list_request(s_paired_cam_mac);
+    esp_now_photo_list_request(s_selected_cam_mac);
 }
 
 /* READY 도착 시 select_index 행을 선택 표시하며 UI 갱신하고 true 반환(호출부가 다음
@@ -896,8 +905,8 @@ static void consume_ready_photo_if_current(void)
     ui_log_add_err(UI_ERR_PHOTO_SELECTION_STALE,
                     "도착 file_id=%u != 선택 file_id=%u — 무시하고 재요청",
                     (unsigned)ready_id, (unsigned)s_selected_file_id);
-    if (s_has_paired_cam && s_has_selected_file_id) {
-        esp_now_photo_fetch_by_id(s_paired_cam_mac, s_selected_file_id);
+    if (s_has_selected_cam && s_has_selected_file_id) {
+        esp_now_photo_fetch_by_id(s_selected_cam_mac, s_selected_file_id);
     }
 }
 
@@ -1088,9 +1097,9 @@ static void show_capture_popup(void)
 static void cb_capture_now(lv_event_t *e)
 {
     (void)e;
-    if (!s_has_paired_cam) return;
+    if (!s_has_selected_cam) return;
     show_capture_popup();
-    esp_now_photo_capture_now(s_paired_cam_mac);
+    esp_now_photo_capture_now(s_selected_cam_mac);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -1197,8 +1206,8 @@ static bool renew_list_tick_fn(lv_obj_t *box)
 static void cb_renew_list(lv_event_t *e)
 {
     (void)e;
-    if (!s_has_paired_cam) return;
-    esp_now_photo_list_request(s_paired_cam_mac);
+    if (!s_has_selected_cam) return;
+    esp_now_photo_list_request(s_selected_cam_mac);
 
     s_renew_list_start_ms = lv_tick_get();
     lv_obj_t *box = show_progress_popup(renew_list_tick_fn);
@@ -1274,7 +1283,7 @@ static bool delete_all_tick_fn(lv_obj_t *box)
 static void cb_delete_all_confirmed(void *ctx)
 {
     (void)ctx;
-    esp_now_photo_delete_all(s_paired_cam_mac);
+    esp_now_photo_delete_all(s_selected_cam_mac);
 
     s_delete_all_stage = DELETE_ALL_STAGE_WAIT_ACK;
     s_delete_all_stage_start_ms = lv_tick_get();
@@ -1292,7 +1301,7 @@ static void cb_delete_all_confirmed(void *ctx)
 static void cb_delete_all(lv_event_t *e)
 {
     (void)e;
-    if (!s_has_paired_cam) return;
+    if (!s_has_selected_cam) return;
     show_confirm_popup(ui_str(STR_MSG_DELETE_ALL_CONFIRM), cb_delete_all_confirmed, NULL);
 }
 
@@ -1323,6 +1332,52 @@ static void reset_camera_ui_state(void)
         lv_obj_set_style_text_font(s_camera_photo_label, ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_set_style_text_color(s_camera_photo_label, lv_palette_main(LV_PALETTE_GREY), 0);
     }
+}
+
+/* CAM 선택 적용 — 드롭다운 수동 탭(cb_camera_select_changed)과 refresh_dashboard의 자동 폴백
+ * (선택된 CAM이 언페어되거나 처음 페어링될 때) 둘 다 이 함수 하나로 수렴시켜서 동작을
+ * 일관되게 함(2026-08-05). mac이 지금 선택과 같으면 아무것도 안 함(불필요한 재요청/화면
+ * 깜빡임 방지) — 실제로 바뀔 때만 옛 CAM의 목록/미리보기를 비우고(reset_camera_ui_state,
+ * 원래 "연결 끊길 때"만 쓰던 함수를 재사용 — 의미가 정확히 들어맞음: 어느 쪽이든 지금
+ * 화면에 있는 목록/사진이 더 이상 유효하지 않다는 뜻) 새 CAM 목록을 자동으로 가져옴 */
+static void select_camera(const uint8_t *mac)
+{
+    if (s_has_selected_cam && memcmp(s_selected_cam_mac, mac, 6) == 0) return;
+    memcpy(s_selected_cam_mac, mac, 6);
+    s_has_selected_cam = true;
+    reset_camera_ui_state();
+    esp_now_photo_list_request(s_selected_cam_mac);
+}
+
+static void cb_camera_select_changed(lv_event_t *e)
+{
+    lv_obj_t *dd = (lv_obj_t *)lv_event_get_target(e);
+    uint16_t idx = lv_dropdown_get_selected(dd);
+    if (idx < (uint16_t)s_cam_dd_count) select_camera(s_cam_dd_macs[idx]);
+}
+
+/* 페어링된 CAM 이름 목록이 실제로 바뀌었을 때만 드롭다운 옵션을 다시 그림 — 매초 무조건
+ * 다시 그리면 사용자가 마침 드롭다운을 열어보고 있을 때 깜빡이거나 닫혀버림. 옵션 문자열과
+ * 동시에 s_cam_dd_macs(인덱스->mac 매핑)도 같이 갱신 */
+static void rebuild_camera_dropdown_if_changed(const esp_now_hub_node_t *nodes, const uint8_t macs[][6], int count)
+{
+    char options[ESP_NOW_HUB_MAX_NODES * (ESP_NOW_LINK_NAME_LEN + 1)];
+    size_t off = 0;
+    for (int i = 0; i < count; i++) {
+        int n = snprintf(options + off, sizeof(options) - off, "%s%s",
+                          i > 0 ? "\n" : "", nodes[i].name);
+        if (n < 0 || (size_t)n >= sizeof(options) - off) break;
+        off += (size_t)n;
+    }
+    options[off] = '\0';
+
+    static char s_prev_options[sizeof(options)] = "";
+    if (strcmp(options, s_prev_options) == 0) return;
+    strcpy(s_prev_options, options);
+
+    lv_dropdown_set_options(s_camera_select_dd, count > 0 ? options : "");
+    s_cam_dd_count = count;
+    for (int i = 0; i < count; i++) memcpy(s_cam_dd_macs[i], macs[i], 6);
 }
 
 static void refresh_dashboard(lv_timer_t *t)
@@ -1377,21 +1432,38 @@ static void refresh_dashboard(lv_timer_t *t)
         lv_obj_add_flag(s_sensor_todo, LV_OBJ_FLAG_HIDDEN);
     }
 
-    /* 판넬3: 카메라 — 연결된 CAM 있으면 사진+촬영버튼 틀, 없으면 없음 라벨.
-     * 지금촬영 버튼이 쏠 대상 mac도 여기서 같이 기억해둠 */
-    bool camera_connected = false;
+    /* 판넬3: 카메라 — 페어링된 CAM을 전부 모아 드롭다운을 채우고, 지금 선택된 CAM이 여전히
+     * 그 안에 있으면 유지·아니면 첫 번째로 자동 폴백(2026-08-05, 여러 CAM 동시 페어링 지원
+     * — select_camera()/rebuild_camera_dropdown_if_changed() 참고, 위 함수 설명 참고) */
+    esp_now_hub_node_t cam_nodes[ESP_NOW_HUB_MAX_NODES];
+    uint8_t            cam_macs[ESP_NOW_HUB_MAX_NODES][6];
+    int cam_count = 0;
     for (int i = 0; i < total; i++) {
         if (s_dash_nodes[i].paired && s_dash_nodes[i].kind == HUB_NODE_KIND_CAM) {
-            camera_connected = true;
-            memcpy(s_paired_cam_mac, s_dash_nodes[i].mac, sizeof(s_paired_cam_mac));
-            break;
+            cam_nodes[cam_count] = s_dash_nodes[i];
+            memcpy(cam_macs[cam_count], s_dash_nodes[i].mac, 6);
+            cam_count++;
         }
     }
-    if (s_camera_was_connected && !camera_connected) {
-        reset_camera_ui_state();  /* 연결이 끊기는 그 순간에만(딱 한 번) 비움 */
+    rebuild_camera_dropdown_if_changed(cam_nodes, cam_macs, cam_count);
+
+    bool camera_connected = (cam_count > 0);
+    if (camera_connected) {
+        int  selected_idx = 0;
+        bool still_valid  = false;
+        for (int i = 0; i < cam_count; i++) {
+            if (s_has_selected_cam && memcmp(cam_macs[i], s_selected_cam_mac, 6) == 0) {
+                still_valid  = true;
+                selected_idx = i;
+                break;
+            }
+        }
+        select_camera(still_valid ? cam_macs[selected_idx] : cam_macs[0]);
+        lv_dropdown_set_selected(s_camera_select_dd, (uint16_t)(still_valid ? selected_idx : 0));
+    } else if (s_has_selected_cam) {
+        s_has_selected_cam = false;
+        reset_camera_ui_state();
     }
-    s_camera_was_connected = camera_connected;
-    s_has_paired_cam = camera_connected;
     if (camera_connected) {
         lv_obj_add_flag(s_camera_empty, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
@@ -1485,56 +1557,6 @@ static void cb_restart_btn(lv_event_t *e)
 {
     (void)e;
     show_confirm_popup("정말 재시작하시겠습니까?", cb_restart_confirmed, NULL);
-}
-
-/* 처리량 벤치마크 트리거(2026-08-04, 임시 개발용 버튼) — esp_now_reliable 설계 전 기준치
- * 실측용, 결과는 UI가 아니라 CNTL/CAM 양쪽 시리얼 로그로만 확인(esp_now_hub.c 참고).
- * 신뢰성 레이어 작업이 끝나면 이 버튼은 제거 예정 */
-#define BENCH_DURATION_SEC (30 * 60)  /* 사용자 지시(2026-08-04): 1시간 -> 30분 */
-
-static lv_obj_t  *s_bench_btn      = NULL;
-static lv_obj_t  *s_bench_btn_lbl  = NULL;
-static lv_timer_t *s_bench_countdown_timer = NULL;
-static int        s_bench_remaining_min    = 0;
-
-static void cb_bench_countdown_tick(lv_timer_t *timer)
-{
-    (void)timer;
-    s_bench_remaining_min--;
-    if (s_bench_remaining_min <= 0) {
-        lv_label_set_text(s_bench_btn_lbl, "시작");
-        lv_obj_clear_state(s_bench_btn, LV_STATE_DISABLED);
-        lv_obj_remove_style(s_bench_btn, NULL, LV_PART_MAIN);  /* 회색 오버라이드 제거 —
-                                                                    테마 기본 버튼색으로 복귀 */
-        lv_timer_delete(s_bench_countdown_timer);
-        s_bench_countdown_timer = NULL;
-        return;
-    }
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%d분 남음", s_bench_remaining_min);
-    lv_label_set_text(s_bench_btn_lbl, buf);
-}
-
-static void cb_bench_btn(lv_event_t *e)
-{
-    (void)e;
-    ui_log_add("BENCH: %d분 벤치마크 트리거 전송", BENCH_DURATION_SEC / 60);
-    esp_now_hub_bench_start(BENCH_DURATION_SEC);
-
-    /* 버튼 반응이 눈에 안 보인다는 사용자 지적(2026-08-04) — 로그창 문구만으론 눌렸는지
-     * 구분이 안 간다고 해서, 누르면 즉시 회색으로 바꾸고 비활성화(중복 클릭도 같이 방지 —
-     * 긴 시간짜리라 두 번 누르면 두 번 연달아 도는 문제가 있었음, 실기로 확인). 1분마다
-     * 남은 시간을 라벨에 갱신 — 역시 사용자 지시 */
-    if (s_bench_btn && s_bench_btn_lbl) {
-        lv_obj_add_state(s_bench_btn, LV_STATE_DISABLED);
-        lv_obj_set_style_bg_color(s_bench_btn, lv_palette_main(LV_PALETTE_GREY), 0);
-        s_bench_remaining_min = BENCH_DURATION_SEC / 60;
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d분 남음", s_bench_remaining_min);
-        lv_label_set_text(s_bench_btn_lbl, buf);
-        if (s_bench_countdown_timer) lv_timer_delete(s_bench_countdown_timer);
-        s_bench_countdown_timer = lv_timer_create(cb_bench_countdown_tick, 60000, NULL);
-    }
 }
 
 /* 페이지콘트롤 — 페이지탭 3개(상황판/통계/설정). 로고 + 상황판/통계 탭 내용(원래 데모의
@@ -1648,24 +1670,44 @@ void ui_init(void)
     lv_obj_t *camera_toolbar = lv_obj_create(camera_box);
     lv_obj_set_size(camera_toolbar, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(camera_toolbar, LV_FLEX_FLOW_ROW);
+    /* 드롭다운은 맨 왼쪽 고정, 나머지 버튼들은 한 덩어리로 맨 오른쪽에 붙임(2026-08-05,
+     * 사용자 지시) — SPACE_BETWEEN을 camera_toolbar 직계 자식 2개(드롭다운, 버튼 묶음
+     * camera_btn_group)에만 걸어서 그 사이만 벌어지게 함(자식이 4개면 전부 균등하게
+     * 벌어져서 버튼들끼리도 떨어져 보였을 것) */
+    lv_obj_set_flex_align(camera_toolbar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(camera_toolbar, 0, 0);
     lv_obj_set_style_pad_all(camera_toolbar, 0, 0);
     lv_obj_add_flag(camera_toolbar, LV_OBJ_FLAG_HIDDEN);  /* 초기값: 연결 전이라 숨김 */
     s_camera_content = camera_toolbar;  /* HIDDEN 토글 대상 1/2 — split_row가 2/2 */
 
-    lv_obj_t *btn_capture = lv_button_create(camera_toolbar);
+    /* CAM 선택 드롭다운(2026-08-05) — camera_toolbar 전체가 이미 미연결 시 숨겨지므로,
+     * "CAM 1대뿐이어도 항상 표시"는 자동으로 충족됨(0대일 때만 안 보임, 그건 카메라 판넬
+     * 자체가 "없음" 문구로 바뀌는 기존 동작과 동일선상이라 문제 없음 — 사용자 확인).
+     * 옵션/매핑은 refresh_dashboard -> rebuild_camera_dropdown_if_changed가 채움.
+     * 기본 폭(LV_DPI_DEF=130px)이 좁아 보인다는 지적 — 50px 더 키움 */
+    s_camera_select_dd = lv_dropdown_create(camera_toolbar);
+    lv_obj_set_width(s_camera_select_dd, LV_DPI_DEF + 50);
+    lv_obj_add_event_cb(s_camera_select_dd, cb_camera_select_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *camera_btn_group = lv_obj_create(camera_toolbar);
+    lv_obj_set_size(camera_btn_group, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(camera_btn_group, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_border_width(camera_btn_group, 0, 0);
+    lv_obj_set_style_pad_all(camera_btn_group, 0, 0);
+
+    lv_obj_t *btn_capture = lv_button_create(camera_btn_group);
     lv_obj_add_event_cb(btn_capture, cb_capture_now, LV_EVENT_CLICKED, NULL);
     s_camera_capture_lbl = lv_label_create(btn_capture);
     lv_label_set_text(s_camera_capture_lbl, ui_str(STR_BTN_CAPTURE_NOW));
     lv_obj_set_style_text_font(s_camera_capture_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    lv_obj_t *btn_renew = lv_button_create(camera_toolbar);
+    lv_obj_t *btn_renew = lv_button_create(camera_btn_group);
     lv_obj_add_event_cb(btn_renew, cb_renew_list, LV_EVENT_CLICKED, NULL);
     s_camera_renew_lbl = lv_label_create(btn_renew);
     lv_label_set_text(s_camera_renew_lbl, ui_str(STR_BTN_RENEW_LIST));
     lv_obj_set_style_text_font(s_camera_renew_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    lv_obj_t *btn_delete_all = lv_button_create(camera_toolbar);
+    lv_obj_t *btn_delete_all = lv_button_create(camera_btn_group);
     lv_obj_add_event_cb(btn_delete_all, cb_delete_all, LV_EVENT_CLICKED, NULL);
     s_camera_delete_all_lbl = lv_label_create(btn_delete_all);
     lv_label_set_text(s_camera_delete_all_lbl, ui_str(STR_BTN_DELETE_ALL));
@@ -1681,9 +1723,23 @@ void ui_init(void)
 
     lv_obj_t *list_panel = lv_obj_create(s_camera_split_row);
     /* 45/55 -> 55/45로 재배분(2026-08-01, 사용자 지시: 목록 폭은 넓히고, 미리보기
-     * 판넬은 실제 판넬 디코드 해상도(320x240)에 맞춰 줄임 — 아래 s_photo_box 참고) */
-    lv_obj_set_size(list_panel, LV_PCT(55), LV_SIZE_CONTENT);
+     * 판넬은 실제 판넬 디코드 해상도(320x240)에 맞춰 줄임 — 아래 s_photo_box 참고).
+     * 2026-08-05 — 고정 55%는 picture_panel이 320px 고정폭일 때만 우연히 맞는 값이라
+     * 화면 크기/여백이 조금만 달라져도 어긋남(실기에서 320px 박스가 picture_panel 밖으로
+     * 삐져나가 패닝해야 다 보이는 문제로 확인). flex_grow로 바꿔서 picture_panel이
+     * 실제로 차지한 폭(아래 참고, 이제 내용물 크기로 결정됨)을 뺀 나머지를 자동으로
+     * 채우게 함 — 퍼센트 계산에 안 의존 */
+    lv_obj_set_size(list_panel, 0, LV_SIZE_CONTENT);  /* 폭 0=flex_grow가 결정(관례상 표기),
+                                                          높이는 원래대로 내용물 크기 —
+                                                          폭만 lv_obj_set_width로 바꾸면서
+                                                          높이 지정이 빠져 패널이 작아졌던
+                                                          실수 수정(2026-08-05) */
+    lv_obj_set_flex_grow(list_panel, 1);
     lv_obj_set_flex_flow(list_panel, LV_FLEX_FLOW_COLUMN);
+    /* 기본 테마 패딩(이 화면 DPI/해상도 조합에서 LVGL DISP_LARGE 버킷의 PAD_DEF=20px,
+     * LV_DPX_CALC(130,24)로 확인)이 목록 컨트롤 폭을 그만큼 깎아먹고 있었음 — 절반(10px)로
+     * 줄여서 목록 폭 확보(2026-08-05, 사용자 지시) */
+    lv_obj_set_style_pad_all(list_panel, 10, 0);
 
     /* 제목 + 사진개수/SD사용량(오른쪽 정렬) — 2026-08-01, 사용자 지시 */
     lv_obj_t *list_title_row = lv_obj_create(list_panel);
@@ -1708,8 +1764,18 @@ void ui_init(void)
     lv_obj_set_style_pad_row(s_photo_list, 2, 0);  /* 행 사이 최소 간격만 유지 */
 
     lv_obj_t *picture_panel = lv_obj_create(s_camera_split_row);
-    lv_obj_set_size(picture_panel, LV_PCT(45), LV_SIZE_CONTENT);
+    /* 2026-08-05 — 퍼센트 폭(45%) 대신 내용물(s_photo_box, 320x240 고정) 크기에 맞춰
+     * 자동으로 정해지도록 변경 — 위 list_panel 주석 참고. 이러면 사진 템플릿이 잘리거나
+     * 패닝해야 보이는 일 자체가 구조적으로 없어짐(패널이 항상 템플릿 크기 이상이 됨) */
+    lv_obj_set_size(picture_panel, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    /* 기본 테마 패딩 절반으로(list_panel과 동일 이유) — content-size라서 이 패딩만큼
+     * picture_panel의 총 폭도 줄어들어, list_panel(flex_grow)이 그만큼 더 넓어짐
+     * (2026-08-05, 사용자 지시) */
+    lv_obj_set_style_pad_all(picture_panel, 10, 0);
     lv_obj_set_flex_flow(picture_panel, LV_FLEX_FLOW_COLUMN);
+    /* cross_place는 기본값(START/좌측)을 그대로 둠 — "미리보기" 제목 라벨은 원래 좌정렬이었고
+     * (사용자 지적, 2026-08-05), s_photo_box는 이제 패널 폭 자체가 320px에 맞춰지므로 정렬과
+     * 무관하게 항상 꽉 참 */
     s_picture_title = lv_label_create(picture_panel);
     lv_label_set_text(s_picture_title, ui_str(STR_PANEL_PICTURE));
     lv_obj_set_style_text_font(s_picture_title, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -1723,7 +1789,11 @@ void ui_init(void)
     s_photo_box = lv_obj_create(picture_panel);
     lv_obj_set_size(s_photo_box, PHOTO_PANEL_DECODE_W, PHOTO_PANEL_DECODE_H);
     lv_obj_set_style_bg_color(s_photo_box, lv_palette_lighten(LV_PALETTE_GREY, 3), 0);
-    lv_obj_set_style_radius(s_photo_box, 12, 0);
+    /* 2026-08-05, 사용자 지시 — 라운드/기본 테마 패딩을 없애서 사진이 320x240에 여백 없이
+     * 꽉 차게 함(그 전엔 이 안쪽 패딩 때문에 사진이 실제보다 작게, 여백을 두고 표시됐음).
+     * 사진 없을 때 플레이스홀더 느낌을 위해 얇은 보더는 유지 */
+    lv_obj_set_style_radius(s_photo_box, 0, 0);
+    lv_obj_set_style_pad_all(s_photo_box, 0, 0);
     lv_obj_set_style_border_width(s_photo_box, 1, 0);
     lv_obj_set_style_border_color(s_photo_box, lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_set_flex_flow(s_photo_box, LV_FLEX_FLOW_COLUMN);
@@ -1821,25 +1891,6 @@ void ui_init(void)
     lv_obj_t *restart_btn_lbl = lv_label_create(restart_btn);
     lv_label_set_text(restart_btn_lbl, "재시작");
     lv_obj_set_style_text_font(restart_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    /* 처리량 벤치마크 버튼(2026-08-04, 임시 개발용) — 위 cb_bench_btn 주석 참고 */
-    lv_obj_t *bench_row = lv_obj_create(cntl_list);
-    lv_obj_set_size(bench_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(bench_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(bench_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(bench_row, 0, 0);
-    lv_obj_set_style_pad_hor(bench_row, 12, 0);
-    lv_obj_set_style_pad_ver(bench_row, 20, 0);
-
-    lv_obj_t *bench_label = lv_label_create(bench_row);
-    lv_label_set_text(bench_label, "처리량 벤치마크(30분)");
-    lv_obj_set_style_text_font(bench_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    s_bench_btn = lv_button_create(bench_row);
-    lv_obj_add_event_cb(s_bench_btn, cb_bench_btn, LV_EVENT_CLICKED, NULL);
-    s_bench_btn_lbl = lv_label_create(s_bench_btn);
-    lv_label_set_text(s_bench_btn_lbl, "시작");
-    lv_obj_set_style_text_font(s_bench_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     create_group_box(option_page, STR_GROUP_SENSOR);
 
