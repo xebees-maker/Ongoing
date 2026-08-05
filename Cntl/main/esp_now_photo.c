@@ -275,7 +275,7 @@ void esp_now_photo_fetch_by_id(const uint8_t *cam_mac, uint32_t file_id)
     start_single_receive(cam_mac, PHOTO_REQUEST_MODE_BY_ID, file_id);
 }
 
-static void handle_meta(const uint8_t *data, int len)
+static void handle_meta(const uint8_t *src_mac, const uint8_t *data, int len)
 {
     if (len < (int)sizeof(esp_now_photo_meta_t)) return;
     const esp_now_photo_meta_t *meta = (const esp_now_photo_meta_t *)data;
@@ -307,6 +307,14 @@ static void handle_meta(const uint8_t *data, int len)
     chunk_bitmap_clear();
     s_nack_rounds_used = 0;
     s_state            = ESP_NOW_PHOTO_STATE_RECEIVING;
+    /* 응답(WINDOW_STATUS_ACK/DONE_ACK) 보낼 대상을 실제 발신자 MAC으로 갱신(2026-08-05,
+     * Selective Repeat 벤치마크로 발견) — 원래는 start_single_receive()가 Cntl이 먼저
+     * PHOTO_REQUEST를 보낼 때 미리 채워뒀는데, XFER_BENCH 모드는 CAM이 요청 없이 먼저
+     * 밀어서(META부터 시작) s_photo_cam_mac이 한 번도 안 채워진 채로 남아있었음(초기값
+     * 전부 0) — esp_now_send(0-MAC, ...)이 ESP_ERR_ESPNOW_NOT_FOUND로 항상 실패해서 응답이
+     * CAM에 전혀 안 갔던 게 원인. META를 실제로 누가 보냈는지가 항상 진짜 정답이므로
+     * 여기서 갱신하는 게 요청 경로 여부와 무관하게 맞음 */
+    if (src_mac) memcpy(s_photo_cam_mac, src_mac, sizeof(s_photo_cam_mac));
     xSemaphoreGive(s_mutex);
 }
 
@@ -434,6 +442,36 @@ static void handle_done(const uint8_t *data, int len)
     send_done_ack(0, NULL);  /* 완료 통보(2026-08-05, Layer 1) — missing_count=0 */
     ESP_LOGI(TAG, "사진 수신 완료: file_id=%u, %u bytes", (unsigned)s_file_id, (unsigned)s_total_size);
     ui_log_add("READY file_id=%u %u bytes", (unsigned)s_file_id, (unsigned)s_total_size);
+}
+
+/* Selective Repeat 실험(2026-08-05) — handle_done()과 같은 원칙(모르는 거래엔 무응답, CAM의
+ * reliable_request 타임아웃/재시도에 맡김)이지만 훨씬 단순함: range 하나 안에서만 누락을
+ * 찾으면 되고(파일 전체를 매번 다시 스캔하지 않음), range_count가 SR_WINDOW_SIZE(CAM 쪽)
+ * 이하로 고정되니 missing_count가 400 상한을 넘을 일이 없음 — 새 구조체 대신
+ * esp_now_photo_chunk_nack_t를 msg_type만 바꿔 그대로 재사용(DONE_ACK와 동일 이유) */
+static void handle_window_status_request(const uint8_t *data, int len)
+{
+    if (len < (int)sizeof(esp_now_photo_window_status_req_t)) return;
+    const esp_now_photo_window_status_req_t *req = (const esp_now_photo_window_status_req_t *)data;
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool ok = (s_state == ESP_NOW_PHOTO_STATE_RECEIVING && req->file_id == s_file_id);
+    xSemaphoreGive(s_mutex);
+    if (!ok) return;
+
+    static esp_now_photo_chunk_nack_t ack;  /* static — 800B+ 구조체 스택 회피(기존 원칙) */
+    uint16_t end = req->range_start + req->range_count;
+    uint16_t n = 0;
+    for (uint16_t idx = req->range_start; idx < end && n < ESP_NOW_PHOTO_NACK_MAX_INDICES; idx++) {
+        if (!chunk_bitmap_test(idx)) ack.missing_idx[n++] = idx;
+    }
+    ack.version       = ESP_NOW_LINK_VERSION;
+    ack.msg_type      = ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK;
+    ack.file_id       = req->file_id;
+    ack.missing_count = n;
+    esp_err_t err = esp_now_send(s_photo_cam_mac, (const uint8_t *)&ack, sizeof(ack));
+    ESP_LOGI(TAG, "WINDOW_STATUS_ACK [%u,%u) 누락 %u개: %s",
+             req->range_start, end, n, esp_err_to_name(err));
 }
 
 esp_now_photo_state_t esp_now_photo_get_state(void)
@@ -785,7 +823,7 @@ void esp_now_photo_delete_all_clear(void)
 void esp_now_photo_on_recv(uint8_t msg_type, const uint8_t *src_mac, const uint8_t *data, int len)
 {
     switch (msg_type) {
-        case ESP_NOW_MSG_PHOTO_META:      handle_meta(data, len);           break;
+        case ESP_NOW_MSG_PHOTO_META:      handle_meta(src_mac, data, len);  break;
         case ESP_NOW_MSG_PHOTO_CHUNK:      handle_chunk(data, len);          break;
         case ESP_NOW_MSG_PHOTO_DONE:       handle_done(data, len);           break;
         case ESP_NOW_MSG_CAPTURE_STATUS:   handle_capture_status(src_mac, data, len); break;
@@ -793,6 +831,7 @@ void esp_now_photo_on_recv(uint8_t msg_type, const uint8_t *src_mac, const uint8
         case ESP_NOW_MSG_PHOTO_LIST_DONE:  handle_list_done(data, len);      break;
         case ESP_NOW_MSG_PHOTO_DELETE_ACK: handle_delete_ack(data, len);     break;
         case ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK: handle_delete_all_ack(data, len); break;
+        case ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST: handle_window_status_request(data, len); break;
         default: break;
     }
 }

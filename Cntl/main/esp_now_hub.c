@@ -294,7 +294,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     } else if (msg_type == ESP_NOW_MSG_PHOTO_META || msg_type == ESP_NOW_MSG_PHOTO_CHUNK ||
                msg_type == ESP_NOW_MSG_PHOTO_DONE || msg_type == ESP_NOW_MSG_CAPTURE_STATUS ||
                msg_type == ESP_NOW_MSG_PHOTO_LIST_ENTRY || msg_type == ESP_NOW_MSG_PHOTO_LIST_DONE ||
-               msg_type == ESP_NOW_MSG_PHOTO_DELETE_ACK || msg_type == ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK) {
+               msg_type == ESP_NOW_MSG_PHOTO_DELETE_ACK || msg_type == ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK ||
+               msg_type == ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST) {
         /* ESP-NOW는 recv_cb를 하나만 등록할 수 있어서, 사진 관련 프로토콜(전송/목록/삭제/
          * 지금촬영 진행상태) 처리는 전부 esp_now_photo.c로 넘김 */
         esp_now_photo_on_recv(msg_type, info ? info->src_addr : NULL, data, len);
@@ -483,7 +484,7 @@ void esp_now_hub_pair(const uint8_t *mac)
     ESP_LOGI(TAG, "PAIR_REQUEST -> %s 큐잉됨", name_copy);
 }
 
-void esp_now_hub_bench_start(uint16_t duration_sec)
+void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode)
 {
     uint8_t target_mac[6] = { 0 };
     bool found = false;
@@ -509,9 +510,10 @@ void esp_now_hub_bench_start(uint16_t duration_sec)
         .version      = ESP_NOW_LINK_VERSION,
         .msg_type     = ESP_NOW_MSG_BENCH_START,
         .duration_sec = duration_sec,
+        .mode         = mode,
     };
     esp_err_t err = esp_now_send(target_mac, (const uint8_t *)&msg, sizeof(msg));
-    ESP_LOGI(TAG, "BENCH_START(%u초) -> %s: %s", duration_sec, name_copy, esp_err_to_name(err));
+    ESP_LOGI(TAG, "BENCH_START(mode=%u, %u초) -> %s: %s", mode, duration_sec, name_copy, esp_err_to_name(err));
 }
 
 void esp_now_hub_unpair(const uint8_t *mac)

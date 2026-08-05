@@ -52,6 +52,8 @@ typedef struct {
     esp_now_photo_request_t  photo_req;  /* kind==CAM_TASK_REQ_PHOTO일 때만 유효 */
     uint32_t                 generation; /* kind==CAM_TASK_REQ_PHOTO일 때만 유효 — 아래 참고 */
     uint16_t                 bench_duration_sec; /* kind==CAM_TASK_REQ_BENCH일 때만 유효 */
+    uint8_t                  bench_mode;         /* kind==CAM_TASK_REQ_BENCH일 때만 유효 —
+                                                     esp_now_bench_mode_t(2026-08-05, SR 실험) */
 } cam_task_request_t;
 
 static QueueHandle_t s_photo_request_queue = NULL;
@@ -323,6 +325,141 @@ static bool send_one_photo(uint32_t file_id, uint32_t my_generation)
     return true;  /* 라운드 소진 — 남은 판단은 Cntl 쪽 최종 타임아웃/에러 처리에 맡김 */
 }
 
+/* Selective Repeat 실험(2026-08-05) — send_one_photo()는 그대로 두고 나란히 추가(A/B 비교가
+ * 목적이라 기존 경로 보존 필수). 파일을 SR_WINDOW_SIZE개씩 윈도우로 나눠서, 윈도우 하나 다
+ * 보낼 때마다 그 범위 안에서 뭘 못 받았는지 물어보고(WINDOW_STATUS_REQUEST/ACK) 빠진 것만
+ * 즉시 메꾼 뒤 다음 윈도우로 넘어감 — send_one_photo()처럼 "끝까지 다 쏘고 한 번에 확인"
+ * 대신 전송 도중 계속 확인하는 게 차이점.
+ * resend_chunks()가 이미 "임의의 missing_idx[] 목록만 골라 보낸다"는 범용 함수라 그대로
+ * 재사용 — 윈도우의 "새로 보낼 청크들"도 그 인덱스 목록을 nack 구조체에 담아 넘기면 똑같이
+ * 처리됨(신규 전송이든 재전송이든 "이 인덱스들 보내"는 동일한 동작이라 재사용 의미가 정확함).
+ * 신뢰성 안전망(DONE/DONE_ACK/NACK라운드)은 기존과 완전히 동일하게 마지막에 유지 — 윈도우
+ * 도중 놓친 게 있어도 마지막에 한 번 더 전체 확인. */
+#define SR_WINDOW_SIZE 16          /* CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM 기본값(16)에 맞춤 —
+                                       이 값이면 이론상 로컬 큐 포화(NO_MEM) 자체를 거의 안 만남 */
+#define SR_STATUS_TIMEOUT_MS 400   /* DONE의 800ms보다 짧게 — 윈도우당 훨씬 자주 도니까 */
+#define SR_STATUS_MAX_ATTEMPTS 3
+
+static bool send_one_photo_sr(uint32_t file_id, uint32_t my_generation)
+{
+    ESP_LOGI(TAG, "CKPT(SR): 시작 file_id=%u", (unsigned)file_id);
+    FILE *fp = NULL;
+    uint32_t size = 0;
+    if (cam_storage_open_read(file_id, &fp, &size) != ESP_OK) {
+        ESP_LOGW(TAG, "SR: 파일 열기 실패: id=%u", (unsigned)file_id);
+        return false;
+    }
+    uint16_t total_chunks = (uint16_t)((size + ESP_NOW_PHOTO_CHUNK_DATA_LEN - 1) / ESP_NOW_PHOTO_CHUNK_DATA_LEN);
+
+    uint32_t crc = 0;
+    {
+        uint8_t crc_buf[256];
+        size_t n;
+        while ((n = fread(crc_buf, 1, sizeof(crc_buf), fp)) > 0) {
+            crc = esp_rom_crc32_le(crc, crc_buf, n);
+        }
+    }
+    fclose(fp);  /* 이후 실제 청크 전송은 resend_chunks()가 매번 자체적으로 열어서 읽음 */
+    ESP_LOGI(TAG, "CKPT(SR): CRC 계산 완료 crc=%08x total_chunks=%u", (unsigned)crc, total_chunks);
+
+    esp_now_photo_meta_t meta = {
+        .version      = ESP_NOW_LINK_VERSION,
+        .msg_type     = ESP_NOW_MSG_PHOTO_META,
+        .file_id      = file_id,
+        .total_size   = size,
+        .total_chunks = total_chunks,
+        .crc32        = crc,
+    };
+    for (int i = 0; i < 3; i++) {
+        esp_err_t meta_err = esp_now_send(s_hub_mac, (const uint8_t *)&meta, sizeof(meta));
+        ESP_LOGI(TAG, "CKPT(SR): META 전송[%d] -> %s", i, esp_err_to_name(meta_err));
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    static esp_now_photo_chunk_nack_t range_req;  /* "새로 보낼 인덱스 목록"으로 재사용해
+                                                       resend_chunks()에 그대로 넘김 */
+    static esp_now_photo_chunk_nack_t status_ack;
+    uint32_t total_sent_chunks = 0;  /* 통계용 — 재전송분 포함 */
+    uint32_t status_requests   = 0;
+
+    for (uint16_t window_base = 0; window_base < total_chunks; ) {
+        if (s_request_generation != my_generation) {
+            ESP_LOGI(TAG, "SR: 더 최신 요청으로 대체됨 — 중단(file_id=%u)", (unsigned)file_id);
+            return false;
+        }
+        uint16_t window_count = total_chunks - window_base;
+        if (window_count > SR_WINDOW_SIZE) window_count = SR_WINDOW_SIZE;
+
+        range_req.file_id       = file_id;
+        range_req.missing_count = window_count;
+        for (uint16_t i = 0; i < window_count; i++) range_req.missing_idx[i] = window_base + i;
+        resend_chunks(file_id, &range_req);
+        total_sent_chunks += window_count;
+
+        uint16_t window_end = window_base + window_count;
+
+        esp_now_photo_window_status_req_t req = {
+            .version     = ESP_NOW_LINK_VERSION,
+            .msg_type    = ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST,
+            .file_id     = file_id,
+            .range_start = window_base,
+            .range_count = window_count,
+        };
+        static const uint8_t s_status_ack_types[] = { ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK };
+        size_t reply_len = 0;
+        esp_err_t err = esp_now_reliable_request(s_hub_mac, &req, sizeof(req),
+                                                  s_status_ack_types, 1,
+                                                  SR_STATUS_TIMEOUT_MS, SR_STATUS_MAX_ATTEMPTS,
+                                                  &status_ack, sizeof(status_ack), &reply_len);
+        status_requests++;
+        if (err == ESP_OK) {
+            esp_now_channelsync_notify_alive();  /* 윈도우마다 자주 왕복 — DONE_ACK보다 더 촘촘한
+                                                      생존 신호(위 헤더 설명 참고) */
+            if (status_ack.missing_count > 0) {
+                resend_chunks(file_id, &status_ack);  /* 이 윈도우 안의 누락분만 즉시 메꿈 */
+                total_sent_chunks += status_ack.missing_count;
+            }
+        } else {
+            ESP_LOGW(TAG, "SR: WINDOW_STATUS_ACK 무응답([%u,%u)) — 다음 윈도우로 진행(끝의 DONE/NACK가 안전망)",
+                     window_base, window_end);
+        }
+        window_base = window_end;
+    }
+    ESP_LOGI(TAG, "CKPT(SR): 윈도우 루프 완료 — 총 전송청크(재전송포함)=%u/%u, 상태확인 %u회",
+             (unsigned)total_sent_chunks, (unsigned)total_chunks, (unsigned)status_requests);
+
+    /* 안전망 — 기존 DONE/DONE_ACK/NACK라운드 그대로(윈도우 도중 놓친 게 있어도 마지막에
+     * 한 번 더 전체 확인) */
+    esp_now_photo_done_t done = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_DONE };
+    static const uint8_t s_sr_done_ack_types[] = { ESP_NOW_MSG_PHOTO_DONE_ACK };
+    static esp_now_photo_chunk_nack_t done_ack;
+
+    for (int round = 0; round < MAX_NACK_ROUNDS; round++) {
+        if (s_request_generation != my_generation) return false;
+
+        size_t reply_len = 0;
+        esp_err_t err = esp_now_reliable_request(s_hub_mac, &done, sizeof(done),
+                                                  s_sr_done_ack_types, 1,
+                                                  800, 3,
+                                                  &done_ack, sizeof(done_ack), &reply_len);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "CKPT(SR): DONE_ACK 무응답(라운드 %d) — 판단 보류", round + 1);
+            return true;
+        }
+        esp_now_channelsync_notify_alive();
+        if (done_ack.missing_count == 0) {
+            ESP_LOGI(TAG, "CKPT(SR): DONE_ACK 완료 확인(라운드 %d)", round + 1);
+            return true;
+        }
+
+        ESP_LOGI(TAG, "SR DONE_ACK: %u개 누락 — 재전송(라운드 %d/%d)", (unsigned)done_ack.missing_count, round + 1, MAX_NACK_ROUNDS);
+        resend_chunks(file_id, &done_ack);
+        if (s_request_generation != my_generation) return false;
+    }
+    ESP_LOGW(TAG, "CKPT(SR): 재전송 라운드 소진");
+    return true;
+}
+
 /* 목록 요청 — 파일 내용 전송 없이 file_id/크기만 하나씩 알려줌. 최대 500장까지 있을 수
  * 있는 순회+개별 send()라 recv_cb(WiFi 태스크)에서 바로 안 하고 여기서 처리 */
 static void send_photo_list(void)
@@ -451,6 +588,65 @@ static void run_bench_blast(uint16_t duration_sec)
              (unsigned)fail_count, err_rate, (unsigned)nomem_retry_count, (unsigned long long)bytes_sent);
 }
 
+/* 사진전송 방식 벤치마크(2026-08-05, Selective Repeat 실험) — 위 run_bench_blast()는 프로토콜
+ * 오버헤드 없는 순수 채널 처리량만 재는데, 이건 그 반대로 실제 META/CHUNK/DONE(+SR이면
+ * WINDOW_STATUS) 왕복까지 전부 포함해서 "진짜 사진 한 장 보내는 데 얼마나 걸리는지"를
+ * duration_sec 동안 반복 측정 — send_one_photo() vs send_one_photo_sr() 실측 비교가 목적.
+ * CAM의 최근 촬영 사진을 반복 대상으로 삼음. Cntl 쪽은 이 벤치마크 때문에 바뀐 게 하나도
+ * 없음 — 기존 handle_meta()가 무조건 재초기화라 CAM이 미는 대로(Cntl이 매번 요청 안 해도)
+ * 그냥 정상 수신됨(확인함) */
+static void run_transfer_bench(esp_now_bench_mode_t mode, uint16_t duration_sec)
+{
+    uint32_t ids[1];
+    int count = cam_storage_list(PHOTO_REQUEST_MODE_LATEST, 0, ids, 1);
+    if (count < 1) {
+        ESP_LOGW(TAG, "XFER_BENCH: 저장된 사진이 없음 — 중단");
+        return;
+    }
+    uint32_t file_id = ids[0];
+    ESP_LOGI(TAG, "XFER_BENCH: mode=%d file_id=%u %u초간 반복 전송 시작", mode, (unsigned)file_id, duration_sec);
+
+    int64_t start_us    = esp_timer_get_time();
+    int64_t end_us       = start_us + (int64_t)duration_sec * 1000000LL;
+    int64_t next_log_us = start_us + BENCH_LOG_INTERVAL_US;
+
+    uint32_t xfer_count = 0, xfer_fail = 0;
+    uint64_t total_elapsed_ms = 0, min_elapsed_ms = UINT64_MAX, max_elapsed_ms = 0;
+    uint32_t win_xfer_count = 0, win_fail = 0;
+    uint64_t win_elapsed_ms = 0;
+
+    while (esp_timer_get_time() < end_us) {
+        int64_t t0 = esp_timer_get_time();
+        bool ok = (mode == ESP_NOW_BENCH_MODE_XFER_SR)
+                      ? send_one_photo_sr(file_id, s_request_generation)
+                      : send_one_photo(file_id, s_request_generation);
+        uint64_t elapsed_ms = (uint64_t)((esp_timer_get_time() - t0) / 1000);
+
+        if (ok) {
+            xfer_count++; win_xfer_count++;
+            total_elapsed_ms += elapsed_ms; win_elapsed_ms += elapsed_ms;
+            if (elapsed_ms < min_elapsed_ms) min_elapsed_ms = elapsed_ms;
+            if (elapsed_ms > max_elapsed_ms) max_elapsed_ms = elapsed_ms;
+        } else {
+            xfer_fail++; win_fail++;
+        }
+
+        int64_t now_us = esp_timer_get_time();
+        if (now_us >= next_log_us) {
+            ESP_LOGI(TAG, "XFER_BENCH(mode=%d) 중간집계(%.0fs 경과): 완료 %u건(실패 %u), 평균 %.0fms/건",
+                     mode, (now_us - start_us) / 1e6, (unsigned)win_xfer_count, (unsigned)win_fail,
+                     win_xfer_count > 0 ? (double)win_elapsed_ms / win_xfer_count : 0.0);
+            win_xfer_count = 0; win_fail = 0; win_elapsed_ms = 0;
+            next_log_us = now_us + BENCH_LOG_INTERVAL_US;
+        }
+    }
+
+    ESP_LOGI(TAG, "XFER_BENCH(mode=%d) 완료: 총 %u건(실패 %u), 평균 %.0fms/건, 최소 %llums, 최대 %llums",
+             mode, (unsigned)xfer_count, (unsigned)xfer_fail,
+             xfer_count > 0 ? (double)total_elapsed_ms / xfer_count : 0.0,
+             (unsigned long long)(xfer_count > 0 ? min_elapsed_ms : 0), (unsigned long long)max_elapsed_ms);
+}
+
 static void photo_transfer_task(void *arg)
 {
     (void)arg;
@@ -459,7 +655,13 @@ static void photo_transfer_task(void *arg)
         if (xQueueReceive(s_photo_request_queue, &item, portMAX_DELAY) != pdTRUE) continue;
 
         if (item.kind == CAM_TASK_REQ_BENCH) {
-            if (s_paired) run_bench_blast(item.bench_duration_sec);
+            if (s_paired) {
+                if (item.bench_mode == ESP_NOW_BENCH_MODE_RAW_BLAST) {
+                    run_bench_blast(item.bench_duration_sec);
+                } else {
+                    run_transfer_bench((esp_now_bench_mode_t)item.bench_mode, item.bench_duration_sec);
+                }
+            }
             continue;
         }
 
@@ -611,7 +813,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (!s_paired || len < (int)sizeof(esp_now_bench_start_t)) return;
         esp_now_bench_start_t req;
         memcpy(&req, data, sizeof(req));
-        cam_task_request_t item = { .kind = CAM_TASK_REQ_BENCH, .bench_duration_sec = req.duration_sec };
+        cam_task_request_t item = { .kind = CAM_TASK_REQ_BENCH, .bench_duration_sec = req.duration_sec,
+                                     .bench_mode = req.mode };
         if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
             ESP_LOGW(TAG, "BENCH_START 큐 가득 — 무시");
         }

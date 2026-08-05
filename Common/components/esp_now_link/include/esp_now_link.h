@@ -86,6 +86,22 @@ typedef enum {
     ESP_NOW_MSG_CAPTURE_STATUS_ACK = 29,    /* Cntl -> CAM: CAPTURE_STATUS(최종 SUCCESS/FAILED)
                                               * 에 대한 최소 확인 응답 — CAM이
                                               * esp_now_reliable_request()로 감쌀 수 있게 함 */
+    ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST = 30,  /* CAM -> Cntl: Selective Repeat 실험(2026-08-05)
+                                              * — 전송 도중 윈도우 하나(range_start부터
+                                              * range_count개) 다 보낼 때마다 그 범위 안에서
+                                              * 뭘 못 받았는지 물어봄. 기존 DONE/NACK는 파일
+                                              * 전체를 다 보낸 "끝에" 한 번만 확인하는데, 이건
+                                              * 그걸 전송 도중 여러 번 하는 버전 — 어느 쪽이
+                                              * 실제로 더 빠른지 BMT로 실측 비교하는 게 목적
+                                              * (project_cntl_cam_esp_now_reliability_layers
+                                              * 메모리 참고, 기존 방식은 손대지 않고 나란히
+                                              * 추가). */
+    ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK = 31,      /* Cntl -> CAM: 위 요청에 대한 응답 — 새 구조체
+                                              * 안 만들고 esp_now_photo_chunk_nack_t를 msg_type만
+                                              * 바꿔 그대로 재사용(PHOTO_DONE_ACK와 동일 이유:
+                                              * "누락 목록을 알려준다"는 의미가 이미 똑같음,
+                                              * range_count가 SR_WINDOW_SIZE 이하로 고정이라
+                                              * missing_count가 400 상한을 넘을 일도 없음). */
 } esp_now_msg_type_t;
 
 typedef struct __attribute__((packed)) {
@@ -250,6 +266,19 @@ typedef struct __attribute__((packed)) {
  * 이미 이 구조체와 동일하고, PHOTO_DONE_ACK는 그냥 "이걸 항상 보낸다"로 바뀐 것뿐이라서
  * (예전엔 문제 있을 때만 NACK을 보냈는데, 이제 missing_count=0인 경우도 포함해 매번 보냄) */
 
+/* ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK(Selective Repeat 실험, 2026-08-05)도 이 구조체를
+ * msg_type만 바꿔 그대로 재사용 — 위 DONE_ACK와 동일 이유, range_count가 SR_WINDOW_SIZE
+ * 이하로 고정되니 missing_count가 400 상한을 넘을 일이 없음 */
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint32_t file_id;
+    uint16_t range_start;   /* 이 chunk_idx부터 */
+    uint16_t range_count;   /* range_count개 범위 안에서 뭘 못 받았는지 물어봄 — 응답은
+                                esp_now_photo_chunk_nack_t(msg_type=WINDOW_STATUS_ACK) */
+} esp_now_photo_window_status_req_t;
+
 /* 지금촬영(CAPTURE_NOW) 진행 상태 — Cntl UI가 진행 팝업 단계 표시에 씀.
  * RECEIVED: CAM이 요청을 접수(아직 촬영 전). SUCCESS/FAILED: 촬영 자체의 성공/실패
  * (전송은 SUCCESS 뒤에 기존 META/CHUNK/DONE으로 이어짐, FAILED면 곧바로 DONE만 옴). */
@@ -376,8 +405,21 @@ typedef struct __attribute__((packed)) {
     uint8_t  data[ESP_NOW_BENCH_BLAST_DATA_LEN];
 } esp_now_bench_blast_t;
 
+/* mode(2026-08-05 추가, Selective Repeat 실험용) — 0: 기존 BENCH_BLAST 순수 채널 처리량 측정
+ * (프로토콜 오버헤드 없음, 원래 이 메시지의 유일한 용도였음). 1: 현재 사진전송 방식(블라스트+
+ * 끝에 NACK라운드)을 CAM의 최근 촬영 사진으로 duration_sec 동안 반복 전송. 2: 같은 걸
+ * Selective Repeat(윈도우+주기적 상태확인)으로 반복 전송. 1/2는 실제 프로토콜 오버헤드까지
+ * 포함해서 두 방식의 실제 소요시간/왕복횟수를 비교하는 게 목적 — 순수 채널 속도(mode 0)와는
+ * 잴 대상 자체가 다름 */
+typedef enum {
+    ESP_NOW_BENCH_MODE_RAW_BLAST   = 0,
+    ESP_NOW_BENCH_MODE_XFER_CURRENT = 1,
+    ESP_NOW_BENCH_MODE_XFER_SR      = 2,
+} esp_now_bench_mode_t;
+
 typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
     uint16_t duration_sec;
+    uint8_t  mode;  /* esp_now_bench_mode_t */
 } esp_now_bench_start_t;

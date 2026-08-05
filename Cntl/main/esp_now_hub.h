@@ -60,6 +60,9 @@ void esp_now_hub_unpair(const uint8_t *mac);
 bool esp_now_hub_is_paired(const uint8_t *mac);
 
 /* 처리량 벤치마크 트리거(2026-08-04, 임시 개발용) — 페어링된 CAM 중 첫 번째에게
- * duration_sec 동안 BENCH_BLAST를 최대 속도로 쏘라고 요청. 결과는 양쪽 시리얼 로그로만
- * 확인(esp_now_cam.c/esp_now_hub.c의 BENCH 로그 참고), UI에는 안 보여줌. */
-void esp_now_hub_bench_start(uint16_t duration_sec);
+ * duration_sec 동안 벤치마크를 시작하라고 요청. 결과는 양쪽 시리얼 로그로만
+ * 확인(esp_now_cam.c/esp_now_hub.c의 BENCH 로그 참고), UI에는 안 보여줌.
+ * mode(2026-08-05 추가, esp_now_bench_mode_t): 0=기존 순수 채널 처리량(BENCH_BLAST),
+ * 1=현재 사진전송 방식 반복(실제 프로토콜 오버헤드 포함), 2=Selective Repeat 반복 —
+ * esp_now_link.h의 esp_now_bench_mode_t 주석 참고. */
+void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode);
