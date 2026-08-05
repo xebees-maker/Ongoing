@@ -10,7 +10,17 @@
       "Write(Docs/한일_*.txt)",
       "Write(Docs/claude_memory_*.zip)",
       "Edit(~/.claude/projects/C--Projects-Ongoing/memory/**)",
-      "Write(~/.claude/projects/C--Projects-Ongoing/memory/**)"
+      "Write(~/.claude/projects/C--Projects-Ongoing/memory/**)",
+      "Edit(C:\\Users\\xebee\\.claude\\projects\\C--Projects-Ongoing\\memory\\**)",
+      "Write(C:\\Users\\xebee\\.claude\\projects\\C--Projects-Ongoing\\memory\\**)",
+      "Edit(.claude/settings.json)",
+      "Write(.claude/settings.json)",
+      "Edit(.claude/settings.local.json)",
+      "Write(.claude/settings.local.json)",
+      "Edit(C:\\Projects\\Ongoing\\.claude\\settings.json)",
+      "Write(C:\\Projects\\Ongoing\\.claude\\settings.json)",
+      "Edit(C:\\Projects\\Ongoing\\.claude\\settings.local.json)",
+      "Write(C:\\Projects\\Ongoing\\.claude\\settings.local.json)"
     ]
   }
 }
