@@ -726,13 +726,19 @@ static void photo_transfer_task(void *arg)
         int count = cam_storage_list((photo_request_mode_t)req.mode, req.param, ids, CAM_STORAGE_MAX_FILES);
         ESP_LOGI(TAG, "PHOTO_REQUEST mode=%d param=%u -> %d장 전송 시작", req.mode, (unsigned)req.param, count);
 
-        /* send_one_photo가 이제 파일당 자기 DONE(+NACK 재전송 라운드)을 스스로 끝까지
+        /* send_one_photo_sr가 이제 파일당 자기 DONE(+NACK 재전송 라운드)을 스스로 끝까지
          * 책임짐(2026-08-03 재설계) — 예전엔 여기서 전체 배치가 끝난 뒤 DONE을 한 번 더
-         * 보냈는데, 이제 그러면 방금 send_one_photo가 이미 마친 완료-확인 사이클 위에
-         * 불필요한 DONE이 하나 더 얹혀서 혼란만 더함 */
+         * 보냈는데, 이제 그러면 방금 send_one_photo_sr가 이미 마친 완료-확인 사이클 위에
+         * 불필요한 DONE이 하나 더 얹혀서 혼란만 더함.
+         * 2026-08-05 — 실기 30분 BMT 실측 비교 후 send_one_photo(블라스트+끝에 NACK)에서
+         * send_one_photo_sr(윈도우+주기적 확인)로 교체. 처리량은 비슷했지만(SR이 약 6.5% 더
+         * 많이 처리, 1696건 vs 1593건/30분) 결정적 차이는 꼬리 지연시간 — 현재 방식은 최대
+         * 8840ms(평균의 8배)까지 튄 반면 SR은 최악의 경우도 1166ms로 평균과 거의 차이 없었음
+         * (project_cntl_cam_esp_now_reliability_layers 메모리 참고). send_one_photo 자체는
+         * 안 지움 — BENCH_START mode=1(XFER_BENCH 현재방식)로 계속 비교용으로 남겨둠 */
         for (int i = 0; i < count && s_paired; i++) {
             if (s_request_generation != item.generation) break;  /* 더 최신 요청으로 대체됨 */
-            send_one_photo(ids[i], item.generation);
+            send_one_photo_sr(ids[i], item.generation);
         }
     }
 }
@@ -746,7 +752,10 @@ static void resolve_name(void)
         return;
     }
 #endif
-    snprintf(s_name, sizeof(s_name), "Cam-%02X%02X", s_mac[4], s_mac[5]);
+    /* MAC 뒤 3바이트(제조사가 기기마다 실제로 다르게 부여하는 유니크 구간, 24비트)를 전부
+     * 사용 — 2바이트(16비트)만 쓰면 이론적으로 충돌 가능성이 있고, 딱히 2바이트로 줄일
+     * 이유도 없었음(이름 길이 여유 충분, ESP_NOW_LINK_NAME_LEN=16)(2026-08-05, 사용자 지적) */
+    snprintf(s_name, sizeof(s_name), "Cam-%02X%02X%02X", s_mac[3], s_mac[4], s_mac[5]);
 }
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
