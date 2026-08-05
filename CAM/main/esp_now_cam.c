@@ -7,6 +7,8 @@
 #include <time.h>
 #include <sys/time.h>
 #include "esp_now.h"
+#include "esp_now_channelsync.h"
+#include "esp_now_reliable.h"
 #include "esp_wifi.h"
 #include "esp_mac.h"
 #include "esp_log.h"
@@ -20,32 +22,20 @@
 
 static const char *TAG = "esp_now_cam";
 
-/* --- 광고/채널스캔/페어링 — Sens/main/esp_now_node.c와 동일 패턴, 자세한 이유는
- * 그쪽 주석 참고(이 세션에서 같이 설계함) --- */
-#define ADVERTISE_PERIOD_US        (1000 * 1000)
-#define KEEPALIVE_PERIOD_US        (1000 * 1000)
-#define SEND_FAIL_THRESHOLD        3
-#define UNPAIRED_FAILED_TIMEOUT_US (30 * 1000 * 1000)
-#define SCAN_DWELL_US              (300 * 1000)
-#define SCAN_CHANNEL_MIN           1
-#define SCAN_CHANNEL_MAX           13
+/* --- 페어링 --- 채널 추적(스캔/광고/생존확인)은 전부 esp_now_channelsync로 이관됨
+ * (2026-08-04 재설계 — 예전엔 keepalive가 PAIR_ACK를 재사용하고 send_cb의 물리계층 ACK로
+ * 생존을 판정했는데, 실기에서 "사진 전송 중엔 이 판정을 아예 쉬는" 플래그(s_transfer_active)
+ * 때문에 30분 벤치마크 내내 공유기 채널전환 감지가 통째로 잠들어 있던 게 발견됨 —
+ * esp_now_channelsync.h 헤더 설명 참고). 여기 남은 건 "채널이 맞다는 전제 하에, 사용자가
+ * 승인한 페어링(PAIR_REQUEST/PAIR_ACK)"만 다룸 */
 
 static char    s_name[ESP_NOW_LINK_NAME_LEN] = "";
 static uint8_t s_mac[6] = { 0 };
-static esp_timer_handle_t s_advertise_timer = NULL;
-static esp_timer_handle_t s_keepalive_timer = NULL;
-static esp_timer_handle_t s_unpaired_failed_timer = NULL;
 
 static bool    s_paired = false;
 static uint8_t s_hub_mac[6] = { 0 };
-static int     s_send_fail_count = 0;
-
-static bool    s_channel_locked = false;
-static uint8_t s_scan_channel   = SCAN_CHANNEL_MIN;
 
 static gpio_num_t s_led_pin = GPIO_NUM_NC;
-
-static const uint8_t s_broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 /* --- 사진 전송 --- */
 /* recv_cb(WiFi 태스크)에서 바로 처리하기엔 무거운 요청(촬영/파일 I/O/여러 건 전송)을
@@ -54,15 +44,18 @@ typedef enum {
     CAM_TASK_REQ_PHOTO       = 0,
     CAM_TASK_REQ_LIST        = 1,
     CAM_TASK_REQ_DELETE_ALL  = 2,
+    CAM_TASK_REQ_BENCH       = 3,
 } cam_task_req_kind_t;
 
 typedef struct {
     cam_task_req_kind_t      kind;
     esp_now_photo_request_t  photo_req;  /* kind==CAM_TASK_REQ_PHOTO일 때만 유효 */
     uint32_t                 generation; /* kind==CAM_TASK_REQ_PHOTO일 때만 유효 — 아래 참고 */
+    uint16_t                 bench_duration_sec; /* kind==CAM_TASK_REQ_BENCH일 때만 유효 */
 } cam_task_request_t;
 
 static QueueHandle_t s_photo_request_queue = NULL;
+static volatile bool s_list_request_pending = false;  /* recv_cb 중복 LIST_REQUEST 억제용 */
 
 /* 청크 신뢰성 재설계(2026-08-03) — "매 청크마다 로컬 라디오의 물리계층 ACK를 기다렸다가
  * 다음으로 넘어가는" 예전 방식을 완전히 버림. 그 "ACK"는 상대(Cntl) 애플리케이션이 실제로
@@ -73,11 +66,18 @@ static QueueHandle_t s_photo_request_queue = NULL;
  * DONE 이후 수신측이 빠진 chunk_idx만 NACK으로 콕 집어 재전송 요청 — 이게 진짜 종단간
  * 확인이라 로컬 ACK의 애매함에 의존하지 않음(esp_now_link.h의 esp_now_photo_chunk_nack_t
  * 주석 참고). 이제 esp_now_send() 완료를 굳이 기다릴 이유가 없어져서 s_awaiting_chunk_ack/
- * s_send_done_sem/s_send_serialize_mutex 전부 제거 — send_cb는 다시 단순히 실패 카운트만
- * 추적함 */
-static QueueHandle_t s_nack_queue = NULL;
+ * s_send_done_sem/s_send_serialize_mutex 전부 제거 — send_cb는 더 이상 실패 카운트도 안 추적함
+ * (2026-08-04 재설계, 생존판정은 esp_now_channelsync가 전담 — 아래 send_cb 참고).
+ * 2026-08-05 — DONE 확인 대기용이었던 s_nack_queue/ESP_NOW_MSG_PHOTO_CHUNK_NACK 수신 경로는
+ * esp_now_reliable_request()로 대체되어 제거됨(send_one_photo() 참고) — 이제 DONE_ACK가
+ * reliable 레이어의 응답으로 직접 돌아옴 */
 #define MAX_NACK_ROUNDS   3
-#define NACK_WAIT_MS      800  /* 수신측이 DONE 받고 목록 대조해서 NACK 보내기까지 여유 */
+/* 청크 버스트 중 CHANNEL_PING이 큐에서 밀리는 문제 완화용(2026-08-05, 위 청크 루프 주석
+ * 참고) — 10개마다 50ms 쉬어서 큐를 비움. 10개×(10ms 페이싱)=100ms 주기에 50ms를 더 얹는
+ * 셈이라 전송 시간이 그만큼 늘지만(약 1.5배), PING 왕복(현재 500ms 타임아웃) 안에 여유있게
+ * 끼어들 수 있는 수준 */
+#define CHUNK_QUEUE_DRAIN_INTERVAL 10
+#define CHUNK_QUEUE_DRAIN_MS       50
 
 /* 사진 요청 세대 번호(2026-08-02) — Cntl은 사진 전송을 취소하는 프로토콜 메시지가 없어서
  * (지금까지 "취소" 버튼은 로컬 팝업만 닫고 CAM엔 아무 통보도 안 갔음), 사용자가 목록에서
@@ -98,72 +98,32 @@ static void set_led(led_pattern_t pattern)
     status_led_set_pattern(s_led_pin, pattern);
 }
 
-static void enter_advertising(bool immediately_failed)
+/* esp_now_channelsync 콜백(2026-08-04) — 채널 동기화될 때마다 호출됨. 페어링 자체는 여기서
+ * 안 건드림(그건 PAIR_REQUEST/PAIR_ACK 핸드셰이크의 몫, recv_cb 참고) — 채널이 다시 맞았다는
+ * 것만 반영하고, LED로 "허브를 찾았다"를 표시 */
+static void on_channel_synced(uint8_t channel, const uint8_t *hub_mac)
 {
-    s_paired = false;
-    s_send_fail_count = 0;
-
-    if (s_keepalive_timer) esp_timer_stop(s_keepalive_timer);
-
-    s_channel_locked = false;
-    s_scan_channel   = SCAN_CHANNEL_MIN;
-    esp_wifi_set_channel(s_scan_channel, WIFI_SECOND_CHAN_NONE);
-
-    esp_timer_stop(s_advertise_timer);
-    esp_timer_start_periodic(s_advertise_timer, SCAN_DWELL_US);
-
-    if (immediately_failed) {
-        set_led(LED_PATTERN_BLINK_SLOW);
-        if (s_unpaired_failed_timer) esp_timer_stop(s_unpaired_failed_timer);
-    } else {
-        set_led(LED_PATTERN_BLINK_FAST);
-        if (s_unpaired_failed_timer) {
-            esp_timer_stop(s_unpaired_failed_timer);
-            esp_timer_start_once(s_unpaired_failed_timer, UNPAIRED_FAILED_TIMEOUT_US);
-        }
-    }
+    (void)channel; (void)hub_mac;
+    set_led(LED_PATTERN_BLINK_FAST);
 }
 
-static void unpaired_failed_timer_cb(void *arg)
+/* 연속 PING 무응답으로 채널 동기화가 끊겼다고 판단된 순간 호출됨 — 채널이 안 맞는 상태에서
+ * "페어링됨"으로 남아있으면 desync이므로 여기서 바로 정리(오늘 실기에서 겪은 문제의 근본
+ * 원인이자, 이 재설계의 핵심 목적) */
+static void on_channel_lost_sync(void)
 {
-    (void)arg;
-    if (s_paired) return;
+    s_paired = false;
     set_led(LED_PATTERN_BLINK_SLOW);
 }
 
-static void keepalive_timer_cb(void *arg)
-{
-    (void)arg;
-    /* Sens의 SENSOR_DATA와 달리 CAM은 페어링 후 딱히 매초 보낼 데이터가 없음 —
-     * PAIR_ACK를 그대로 재전송해서 "아직 살아있음"을 알림. Cntl의 기존 PAIR_ACK
-     * 핸들러가 이미 paired=true/last_data_ms 갱신을 해주므로 Cntl 쪽 변경 불필요.
-     * 청크 스트리밍 재설계(2026-08-03) 이후로는 완료를 기다릴 이유가 없어져서 단순
-     * fire-and-forget — 위 s_nack_queue 주석 참고 */
-    esp_now_pair_ack_t ack = {
-        .version  = ESP_NOW_LINK_VERSION,
-        .msg_type = ESP_NOW_MSG_PAIR_ACK,
-    };
-    memcpy(ack.node_mac, s_mac, sizeof(ack.node_mac));
-    esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
-}
-
+/* 순수 로컬 표시(LED)용으로만 남김 — 생존/연결 판정은 전부 esp_now_channelsync의
+ * CHANNEL_PING/PONG(애플리케이션 레벨 왕복)이 전담함. 물리계층 ACK(send_cb의 성공/실패)는
+ * "진짜 도달 확인"이 아니라는 게 오늘 세션에서 확정된 원칙이라 판정 기준으로 안 씀 */
 static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t status)
 {
     (void)info;
-
-    if (!s_paired) return;
-
-    if (status == ESP_NOW_SEND_SUCCESS) {
-        s_send_fail_count = 0;
+    if (s_paired && status == ESP_NOW_SEND_SUCCESS) {
         set_led(LED_PATTERN_HEARTBEAT);
-        return;
-    }
-
-    s_send_fail_count++;
-    ESP_LOGW(TAG, "전송 실패 (연속 %d회)", s_send_fail_count);
-    if (s_send_fail_count >= SEND_FAIL_THRESHOLD) {
-        ESP_LOGW(TAG, "허브 응답 끊김으로 판단 — 재광고 시작");
-        enter_advertising(true);
     }
 }
 
@@ -203,6 +163,9 @@ static void resend_chunks(uint32_t file_id, const esp_now_photo_chunk_nack_t *na
             ESP_LOGW(TAG, "재전송 실패: chunk[%u] -> %s(시도 %d회)", idx, esp_err_to_name(err), attempt + 1);
         }
         vTaskDelay(pdMS_TO_TICKS(10));
+        if ((i + 1) % CHUNK_QUEUE_DRAIN_INTERVAL == 0) {
+            vTaskDelay(pdMS_TO_TICKS(CHUNK_QUEUE_DRAIN_MS));  /* CHANNEL_PING 큐잉 지연 완화 — 위 청크 루프 주석 참고 */
+        }
     }
     fclose(fp);
     ESP_LOGI(TAG, "NACK 재전송 완료: file_id=%u %u개 청크", (unsigned)file_id, (unsigned)nack->missing_count);
@@ -210,12 +173,12 @@ static void resend_chunks(uint32_t file_id, const esp_now_photo_chunk_nack_t *na
 
 /* file_id 하나를 META + CHUNK*로 스트리밍 전송(2026-08-03 재설계) — 청크마다 응답을
  * 기다리지 않고 그냥 순서대로 다 보낸 뒤 DONE. 신뢰성은 여기서 확보 안 함(로컬 라디오 ACK는
- * 종단간 확인이 아니라서 애초에 의미가 없었음, 위 s_nack_queue 주석 참고) — 대신 DONE 뒤에
- * Cntl이 빠진 chunk_idx를 NACK으로 콕 집어 요청하면 그것만 재전송하는 걸 최대
- * MAX_NACK_ROUNDS번 반복. NACK이 안 오면(수신측이 다 받았다는 뜻) 바로 끝.
+ * 종단간 확인이 아니라서 애초에 의미가 없었음) — 대신 DONE을 esp_now_reliable_request()로
+ * 보내고 PHOTO_DONE_ACK을 기다림(2026-08-05, Layer 1). missing_count가 0이면 완료, 아니면
+ * 그 chunk_idx만 재전송하는 걸 최대 MAX_NACK_ROUNDS번 반복.
  * my_generation: 세대번호 — 도중에 더 최신 요청이 들어오면 즉시 중단(위 s_request_generation
  * 주석 참고). 반환값은 "끝까지 이 요청으로 진행했는가"(대체당하지 않았는가)일 뿐, 수신측이
- * 실제로 다 받았는지는 이 함수가 알 방법이 없음(NACK이 그 판단을 대신함) */
+ * 실제로 다 받았는지는 이 함수가 알 방법이 없음(DONE_ACK가 그 판단을 대신함) */
 static bool send_one_photo(uint32_t file_id, uint32_t my_generation)
 {
     ESP_LOGI(TAG, "CKPT: send_one_photo 시작 file_id=%u", (unsigned)file_id);
@@ -262,7 +225,7 @@ static bool send_one_photo(uint32_t file_id, uint32_t my_generation)
     for (int i = 0; i < 3; i++) {
         esp_err_t meta_err = esp_now_send(s_hub_mac, (const uint8_t *)&meta, sizeof(meta));
         ESP_LOGI(TAG, "CKPT: META 전송[%d] sizeof=%u -> %s", i, (unsigned)sizeof(meta), esp_err_to_name(meta_err));
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(20));  /* 5ms는 큐가 회복하기엔 너무 짧았음(2026-08-04 실기 로그) */
     }
 
     esp_now_photo_chunk_t chunk = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_CHUNK, .file_id = file_id };
@@ -306,49 +269,57 @@ static bool send_one_photo(uint32_t file_id, uint32_t my_generation)
         }
         vTaskDelay(pdMS_TO_TICKS(10));  /* 큐 과부하 방지 페이싱 — 4ms도 여전히 너무 빨랐음
                                           * (2026-08-04 실기 로그, 위 재시도 주석 참고) */
+
+        /* 2026-08-05 — CHANNEL_PING(esp_now_channelsync)이 이 청크들과 같은 ESP-NOW 송신큐를
+         * 공유함(ESP-IDF에 우선순위/QoS 태깅 API가 없어서 분리 불가 — 소스 확인함, 사전컴파일
+         * libespnow.a). 청크를 쉼 없이 계속 큐잉하면 PING이 그 뒤에 밀려서 500ms 타임아웃을
+         * 넘기고, 실제로 채널은 멀쩡한데 "동기화 끊김"으로 오판해 CAM이 채널을 이탈하는 문제가
+         * 실기에서 재현됨(사진가져오기 반복 중 3006). CHUNK_QUEUE_DRAIN_INTERVAL개마다 큐가
+         * 완전히 비워질 만큼(CHUNK_QUEUE_DRAIN_MS) 쉬어서 PING이 그 틈에 밀리지 않고 나갈 수
+         * 있게 함 — 사용자 지시: "지연시간 때문에 문제되지 않는 크기로 N을 잡는다" */
+        if ((idx + 1) % CHUNK_QUEUE_DRAIN_INTERVAL == 0) {
+            vTaskDelay(pdMS_TO_TICKS(CHUNK_QUEUE_DRAIN_MS));
+        }
     }
     fclose(fp);
     ESP_LOGI(TAG, "CKPT: 청크 전송 루프 완료(%u개)", total_chunks);
 
-    /* 한 바퀴 다 보냈다는 신호 + NACK 대기/재전송 라운드 — 이게 이 전송의 실제 신뢰성
-     * 보장 지점(스트리밍 자체엔 신뢰성이 없음, 위 함수 설명 참고) */
-    /* DONE도 META처럼 3번 반복 전송(2026-08-04) — 예전엔 딱 1번만 보냈는데, 청크가
-     * 전부 정상 도착해도 이 마지막 DONE 하나가 무선에서 유실되면 Cntl은 청크를 다
-     * 갖고도 handle_done()이 아예 안 불려서 진행률이 안 바뀐 채로 8초 뒤 UI 정체
-     * 타임아웃(UI_ERR_FETCH_NORESPONSE=3006)으로 빠짐 — "청크는 다 갔는데 결국
-     * 타임아웃"이라는 관찰과 정확히 일치. handle_done()은 RECEIVING 상태가 아니면
-     * 그냥 무시하고 리턴하니 중복 수신은 안전함(esp_now_photo.c 참고) */
+    /* 한 바퀴 다 보냈다는 신호 + 확인/재전송 라운드 — 이게 이 전송의 실제 신뢰성 보장 지점
+     * (스트리밍 자체엔 신뢰성이 없음, 위 함수 설명 참고).
+     * 2026-08-05 Layer 1 재설계 — 예전엔 DONE을 3번 반복 전송한 뒤 별도 큐(s_nack_queue)로
+     * NACK이 오나 안 오나 지켜보고 "안 오면 완료로 판단"하는 낙관적 방식이었음(물리 ACK와
+     * 마찬가지로 "응답이 없다"를 "성공"으로 해석하는 게 원리적으로 찜찜한 지점이었음).
+     * 이제 esp_now_reliable_request()가 DONE을 보내고 PHOTO_DONE_ACK을 "반드시" 기다림 —
+     * 응답이 진짜 안 오면 그 자체를 무응답으로 취급(재시도는 레이어가 대신 함), 응답이 오면
+     * missing_count로 완료/누락을 명시적으로 구분함 */
     esp_now_photo_done_t done = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_DONE };
-    for (int i = 0; i < 3; i++) {
-        esp_err_t done_err = esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));
-        ESP_LOGI(TAG, "CKPT: DONE 전송[%d] -> %s", i, esp_err_to_name(done_err));
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
-    ESP_LOGI(TAG, "CKPT: NACK 대기 시작");
+    static const uint8_t s_done_ack_types[] = { ESP_NOW_MSG_PHOTO_DONE_ACK };
+    static esp_now_photo_chunk_nack_t ack;  /* static — 800B+ 구조체를 스택에 안 둠(2026-08-03
+                                                스택 오버플로우 사고 이후 원칙) */
 
-    /* static — 808바이트짜리 구조체를 photo_tx 태스크 스택에 두지 않음(24KB로 늘리긴
-     * 했지만 큰 지역변수는 습관적으로 피함, 2026-08-03) */
-    static esp_now_photo_chunk_nack_t nack;
     for (int round = 0; round < MAX_NACK_ROUNDS; round++) {
         if (s_request_generation != my_generation) return false;
 
-        if (xQueueReceive(s_nack_queue, &nack, pdMS_TO_TICKS(NACK_WAIT_MS)) != pdTRUE) {
-            ESP_LOGI(TAG, "CKPT: NACK 안 옴(라운드 %d) — 전송 완료로 판단", round + 1);
-            return true;  /* NACK 안 옴 — 수신측이 전부 받았다고 판단, 끝 */
+        size_t reply_len = 0;
+        esp_err_t err = esp_now_reliable_request(s_hub_mac, &done, sizeof(done),
+                                                  s_done_ack_types, 1,
+                                                  800, 3,
+                                                  &ack, sizeof(ack), &reply_len);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "CKPT: DONE_ACK 무응답(라운드 %d) — 판단 보류(Cntl 쪽 타임아웃에 맡김)", round + 1);
+            return true;
         }
-        if (nack.file_id != file_id || nack.missing_count == 0) continue;
+        esp_now_channelsync_notify_alive();  /* 방금 진짜 왕복 성공 — PING 큐잉 지연 오탐 완화(위 헤더 참고) */
+        if (ack.missing_count == 0) {
+            ESP_LOGI(TAG, "CKPT: DONE_ACK 완료 확인(라운드 %d)", round + 1);
+            return true;
+        }
 
-        ESP_LOGI(TAG, "NACK 수신: file_id=%u %u개 재요청(라운드 %d/%d)",
-                 (unsigned)file_id, (unsigned)nack.missing_count, round + 1, MAX_NACK_ROUNDS);
-        resend_chunks(file_id, &nack);
-
+        ESP_LOGI(TAG, "DONE_ACK: %u개 누락 — 재전송(라운드 %d/%d)", (unsigned)ack.missing_count, round + 1, MAX_NACK_ROUNDS);
+        resend_chunks(file_id, &ack);
         if (s_request_generation != my_generation) return false;
-        for (int i = 0; i < 3; i++) {
-            esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));  /* 재확인 요청 — 동일 이유로 3회 */
-            vTaskDelay(pdMS_TO_TICKS(5));
-        }
     }
-    ESP_LOGI(TAG, "CKPT: NACK 라운드 소진");
+    ESP_LOGW(TAG, "CKPT: 재전송 라운드 소진");
     return true;  /* 라운드 소진 — 남은 판단은 Cntl 쪽 최종 타임아웃/에러 처리에 맡김 */
 }
 
@@ -381,6 +352,10 @@ static void send_photo_list(void)
     uint32_t sd_total_kb = 0, sd_used_kb = 0;
     cam_storage_get_sd_usage(&sd_total_kb, &sd_used_kb);  /* 실패해도 0/0으로 채워져서 그대로 보냄 */
 
+    /* 2026-08-05 Layer 1 재설계 — LIST_DONE을 esp_now_reliable_request()로 보내고
+     * PHOTO_LIST_DONE_ACK를 기다림(재시도는 레이어가 대신 함, 3번 수동 반복 불필요).
+     * Cntl이 개수 불일치를 감지하면 자기 쪽에서 알아서 새 PHOTO_LIST_REQUEST를 다시
+     * 보내므로(esp_now_photo.c의 handle_list_done 참고) 여기서는 응답 왔는지만 확인하면 됨 */
     esp_now_photo_list_done_t done = {
         .version     = ESP_NOW_LINK_VERSION,
         .msg_type    = ESP_NOW_MSG_PHOTO_LIST_DONE,
@@ -388,8 +363,92 @@ static void send_photo_list(void)
         .sd_total_kb = sd_total_kb,
         .sd_used_kb  = sd_used_kb,
     };
-    esp_now_send(s_hub_mac, (const uint8_t *)&done, sizeof(done));
-    ESP_LOGI(TAG, "PHOTO_LIST_DONE 전송(%d개, SD %u/%uKB)", sent, (unsigned)sd_used_kb, (unsigned)sd_total_kb);
+    static const uint8_t s_list_done_ack_types[] = { ESP_NOW_MSG_PHOTO_LIST_DONE_ACK };
+    esp_err_t err = esp_now_reliable_request(s_hub_mac, &done, sizeof(done),
+                                              s_list_done_ack_types, 1,
+                                              800, 3,
+                                              NULL, 0, NULL);
+    if (err == ESP_OK) esp_now_channelsync_notify_alive();  /* 위 헤더 설명 참고 */
+    ESP_LOGI(TAG, "PHOTO_LIST_DONE 전송(%d개, SD %u/%uKB): %s", sent, (unsigned)sd_used_kb,
+             (unsigned)sd_total_kb, esp_err_to_name(err));
+}
+
+/* 처리량 벤치마크(2026-08-04) — 프로토콜 신뢰성 레이어를 만들기 전에, 지금 이 채널
+ * (STA-공유채널이든 격리-AP든)에서 순수하게 뽑을 수 있는 최대 처리량이 얼마인지 기준치를
+ * 먼저 재둠. 청크와 같은 크기의 더미 바이트를 큐가 허용하는 한 최대 속도로 계속 쏘고,
+ * ESP_ERR_ESPNOW_NO_MEM(로컬 송신큐 포화)만 잠깐 기다렸다 재시도 — 그 외 실패는 실패로
+ * 세고 다음 것으로 넘어감(재전송 안 함, 신뢰성 측정이 아니라 처리량 측정이 목적).
+ *
+ * 1시간 연속 실행 지원(2026-08-04, 사용자 요청: 에러율/대역폭 추이를 오래 관찰하고 싶다) —
+ * 매초 로그를 남기면 1시간에 3600줄이라 너무 많음. BENCH_LOG_INTERVAL_US마다 그 구간만의
+ * 집계(구간 처리량 + 구간 오류율)를 찍고 리셋 — 전체 누적치는 함수 끝의 최종 요약 한 줄로.
+ * NO_MEM 재시도는 "진짜 실패"가 아니라 로컬 큐가 잠깐 찬 것뿐이라 fail_count와 분리 집계 —
+ * 섞으면 오류율이 실제보다 훨씬 나빠 보임(로컬 큐 포화는 무선 유실이 아님, 위 함수 설명 참고) */
+#define BENCH_LOG_INTERVAL_US (30 * 1000 * 1000)
+
+static void run_bench_blast(uint16_t duration_sec)
+{
+    ESP_LOGI(TAG, "BENCH: %u초간 최대 속도 전송 시작", duration_sec);
+
+    static esp_now_bench_blast_t blast;  /* static — 1200+바이트를 태스크 스택에 두지 않음 */
+    blast.version  = ESP_NOW_LINK_VERSION;
+    blast.msg_type = ESP_NOW_MSG_BENCH_BLAST;
+    blast.seq      = 0;
+    memset(blast.data, 0xAA, sizeof(blast.data));
+
+    int64_t start_us = esp_timer_get_time();
+    int64_t end_us   = start_us + (int64_t)duration_sec * 1000000LL;
+
+    uint32_t ok_count = 0, fail_count = 0, nomem_retry_count = 0;
+    uint64_t bytes_sent = 0;
+    uint32_t win_ok = 0, win_fail = 0, win_nomem = 0;
+    uint64_t win_bytes = 0;
+    int64_t  win_start_us = start_us;
+    int64_t  next_log_us  = start_us + BENCH_LOG_INTERVAL_US;
+
+    while (esp_timer_get_time() < end_us) {
+        esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&blast, sizeof(blast));
+        if (err == ESP_ERR_ESPNOW_NO_MEM) {
+            nomem_retry_count++;
+            win_nomem++;
+            /* pdMS_TO_TICKS(5)는 CONFIG_FREERTOS_HZ=100(틱당 10ms)에서 정수 나눗셈으로
+             * 0틱이 됨 — vTaskDelay(0)은 사실상 지연 없이 즉시 재시도라 큐가 계속 찬 상태에서
+             * photo_tx가 IDLE 태스크를 굶겨 task watchdog가 반복 트리거됨(2026-08-04, 1시간
+             * 실기 로그로 확인, 26회 발생). 최소 1틱(10ms)을 보장하도록 수정 */
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;  /* 큐 포화 — 같은 seq로 재시도(측정 왜곡 방지, 성공한 것만 카운트) */
+        }
+        if (err == ESP_OK) {
+            ok_count++;
+            win_ok++;
+            bytes_sent += sizeof(blast);
+            win_bytes += sizeof(blast);
+        } else {
+            fail_count++;
+            win_fail++;
+        }
+        blast.seq++;
+
+        int64_t now_us = esp_timer_get_time();
+        if (now_us >= next_log_us) {
+            double win_sec = (now_us - win_start_us) / 1e6;
+            uint32_t win_total = win_ok + win_fail;
+            double win_err_rate = win_total > 0 ? (100.0 * win_fail / win_total) : 0.0;
+            ESP_LOGI(TAG, "BENCH 중간집계(%.0fs 경과): %.1fKB/s, 성공%u/실패%u(오류율%.2f%%), NO_MEM재시도%u회",
+                     (now_us - start_us) / 1e6,
+                     win_sec > 0 ? (win_bytes / 1024.0) / win_sec : 0.0,
+                     (unsigned)win_ok, (unsigned)win_fail, win_err_rate, (unsigned)win_nomem);
+            win_ok = 0; win_fail = 0; win_nomem = 0; win_bytes = 0;
+            win_start_us = now_us;
+            next_log_us  = now_us + BENCH_LOG_INTERVAL_US;
+        }
+    }
+    double sec = (double)duration_sec;
+    uint32_t total = ok_count + fail_count;
+    double err_rate = total > 0 ? (100.0 * fail_count / total) : 0.0;
+    ESP_LOGI(TAG, "BENCH 완료: 성공 %u개(평균 %.1fKB/s), 실패 %u개(오류율 %.2f%%), NO_MEM재시도 %u회, 총 %llu바이트",
+             (unsigned)ok_count, sec > 0 ? (bytes_sent / 1024.0) / sec : 0.0,
+             (unsigned)fail_count, err_rate, (unsigned)nomem_retry_count, (unsigned long long)bytes_sent);
 }
 
 static void photo_transfer_task(void *arg)
@@ -398,12 +457,23 @@ static void photo_transfer_task(void *arg)
     cam_task_request_t item;
     for (;;) {
         if (xQueueReceive(s_photo_request_queue, &item, portMAX_DELAY) != pdTRUE) continue;
-        if (!s_paired) continue;
 
-        if (item.kind == CAM_TASK_REQ_LIST) {
-            send_photo_list();
+        if (item.kind == CAM_TASK_REQ_BENCH) {
+            if (s_paired) run_bench_blast(item.bench_duration_sec);
             continue;
         }
+
+        if (item.kind == CAM_TASK_REQ_LIST) {
+            /* 2026-08-04 실기로 확인된 레이스: 큐에서 뽑히자마자(=send_photo_list() 시작
+             * 전에) 플래그를 지우면, 그 함수가 아직 도는 중(파일 여러 개면 수십~수백ms)에
+             * 3번 반복 전송의 2/3번째 요청이 도착해서 "새 요청"으로 오인 — 실제로 목록을
+             * 두 번 보냈음(로그 확인). send_photo_list()가 끝난 뒤에 해제해야 그 시간
+             * 동안 들어오는 중복을 계속 걸러낼 수 있음 */
+            if (s_paired) send_photo_list();
+            s_list_request_pending = false;
+            continue;
+        }
+        if (!s_paired) continue;
 
         if (item.kind == CAM_TASK_REQ_DELETE_ALL) {
             int deleted = cam_storage_delete_all();
@@ -432,12 +502,20 @@ static void photo_transfer_task(void *arg)
             ESP_LOGI(TAG, "CAPTURE_NOW 요청 — 즉시 촬영 시작");
             bool captured = cam_node_capture_now();
             ESP_LOGI(TAG, "CAPTURE_NOW 촬영 결과: %s", captured ? "성공" : "실패");
+            /* 2026-08-05 Layer 1 재설계 — CAPTURE_STATUS_ACK를 기다리는 reliable_request로
+             * 교체(3번 수동 반복 대신 레이어가 재시도). 이 최종 결과가 안 가면 Cntl은
+             * 지금촬영이 끝났는지 몰라서 UI_ERR_CAPTURE_NORESPONSE(4004)로 빠짐(실기 확인) */
             esp_now_capture_status_t status = {
                 .version  = ESP_NOW_LINK_VERSION,
                 .msg_type = ESP_NOW_MSG_CAPTURE_STATUS,
                 .status   = captured ? CAM_CAPTURE_STATUS_SUCCESS : CAM_CAPTURE_STATUS_FAILED,
             };
-            esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&status, sizeof(status));
+            static const uint8_t s_capture_ack_types[] = { ESP_NOW_MSG_CAPTURE_STATUS_ACK };
+            esp_err_t err = esp_now_reliable_request(s_hub_mac, &status, sizeof(status),
+                                                      s_capture_ack_types, 1,
+                                                      800, 3,
+                                                      NULL, 0, NULL);
+            if (err == ESP_OK) esp_now_channelsync_notify_alive();  /* 위 헤더 설명 참고 */
             ESP_LOGI(TAG, "CAPTURE_STATUS(%s) 전송: %s", captured ? "SUCCESS" : "FAILED", esp_err_to_name(err));
             continue;
         }
@@ -474,26 +552,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     if (len < 2) return;
     uint8_t msg_type = data[1];
 
-    if (!s_paired && !s_channel_locked && msg_type == ESP_NOW_MSG_ADVERTISE_ACK) {
-        if (len < (int)sizeof(esp_now_advertise_ack_t)) return;
-        /* s_scan_channel을 그대로 믿으면 안 됨 — advertise_timer_cb(별도 타이머 콜백)가
-         * 300ms마다 이 변수를 증가시키고 채널을 바꾸는데, recv_cb(ESP-NOW 드라이버 태스크)가
-         * 실제로 이 콜백을 실행하는 시점은 패킷을 "물리적으로 수신한" 시점보다 늦어질 수
-         * 있어서, 그 사이에 advertise_timer_cb가 먼저 끼어들면 s_scan_channel이 이미 다음
-         * 채널로 넘어간 뒤임 — 그러면 실제로는 이전 채널에서 응답을 받았는데 엉뚱하게 다음
-         * 채널로 락되는 레이스가 생김(2026-08-02, 실기에서 Cntl은 항상 CH1 고정인데 CAM이
-         * CH2로 락되는 게 반복 재현돼서 발견). info->rx_ctrl->channel은 드라이버가 패킷을
-         * 실제로 수신한 채널을 그대로 담고 있어서 이 레이스에서 자유로움 — 이 값을 신뢰 */
-        uint8_t actual_channel = (info && info->rx_ctrl) ? info->rx_ctrl->channel : s_scan_channel;
-        s_scan_channel = actual_channel;
-        esp_wifi_set_channel(s_scan_channel, WIFI_SECOND_CHAN_NONE);  /* 레이스로 이미 다른
-                                                                          채널로 넘어갔으면 되돌림 */
-        s_channel_locked = true;
-        esp_timer_stop(s_advertise_timer);
-        esp_timer_start_periodic(s_advertise_timer, ADVERTISE_PERIOD_US);
-        ESP_LOGI(TAG, "Cntl 채널 확인됨(CH%d) — 스캔 중지, 페어링 대기", s_scan_channel);
-        return;
-    }
+    /* ADVERTISE_ACK/CHANNEL_PONG 소비 — 그 외 타입은 조용히 무시하고 리턴하므로 아래 기존
+     * dispatch와 안전하게 병행됨(2026-08-04, esp_now_channelsync.h 참고) */
+    esp_now_channelsync_on_recv(info, msg_type, data, len);
+    /* Reliable 모드(Layer 1) 요청/응답 매칭 — photo_tx 태스크가 기다리는 응답이면 깨움
+     * (2026-08-05, esp_now_reliable.h 참고, 위와 동일한 병행 안전성) */
+    esp_now_reliable_on_recv(msg_type, info ? info->src_addr : NULL, data, len);
 
     if (msg_type == ESP_NOW_MSG_PHOTO_REQUEST) {
         if (!s_paired || len < (int)sizeof(esp_now_photo_request_t)) return;
@@ -528,33 +592,47 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             s_request_generation++;
             s_last_req = req;
             s_has_last_req = true;
-        }
-        cam_task_request_t item = { .kind = CAM_TASK_REQ_PHOTO, .photo_req = req, .generation = s_request_generation };
-        if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
-            ESP_LOGW(TAG, "PHOTO_REQUEST 큐 가득 — 이전 전송 아직 진행중, 무시");
+            cam_task_request_t item = { .kind = CAM_TASK_REQ_PHOTO, .photo_req = req, .generation = s_request_generation };
+            if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "PHOTO_REQUEST 큐 가득 — 이전 전송 아직 진행중, 무시");
+            }
+        } else {
+            /* 2026-08-04 — 예전엔 세대번호만 안 올리고 큐에는 그대로 다시 넣었음. ESP-NOW
+             * 물리계층 자동 재전송으로 "같은" 요청이 두 번 들어오는 경우뿐 아니라, Cntl이
+             * 신뢰성을 위해 같은 요청을 의도적으로 여러 번 보내는 경우(아래 esp_now_photo.c
+             * 참고)에도 그대로 큐에 쌓여서 같은 사진/배치를 몇 번씩 중복 전송하고 있었음 —
+             * 진짜 새 요청이 아니면 아예 무시 */
+            ESP_LOGI(TAG, "PHOTO_REQUEST 중복 수신(mode=%d param=%u) — 무시", req.mode, (unsigned)req.param);
         }
         return;
     }
 
-    if (msg_type == ESP_NOW_MSG_PHOTO_CHUNK_NACK) {
-        if (!s_paired || len < (int)sizeof(esp_now_photo_chunk_nack_t)) return;
-        /* static — 808바이트짜리 구조체를 recv_cb(드라이버 태스크) 스택에 두지 않음
-         * (2026-08-03, 방금 겪은 스택 오버플로우 사고 이후 큰 지역변수는 되도록 피함) */
-        static esp_now_photo_chunk_nack_t nack;
-        memcpy(&nack, data, sizeof(nack));
-        /* photo_tx 태스크(send_one_photo)가 직접 기다리는 큐 — 논블로킹, 못 넣으면(이미
-         * 꽉 찼으면) 그냥 버림. 어차피 못 받으면 Cntl이 다음 라운드에 또 NACK을 보냄 */
-        if (xQueueSend(s_nack_queue, &nack, 0) != pdTRUE) {
-            ESP_LOGW(TAG, "NACK 큐 가득 — 무시(다음 라운드에 다시 옴)");
+    if (msg_type == ESP_NOW_MSG_BENCH_START) {
+        if (!s_paired || len < (int)sizeof(esp_now_bench_start_t)) return;
+        esp_now_bench_start_t req;
+        memcpy(&req, data, sizeof(req));
+        cam_task_request_t item = { .kind = CAM_TASK_REQ_BENCH, .bench_duration_sec = req.duration_sec };
+        if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "BENCH_START 큐 가득 — 무시");
         }
         return;
     }
 
     if (msg_type == ESP_NOW_MSG_PHOTO_LIST_REQUEST) {
         if (!s_paired || len < (int)sizeof(esp_now_photo_list_request_t)) return;
+        /* 2026-08-04 — Cntl이 신뢰성을 위해 LIST_REQUEST를 여러 번 보내면(아래 esp_now_photo.c
+         * 참고), 예전엔 그때마다 큐에 다시 쌓여서 SD 목록조회(최대 500개 파일 stat)를
+         * 몇 번씩 중복 실행했음. 이미 대기/진행 중이면 추가로 안 쌓음 — PHOTO_REQUEST의
+         * 중복 무시와 같은 이유 */
+        if (s_list_request_pending) {
+            ESP_LOGI(TAG, "PHOTO_LIST_REQUEST 중복 수신 — 무시(이미 처리 중)");
+            return;
+        }
         cam_task_request_t item = { .kind = CAM_TASK_REQ_LIST };
         if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
             ESP_LOGW(TAG, "PHOTO_LIST_REQUEST 큐 가득 — 무시");
+        } else {
+            s_list_request_pending = true;
         }
         return;
     }
@@ -584,28 +662,29 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         return;
     }
 
-    /* Cntl이 연결 해제했다는 통보 — 우리 쪽 hub로 등록된 상대가 보낸 것만 인정하고
-     * 페어링 전(광고/채널스캔) 상태로 돌아감. 이게 없으면 Cntl이 끊어도 CAM은 몰라서
-     * keepalive를 계속 보내 Cntl 목록에서 "연결됨"으로 되돌아가버림(실기로 확인됨). */
+    /* Cntl이 연결 해제했다는 통보 — 페어링만 정리(2026-08-04 — 채널 동기화는 그대로 유지,
+     * esp_now_channelsync가 독립적으로 계속 확인 중이라 다시 스캔할 필요 없음. 예전엔
+     * enter_advertising()으로 채널 스캔부터 다시 했는데, 채널이 안 바뀐 이상 불필요한
+     * 낭비였음) */
     if (msg_type == ESP_NOW_MSG_UNPAIR) {
         if (!s_paired || len < (int)sizeof(esp_now_unpair_t)) return;
         if (memcmp(info->src_addr, s_hub_mac, sizeof(s_hub_mac)) != 0) return;
-        ESP_LOGI(TAG, "Cntl이 연결 해제함 — 광고 재개");
-        enter_advertising(false);
+        ESP_LOGI(TAG, "Cntl이 연결 해제함");
+        s_paired = false;
+        set_led(LED_PATTERN_BLINK_FAST);
         return;
     }
 
     /* Cntl 소프트리셋 대응(2026-08-02) — Cntl이 재시작하면 노드 테이블이 통째로 비워지는데,
-     * 우리는 이미 페어링됐다고 믿고 ADVERTISE를 멈춘 채 PAIR_ACK(keepalive)만 계속 보냄.
-     * 근데 esp_now_send()의 성공/실패는 물리계층 ACK 기준이라 상대가 그 keepalive를
-     * 애플리케이션 레벨에서 무시해도 우리는 계속 "성공"으로만 보여서 SEND_FAIL_THRESHOLD가
-     * 절대 안 걸림 — 즉 스스로는 이 상태를 못 벗어남(실기로 확인). Cntl이 부팅 직후 이
-     * 브로드캐스트를 한 번 보내주면, 페어링돼 있던 노드도 강제로 재광고 모드로 돌아감 */
+     * 우리는 이미 페어링됐다고 믿고 있음. 2026-08-04 재설계: 생존확인이 이제 CHANNEL_PING/PONG
+     * 기반이라(esp_now_channelsync) Cntl이 재부팅해도 응답만 하면 되므로 채널 동기화 자체는
+     * 안 끊김 — 여기선 페어링 상태만 정리하면 됨(재스캔 불필요) */
     if (msg_type == ESP_NOW_MSG_HUB_RESET) {
         if (len < (int)sizeof(esp_now_hub_reset_t)) return;
         if (s_paired) {
-            ESP_LOGI(TAG, "Cntl 재시작 감지(HUB_RESET) — 재광고 시작");
-            enter_advertising(false);
+            ESP_LOGI(TAG, "Cntl 재시작 감지(HUB_RESET)");
+            s_paired = false;
+            set_led(LED_PATTERN_BLINK_FAST);
         }
         return;
     }
@@ -639,14 +718,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     }
 
     s_paired = true;
-    s_send_fail_count = 0;
-    esp_timer_stop(s_advertise_timer);
-    if (s_unpaired_failed_timer) esp_timer_stop(s_unpaired_failed_timer);
-    if (!s_keepalive_timer) {
-        const esp_timer_create_args_t ka_args = { .callback = keepalive_timer_cb, .name = "cam_keepalive" };
-        ESP_ERROR_CHECK(esp_timer_create(&ka_args, &s_keepalive_timer));
-    }
-    esp_timer_start_periodic(s_keepalive_timer, KEEPALIVE_PERIOD_US);
     set_led(LED_PATTERN_HEARTBEAT);
 
     esp_now_pair_ack_t ack = {
@@ -656,24 +727,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     memcpy(ack.node_mac, s_mac, sizeof(ack.node_mac));
     esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
     ESP_LOGI(TAG, "페어링됨: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
-}
-
-static void advertise_timer_cb(void *arg)
-{
-    (void)arg;
-    esp_now_advertise_t msg = {
-        .version  = ESP_NOW_LINK_VERSION,
-        .msg_type = ESP_NOW_MSG_ADVERTISE,
-    };
-    memcpy(msg.name, s_name, sizeof(msg.name));
-    memcpy(msg.mac, s_mac, sizeof(msg.mac));
-    esp_now_send(s_broadcast_addr, (const uint8_t *)&msg, sizeof(msg));
-
-    if (!s_channel_locked) {
-        s_scan_channel++;
-        if (s_scan_channel > SCAN_CHANNEL_MAX) s_scan_channel = SCAN_CHANNEL_MIN;
-        esp_wifi_set_channel(s_scan_channel, WIFI_SECOND_CHAN_NONE);
-    }
 }
 
 void esp_now_cam_set_status_led(gpio_num_t pin)
@@ -688,10 +741,6 @@ void esp_now_cam_init(void)
     ESP_LOGI(TAG, "노드 이름: %s (MAC " MACSTR ")", s_name, MAC2STR(s_mac));
 
     s_photo_request_queue = xQueueCreate(4, sizeof(cam_task_request_t));
-    /* NACK은 send_one_photo()가 자기 전송 도중(같은 photo_tx 태스크) 직접 기다리므로 슬롯
-     * 1~2개면 충분 — 여러 개 쌓일 상황 자체가 없음(파일 하나 처리 끝나야 다음 큐 항목으로
-     * 넘어가는 단일 소비자 구조) */
-    s_nack_queue = xQueueCreate(2, sizeof(esp_now_photo_chunk_nack_t));
     /* 4096으로는 촬영(esp_camera_fb_get)+SD 저장(FATFS) 경로에서 스택 오버플로우 실기 확인
      * (2026-08-01) — 여유있게 증설했었으나, 목록조회(LIST) 경로에서 또 다른 스택 오버플로우가
      * 실기에서 확인됨(2026-08-03) — CAM 크래시 후 재부팅되면서 Cntl 쪽엔 그냥 "무응답
@@ -707,20 +756,10 @@ void esp_now_cam_init(void)
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
     ESP_ERROR_CHECK(esp_now_register_send_cb(send_cb));
 
-    esp_now_peer_info_t peer = { 0 };
-    memcpy(peer.peer_addr, s_broadcast_addr, sizeof(peer.peer_addr));
-    peer.ifidx   = WIFI_IF_STA;
-    peer.channel = 0;
-    peer.encrypt = false;
-    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
-
-    const esp_timer_create_args_t adv_args = { .callback = advertise_timer_cb, .name = "cam_adv" };
-    ESP_ERROR_CHECK(esp_timer_create(&adv_args, &s_advertise_timer));
-
-    const esp_timer_create_args_t unpaired_args = { .callback = unpaired_failed_timer_cb, .name = "cam_unpaired" };
-    ESP_ERROR_CHECK(esp_timer_create(&unpaired_args, &s_unpaired_failed_timer));
-
-    enter_advertising(false);
+    /* 광고/채널스캔/생존확인은 전부 esp_now_channelsync가 전담(2026-08-04 재설계) —
+     * 브로드캐스트 피어 등록도 이 컴포넌트가 알아서 함 */
+    esp_now_channelsync_init(s_name, s_mac, on_channel_synced, on_channel_lost_sync);
+    set_led(LED_PATTERN_BLINK_FAST);
 }
 
 const char *esp_now_cam_get_name(void) { return s_name; }

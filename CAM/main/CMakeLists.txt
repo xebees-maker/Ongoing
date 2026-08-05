@@ -17,6 +17,8 @@ idf_component_register(
         esp_netif
         esp_timer
         esp_now_link
+        esp_now_channelsync
+        esp_now_reliable
         esp32-camera
         bsp_esp32s3_cam
         io_expander_ch32v003

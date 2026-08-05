@@ -13,6 +13,7 @@
 #include "esp_http_server.h"
 #include "esp_now_hub.h"
 #include "esp_now_photo.h"
+#include "esp_now_tx.h"
 #include "esp_lv_decoder.h"
 #include "ui_log.h"
 #include "rtc_sync.h"
@@ -172,6 +173,7 @@ void app_main(void)
      * Cntl main.c와 동일하게 UI 뜬 뒤 마지막에 켬 */
     esp_now_photo_init();
     esp_now_hub_init();
+    esp_now_tx_init();
 
     /* Cntl 통합 테스트 5단계: 웹 대시보드(HTTP 서버, 최소 버전) */
     web_dashboard_start_stub();

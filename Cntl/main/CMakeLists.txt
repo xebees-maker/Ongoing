@@ -8,6 +8,7 @@ idf_component_register(
         "ui_log.c"
         "esp_now_hub.c"
         "esp_now_photo.c"
+        "esp_now_tx.c"
         "rtc_sync.c"
         "../components/waveshare_rgb_lcd_port.c"
     INCLUDE_DIRS
@@ -20,6 +21,7 @@ idf_component_register(
         esp_netif
         esp_http_server
         esp_now_link
+        esp_now_reliable
         esp_timer
         waveshare__pcf85063a
     PRIV_REQUIRES

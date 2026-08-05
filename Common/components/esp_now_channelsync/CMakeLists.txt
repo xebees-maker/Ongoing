@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "esp_now_channelsync.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_now_link
+        esp_wifi
+        esp_timer
+)

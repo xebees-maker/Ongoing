@@ -31,8 +31,10 @@ extern "C" {
 
 void esp_now_photo_init(void);
 
-/* esp_now_hub.c의 recv_cb가 PHOTO_ 계열/CAPTURE_STATUS 메시지를 여기로 넘겨줌 */
-void esp_now_photo_on_recv(uint8_t msg_type, const uint8_t *data, int len);
+/* esp_now_hub.c의 recv_cb가 PHOTO_ 계열/CAPTURE_STATUS 메시지를 여기로 넘겨줌.
+ * src_mac: 보낸 CAM의 MAC(2026-08-05 추가 — CAPTURE_STATUS_ACK을 그 자리에서 돌려보내려면
+ * 필요, esp_now_photo.c의 handle_capture_status() 참고) */
+void esp_now_photo_on_recv(uint8_t msg_type, const uint8_t *src_mac, const uint8_t *data, int len);
 
 /* ────────────────────────────────────────────────────────────
  * 1. 단일 사진 수신 — capture_now/fetch_by_id 공용

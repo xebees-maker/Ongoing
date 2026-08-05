@@ -57,6 +57,35 @@ typedef enum {
                                               * 스트리밍+선택적 재전송)는 사진 전용이 아니라
                                               * 나중에 다른 대용량 전송(Sens 등)에도 그대로
                                               * 재사용 가능한 일반적인 패턴 */
+    ESP_NOW_MSG_BENCH_BLAST = 23,           /* CAM -> Cntl: 처리량 벤치마크용 더미 바이트(내용
+                                              * 무의미) — Cntl은 받는 즉시 버리고 바이트 수만
+                                              * 카운트. 프로토콜 오버헤드 없는 순수 채널 처리량
+                                              * 실측용(2026-08-04, esp_now_reliable 설계 착수
+                                              * 전 기준치 측정) */
+    ESP_NOW_MSG_BENCH_START = 24,           /* Cntl -> CAM: 벤치마크 트리거(N초간 BLAST 최대
+                                              * 속도 전송 시작). Cntl 설정화면의 임시 버튼에서
+                                              * 보냄 */
+    ESP_NOW_MSG_CHANNEL_PING = 25,           /* 노드 -> 허브: 순수 생존/채널동기 확인 전용
+                                               * (2026-08-04, esp_now_channelsync 설계 — 페어링
+                                               * 여부와 무관하게 "지금 이 채널에서 서로 닿는지"만
+                                               * 확인. PAIR_ACK 재사용 keepalive를 대체함 —
+                                               * 그건 "살아있음"과 "페어링됨"의 의미가 섞여
+                                               * 있었음). */
+    ESP_NOW_MSG_CHANNEL_PONG = 26,           /* 허브 -> 노드: CHANNEL_PING 응답. 허브는 페어링
+                                               * 여부와 무관하게 자기가 지금 있는 채널에서 받은
+                                               * PING엔 항상 응답함 — 생존확인은 페어링 승인과
+                                               * 별개 개념이므로. */
+    ESP_NOW_MSG_PHOTO_DONE_ACK = 27,        /* Cntl -> CAM: PHOTO_DONE에 대한 응답, "항상" 보냄
+                                              * (2026-08-05, esp_now_reliable Layer 1 설계 —
+                                              * 예전 NACK은 "문제 있을 때만" 보내서 정상 종료를
+                                              * CAM이 구분할 방법이 없었음). missing_count=0이면
+                                              * 완료, 아니면 기존 esp_now_photo_chunk_nack_t
+                                              * 구조체 그대로 재사용해 누락분을 실어보냄 */
+    ESP_NOW_MSG_PHOTO_LIST_DONE_ACK = 28,   /* Cntl -> CAM: PHOTO_LIST_DONE에 대한 응답, 개수
+                                              * 일치 여부와 무관하게 "항상" 보냄(위와 동일 원칙) */
+    ESP_NOW_MSG_CAPTURE_STATUS_ACK = 29,    /* Cntl -> CAM: CAPTURE_STATUS(최종 SUCCESS/FAILED)
+                                              * 에 대한 최소 확인 응답 — CAM이
+                                              * esp_now_reliable_request()로 감쌀 수 있게 함 */
 } esp_now_msg_type_t;
 
 typedef struct __attribute__((packed)) {
@@ -91,6 +120,16 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
     uint8_t node_mac[6];
 } esp_now_pair_ack_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_channel_ping_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_channel_pong_t;
 
 /* Cntl -> 노드(유니캐스트): 사용자가 Cntl에서 연결 해제함. 받은 노드는 다시 페어링 전
  * 상태(광고/채널스캔)로 돌아가고 keepalive를 멈춰야 함 — 그 전엔 노드가 자기 상태를 알 방법이
@@ -205,6 +244,12 @@ typedef struct __attribute__((packed)) {
     uint16_t missing_idx[ESP_NOW_PHOTO_NACK_MAX_INDICES];
 } esp_now_photo_chunk_nack_t;
 
+/* ESP_NOW_MSG_PHOTO_DONE_ACK(2026-08-05, Layer 1 Reliable 모드)는 이 구조체를 msg_type만
+ * 바꿔서 그대로 재사용함 — missing_count=0이면 완료, 아니면 지금의 NACK과 똑같이 누락
+ * chunk_idx 목록을 실음. 굳이 새 구조체를 안 만든 이유: "누락분을 알려준다"는 의미 자체가
+ * 이미 이 구조체와 동일하고, PHOTO_DONE_ACK는 그냥 "이걸 항상 보낸다"로 바뀐 것뿐이라서
+ * (예전엔 문제 있을 때만 NACK을 보냈는데, 이제 missing_count=0인 경우도 포함해 매번 보냄) */
+
 /* 지금촬영(CAPTURE_NOW) 진행 상태 — Cntl UI가 진행 팝업 단계 표시에 씀.
  * RECEIVED: CAM이 요청을 접수(아직 촬영 전). SUCCESS/FAILED: 촬영 자체의 성공/실패
  * (전송은 SUCCESS 뒤에 기존 META/CHUNK/DONE으로 이어짐, FAILED면 곧바로 DONE만 옴). */
@@ -219,6 +264,14 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
     uint8_t status;  /* cam_capture_status_t */
 } esp_now_capture_status_t;
+
+/* CAPTURE_STATUS(SUCCESS/FAILED, 최종 결과)에 대한 Cntl의 최소 확인 응답(2026-08-05,
+ * Layer 1) — CAM이 esp_now_reliable_request()로 감싸서 "진짜 도달했는지" 확인할 수 있게 함.
+ * 페이로드 없음(응답이 왔다는 사실 자체가 의미의 전부) */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_capture_status_ack_t;
 
 /* 사진 "목록"만 요청 — META/CHUNK로 실제 JPEG 내용을 보내는 것과 무관하게, 저장된 파일들의
  * file_id/kind/촬영시각/크기만 가볍게 나열해서 알려줌. 목록에서 하나를 고르면 그때
@@ -256,6 +309,8 @@ typedef struct __attribute__((packed)) {
                              * 호환 — 안 채워진 필드는 그냥 0으로 옴) */
     uint32_t sd_used_kb;   /* 사용 중인 용량(KB) */
 } esp_now_photo_list_done_t;
+/* ESP_NOW_MSG_PHOTO_LIST_DONE_ACK(2026-08-05, Layer 1)도 이 구조체를 msg_type만 바꿔서
+ * 그대로 재사용 — 필드 의미가 이미 동일함(count 등), "항상 보낸다"만 새로운 규칙 */
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;
@@ -308,3 +363,21 @@ typedef struct __attribute__((packed)) {
     uint8_t  wb_mode;               /* cam_wb_mode_t */
     uint32_t capture_interval_sec;  /* 0 = 자동 촬영 끔 */
 } esp_now_cam_config_t;
+
+/* PHOTO_CHUNK와 동일 크기로 맞춰야 실사용 전송과 같은 조건에서 처리량을 잴 수 있음.
+ * seq는 순서 확인용이 아니라 Cntl 로그에서 유실 유무를 눈으로 보기 위한 참고값(벤치마크는
+ * 유실을 감지/보정하지 않음 — 순수 최대 처리량 측정이 목적). */
+#define ESP_NOW_BENCH_BLAST_DATA_LEN ESP_NOW_PHOTO_CHUNK_DATA_LEN
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint32_t seq;
+    uint8_t  data[ESP_NOW_BENCH_BLAST_DATA_LEN];
+} esp_now_bench_blast_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint16_t duration_sec;
+} esp_now_bench_start_t;

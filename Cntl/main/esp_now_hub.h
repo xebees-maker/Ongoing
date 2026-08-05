@@ -12,7 +12,11 @@
 #include "esp_now_link.h"
 
 #define ESP_NOW_HUB_MAX_NODES 8
-#define ESP_NOW_HUB_NODE_TIMEOUT_MS 5000U  /* advertise 주기(1s) 5회 누락 시 리스트에서 제외 */
+/* 2026-08-04: CAM keepalive를 1s->10s로 늘려서(esp_now_cam.c, 채널 혼잡 튜닝) 5회 누락
+ * 기준을 유지하려면 50s가 맞음. Sens는 아직 1s 주기 그대로라 목록에서 실제로 사라지는
+ * 반응이 그만큼 느려지는 부작용 있음(끊긴 뒤 최대 50s간 목록엔 남아있음) — CAM 튜닝
+ * 결과 보고 필요하면 노드 종류별로 분리 예정 */
+#define ESP_NOW_HUB_NODE_TIMEOUT_MS 50000U
 
 /* CAM/SENS는 ADVERTISE 메시지에 장치 종류를 안 실어보내서(name/mac만 있음), 이름 접두사로
  * 구분함 — CAM은 기본 이름이 "Cam-XXXX"(esp_now_cam.c), SENS는 "Sens-XXXX"(esp_now_node.c).
@@ -49,3 +53,13 @@ int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max
 /* 리스트 아이템 탭 시 사용 — mac은 esp_now_hub_get_nodes()로 얻은 노드의 mac[6] */
 void esp_now_hub_pair(const uint8_t *mac);
 void esp_now_hub_unpair(const uint8_t *mac);
+
+/* 통신 시도 전 항상 이걸로 실제 페어링 여부를 확인(2026-08-04, 사용자 지시) — 화면의
+ * "연결됨" 표시나 로컬 상태만 믿지 말고 매번 이 함수로 재확인. esp_now_photo.c의 모든
+ * 요청 함수가 이 가드를 거쳐가게 되어 있음(esp_now_photo_capture_now 등 참고). */
+bool esp_now_hub_is_paired(const uint8_t *mac);
+
+/* 처리량 벤치마크 트리거(2026-08-04, 임시 개발용) — 페어링된 CAM 중 첫 번째에게
+ * duration_sec 동안 BENCH_BLAST를 최대 속도로 쏘라고 요청. 결과는 양쪽 시리얼 로그로만
+ * 확인(esp_now_cam.c/esp_now_hub.c의 BENCH 로그 참고), UI에는 안 보여줌. */
+void esp_now_hub_bench_start(uint16_t duration_sec);
