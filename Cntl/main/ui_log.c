@@ -44,6 +44,7 @@ static const ui_err_entry_t s_err_table[] = {
     { UI_ERR_SEND_DELETE_REQ,     "삭제 요청 전송 실패" },
     { UI_ERR_SEND_DELETE_ALL_REQ, "전체삭제 요청 전송 실패" },
     { UI_ERR_REQUEST_BUSY,        "요청 무시됨(이미 수신중)" },
+    { UI_ERR_NOT_PAIRED,          "페어링 끊김 — 재연결 시도" },
     { UI_ERR_META_TOO_BIG,        "사진이 수신 버퍼보다 큼" },
     { UI_ERR_CHUNK_MISSING,       "청크 누락" },
     { UI_ERR_CRC_MISMATCH,        "CRC 불일치" },
@@ -51,6 +52,7 @@ static const ui_err_entry_t s_err_table[] = {
     { UI_ERR_LIST_COUNT_MISMATCH, "목록 항목 유실" },
     { UI_ERR_FETCH_NORESPONSE,    "사진 가져오기 무응답" },
     { UI_ERR_LIST_NORESPONSE,     "목록 갱신 무응답" },
+    { UI_ERR_PHOTO_SELECTION_STALE, "선택-도착 불일치(낡은 응답)" },
     { UI_ERR_DELETE_FAILED,       "사진 삭제 실패" },
     { UI_ERR_DELETE_ALL_FAILED,   "전체삭제 실패" },
     { UI_ERR_CAPTURE_FAILED,      "촬영 실패" },
@@ -60,7 +62,6 @@ static const ui_err_entry_t s_err_table[] = {
     { UI_ERR_FONT_FILE_OPEN,      "폰트 파일 열기 실패" },
     { UI_ERR_FONT_CREATE,         "폰트 생성 실패" },
     { UI_ERR_HTTPD_START,         "웹서버 시작 실패" },
-    { UI_ERR_TEST_FORCED,         "시험 버튼 강제 에러" },
 };
 
 void ui_log_init(void)

@@ -198,6 +198,8 @@ static void update_lang_buttons(void)
 /* 카메라 리스트(설정탭)의 "비교 대상 없음" 상태(-1)로 되돌림 — 정의는 s_camera_count_prev
  * 선언부 근처(아래), 여기(refresh_lang_texts)보다 늦게 선언돼서 전방선언만 둠 */
 static void force_camera_list_redraw(void);
+/* 목록 개수 라벨("N개"/"N Pic.") 갱신 — 정의는 refresh_photo_list_ui 근처(아래) */
+static void update_list_info_label(void);
 
 static void refresh_lang_texts(void)
 {
@@ -236,6 +238,7 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_camera_delete_all_lbl, ui_str(STR_BTN_DELETE_ALL));
     lv_label_set_text(s_list_title, ui_str(STR_PANEL_LIST));
     lv_label_set_text(s_picture_title, ui_str(STR_PANEL_PICTURE));
+    update_list_info_label();
 }
 
 /* 실제 반영(ui_lang_set — s_lang 갱신 + nvs 저장)이 끝난 뒤에만 라디오/라벨을 갱신한다
@@ -529,6 +532,7 @@ static lv_obj_t *create_dashboard_panel(lv_obj_t *parent, ui_str_id_t title_id, 
 static void refresh_photo_list_ui(int select_index);  /* capture 팝업이 완료 시점에 씀 */
 static void show_fetch_progress_popup(void);  /* 아래 공용 진행팝업 모듈 정의 뒤에 구현 */
 static void display_photo(uint32_t file_id);  /* 아래 정의 — 캐시 히트 시 여기서 바로 씀 */
+static void consume_ready_photo_if_current(void);  /* 아래 정의 — display_photo() 직후 */
 
 /* CAM의 실제 파일명 표기(base36 4자리, 0-9A-Z, CAM/main/cam_storage.c의 encode_seq()와
  * 동일 인코딩)를 그대로 미러링 — 예전엔 file_id를 %u로 그냥 10진수로 찍어서 CAM SD카드의
@@ -582,15 +586,13 @@ static void reconcile_selection(lv_obj_t *row, bool show_popup)
     ui_log_add("SELECT file_id=%u", (unsigned)s_selected_file_id);
 
     /* 새 요청을 걸기 전에, 직전 사진이 방금 도착했는데(READY) 아직 판넬에 반영 안 된
-     * 상태면 먼저 반영하고 넘어감 — esp_now_photo_fetch_by_id()가 새 요청 시작하면서
-     * 상태를 무조건 IDLE로 되돌리는데, 그 전에 이걸 안 하면 방금 받은 사진이 화면에
-     * 한 번도 안 뜨고 유실됨(2026-08-01 실기에서 확인) */
-    if (esp_now_photo_get_state() == ESP_NOW_PHOTO_STATE_READY) {
-        uint32_t pending_id = esp_now_photo_get_ready_file_id();
-        ui_log_add("SELECT: 대기중 READY(file_id=%u) 먼저 반영", (unsigned)pending_id);
-        display_photo(pending_id);
-        esp_now_photo_ready_ack();
-    }
+     * 상태면 먼저 처리하고 넘어감 — esp_now_photo_fetch_by_id()가 새 요청 시작하면서
+     * 상태를 무조건 IDLE로 되돌리므로, 그 전에 이걸 안 하면 도착한 사진을 영영 못 봄
+     * (2026-08-01 실기에서 확인). 다만 이 시점엔 s_selected_file_id가 이미 "새" 선택으로
+     * 바뀌어 있어서, 대기 중이던 READY는 대부분 "이전" 선택의 응답 — 그대로 그리면 안
+     * 되고 consume_ready_photo_if_current()가 file_id 일치 여부를 확인해서 처리함
+     * (2026-08-05, 선택-도착 불일치 버그 수정) */
+    consume_ready_photo_if_current();
 
     esp_now_photo_fetch_by_id(s_paired_cam_mac, s_selected_file_id);
     if (show_popup) show_fetch_progress_popup();
@@ -626,21 +628,30 @@ static void cb_photo_delete_btn(lv_event_t *e)
     show_photo_delete_confirm(file_id);
 }
 
+/* 목록 제목 옆 "N개 XX%" / "N Pic. XX%" 라벨 — 언어 전환 시(refresh_lang_texts)와
+ * 목록 갱신 시(refresh_photo_list_ui) 둘 다에서 다시 그려야 해서 분리(2026-08-04).
+ * "개(Pic.)" 표기는 괄호 안이 영문 모드일 때만 쓰는 표기라는 뜻이었음(사용자 정정:
+ * 한글모드="N개", 영문모드="N Pic.", 둘 다 같이 보이면 안 됨) */
+static void update_list_info_label(void)
+{
+    uint32_t sd_total_kb = 0, sd_used_kb = 0;
+    esp_now_photo_list_get_sd_usage(&sd_total_kb, &sd_used_kb);
+    bool en = (ui_lang_get() == UI_LANG_EN);
+    char info_buf[32];
+    if (sd_total_kb > 0) {
+        unsigned pct = (unsigned)((uint64_t)sd_used_kb * 100 / sd_total_kb);
+        snprintf(info_buf, sizeof(info_buf), en ? "%d Pic.  %u%%" : "%d개  %u%%", s_current_list_count, pct);
+    } else {
+        snprintf(info_buf, sizeof(info_buf), en ? "%d Pic." : "%d개", s_current_list_count);
+    }
+    lv_label_set_text(s_list_info_label, info_buf);
+}
+
 /* select_index: 이 인덱스의 행을 선택 표시(예: 지금촬영 직후엔 0=최신). -1이면 선택 없음 */
 static void refresh_photo_list_ui(int select_index)
 {
     s_current_list_count = esp_now_photo_list_get_items(s_current_list, ESP_NOW_PHOTO_LIST_MAX);
-
-    uint32_t sd_total_kb = 0, sd_used_kb = 0;
-    esp_now_photo_list_get_sd_usage(&sd_total_kb, &sd_used_kb);
-    char info_buf[32];
-    if (sd_total_kb > 0) {
-        unsigned pct = (unsigned)((uint64_t)sd_used_kb * 100 / sd_total_kb);
-        snprintf(info_buf, sizeof(info_buf), "%d개(Pic.)  %u%%", s_current_list_count, pct);
-    } else {
-        snprintf(info_buf, sizeof(info_buf), "%d개(Pic.)", s_current_list_count);
-    }
-    lv_label_set_text(s_list_info_label, info_buf);
+    update_list_info_label();
 
     lv_indev_reset(NULL, s_photo_list);
     lv_obj_clean(s_photo_list);
@@ -867,6 +878,29 @@ static void display_photo(uint32_t file_id)
     ui_log_add("DISPLAY set_src 완료 file_id=%u", (unsigned)file_id);
 }
 
+/* READY 상태 사진을 "지금 선택된 항목과 일치할 때만" 화면에 반영(2026-08-05) — 취소가
+ * 실제 거래를 못 끝내는 문제(위 cb_progress_popup_cancel 참고)를 고쳤어도, 방어적으로
+ * 한 번 더 확인함. 안 맞으면(이미 다른 걸 선택해서 이 응답은 낡은 것) 조용히 버리지
+ * 않고 에러로 표시(사용자 지시: "2번도 에러니까 안 그리는 것보다 에러를 띄워줘") +
+ * 지금 선택된 항목을 다시 요청 — 그 사이 busy로 무시됐을 수 있는 진짜 요청을 벌충함
+ * (start_single_receive()의 기존 busy 가드가 중복 무선 전송은 로컬에서 안전하게 막음) */
+static void consume_ready_photo_if_current(void)
+{
+    if (esp_now_photo_get_state() != ESP_NOW_PHOTO_STATE_READY) return;
+    uint32_t ready_id = esp_now_photo_get_ready_file_id();
+    esp_now_photo_ready_ack();
+    if (s_has_selected_file_id && ready_id == s_selected_file_id) {
+        display_photo(ready_id);
+        return;
+    }
+    ui_log_add_err(UI_ERR_PHOTO_SELECTION_STALE,
+                    "도착 file_id=%u != 선택 file_id=%u — 무시하고 재요청",
+                    (unsigned)ready_id, (unsigned)s_selected_file_id);
+    if (s_has_paired_cam && s_has_selected_file_id) {
+        esp_now_photo_fetch_by_id(s_paired_cam_mac, s_selected_file_id);
+    }
+}
+
 /* ════════════════════════════════════════════════════════════
  * CAM(추후 SENS) 진행 팝업 공용 틀 — 오버레이 + "취소" 버튼(언제든 닫기) + 200ms 폴링
  * 타이머 + 완료시 자동 닫힘. 지금촬영/모두지우기 등 CAM과 통신하며 단계를 보여주는 모든
@@ -885,6 +919,9 @@ static lv_obj_t          *s_progress_popup_overlay = NULL;
 static lv_obj_t          *s_progress_popup_box = NULL;
 static lv_timer_t        *s_progress_popup_timer = NULL;
 static progress_tick_fn_t s_progress_tick_fn = NULL;
+static lv_obj_t          *s_progress_popup_cancel_btn = NULL;
+static lv_obj_t          *s_progress_popup_cancel_lbl = NULL;
+static bool               s_progress_popup_cancel_requested = false;
 
 static void close_progress_popup(void)
 {
@@ -898,13 +935,28 @@ static void close_progress_popup(void)
     }
     s_progress_popup_box = NULL;
     s_progress_tick_fn = NULL;
+    s_progress_popup_cancel_btn = NULL;
+    s_progress_popup_cancel_lbl = NULL;
+    s_progress_popup_cancel_requested = false;
     resume_bg_timers();
 }
 
+/* "취소"는 먹통 방지를 위한 심리적 안전장치로만 남기고, 실제 거래(CAM으로 보낸 요청)는
+ * 취소할 방법이 프로토콜에 없어서 그대로 계속 진행됨(2026-08-05, 사용자 지시) — 예전엔
+ * 여기서 바로 close_progress_popup()을 불러서 모달/배경타이머를 즉시 풀어버렸는데, 그
+ * 직후 사용자가 다른 항목을 선택하면 아직 끝나지 않은 이전 요청의 뒤늦은 응답이 새
+ * 선택 위에 잘못 표시되는 경쟁 상태로 이어짐(실기에서 재현: "선택한 사진과 다른 사진이
+ * 보임"). 이제는 라벨/버튼만 "종료 대기 중"으로 바꾸고 모달은 유지 — 각 흐름의
+ * tick_fn이 실제 완료(READY/ERROR)나 자체 타임아웃(CAM_RESPONSE_TIMEOUT_MS)을 만나
+ * true를 반환할 때만 진짜로 닫힘(아래 progress_popup_tick, 안 건드림) — 그래서 무한정
+ * 막히진 않고 상한이 있음 */
 static void cb_progress_popup_cancel(lv_event_t *e)
 {
     (void)e;
-    close_progress_popup();
+    if (s_progress_popup_cancel_requested) return;  /* 중복 클릭 무시 */
+    s_progress_popup_cancel_requested = true;
+    if (s_progress_popup_cancel_btn) lv_obj_add_state(s_progress_popup_cancel_btn, LV_STATE_DISABLED);
+    if (s_progress_popup_cancel_lbl) lv_label_set_text(s_progress_popup_cancel_lbl, ui_str(STR_BTN_CANCEL_PENDING));
 }
 
 static void progress_popup_tick(lv_timer_t *t)
@@ -923,13 +975,15 @@ static lv_obj_t *show_progress_popup(progress_tick_fn_t tick_fn)
     s_progress_popup_overlay = lv_obj_get_parent(box);
     s_progress_popup_box = box;
     s_progress_tick_fn = tick_fn;
+    s_progress_popup_cancel_requested = false;
     return box;
 }
 
 static void start_progress_popup(lv_obj_t *box)
 {
     lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_CANCEL, cb_progress_popup_cancel, NULL);
+    s_progress_popup_cancel_btn = add_modal_button(btn_row, STR_BTN_CANCEL, cb_progress_popup_cancel, NULL);
+    s_progress_popup_cancel_lbl = lv_obj_get_child(s_progress_popup_cancel_btn, 0);
     s_progress_popup_timer = lv_timer_create(progress_popup_tick, 200, NULL);
 }
 
@@ -1354,8 +1408,7 @@ static void refresh_dashboard(lv_timer_t *t)
      * 들고 있고 디코드+그리는 건 UI 쪽 책임 */
     esp_now_photo_state_t photo_state = esp_now_photo_get_state();
     if (photo_state == ESP_NOW_PHOTO_STATE_READY) {
-        display_photo(esp_now_photo_get_ready_file_id());
-        esp_now_photo_ready_ack();
+        consume_ready_photo_if_current();  /* 2026-08-05 — 지금 선택과 일치할 때만 반영 */
     } else if (photo_state == ESP_NOW_PHOTO_STATE_ERROR) {
         esp_now_photo_clear();  /* 실패 로그는 esp_now_photo.c 쪽에서 이미 남김 */
     }
@@ -1420,21 +1473,8 @@ static void refresh_clock(lv_timer_t *t)
     lv_label_set_text(s_clock_label, buf);
 }
 
-/* 설정탭 제어기 그룹박스 "시험" 버튼 — 에러 토스트/경고 로고 파이프라인 확인용.
- * 처음엔 실제로 PSRAM을 다 소모시킬 때까지 반복 malloc했는데, 그러면 이 코드가 감싸지
- * 않은 다른 시스템(LVGL 내부 할당, WiFi 등)까지 같이 죽어서 화면이 깨지고 장치가
- * 먹통이 됐음(2026-08-01, 실기에서 확인) — 에러 핸들러는 실패를 감지하면 더 시도하지
- * 않고 토스트+로고만 바꾸고 끝나야 한다는 지적을 받아, 실제 메모리는 안 건드리고
- * 강제 에러 하나만 발생시키는 것으로 단순화함 */
-static void cb_test_low_memory(lv_event_t *e)
-{
-    (void)e;
-    ui_log_add_err(UI_ERR_TEST_FORCED, "TEST 강제 에러(여유PSRAM=%u)",
-                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-}
-
-/* 소프트 재시작 — 시험 버튼으로 메모리를 소모시킨 뒤 물리적으로 전원을 뽑지 않고도
- * 복구할 수 있게(2026-08-01, 사용자 요청). 확인 팝업 거쳐서 esp_restart() */
+/* 소프트 재시작 — 물리적으로 전원을 뽑지 않고도 복구할 수 있게(2026-08-01, 사용자 요청).
+ * 확인 팝업 거쳐서 esp_restart() */
 static void cb_restart_confirmed(void *ctx)
 {
     (void)ctx;
@@ -1445,6 +1485,56 @@ static void cb_restart_btn(lv_event_t *e)
 {
     (void)e;
     show_confirm_popup("정말 재시작하시겠습니까?", cb_restart_confirmed, NULL);
+}
+
+/* 처리량 벤치마크 트리거(2026-08-04, 임시 개발용 버튼) — esp_now_reliable 설계 전 기준치
+ * 실측용, 결과는 UI가 아니라 CNTL/CAM 양쪽 시리얼 로그로만 확인(esp_now_hub.c 참고).
+ * 신뢰성 레이어 작업이 끝나면 이 버튼은 제거 예정 */
+#define BENCH_DURATION_SEC (30 * 60)  /* 사용자 지시(2026-08-04): 1시간 -> 30분 */
+
+static lv_obj_t  *s_bench_btn      = NULL;
+static lv_obj_t  *s_bench_btn_lbl  = NULL;
+static lv_timer_t *s_bench_countdown_timer = NULL;
+static int        s_bench_remaining_min    = 0;
+
+static void cb_bench_countdown_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    s_bench_remaining_min--;
+    if (s_bench_remaining_min <= 0) {
+        lv_label_set_text(s_bench_btn_lbl, "시작");
+        lv_obj_clear_state(s_bench_btn, LV_STATE_DISABLED);
+        lv_obj_remove_style(s_bench_btn, NULL, LV_PART_MAIN);  /* 회색 오버라이드 제거 —
+                                                                    테마 기본 버튼색으로 복귀 */
+        lv_timer_delete(s_bench_countdown_timer);
+        s_bench_countdown_timer = NULL;
+        return;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d분 남음", s_bench_remaining_min);
+    lv_label_set_text(s_bench_btn_lbl, buf);
+}
+
+static void cb_bench_btn(lv_event_t *e)
+{
+    (void)e;
+    ui_log_add("BENCH: %d분 벤치마크 트리거 전송", BENCH_DURATION_SEC / 60);
+    esp_now_hub_bench_start(BENCH_DURATION_SEC);
+
+    /* 버튼 반응이 눈에 안 보인다는 사용자 지적(2026-08-04) — 로그창 문구만으론 눌렸는지
+     * 구분이 안 간다고 해서, 누르면 즉시 회색으로 바꾸고 비활성화(중복 클릭도 같이 방지 —
+     * 긴 시간짜리라 두 번 누르면 두 번 연달아 도는 문제가 있었음, 실기로 확인). 1분마다
+     * 남은 시간을 라벨에 갱신 — 역시 사용자 지시 */
+    if (s_bench_btn && s_bench_btn_lbl) {
+        lv_obj_add_state(s_bench_btn, LV_STATE_DISABLED);
+        lv_obj_set_style_bg_color(s_bench_btn, lv_palette_main(LV_PALETTE_GREY), 0);
+        s_bench_remaining_min = BENCH_DURATION_SEC / 60;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d분 남음", s_bench_remaining_min);
+        lv_label_set_text(s_bench_btn_lbl, buf);
+        if (s_bench_countdown_timer) lv_timer_delete(s_bench_countdown_timer);
+        s_bench_countdown_timer = lv_timer_create(cb_bench_countdown_tick, 60000, NULL);
+    }
 }
 
 /* 페이지콘트롤 — 페이지탭 3개(상황판/통계/설정). 로고 + 상황판/통계 탭 내용(원래 데모의
@@ -1713,27 +1803,7 @@ void ui_init(void)
 
     update_lang_buttons();  /* 초기 선택 상태(기본 UI_LANG_KO) 반영 */
 
-    /* 시험 버튼 — 에러 토스트/경고 로고 확인용(2026-08-01) */
-    lv_obj_t *test_row = lv_obj_create(cntl_list);
-    lv_obj_set_size(test_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(test_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(test_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(test_row, 0, 0);
-    lv_obj_set_style_pad_hor(test_row, 12, 0);
-    lv_obj_set_style_pad_ver(test_row, 20, 0);
-
-    lv_obj_t *test_label = lv_label_create(test_row);
-    lv_label_set_text(test_label, "메모리부족 시험");
-    lv_obj_set_style_text_font(test_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    lv_obj_t *test_btn = lv_button_create(test_row);
-    lv_obj_add_event_cb(test_btn, cb_test_low_memory, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *test_btn_lbl = lv_label_create(test_btn);
-    lv_label_set_text(test_btn_lbl, "시험");
-    lv_obj_set_style_text_font(test_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    /* 재시작 버튼 — 시험 버튼으로 메모리를 소모시킨 뒤 물리적 전원 재연결 없이 복구할
-     * 수 있게(2026-08-01, 사용자 요청) */
+    /* 재시작 버튼 — 물리적 전원 재연결 없이 소프트 리셋(2026-08-01, 사용자 요청) */
     lv_obj_t *restart_row = lv_obj_create(cntl_list);
     lv_obj_set_size(restart_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(restart_row, LV_FLEX_FLOW_ROW);
@@ -1751,6 +1821,25 @@ void ui_init(void)
     lv_obj_t *restart_btn_lbl = lv_label_create(restart_btn);
     lv_label_set_text(restart_btn_lbl, "재시작");
     lv_obj_set_style_text_font(restart_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 처리량 벤치마크 버튼(2026-08-04, 임시 개발용) — 위 cb_bench_btn 주석 참고 */
+    lv_obj_t *bench_row = lv_obj_create(cntl_list);
+    lv_obj_set_size(bench_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(bench_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bench_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(bench_row, 0, 0);
+    lv_obj_set_style_pad_hor(bench_row, 12, 0);
+    lv_obj_set_style_pad_ver(bench_row, 20, 0);
+
+    lv_obj_t *bench_label = lv_label_create(bench_row);
+    lv_label_set_text(bench_label, "처리량 벤치마크(30분)");
+    lv_obj_set_style_text_font(bench_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_bench_btn = lv_button_create(bench_row);
+    lv_obj_add_event_cb(s_bench_btn, cb_bench_btn, LV_EVENT_CLICKED, NULL);
+    s_bench_btn_lbl = lv_label_create(s_bench_btn);
+    lv_label_set_text(s_bench_btn_lbl, "시작");
+    lv_obj_set_style_text_font(s_bench_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     create_group_box(option_page, STR_GROUP_SENSOR);
 

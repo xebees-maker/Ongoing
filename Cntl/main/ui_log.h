@@ -33,6 +33,8 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_SEND_DELETE_REQ      2004  /* 삭제 요청 전송 실패 */
 #define UI_ERR_SEND_DELETE_ALL_REQ  2005  /* 전체삭제 요청 전송 실패 */
 #define UI_ERR_REQUEST_BUSY         2006  /* 이미 수신 중이라 새 요청 무시됨 */
+#define UI_ERR_NOT_PAIRED           2007  /* 요청 시점에 이미 언페어링 상태(desync 포함) —
+                                             전송 자체를 안 하고 재연결을 시도함 */
 
 #define UI_ERR_META_TOO_BIG         3001  /* CAM이 보낸 사진이 고정 수신 버퍼보다 큼 */
 #define UI_ERR_CHUNK_MISSING        3002  /* 청크 누락 — 재조립 실패 */
@@ -41,6 +43,12 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_LIST_COUNT_MISMATCH  3005  /* 목록 항목 일부 유실 — 재요청/포기 */
 #define UI_ERR_FETCH_NORESPONSE     3006  /* 사진 가져오기 요청 후 CAM 무응답(진행 정체) */
 #define UI_ERR_LIST_NORESPONSE      3007  /* 목록 갱신 요청 후 CAM 무응답(타임아웃) */
+#define UI_ERR_PHOTO_SELECTION_STALE 3008 /* 도착한 사진의 file_id가 지금 선택된 항목과 다름
+                                             — 이전에 밀려난(대체된) 요청의 뒤늦은 응답.
+                                             화면에는 안 그리고 지금 선택된 항목을 재요청함
+                                             (2026-08-05, 선택-도착 불일치 경쟁 상태 방지용
+                                             방어장치 — 정상적으론 거의 안 떠야 함, 뜨면
+                                             모달 차단이 뚫린 것이므로 실제 버그로 취급) */
 
 #define UI_ERR_DELETE_FAILED        4001  /* CAM이 삭제 실패로 응답 */
 #define UI_ERR_DELETE_ALL_FAILED    4002  /* CAM이 전체삭제 실패로 응답 */
@@ -52,8 +60,6 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_FONT_FILE_OPEN       5003  /* 폰트 파일 열기 실패 */
 #define UI_ERR_FONT_CREATE          5004  /* TinyTTF 폰트 인스턴스 생성 실패 */
 #define UI_ERR_HTTPD_START          5005  /* 웹서버(httpd_start) 시작 실패 */
-
-#define UI_ERR_TEST_FORCED          9001  /* 설정탭 "시험" 버튼 — 강제 발생 */
 
 void ui_log_add_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
