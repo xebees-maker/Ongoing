@@ -10,6 +10,7 @@ idf_component_register(
         "esp_now_photo.c"
         "esp_now_tx.c"
         "rtc_sync.c"
+        "device_config.c"
         "../components/waveshare_rgb_lcd_port.c"
     INCLUDE_DIRS
         "."

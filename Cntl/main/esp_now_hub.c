@@ -4,6 +4,7 @@
 #include "esp_now_tx.h"
 #include "rtc_sync.h"
 #include "ui_log.h"
+#include "device_config.h"
 
 #include <string.h>
 #include <assert.h>
@@ -19,9 +20,10 @@
 
 static const char *TAG = "esp_now_hub";
 
-/* Cntl 실제 sdkconfig 기준 STA 모드+SSID/PW — 4단계 테스트 때와 동일 */
-#define WIFI_SSID     "hkhome"
-#define WIFI_PASSWORD "mama0709!"
+/* Cntl 실제 sdkconfig 기준 STA 모드+SSID/PW — 이 PC(원래 PC)의 네트워크로 복원
+ * (다른 PC 세션에서 그쪽 네트워크 hkhome으로 바뀌어 커밋됨 — 2026-08-08 원복) */
+#define WIFI_SSID     "iptime2.4"
+#define WIFI_PASSWORD "sk1234!@#"
 
 /* 2026-08-04 — 채널 격리 실험: Cntl을 hkhome STA에서 떼어내 순수 SoftAP 전용으로 돌려서,
  * ESP-NOW(CAM/Sens) 트래픽이 더 이상 hkhome의 실제 WiFi 트래픽과 같은 채널을 나눠 쓰지
@@ -93,7 +95,39 @@ static void add_peer_if_needed(const uint8_t *mac)
     peer.encrypt = false;
     if (esp_now_add_peer(&peer) != ESP_OK) {
         ESP_LOGW(TAG, "피어 등록 실패");
+        return;
     }
+    /* 2026-08-08 — CAM 쪽과 짝맞춤(esp_now_cam.c 동일 주석 참고). 이 함수는 CAM/Sens 등
+     * 실제 노드 MAC에만 불림(브로드캐스트 주소는 여기 안 옴) — 안전. */
+    esp_now_rate_config_t rate_cfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };
+    esp_err_t rate_err = esp_now_set_peer_rate_config(mac, &rate_cfg);
+    ESP_LOGI(TAG, "피어 레이트 설정(MCS0/HT20) -> %s", esp_err_to_name(rate_err));
+}
+
+static volatile hub_config_apply_stage_t s_config_apply_stage = HUB_CONFIG_APPLY_IDLE;
+
+hub_config_apply_stage_t esp_now_hub_get_config_apply_stage(void) { return s_config_apply_stage; }
+void esp_now_hub_config_apply_stage_clear(void) { s_config_apply_stage = HUB_CONFIG_APPLY_IDLE; }
+
+/* 2026-08-08 — device_config(Cntl이 소유하는 CAM 설정)의 "현재 값"을 mac 하나에 그대로
+ * 밀어줌. 페어링 시 자동 전송(recv_cb의 PAIR_ACK 핸들러)과, 설정탭 Apply 버튼
+ * (esp_now_hub_apply_*) 둘 다 이 함수 하나로 통일 — "지금 저장된 값을 보낸다"는 의미가
+ * 완전히 같으므로 재사용. s_config_apply_stage는 Apply 버튼 진행팝업용(페어링 자동전송
+ * 때도 갱신되긴 하지만 그때는 아무도 안 봄 — 무해) */
+static void push_cam_config_to(const uint8_t *mac)
+{
+    esp_now_cam_config_t cfg = {
+        .version                = ESP_NOW_LINK_VERSION,
+        .msg_type               = ESP_NOW_MSG_CAM_CONFIG_SET,
+        .wb_mode                = CAM_WB_AUTO,
+        .capture_interval_sec   = device_config_get_cam_capture_interval_sec(),
+        .response_interval_sec  = device_config_get_response_interval_sec(),
+    };
+    static const uint8_t s_config_ack_types[] = { ESP_NOW_MSG_CAM_CONFIG_ACK };
+    s_config_apply_stage = HUB_CONFIG_APPLY_SENT;
+    esp_now_tx_enqueue(mac, &cfg, sizeof(cfg), s_config_ack_types, 1, 800, 3, "CAM 설정");
+    ESP_LOGI(TAG, "CAM_CONFIG_SET -> 촬영주기=%us 응답성=%us 큐잉됨",
+             (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec);
 }
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
@@ -159,7 +193,9 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         esp_now_hub_node_t *n = find_node(info->src_addr);
         bool became_paired = false;
         char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
+        hub_node_kind_t kind_copy = HUB_NODE_KIND_UNKNOWN;
         if (n) {
+            kind_copy = n->kind;
             /* 생존 신호(last_seen_ms)는 항상 갱신 — 페어링 후엔 CAM/SENS가 ADVERTISE를
              * 끊고 이 PAIR_ACK(keepalive)로만 살아있음을 알리는 것으로 보이는데, 이걸
              * user_unpaired로 걸러버리면(예전 버그) 연결 해제 직후부터 생존 신호 자체가
@@ -191,6 +227,14 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             };
             esp_err_t err = esp_now_send(info->src_addr, (const uint8_t *)&set_time, sizeof(set_time));
             ESP_LOGI(TAG, "SET_TIME(%u) 전송: %s", (unsigned)set_time.unix_time, esp_err_to_name(err));
+
+            /* 2026-08-08 설계 — CAM/SENS는 설정을 로컬에 저장하지 않으므로, 페어링될
+             * 때마다 Cntl이 기억하고 있는 현재 설정값을 매번 다시 밀어줌(SET_TIME과 같은
+             * 타이밍) — 그래야 재부팅한 CAM이 Kconfig 기본값이 아니라 사용자가 마지막으로
+             * Apply한 값으로 곧바로 동작함 */
+            if (kind_copy == HUB_NODE_KIND_CAM) {
+                push_cam_config_to(info->src_addr);
+            }
         }
 
     } else if (msg_type == ESP_NOW_MSG_CHANNEL_PING) {
@@ -299,6 +343,13 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         /* ESP-NOW는 recv_cb를 하나만 등록할 수 있어서, 사진 관련 프로토콜(전송/목록/삭제/
          * 지금촬영 진행상태) 처리는 전부 esp_now_photo.c로 넘김 */
         esp_now_photo_on_recv(msg_type, info ? info->src_addr : NULL, data, len);
+
+    } else if (msg_type == ESP_NOW_MSG_CAM_CONFIG_ACK) {
+        /* esp_now_reliable_on_recv(위)가 이미 esp_now_tx 태스크를 깨워서 재시도 루프를
+         * 끝내지만, 그건 esp_now_tx 모듈 내부 상태일 뿐이라 UI(설정탭 Apply 진행팝업)가
+         * 볼 방법이 없음 — capture_stage와 같은 이유로 여기서 별도 폴링 상태를 갱신 */
+        if (len < (int)sizeof(esp_now_cam_config_ack_t)) return;
+        s_config_apply_stage = HUB_CONFIG_APPLY_ACKED;
     }
 }
 
@@ -425,14 +476,30 @@ uint8_t esp_now_hub_get_wifi_channel(void)
     return channel;
 }
 
+/* 2026-08-08 재설계 — 응답성이 시스템 전체 공통 설정(device_config)이 되면서, 이 타임아웃도
+ * 노드별이 아니라 그 값 하나로 전체 계산. CAM 쪽 "끊김 판정"(esp_now_channelsync의
+ * PING_FAIL_THRESHOLD=3회 연속 무응답)이 이제 응답성*3만큼 걸리므로, Cntl이 그보다 먼저/
+ * 빠듯하게 "무응답=이상"으로 판단하면 CAM이 정상적으로 뜸하게 확인하는 중인데도 매번
+ * 오탐(false 끊김)이 남 — CAM 쪽 판정+한 번 더 재시도할 시간까지 여유있게 감안한 배수 */
+#define HUB_NODE_TIMEOUT_MARGIN_MULT 6
+
+uint32_t esp_now_hub_node_timeout_ms(void)
+{
+    uint32_t response_sec = device_config_get_response_interval_sec();
+    if (response_sec == 0) return ESP_NOW_HUB_NODE_TIMEOUT_MS;
+    uint32_t computed = response_sec * 1000U * HUB_NODE_TIMEOUT_MARGIN_MULT;
+    return computed > ESP_NOW_HUB_NODE_TIMEOUT_MS ? computed : ESP_NOW_HUB_NODE_TIMEOUT_MS;
+}
+
 int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t timeout_ms = esp_now_hub_node_timeout_ms();
     int count = 0;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count && count < max; i++) {
         if (kind != HUB_NODE_KIND_UNKNOWN && s_nodes[i].kind != kind) continue;
-        if (now_ms - s_nodes[i].last_seen_ms > ESP_NOW_HUB_NODE_TIMEOUT_MS) continue;
+        if (now_ms - s_nodes[i].last_seen_ms > timeout_ms) continue;
         out[count++] = s_nodes[i];
     }
     xSemaphoreGive(s_nodes_mutex);
@@ -442,10 +509,11 @@ int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max
 bool esp_now_hub_is_paired(const uint8_t *mac)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t timeout_ms = esp_now_hub_node_timeout_ms();
     bool paired = false;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     esp_now_hub_node_t *n = find_node(mac);
-    if (n && n->paired && (now_ms - n->last_seen_ms) <= ESP_NOW_HUB_NODE_TIMEOUT_MS) {
+    if (n && n->paired && (now_ms - n->last_seen_ms) <= timeout_ms) {
         paired = true;
     }
     xSemaphoreGive(s_nodes_mutex);
@@ -514,6 +582,33 @@ void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode)
     };
     esp_err_t err = esp_now_send(target_mac, (const uint8_t *)&msg, sizeof(msg));
     ESP_LOGI(TAG, "BENCH_START(mode=%u, %u초) -> %s: %s", mode, duration_sec, name_copy, esp_err_to_name(err));
+}
+
+void esp_now_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
+{
+    device_config_set_cam_capture_interval_sec(sec);
+    push_cam_config_to(mac);
+}
+
+void esp_now_hub_apply_response_interval_sec(uint32_t sec)
+{
+    device_config_set_response_interval_sec(sec);
+
+    /* 시스템 공통 설정이므로 지금 페어링된 CAM 전부에게 다시 보냄(esp_now_hub_bench_start의
+     * "페어링된 노드 순회" 패턴과 동일) — SENS는 아직 CAM_CONFIG_SET을 이해 못 하므로 CAM만 */
+    uint8_t targets[ESP_NOW_HUB_MAX_NODES][6];
+    int target_count = 0;
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_node_count; i++) {
+        if (s_nodes[i].kind == HUB_NODE_KIND_CAM && s_nodes[i].paired) {
+            memcpy(targets[target_count++], s_nodes[i].mac, 6);
+        }
+    }
+    xSemaphoreGive(s_nodes_mutex);
+
+    for (int i = 0; i < target_count; i++) {
+        push_cam_config_to(targets[i]);
+    }
 }
 
 void esp_now_hub_unpair(const uint8_t *mac)

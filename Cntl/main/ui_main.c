@@ -2,6 +2,7 @@
 #include "ui_strings.h"
 #include "ui_font.h"
 #include "esp_now_hub.h"
+#include "device_config.h"
 #include "esp_now_photo.h"
 #include "ui_log.h"
 #include "esp_heap_caps.h"
@@ -81,6 +82,41 @@ static bool               s_has_selected_cam = false;  /* 지금촬영/목록/�
 static lv_obj_t          *s_camera_select_dd = NULL;
 static uint8_t            s_cam_dd_macs[ESP_NOW_HUB_MAX_NODES][6];
 static int                s_cam_dd_count = 0;
+
+/* 원격 설정(2026-08-08 재설계) — Cntl이 값의 주인(device_config.h), CAM은 페어링 때마다
+ * 받아서 쓸 뿐 로컬 저장 안 함. 촬영주기=카메라별(지금은 선택된 CAM 하나), 응답성=시스템
+ * 전체 공통. 두 행 다 [라벨][드롭다운][Apply] 인라인 — Apply는 드롭다운 값이 "마지막으로
+ * 성공 적용된 값"과 달라졌을 때만 활성화(5단계 플로우, 사용자 설계). refresh_lang_texts()가
+ * 이 라벨들을 참조하므로 그 함수보다 앞에 선언돼야 함(사용자 지시: "앞으로 모든 label은 그
+ * 구조체에 넣어야해" — ui_str_id_t뿐 아니라 이 선언 순서 규칙도 같이 지킬 것). */
+static lv_obj_t *s_capture_interval_dd    = NULL;
+static lv_obj_t *s_capture_apply_btn      = NULL;
+static lv_obj_t *s_capture_interval_label = NULL;
+static lv_obj_t *s_capture_apply_lbl      = NULL;
+static int       s_capture_interval_applied_idx = -1;  /* -1: 아직 모름(부팅 직후) */
+
+static lv_obj_t *s_response_interval_dd    = NULL;
+static lv_obj_t *s_response_apply_btn      = NULL;
+static lv_obj_t *s_response_interval_label = NULL;
+static lv_obj_t *s_response_apply_lbl      = NULL;
+static int       s_response_interval_applied_idx = -1;
+
+static lv_obj_t *s_restart_label     = NULL;
+static lv_obj_t *s_restart_btn_lbl   = NULL;
+
+/* 드롭다운 옵션 문자열의 줄 순서 == 이 배열의 인덱스 순서(초 단위) — 반드시 같이 바꿀 것.
+ * 2026-08-08 — "10초"를 뺌: 실기에서 자동촬영 타이머가 이 짧은 주기로 ESP-NOW 활동과
+ * 겹치면 힙이 깨지는 크래시를 확인함(CAM 쪽에도 1800s 미만은 강제로 올리는 안전장치를
+ * 넣었지만, UI에서부터 실제로 안 되는 값을 보여주지 않는 게 맞음 — cam_node.c의
+ * clamp_capture_interval_sec 참고) */
+static const uint32_t s_capture_interval_values[]  = { 0, 1800, 3600, 10800, 36000 };
+static const uint32_t s_response_interval_values[] = { 1, 2, 5, 10 };
+
+static int find_value_index(const uint32_t *values, int count, uint32_t v)
+{
+    for (int i = 0; i < count; i++) if (values[i] == v) return i;
+    return 0;
+}
 
 /* 대시보드 썸네일(판넬) 디코드 버퍼 — 목표 해상도가 고정(320x240)이라 매번 free+새로
  * alloc 하지 않고 ui_init()에서 한 번만 잡아서 계속 재사용, 내용만 덮어쓰고 LVGL 이미지
@@ -248,6 +284,27 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_list_title, ui_str(STR_PANEL_LIST));
     lv_label_set_text(s_picture_title, ui_str(STR_PANEL_PICTURE));
     update_list_info_label();
+
+    /* 2026-08-08 — 새 라벨은 전부 여기 등록할 것(사용자 지시: "앞으로 모든 label은 그
+     * 구조체에 넣어야해" — ui_str_id_t 테이블만으론 부족하고, 이 함수에도 반드시 같이
+     * 추가해야 언어전환이 실제로 반영됨) */
+    lv_label_set_text(s_capture_interval_label, ui_str(STR_LABEL_CAPTURE_INTERVAL));
+    lv_label_set_text(s_capture_apply_lbl, ui_str(STR_BTN_APPLY));
+    lv_label_set_text(s_response_interval_label, ui_str(STR_LABEL_RESPONSE_INTERVAL));
+    lv_label_set_text(s_response_apply_lbl, ui_str(STR_BTN_APPLY));
+    lv_label_set_text(s_restart_label, ui_str(STR_LABEL_RESTART_DEVICE));
+    lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
+
+    /* 드롭다운 옵션 문자열 자체도 언어별이라 다시 채워야 함 — lv_dropdown_set_options는
+     * 선택 인덱스를 0으로 리셋시키므로, 지금 선택돼있던 인덱스를 기억했다가 그대로
+     * 되돌려줘야 사용자가 고른 값이 언어 전환 때문에 조용히 바뀌지 않음 */
+    uint16_t capture_sel = lv_dropdown_get_selected(s_capture_interval_dd);
+    lv_dropdown_set_options(s_capture_interval_dd, ui_str(STR_OPT_CAPTURE_INTERVAL_LIST));
+    lv_dropdown_set_selected(s_capture_interval_dd, capture_sel);
+
+    uint16_t response_sel = lv_dropdown_get_selected(s_response_interval_dd);
+    lv_dropdown_set_options(s_response_interval_dd, ui_str(STR_OPT_RESPONSE_INTERVAL_LIST));
+    lv_dropdown_set_selected(s_response_interval_dd, response_sel);
 }
 
 /* 실제 반영(ui_lang_set — s_lang 갱신 + nvs 저장)이 끝난 뒤에만 라디오/라벨을 갱신한다
@@ -336,12 +393,12 @@ static void cb_logo_warning_tap(lv_event_t *e)
     lv_obj_t *box = create_modal();
 
     lv_obj_t *title = lv_label_create(box);
-    lv_label_set_text(title, "에러 코드 목록");
+    lv_label_set_text(title, ui_str(STR_TITLE_ERROR_LIST));
     lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_18), 0);
 
     if (n == 0) {
         lv_obj_t *lbl = lv_label_create(box);
-        lv_label_set_text(lbl, "(없음)");
+        lv_label_set_text(lbl, ui_str(STR_ERROR_LIST_EMPTY));
         lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
     } else {
         for (int i = 0; i < n; i++) {
@@ -1556,7 +1613,106 @@ static void cb_restart_confirmed(void *ctx)
 static void cb_restart_btn(lv_event_t *e)
 {
     (void)e;
-    show_confirm_popup("정말 재시작하시겠습니까?", cb_restart_confirmed, NULL);
+    show_confirm_popup(ui_str(STR_MSG_RESTART_CONFIRM), cb_restart_confirmed, NULL);
+}
+
+/* 설정탭 Apply 5단계 플로우(2026-08-08, 사용자 설계) — 공용 진행팝업(show_progress_popup)
+ * 재사용, capture/response 둘 다 이 하나의 tick 함수로 처리(어느 쪽인지는
+ * s_config_apply_target로 구분). 촬영주기/응답성 각각 독립된 Apply 버튼이라 동시에 둘 다
+ * 누르는 경우는 없다고 가정(2단계 팝업이 모달이라 물리적으로도 막힘) */
+typedef enum { CONFIG_APPLY_TARGET_CAPTURE, CONFIG_APPLY_TARGET_RESPONSE } config_apply_target_t;
+static config_apply_target_t s_config_apply_target;
+static int                   s_config_apply_pending_idx;
+static uint32_t              s_config_apply_start_ms;
+static lv_obj_t              *s_config_apply_label;
+
+static void update_capture_apply_enabled(void)
+{
+    bool changed = (lv_dropdown_get_selected(s_capture_interval_dd) != (uint16_t)s_capture_interval_applied_idx);
+    if (changed) lv_obj_clear_state(s_capture_apply_btn, LV_STATE_DISABLED);
+    else lv_obj_add_state(s_capture_apply_btn, LV_STATE_DISABLED);
+}
+
+static void update_response_apply_enabled(void)
+{
+    bool changed = (lv_dropdown_get_selected(s_response_interval_dd) != (uint16_t)s_response_interval_applied_idx);
+    if (changed) lv_obj_clear_state(s_response_apply_btn, LV_STATE_DISABLED);
+    else lv_obj_add_state(s_response_apply_btn, LV_STATE_DISABLED);
+}
+
+static void cb_capture_interval_changed(lv_event_t *e) { (void)e; update_capture_apply_enabled(); }
+static void cb_response_interval_changed(lv_event_t *e) { (void)e; update_response_apply_enabled(); }
+
+static bool config_apply_tick_fn(lv_obj_t *box)
+{
+    (void)box;
+    hub_config_apply_stage_t stage = esp_now_hub_get_config_apply_stage();
+    if (stage == HUB_CONFIG_APPLY_ACKED) {
+        lv_label_set_text(s_config_apply_label, ui_str(STR_STATUS_OK));
+        lv_obj_set_style_text_color(s_config_apply_label, lv_palette_main(LV_PALETTE_GREEN), 0);
+        if (s_config_apply_target == CONFIG_APPLY_TARGET_CAPTURE) {
+            s_capture_interval_applied_idx = s_config_apply_pending_idx;
+            update_capture_apply_enabled();
+        } else {
+            s_response_interval_applied_idx = s_config_apply_pending_idx;
+            update_response_apply_enabled();
+        }
+        esp_now_hub_config_apply_stage_clear();
+        return true;
+    }
+    if (lv_tick_elaps(s_config_apply_start_ms) > CAM_RESPONSE_TIMEOUT_MS) {
+        lv_label_set_text(s_config_apply_label, ui_str(STR_CONFIG_APPLY_STALLED));
+        lv_obj_set_style_text_color(s_config_apply_label, lv_palette_main(LV_PALETTE_RED), 0);
+        ui_log_add_err(UI_ERR_CONFIG_NORESPONSE, "설정 적용 요청에 CAM 응답 없음(타임아웃)");
+        esp_now_hub_config_apply_stage_clear();
+        return true;
+    }
+    return false;
+}
+
+static void show_config_apply_popup(void)
+{
+    s_config_apply_start_ms = lv_tick_get();
+    lv_obj_t *box = show_progress_popup(config_apply_tick_fn);
+
+    lv_obj_t *spinner = lv_spinner_create(box);
+    lv_obj_set_size(spinner, 40, 40);
+    lv_obj_align(spinner, LV_ALIGN_TOP_MID, 0, 0);
+
+    s_config_apply_label = lv_label_create(box);
+    lv_obj_set_style_text_font(s_config_apply_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_config_apply_label, ui_str(STR_CONFIG_APPLY_PROGRESS));
+    lv_obj_set_style_text_color(s_config_apply_label, lv_palette_main(LV_PALETTE_GREY), 0);
+
+    start_progress_popup(box);
+}
+
+static void cb_apply_capture_interval(lv_event_t *e)
+{
+    (void)e;
+    if (!s_has_selected_cam) {
+        ui_log_add("촬영주기 적용: 선택된 카메라 없음");
+        return;
+    }
+    uint16_t idx = lv_dropdown_get_selected(s_capture_interval_dd);
+    uint32_t sec = (idx < (sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0])))
+                   ? s_capture_interval_values[idx] : 0;
+    s_config_apply_target = CONFIG_APPLY_TARGET_CAPTURE;
+    s_config_apply_pending_idx = idx;
+    esp_now_hub_apply_cam_capture_interval_sec(s_selected_cam_mac, sec);
+    show_config_apply_popup();
+}
+
+static void cb_apply_response_interval(lv_event_t *e)
+{
+    (void)e;
+    uint16_t idx = lv_dropdown_get_selected(s_response_interval_dd);
+    uint32_t sec = (idx < (sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0])))
+                   ? s_response_interval_values[idx] : 0;
+    s_config_apply_target = CONFIG_APPLY_TARGET_RESPONSE;
+    s_config_apply_pending_idx = idx;
+    esp_now_hub_apply_response_interval_sec(sec);
+    show_config_apply_popup();
 }
 
 /* 페이지콘트롤 — 페이지탭 3개(상황판/통계/설정). 로고 + 상황판/통계 탭 내용(원래 데모의
@@ -1882,15 +2038,15 @@ void ui_init(void)
     lv_obj_set_style_pad_hor(restart_row, 12, 0);
     lv_obj_set_style_pad_ver(restart_row, 20, 0);
 
-    lv_obj_t *restart_label = lv_label_create(restart_row);
-    lv_label_set_text(restart_label, "장치 재시작");
-    lv_obj_set_style_text_font(restart_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_restart_label = lv_label_create(restart_row);
+    lv_label_set_text(s_restart_label, ui_str(STR_LABEL_RESTART_DEVICE));
+    lv_obj_set_style_text_font(s_restart_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *restart_btn = lv_button_create(restart_row);
     lv_obj_add_event_cb(restart_btn, cb_restart_btn, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *restart_btn_lbl = lv_label_create(restart_btn);
-    lv_label_set_text(restart_btn_lbl, "재시작");
-    lv_obj_set_style_text_font(restart_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_restart_btn_lbl = lv_label_create(restart_btn);
+    lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
+    lv_obj_set_style_text_font(s_restart_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     create_group_box(option_page, STR_GROUP_SENSOR);
 
@@ -1901,5 +2057,69 @@ void ui_init(void)
     lv_obj_set_size(s_camera_list, LV_PCT(100), LV_SIZE_CONTENT);
     s_camera_list_timer = lv_timer_create(refresh_camera_list, 1000, NULL);
 
-    create_group_box(option_page, STR_GROUP_SYSTEM);
+    /* 촬영주기 행(2026-08-08, 사용자 설계) — [라벨][드롭다운][Apply] 한 줄. 카메라별 설정이라
+     * 이 그룹박스(영상)에 유지, 응답성은 시스템 공통이라 아래 STR_GROUP_SYSTEM으로 이동 */
+    lv_obj_t *capture_row = lv_obj_create(camera_group_box);
+    lv_obj_set_size(capture_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(capture_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(capture_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(capture_row, 0, 0);
+    lv_obj_set_style_pad_hor(capture_row, 12, 0);
+    lv_obj_set_style_pad_ver(capture_row, 20, 0);
+
+    s_capture_interval_label = lv_label_create(capture_row);
+    lv_label_set_text(s_capture_interval_label, ui_str(STR_LABEL_CAPTURE_INTERVAL));
+    lv_obj_set_style_text_font(s_capture_interval_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_capture_interval_dd = lv_dropdown_create(capture_row);
+    lv_dropdown_set_options(s_capture_interval_dd, ui_str(STR_OPT_CAPTURE_INTERVAL_LIST));
+    s_capture_interval_applied_idx = find_value_index(s_capture_interval_values,
+        sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]),
+        device_config_get_cam_capture_interval_sec());
+    lv_dropdown_set_selected(s_capture_interval_dd, (uint16_t)s_capture_interval_applied_idx);
+    /* 드롭다운 기본폰트는 한글 글리프가 없는 LVGL 내장 폰트 — 닫힌 상태 표시(MAIN)와 펼친
+     * 목록(lv_dropdown_get_list) 둘 다 커스텀 TTF로 따로 지정해야 함(안 하면 깨져 보임,
+     * 2026-08-08 실기에서 확인 — cntl_row의 s_btn_ko 체크박스와 같은 이유) */
+    lv_obj_set_style_text_font(s_capture_interval_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_capture_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_capture_interval_dd, cb_capture_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    s_capture_apply_btn = lv_button_create(capture_row);
+    lv_obj_add_event_cb(s_capture_apply_btn, cb_apply_capture_interval, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_state(s_capture_apply_btn, LV_STATE_DISABLED);  /* 부팅 직후엔 표시값==저장값 */
+    s_capture_apply_lbl = lv_label_create(s_capture_apply_btn);  /* 전역: refresh_lang_texts에서 갱신 */
+    lv_label_set_text(s_capture_apply_lbl, ui_str(STR_BTN_APPLY));
+    lv_obj_set_style_text_font(s_capture_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 시스템(System) 그룹박스 — 응답성(연결성/절전, 전체 공통 하나) 행. 촬영주기와 같은
+     * [라벨][드롭다운][Apply] 인라인 레이아웃 */
+    lv_obj_t *system_group_box = create_group_box(option_page, STR_GROUP_SYSTEM);
+    lv_obj_t *response_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(response_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(response_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(response_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(response_row, 0, 0);
+    lv_obj_set_style_pad_hor(response_row, 12, 0);
+    lv_obj_set_style_pad_ver(response_row, 20, 0);
+
+    s_response_interval_label = lv_label_create(response_row);
+    lv_label_set_text(s_response_interval_label, ui_str(STR_LABEL_RESPONSE_INTERVAL));
+    lv_obj_set_style_text_font(s_response_interval_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_response_interval_dd = lv_dropdown_create(response_row);
+    lv_dropdown_set_options(s_response_interval_dd, ui_str(STR_OPT_RESPONSE_INTERVAL_LIST));
+    s_response_interval_applied_idx = find_value_index(s_response_interval_values,
+        sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0]),
+        device_config_get_response_interval_sec());
+    lv_dropdown_set_selected(s_response_interval_dd, (uint16_t)s_response_interval_applied_idx);
+    lv_obj_set_style_text_font(s_response_interval_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_response_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_response_interval_dd, cb_response_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    s_response_apply_btn = lv_button_create(response_row);
+    lv_obj_add_event_cb(s_response_apply_btn, cb_apply_response_interval, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_state(s_response_apply_btn, LV_STATE_DISABLED);
+    s_response_apply_lbl = lv_label_create(s_response_apply_btn);
+    lv_label_set_text(s_response_apply_lbl, ui_str(STR_BTN_APPLY));
+    lv_obj_set_style_text_font(s_response_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 }

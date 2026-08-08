@@ -59,6 +59,36 @@ void esp_now_hub_unpair(const uint8_t *mac);
  * 요청 함수가 이 가드를 거쳐가게 되어 있음(esp_now_photo_capture_now 등 참고). */
 bool esp_now_hub_is_paired(const uint8_t *mac);
 
+/* 2026-08-08 재설계 — CAM/SENS 원격 설정은 이제 device_config.h가 값의 주인(영구저장),
+ * 여기 두 함수는 "값을 바꾸고 + 지금 페어링된 대상에게 즉시 반영"까지 한 번에 처리하는
+ * Apply 동작 전용. 둘 다 esp_now_tx 큐잉 패턴이라 즉시 리턴(UI 안 얼어붙음) — 실제 결과는
+ * CAM_CONFIG_ACK 수신으로 옴(esp_now_tx가 재시도까지 처리, 실패해도 로그/토스트만).
+ *
+ * 촬영주기: 카메라별 설정이지만 지금은 CAM이 보통 1대라 mac 하나만 대상으로 함(여러 대로
+ * 늘면 이 함수 자체를 mac별 반복호출 구조로 바꾸면 됨, device_config는 이미 값 하나뿐이라
+ * 그때 같이 확장 필요).
+ * 응답성: 시스템 전체 공통 설정이라 현재 페어링된 모든 CAM에 한 번에 반영. */
+void esp_now_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec);
+void esp_now_hub_apply_response_interval_sec(uint32_t sec);
+
+/* 설정탭 Apply 버튼 진행팝업용 상태 폴링(2026-08-08) — esp_now_photo_get_capture_stage()와
+ * 같은 패턴. IDLE=아직 아무 것도 안 보냄, SENT=push_cam_config_to() 호출됨(esp_now_tx가
+ * 재시도 중), ACKED=CAM_CONFIG_ACK 수신 확인. clear()는 팝업 닫을 때 호출해서 다음 Apply를
+ * 위해 IDLE로 되돌림. */
+typedef enum {
+    HUB_CONFIG_APPLY_IDLE = 0,
+    HUB_CONFIG_APPLY_SENT,
+    HUB_CONFIG_APPLY_ACKED,
+} hub_config_apply_stage_t;
+
+hub_config_apply_stage_t esp_now_hub_get_config_apply_stage(void);
+void esp_now_hub_config_apply_stage_clear(void);
+
+/* 노드별 실제 무응답 타임아웃(ms) — device_config의 시스템 응답성 설정값 배수(여유마진).
+ * esp_now_hub_get_nodes()/is_paired()가 내부적으로 이걸 씀 — UI가 "몇 초 뒤에 끊김으로
+ * 판단하는지" 표시하고 싶을 때도 그대로 재사용 가능하게 공개 */
+uint32_t esp_now_hub_node_timeout_ms(void);
+
 /* 처리량 벤치마크 트리거(2026-08-04, 임시 개발용) — 페어링된 CAM 중 첫 번째에게
  * duration_sec 동안 벤치마크를 시작하라고 요청. 결과는 양쪽 시리얼 로그로만
  * 확인(esp_now_cam.c/esp_now_hub.c의 BENCH 로그 참고), UI에는 안 보여줌.

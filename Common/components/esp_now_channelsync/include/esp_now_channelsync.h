@@ -67,6 +67,12 @@ void esp_now_channelsync_on_recv(const esp_now_recv_info_t *info, uint8_t msg_ty
 
 bool esp_now_channelsync_is_synced(void);
 
+/* PING 주기를 기본 500ms에서 바꿈(2026-08-08, 배터리 노드 절전 설정 연동용) — interval_ms=0이면
+ * 기본값(500ms)으로 리셋. SYNCED 상태면 즉시 새 주기로 재시작, UNSYNCED면 다음 동기화 시
+ * 이 값으로 시작함. PING_FAIL_THRESHOLD(3회)는 그대로라 "끊김 판정까지 걸리는 시간"도 이
+ * 값에 비례해서 늘어남(의도된 동작 — 노드가 그만큼 뜸하게 확인하기로 한 것이므로) */
+void esp_now_channelsync_set_ping_interval_ms(uint32_t interval_ms);
+
 /* CHANNEL_PING/PONG이 아닌 다른 경로로 방금 hub와의 실제 애플리케이션 레벨 왕복에 성공했음을
  * 알림(2026-08-05) — 예: esp_now_reliable_request()가 DONE_ACK/LIST_DONE_ACK 등을 실제로
  * 받은 직후. PING과 청크 버스트가 같은 ESP-NOW 송신큐를 공유해서(ESP-IDF에 우선순위 분리

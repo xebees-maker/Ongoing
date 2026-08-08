@@ -54,6 +54,7 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_DELETE_ALL_FAILED    4002  /* CAM이 전체삭제 실패로 응답 */
 #define UI_ERR_CAPTURE_FAILED       4003  /* CAM이 촬영 실패로 응답 */
 #define UI_ERR_CAPTURE_NORESPONSE   4004  /* 지금촬영 요청 후 CAM 무응답 */
+#define UI_ERR_CONFIG_NORESPONSE    4005  /* 설정(CAM_CONFIG_SET) 적용 요청 후 CAM 무응답 */
 
 #define UI_ERR_FONT_FILE_MISSING    5001  /* 폰트 파일 없음(stat 실패) */
 #define UI_ERR_FONT_BUF_ALLOC       5002  /* 폰트 파일 로드용 PSRAM 할당 실패 */

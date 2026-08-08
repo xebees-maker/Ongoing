@@ -1,6 +1,6 @@
 #include "esp_now_cam.h"
 #include "cam_storage.h"
-#include "cam_node.h"
+#include "cam_node.h"  /* cam_node_set_capture_interval_sec/set_response_interval_sec/sleep_lock_* */
 
 #include <string.h>
 #include <stdio.h>
@@ -164,7 +164,11 @@ static void resend_chunks(uint32_t file_id, const esp_now_photo_chunk_nack_t *na
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "재전송 실패: chunk[%u] -> %s(시도 %d회)", idx, esp_err_to_name(err), attempt + 1);
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        /* 2026-08-08 — 10ms->5ms: MCS0(6.5Mbps)로 올리면 프레임 전송시간이 ~1.5ms로 줄어서
+         * 1Mbps 기준으로 튜닝됐던 10ms에는 더 이상 못 미칠 이유가 없음(위 esp_now_add_peer
+         * 옆 레이트설정 주석 참고). NO_MEM 재시도(위 6회*20ms)가 여전히 안전망이라 큐가
+         * 실제로 못 따라가면 이 루프 자체가 자동으로 더 기다림 — 5ms는 "시도값"일 뿐. */
+        vTaskDelay(pdMS_TO_TICKS(5));
         if ((i + 1) % CHUNK_QUEUE_DRAIN_INTERVAL == 0) {
             vTaskDelay(pdMS_TO_TICKS(CHUNK_QUEUE_DRAIN_MS));  /* CHANNEL_PING 큐잉 지연 완화 — 위 청크 루프 주석 참고 */
         }
@@ -654,6 +658,12 @@ static void photo_transfer_task(void *arg)
     for (;;) {
         if (xQueueReceive(s_photo_request_queue, &item, portMAX_DELAY) != pdTRUE) continue;
 
+        /* ESP-NOW 사진전송/목록조회/삭제 도중 light sleep 진입 방지(2026-08-08) — 큐에서
+         * 하나 뽑아 처리하는 이 블록 전체가 "바쁜 구간". 이 태스크 루프를 도는 동안(다음
+         * xQueueReceive로 돌아가기 전까지) 계속 잠금 — 처리 종류가 여럿이라 매 return/continue
+         * 지점마다 짝을 맞추는 대신, 이번 반복 시작에 걸고 끝에 푸는 편이 실수하기 어려움 */
+        cam_node_sleep_lock_acquire();
+
         if (item.kind == CAM_TASK_REQ_BENCH) {
             if (s_paired) {
                 if (item.bench_mode == ESP_NOW_BENCH_MODE_RAW_BLAST) {
@@ -662,6 +672,7 @@ static void photo_transfer_task(void *arg)
                     run_transfer_bench((esp_now_bench_mode_t)item.bench_mode, item.bench_duration_sec);
                 }
             }
+            cam_node_sleep_lock_release();
             continue;
         }
 
@@ -673,9 +684,13 @@ static void photo_transfer_task(void *arg)
              * 동안 들어오는 중복을 계속 걸러낼 수 있음 */
             if (s_paired) send_photo_list();
             s_list_request_pending = false;
+            cam_node_sleep_lock_release();
             continue;
         }
-        if (!s_paired) continue;
+        if (!s_paired) {
+            cam_node_sleep_lock_release();
+            continue;
+        }
 
         if (item.kind == CAM_TASK_REQ_DELETE_ALL) {
             int deleted = cam_storage_delete_all();
@@ -687,6 +702,7 @@ static void photo_transfer_task(void *arg)
             };
             esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
             ESP_LOGI(TAG, "PHOTO_DELETE_ALL_ACK(성공=%d, %d개) 전송: %s", ack.success, deleted, esp_err_to_name(err));
+            cam_node_sleep_lock_release();
             continue;
         }
 
@@ -719,6 +735,7 @@ static void photo_transfer_task(void *arg)
                                                       NULL, 0, NULL);
             if (err == ESP_OK) esp_now_channelsync_notify_alive();  /* 위 헤더 설명 참고 */
             ESP_LOGI(TAG, "CAPTURE_STATUS(%s) 전송: %s", captured ? "SUCCESS" : "FAILED", esp_err_to_name(err));
+            cam_node_sleep_lock_release();
             continue;
         }
 
@@ -740,6 +757,7 @@ static void photo_transfer_task(void *arg)
             if (s_request_generation != item.generation) break;  /* 더 최신 요청으로 대체됨 */
             send_one_photo_sr(ids[i], item.generation);
         }
+        cam_node_sleep_lock_release();
     }
 }
 
@@ -858,6 +876,34 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         return;
     }
 
+    if (msg_type == ESP_NOW_MSG_CAM_CONFIG_SET) {
+        /* 2026-08-08 — 촬영주기(배터리/SD)+응답성(연결성/절전) 원격 설정. recv_cb(ESP-NOW
+         * 드라이버 태스크)에서 바로 처리 — SD 파일 쓰기 하나뿐이라 photo_transfer_task
+         * 큐로 넘길 만큼 무겁지 않음(다른 핸들러들과 동일 판단, 예: PHOTO_DELETE_REQUEST) */
+        if (!s_paired || len < (int)sizeof(esp_now_cam_config_t)) return;
+        esp_now_cam_config_t cfg;
+        memcpy(&cfg, data, sizeof(cfg));
+        cam_node_set_capture_interval_sec(cfg.capture_interval_sec);
+        cam_node_set_response_interval_sec(cfg.response_interval_sec);
+        if (cfg.wb_mode < CAM_WB_MODE_COUNT) {
+            /* 화이트밸런스는 기존 필드라 그대로 적용 — 센서 API가 cam_node.c에 없어서 여기서
+             * 직접 처리(다른 촬영 파라미터 setter들과 달리 이건 esp_camera 센서 핸들을
+             * cam_node.c 밖으로 안 내보내서, sensor_t 직접 접근은 그쪽에만 있음 — 지금은
+             * wb_mode 저장/전달만 하고 실제 센서 적용은 TODO로 남김, 촬영주기/응답성이 이번
+             * 세션의 핵심 스코프) */
+            ESP_LOGI(TAG, "CAM_CONFIG_SET: wb_mode=%u(적용 TODO) capture=%us response=%us",
+                     cfg.wb_mode, (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec);
+        }
+        esp_now_cam_config_ack_t ack = {
+            .version  = ESP_NOW_LINK_VERSION,
+            .msg_type = ESP_NOW_MSG_CAM_CONFIG_ACK,
+            .success  = 1,
+        };
+        esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
+        ESP_LOGI(TAG, "CAM_CONFIG_ACK 전송: %s", esp_err_to_name(err));
+        return;
+    }
+
     if (msg_type == ESP_NOW_MSG_PHOTO_DELETE_REQUEST) {
         if (!s_paired || len < (int)sizeof(esp_now_photo_delete_request_t)) return;
         esp_now_photo_delete_request_t req;
@@ -928,6 +974,14 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     if (!esp_now_is_peer_exist(s_hub_mac)) {
         ESP_ERROR_CHECK(esp_now_add_peer(&peer));
     }
+    /* 2026-08-08 — ESP-NOW 기본 TX 레이트는 1Mbps(802.11b), 청크 페이싱(10ms)이 사실상 이
+     * 레이트에서의 프레임 전송시간(~1220B/1Mbps≈9.8ms)에 맞춰 튜닝된 값이었을 가능성이 큼.
+     * MCS0(HT20, 6.5Mbps)로 올려서 프레임당 전송시간을 줄임 — 30cm 근접/강한 신호 조건이라
+     * 안정성 우선으로 가장 낮은 MCS만 시도(사용자 지시: 불안정하면 속도는 완전히 포기).
+     * 실패해도(ESP_ERR 리턴) 치명적이지 않음 — 기본 1Mbps로 계속 동작하니 CHECK 안 함 */
+    esp_now_rate_config_t rate_cfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };
+    esp_err_t rate_err = esp_now_set_peer_rate_config(s_hub_mac, &rate_cfg);
+    ESP_LOGI(TAG, "CKPT: 허브 피어 레이트 설정(MCS0/HT20) -> %s", esp_err_to_name(rate_err));
 
     s_paired = true;
     set_led(LED_PATTERN_HEARTBEAT);

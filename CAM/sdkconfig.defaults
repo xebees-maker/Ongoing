@@ -16,6 +16,12 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # ── CPU 주파수 ────────────────────────────────────────────────
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y   # 160MHz → 240MHz
 
+# ── 절전(Light Sleep) ───────────────────────────────────────────
+# 2026-08-08 두 번째로 시도했다가 실기에서 다시 되돌림(USB-Serial-JTAG 콘솔이 유휴 상태에서
+# 아예 응답 없어짐 — cam_node.c app_main() 주석 참고, project_cam_esp_now_production 메모리).
+# CONFIG_PM_ENABLE/CONFIG_FREERTOS_USE_TICKLESS_IDLE 둘 다 안 씀 — WiFi 모뎀슬립
+# (esp_wifi_set_ps)은 이 두 옵션과 무관하게 독립적으로 잘 동작하므로 그대로 유지.
+
 # ── PSRAM ────────────────────────────────────────────────────
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
@@ -28,7 +34,7 @@ CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 # ── 카메라 센서/촬영 ───────────────────────────────────────────
 # 물려있는 센서에 맞춰 CAM_SENSOR_OV5640/OV3660 중 하나로(둘 다 XCLK/fb_count/기본 해상도가
 # 자동으로 갈림, main/Kconfig.projbuild 참고). 센서 바꾸면 이 값 바꾸고 재빌드/재플래시.
-CONFIG_CAM_SENSOR_OV3660=y
+CONFIG_CAM_SENSOR_OV5640=y
 CONFIG_CAM_CAPTURE_30M=y   # 운영 주기(30분) — 개발 중엔 CAM_CAPTURE_10S로 바꿔서 테스트
 
 # ── esp32-camera JPEG 프레임버퍼 ────────────────────────────────

@@ -12,12 +12,17 @@ static const char *TAG = "esp_now_chsync";
 #define SCAN_CHANNEL_MIN     1
 #define SCAN_CHANNEL_MAX     13
 
-/* 500ms마다 PING 왕복 확인, 연속 3회(약 1.5초) 무응답이면 동기화 끊김으로 판정 — 오늘의
- * "몇 분"과 대비되는 목표치(수 초 이내). 매 라운드는 "직전 PING의 PONG이 왔는가"만 검사하고
- * 바로 다음 PING을 보내는 단순한 구조라 별도의 응답 타임아웃 타이머가 필요 없음(위 헤더의
- * 설계 원칙 참고 — 이 루프는 다른 무엇으로도 멈추지 않음). */
-#define PING_INTERVAL_US     (500 * 1000)
+/* 기본 500ms마다 PING 왕복 확인, 연속 3회 무응답이면 동기화 끊김으로 판정. 매 라운드는
+ * "직전 PING의 PONG이 왔는가"만 검사하고 바로 다음 PING을 보내는 단순한 구조라 별도의 응답
+ * 타임아웃 타이머가 필요 없음(위 헤더의 설계 원칙 참고 — 이 루프는 다른 무엇으로도 멈추지
+ * 않음).
+ * 2026-08-08 — 배터리 노드(CAM)의 절전 설정(esp_now_cam_config_t.response_interval_sec)에
+ * 맞춰 이 주기를 늘릴 수 있게 상수를 변수로 바꿈(esp_now_channelsync_set_ping_interval_ms
+ * 참고) — 상시전원 노드는 기본값 그대로 둬도 됨 */
+#define PING_INTERVAL_US_DEFAULT (500 * 1000)
 #define PING_FAIL_THRESHOLD  3
+
+static uint32_t s_ping_interval_us = PING_INTERVAL_US_DEFAULT;
 
 static const uint8_t s_broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -160,7 +165,7 @@ void esp_now_channelsync_on_recv(const esp_now_recv_info_t *info, uint8_t msg_ty
         s_synced          = true;
         s_ping_fail_count = 0;
         s_pong_pending    = false;
-        if (s_ping_timer) esp_timer_start_periodic(s_ping_timer, PING_INTERVAL_US);
+        if (s_ping_timer) esp_timer_start_periodic(s_ping_timer, s_ping_interval_us);
 
         ESP_LOGI(TAG, "채널 동기화됨(CH%d)", s_scan_channel);
         if (s_on_synced) s_on_synced(s_scan_channel, s_hub_mac);
@@ -188,4 +193,17 @@ void esp_now_channelsync_notify_alive(void)
 bool esp_now_channelsync_is_synced(void)
 {
     return s_synced;
+}
+
+void esp_now_channelsync_set_ping_interval_ms(uint32_t interval_ms)
+{
+    if (interval_ms == 0) interval_ms = PING_INTERVAL_US_DEFAULT / 1000;
+    s_ping_interval_us = interval_ms * 1000;
+    /* SYNCED 상태에서 바로 반영 — 다음 PONG/재동기화 때 새 주기로 자동 반영되는 걸 기다리지
+     * 않고, 지금 도는 타이머를 새 주기로 즉시 재시작(연속 실패 카운트는 유지, 방금 막 살아있음
+     * 확인이 끊긴 건 아니므로 리셋할 이유 없음) */
+    if (s_synced && s_ping_timer) {
+        esp_timer_stop(s_ping_timer);
+        esp_timer_start_periodic(s_ping_timer, s_ping_interval_us);
+    }
 }

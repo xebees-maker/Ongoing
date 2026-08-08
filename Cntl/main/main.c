@@ -17,6 +17,7 @@
 #include "esp_lv_decoder.h"
 #include "ui_log.h"
 #include "rtc_sync.h"
+#include "device_config.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -102,6 +103,9 @@ void app_main(void)
     /* 영구 저장 설정값(언어 등) 복원 — UI 생성(ui_init) 전에 해야 라벨이 처음부터
      * 올바른 언어로 뜸 */
     ui_lang_load();
+    /* CAM/SENS 원격 설정값(Cntl이 주인, 2026-08-08 설계) — UI 생성 전에 로드해야 설정탭
+     * 드롭다운이 처음부터 저장된 값을 보여줌(부팅 시 "값 미리 로드" 요구사항) */
+    device_config_load();
 
     const esp_lv_adapter_rotation_t rotation = ESP_LV_ADAPTER_ROTATE_0;
     const esp_lv_adapter_tear_avoid_mode_t tear_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_DEFAULT_RGB;

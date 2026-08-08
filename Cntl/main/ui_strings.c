@@ -66,6 +66,20 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
                                           "2. Unable to verify — use Renew list to check again" },
     [STR_LIST_RENEW_PROGRESS]        = { "목록 갱신 중...",             "Refreshing list..." },
     [STR_LIST_EMPTY]                 = { "사진 없음",                   "No Picture" },
+    [STR_LABEL_CAPTURE_INTERVAL]     = { "촬영 주기",                   "Capture interval" },
+    [STR_LABEL_RESPONSE_INTERVAL]    = { "응답성",                     "Responsiveness" },
+    [STR_BTN_APPLY]                  = { "적용",                       "Apply" },
+    [STR_CONFIG_APPLY_PROGRESS]      = { "설정 적용 중...",             "Applying settings..." },
+    [STR_CONFIG_APPLY_STALLED]       = { "응답 없음 — 연결 상태를 확인하세요", "No response — check connection" },
+    [STR_TITLE_ERROR_LIST]           = { "에러 코드 목록",               "Error code list" },
+    [STR_ERROR_LIST_EMPTY]           = { "(없음)",                     "(None)" },
+    [STR_LABEL_RESTART_DEVICE]       = { "장치 재시작",                 "Restart device" },
+    [STR_BTN_RESTART]                = { "재시작",                     "Restart" },
+    [STR_MSG_RESTART_CONFIRM]        = { "정말 재시작하시겠습니까?",     "Do you want restart?" },
+    /* 영문일 때는 단위를 S/M/H로 축약(2026-08-08, 사용자 지시) — 값(초 단위)은
+     * s_capture_interval_values/s_response_interval_values와 순서가 반드시 같아야 함 */
+    [STR_OPT_CAPTURE_INTERVAL_LIST]  = { "끄기\n30분\n1시간\n3시간\n10시간", "Off\n30M\n1H\n3H\n10H" },
+    [STR_OPT_RESPONSE_INTERVAL_LIST] = { "1초\n2초\n5초\n10초",           "1S\n2S\n5S\n10S" },
 };
 
 void ui_lang_load(void)

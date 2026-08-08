@@ -102,6 +102,10 @@ typedef enum {
                                               * "누락 목록을 알려준다"는 의미가 이미 똑같음,
                                               * range_count가 SR_WINDOW_SIZE 이하로 고정이라
                                               * missing_count가 400 상한을 넘을 일도 없음). */
+    ESP_NOW_MSG_CAM_CONFIG_ACK = 32,        /* CAM -> Cntl: CAM_CONFIG_SET 적용 결과(2026-08-08,
+                                              * 절전/응답성 설정 추가하면서 Cntl이 esp_now_reliable_
+                                              * request()로 감쌀 수 있게 응답 메시지 신설 — 예전엔
+                                              * CAM_CONFIG_SET을 보내기만 하고 확인이 없었음) */
 } esp_now_msg_type_t;
 
 typedef struct __attribute__((packed)) {
@@ -390,8 +394,22 @@ typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
     uint8_t  wb_mode;               /* cam_wb_mode_t */
-    uint32_t capture_interval_sec;  /* 0 = 자동 촬영 끔 */
+    uint32_t capture_interval_sec;  /* 0 = 자동 촬영 끔 — 배터리/SD 용량 트레이드오프
+                                        (project_cntl_cam_power_responsiveness 메모리 참고) */
+    uint32_t response_interval_sec; /* 2026-08-08 추가 — on-demand 요청에 CAM이 반응하기까지
+                                        허용 가능한 최대 지연(연결성/절전 트레이드오프, 1~10초
+                                        권장 범위). CAM 쪽 채널동기 PING 주기 및 Cntl 쪽 노드
+                                        무응답 타임아웃 산정에 그대로 쓰임 — 두 값 다 이 하나의
+                                        설정에서 파생(사용자가 직접 지정, 0=레거시/기본 500ms
+                                        틱 그대로 유지) */
 } esp_now_cam_config_t;
+
+/* CAM -> Cntl: CAM_CONFIG_SET 적용 결과 확인(2026-08-08) */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+    uint8_t success;
+} esp_now_cam_config_ack_t;
 
 /* PHOTO_CHUNK와 동일 크기로 맞춰야 실사용 전송과 같은 조건에서 처리량을 잴 수 있음.
  * seq는 순서 확인용이 아니라 Cntl 로그에서 유실 유무를 눈으로 보기 위한 참고값(벤치마크는
