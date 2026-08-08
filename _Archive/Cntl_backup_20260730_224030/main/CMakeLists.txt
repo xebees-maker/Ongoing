@@ -1,0 +1,37 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "fs.c"
+        "ui_font.c"
+        "ui_main.c"
+        "ui_dashboard.c"
+        "ui_timer.c"
+        "ui_palette.c"
+        "ui_input.c"
+        "ui_screen.c"
+        "ui_nodes.c"
+        "ui_node_tabs.c"
+        "esp_now_hub.c"
+        "web_dashboard.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        nvs_flash
+        freertos
+        log
+        bsp_ws_4_3b
+        lvgl
+        joltwallet__littlefs
+        esp_adc
+        esp_driver_gpio
+        esp_driver_usb_serial_jtag
+        battery_monitor
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_timer
+        esp_now_link
+        esp_http_server
+        esp_rom
+)
+

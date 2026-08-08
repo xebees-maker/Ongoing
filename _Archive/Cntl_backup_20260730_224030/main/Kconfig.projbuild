@@ -1,0 +1,35 @@
+menu "Cntl WiFi"
+
+    choice CNTL_WIFI_MODE
+        prompt "WiFi mode"
+        default CNTL_WIFI_MODE_STA
+        help
+            STA: join an existing AP (dev/test phase — same router as Sens nodes,
+            ESP-NOW relies on both being on that AP's channel).
+            AP: Cntl hosts its own SoftAP at the fixed ESP-NOW channel (production phase).
+
+        config CNTL_WIFI_MODE_STA
+            bool "Station (join existing WiFi)"
+        config CNTL_WIFI_MODE_AP
+            bool "SoftAP (Cntl hosts its own network)"
+    endchoice
+
+    config CNTL_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            STA mode: SSID to join (same router Sens nodes join in dev phase).
+            AP mode: SSID this device broadcasts.
+            Left empty by default on purpose — this file is committed to git.
+            Set the real value in sdkconfig (gitignored), not here.
+
+    config CNTL_WIFI_PASSWORD
+        string "WiFi password"
+        default ""
+        help
+            STA mode: password for the AP being joined. AP mode: password for this
+            device's own network (min 8 chars, or leave empty for open AP).
+            Left empty by default on purpose — this file is committed to git.
+            Set the real value in sdkconfig (gitignored), not here.
+
+endmenu

@@ -19,8 +19,9 @@ __pycache__/
 *.pyc
 
 # Claude Code memory (local only) — settings.json is the exception, it travels with git
-.claude/*
-!.claude/settings.json
+# (applies at any depth, so per-project Cntl/.claude, Sens/.claude etc. follow the same rule)
+**/.claude/*
+!**/.claude/settings.json
 
 # Build/flash logs
 build_log.txt
