@@ -64,4 +64,21 @@ menu "CAM Node"
         string "노드 이름 (비우면 MAC 뒤 4자리로 자동 생성 — Cam-XXXX)"
         default ""
 
+    config CAM_DEEPSLEEP_ENABLE
+        bool "Deep Sleep 주기적 웨이크 사용"
+        default y
+        help
+            꺼면 상시 동작 상태로 남음(콘솔/벤치 작업 시 매 사이클 USB 재열거를 안 겪기 위한
+            개발용 이스케이프 해치, 2026-08-10). 켜면 응답성 설정 값 주기로 딥슬립↔웨이크를
+            반복함(cam_node.c app_main 참고).
+
+    config CAM_DEEPSLEEP_AWAKE_MARGIN_SEC
+        int "RWDT 깨어있는 시간 마진(초)"
+        default 90
+        depends on CAM_DEEPSLEEP_ENABLE
+        help
+            RWDT 예산 = 응답성(딥슬립 주기) + 이 마진. 페어링/설정수신/명령처리 등 깨어있는
+            동안 실제로 걸리는 시간을 여유있게 덮기 위한 값 — 보수적 기본값으로 시작, 실기
+            측정 후 튜닝 대상(2026-08-10 계획 참고).
+
 endmenu

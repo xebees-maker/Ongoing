@@ -17,5 +17,9 @@ void esp_now_cam_init(void);
 const char *esp_now_cam_get_name(void);
 bool esp_now_cam_is_paired(void);
 
+/** @brief 사진전송/목록조회/삭제 큐가 대기 중이거나 처리 중인가 — Deep Sleep 진입 전 대기
+ *         윈도우 판정(cam_node.c의 cam_node_wake_window_done())에 씀 */
+bool esp_now_cam_is_busy(void);
+
 /** @brief Green 상태 LED GPIO 등록 (esp_now_cam_init() 이전에 호출) */
 void esp_now_cam_set_status_led(gpio_num_t pin);

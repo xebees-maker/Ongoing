@@ -106,7 +106,37 @@ typedef enum {
                                               * 절전/응답성 설정 추가하면서 Cntl이 esp_now_reliable_
                                               * request()로 감쌀 수 있게 응답 메시지 신설 — 예전엔
                                               * CAM_CONFIG_SET을 보내기만 하고 확인이 없었음) */
+    ESP_NOW_MSG_DEEP_SLEEP_STATS = 33,      /* CAM -> Cntl: Deep Sleep 사이클 통계, 매 웨이크의
+                                              * CAM_CONFIG_SET 적용 직후 1회성 전송(반드시 설정
+                                              * 반영 이후여야 sleep_interval_sec이 정확함 —
+                                              * 페어링 직후 바로 보내면 Kconfig 기본값이
+                                              * 찍히는 버그가 있었음, 실사용 중 발견/수정)
+                                              * (2026-08-10, Light
+                                              * Sleep 전면 폐기 후 Deep Sleep 전환 — Light Sleep은
+                                              * 실측 결과 전혀 진입하지 않는 것으로 확인되어
+                                              * 포기함. 이 메시지는 원래 ESP_NOW_MSG_POWER_STATS
+                                              * 자리를 재사용한 제자리 개명). 요청-응답이 아니라
+                                              * 노드가 웨이크마다 자체적으로 그냥 보내기만
+                                              * 함(ACK 없음, CHANNEL_PING과 같은 성격) */
+    ESP_NOW_MSG_SLEEP_NOW = 34,              /* Cntl -> CAM: "이번 사이클에 더 할 일 없으니
+                                              * 지금 바로 자도 됨"(2026-08-10, 적응형 반응시간
+                                              * 설계). Cntl은 사용자의 마지막 조작으로부터
+                                              * 적응형 반응시간(설정값, 기본 10초) 이상
+                                              * 조용하면(그리고 페어링 직후 루틴 설정 전달까지
+                                              * 끝났으면) 이걸 보냄 — CAM은 받으면 남은 유휴여유
+                                              * 타이머를 기다리지 않고 1초 이내로 즉시
+                                              * esp_deep_sleep_start()로 진입. 유실돼도 CAM의
+                                              * 자체 유휴여유 타이머(이제 안전장치, 값 상향됨)가
+                                              * 결국 재워주므로 무해 — 페이로드 없음, ACK 없음
+                                              * (CHANNEL_PING과 같은 성격, 안 와도 상태가 안
+                                              * 꼬임) */
 } esp_now_msg_type_t;
+
+/* ESP_NOW_MSG_SLEEP_NOW 페이로드 — 특별한 정보 없이 신호 자체가 전부 */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_sleep_now_t;
 
 typedef struct __attribute__((packed)) {
     uint8_t version;
@@ -441,3 +471,24 @@ typedef struct __attribute__((packed)) {
     uint16_t duration_sec;
     uint8_t  mode;  /* esp_now_bench_mode_t */
 } esp_now_bench_start_t;
+
+/* CAM의 Deep Sleep 웨이크 원인 — RWDT는 소프트웨어가 esp_deep_sleep_start()를 못
+ * 부르고(버그/행) RTC 워치독 안전망이 강제로 리셋시킨 경우(rwdt_guard 모듈 참고). */
+typedef enum {
+    CAM_WAKE_REASON_POWERON = 0,
+    CAM_WAKE_REASON_TIMER   = 1,   /* 정상 — 딥슬립 타이머로 깨어남 */
+    CAM_WAKE_REASON_RWDT    = 2,   /* RWDT 안전망 발동 — 코드가 못 잠들었거나 멈췄었음 */
+    CAM_WAKE_REASON_OTHER   = 3,
+} cam_wake_reason_t;
+
+/* ESP_NOW_MSG_DEEP_SLEEP_STATS(2026-08-10) — CAM이 매 웨이크마다 페어링 완료 직후 1회
+ * 보냄. 사이클 카운트/누적 절전시간은 CAM에 저장하지 않고(설정은 파일 기반, 로컬 저장
+ * 최소화 원칙 + RESET_RTC 액션이 RTC 슬로우메모리를 보존하는지 불확실) Cntl이 리포트를
+ * 받을 때마다 자기 쪽에서 누적 계산함. */
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint8_t  wake_reason;           /* cam_wake_reason_t */
+    uint32_t awake_uptime_ms;       /* 이번 사이클 기상~페어링 완료까지 경과시간 */
+    uint32_t sleep_interval_sec;    /* 이번에 적용 중인 딥슬립 주기(=response_interval_sec) */
+} esp_now_deep_sleep_stats_t;

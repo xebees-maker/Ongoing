@@ -30,7 +30,7 @@ typedef enum {
     STR_MSG_UNPAIR_CONFIRM,
     STR_BTN_CONFIRM,
     STR_BTN_CANCEL,
-    STR_BTN_CANCEL_PENDING,
+    STR_STATUS_CANCEL_PENDING,
     STR_BTN_YES,
     STR_PANEL_SUMMARY,
     STR_PANEL_NO_SENSOR,
@@ -39,6 +39,9 @@ typedef enum {
     STR_PANEL_SENSOR_TODO,
     STR_PANEL_NO_PHOTO_YET,
     STR_STATUS_OK,
+    /* connectionless 모델(2026-08-10) — 요약판넬 상태문구, PAIRED(페어됨)/ACTIVE(통신 중) */
+    STR_STATUS_PAIRED,
+    STR_STATUS_ACTIVE,
     STR_BTN_CAPTURE_NOW,
     STR_BTN_RENEW_LIST,
     STR_PANEL_LIST,
@@ -81,6 +84,27 @@ typedef enum {
     STR_MSG_RESTART_CONFIRM,
     STR_OPT_CAPTURE_INTERVAL_LIST,
     STR_OPT_RESPONSE_INTERVAL_LIST,
+    STR_LABEL_TIME,
+    STR_BTN_SET_TIME,
+    STR_TITLE_SET_TIME,
+    STR_PANEL_DEEPSLEEP,
+    STR_DEEPSLEEP_LINE_FMT,
+    STR_WAKE_REASON_TIMER,
+    STR_WAKE_REASON_RWDT,
+    STR_WAKE_REASON_POWERON,
+    STR_WAKE_REASON_OTHER,
+    /* 응답성 드롭다운 도움말(2026-08-10) — s_response_interval_values 순서와 반드시 같이
+     * 맞출 것(ui_main.c) */
+    STR_RESPONSE_HELP_0,  /* 1초=즉시 */
+    STR_RESPONSE_HELP_1,  /* 3초=빠름 */
+    STR_RESPONSE_HELP_2,  /* 10초=균형 */
+    STR_RESPONSE_HELP_3,  /* 30초=절전 */
+    STR_RESPONSE_HELP_4,  /* 30분=최대절전 */
+    /* 적응형 반응시간(2026-08-10) — 마지막 사용자 조작 후 이만큼 조용해야 CAM에 SLEEP_NOW.
+     * s_adaptive_response_values 순서와 반드시 같이 맞출 것(ui_main.c) */
+    STR_LABEL_ADAPTIVE_RESPONSE,
+    STR_OPT_ADAPTIVE_RESPONSE_LIST,
+    STR_HELP_ADAPTIVE_RESPONSE,
     STR_COUNT,
 } ui_str_id_t;
 

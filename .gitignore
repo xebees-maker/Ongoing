@@ -7,6 +7,9 @@ sdkconfig.old
 main/fonts/
 fonts.bin
 
+# RTC boot-seed time (regenerated every build by Cntl/tools/gen_time_sync.py)
+Cntl/assets_root/time_sync.txt
+
 # Dependencies (managed by idf component manager)
 managed_components/
 dependencies.lock

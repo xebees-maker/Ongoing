@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "cam_node.c"
+        "rwdt_guard.c"
         "esp_now_cam.c"
         "cam_storage.c"
         "dev_console.c"
@@ -11,7 +12,6 @@ idf_component_register(
         freertos
         log
         status_led
-        esp_pm
         esp_wifi
         esp_event
         esp_netif
@@ -29,4 +29,6 @@ idf_component_register(
         mbedtls
         esp_rom
         esp_driver_usb_serial_jtag
+        esp_hal_wdt
+        esp_hw_support
 )

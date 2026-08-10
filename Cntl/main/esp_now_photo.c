@@ -176,17 +176,23 @@ void esp_now_photo_init(void)
 /* ════════════════════════════════════════════════════════════
  * 단일 사진 수신 — 내부 공용 로직
  * ════════════════════════════════════════════════════════════ */
-/* 통신 시도 전 항상 실제 페어링 여부를 재확인(2026-08-04, 사용자 지시) — 화면의 "연결됨"
- * 표시나 로컬 캐시 상태를 그냥 믿지 않고 esp_now_hub의 노드 테이블로 매번 재확인한다.
- * 끊겨 있으면 전송 자체를 하지 않고(허공에 보내는 걸 방지), 에러 토스트를 띄우는 동시에
- * 재페어링을 자동으로 시도한다 — CAM MAC은 이미 알고 있으니 사용자가 다시 목록에서
- * 찾을 필요 없이 바로 재시도 가능 */
+/* 통신 시도 전 항상 지금 이 기기를 아는 상태인지 확인(2026-08-04, 사용자 지시로 도입,
+ * 2026-08-10 connectionless 모델로 재정의) — ESP-NOW는 connectionless라 "연결/연결끊김"
+ * 자체가 없는 개념이었음(사용자 정정). WAITING(한 번도 페어링 안 됐거나 자동 재연결이
+ * 정상 범위를 넘겨 실패 중)일 때만 막고, PAIRED/ACTIVE는 CAM이 딥슬립 사이 무선
+ * 무응답 구간에 있어도 그냥 통과시킴 — 실제 전송이 응답을 못 받으면 그건 이 요청
+ * 자체의 무응답 에러(UI_ERR_*_NORESPONSE 등, 기존 개별 처리)로 자연스럽게 드러남.
+ * 재페어링 자체는 esp_now_hub.c의 ADVERTISE 핸들러가 사용자 액션과 무관하게 매 딥슬립
+ * 사이클마다 알아서 재시도하므로 여기서 따로 안 건드림.
+ * 5개 액션 함수(지금촬영/목록갱신/삭제/전체삭제/사진선택-fetch) 전부 이 함수를 거쳐가므로,
+ * 적응형 반응시간(2026-08-10)의 "마지막 사용자 조작" 시각도 여기서 한 곳에서 갱신함 —
+ * select_camera()의 자동 최초 목록조회도 이 경로를 타지만, 그 정도는 "활동"으로 봐도
+ * 무해함(어차피 드물게 발생, 과설계 방지) */
 static bool require_paired(const uint8_t *cam_mac, const char *what)
 {
-    if (esp_now_hub_is_paired(cam_mac)) return true;
-    ui_log_add_err(UI_ERR_NOT_PAIRED, "%s 실패(페어링 끊김) — 재연결 시도", what);
-    esp_now_hub_pair(cam_mac);
-    return false;
+    (void)what;
+    esp_now_hub_note_user_action();
+    return esp_now_hub_get_conn_state(cam_mac) != HUB_CONN_STATE_WAITING;
 }
 
 static void start_single_receive(const uint8_t *cam_mac, uint8_t mode, uint32_t param)
@@ -344,6 +350,14 @@ static void handle_chunk(const uint8_t *data, int len)
         s_chunks_received++;
     }
     xSemaphoreGive(s_mutex);
+
+    /* 2026-08-10 — 적응형 반응시간의 "마지막 사용자 조작" 시각을 청크마다 갱신. 예전엔
+     * require_paired()가 요청 "시작" 시점에 한 번만 갱신해서, 전송이 몇 초 걸리면 그 시간이
+     * 고스란히 조용한 시간으로 카운트돼버림 — 전송 도중에 이미 적응형 임계값을 넘겨 SLEEP_NOW가
+     * CAM에 큐잉되고, 전송이 끝나 busy가 풀리자마자(사용자가 결과를 볼 틈도 없이) 바로 잠드는
+     * 문제로 실사용 중 확인됨(사용자 분석: "통신 완료 후가 아니라 통신을 시작한 입력에 의해
+     * 카운터가 진행됨"). 청크가 계속 들어오는 동안은 "활동 중"이 맞으므로 매 청크 갱신 */
+    esp_now_hub_note_user_action();
 }
 
 /* missing_count==0이면 완료를 뜻하는 PHOTO_DONE_ACK를 항상 1번만 보냄(2026-08-05, Layer 1
@@ -630,6 +644,9 @@ static void handle_list_entry(const uint8_t *data, int len)
         s_list_count++;
     }
     xSemaphoreGive(s_mutex);
+
+    esp_now_hub_note_user_action();  /* 2026-08-10 — handle_chunk()와 동일 이유(목록도 최대
+                                         500장이라 전송에 시간이 걸릴 수 있음) */
 }
 
 /* PHOTO_LIST_DONE_ACK를 항상 보냄(2026-08-05, Layer 1) — DONE_ACK와 동일한 원칙. CAM은

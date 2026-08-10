@@ -23,6 +23,16 @@
 
 static const char *TAG = "lvgl9_demo";
 
+/* 2026-08-10 — 적응형 반응시간(esp_now_hub.h)의 "마지막 사용자 조작" 시각을 통신 관련
+ * 5개 함수뿐 아니라 화면 터치 전체로 넓힘(보류했다가 재활성화 — 통신 경로에 남아있던 버그를
+ * 먼저 잡은 뒤 진행하기로 사용자와 합의). LV_EVENT_PRESSED만 걸어도 충분 — 터치가 시작될
+ * 때마다 한 번씩만 갱신되면 되고, 드래그 중 계속 오는 LV_EVENT_PRESSING까지 볼 필요 없음 */
+static void touch_activity_event_cb(lv_event_t *e)
+{
+    (void)e;
+    esp_now_hub_note_user_action();
+}
+
 /* Cntl 통합 테스트 5단계: HTTP 서버만 최소로(esp_now_hub 노드 데이터 없이 더미 페이지) —
  * "esp_http_server 자체가 RGB 패널을 깨는지"만 격리해서 확인 */
 static esp_err_t root_get_handler(httpd_req_t *req)
@@ -145,6 +155,7 @@ void app_main(void)
         esp_lv_adapter_touch_config_t touch_config = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, touch_handle);
         lv_indev_t *touch = esp_lv_adapter_register_touch(&touch_config);
         assert(touch != NULL);
+        lv_indev_add_event_cb(touch, touch_activity_event_cb, LV_EVENT_PRESSED, NULL);
     }
 
     ESP_ERROR_CHECK(esp_lv_adapter_start());

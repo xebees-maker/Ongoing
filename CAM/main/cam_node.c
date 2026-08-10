@@ -18,7 +18,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_check.h"
-#include "esp_pm.h"
+#include "esp_system.h"
+#include "esp_sleep.h"
 #include "nvs_flash.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -37,6 +38,7 @@
 #include "status_led.h"
 #include "cam_node.h"
 #include "dev_console.h"
+#include "rwdt_guard.h"
 
 static const char *TAG = "cam_node";
 
@@ -91,8 +93,11 @@ static const char *TAG = "cam_node";
  * 기억하는 주체는 Cntl(/assets/settings.bin) — esp_now_hub.c 참고.
  * (1차 설계였던 SD카드 저장은 두 가지 문제로 폐기: 1) 이 원칙과 안 맞음 2) SD 접근 자체가
  * ESP-NOW 동시활동과 겹치면 힙이 깨지는 걸 실기에서 발견함 — 아래 clamp는 그 안전장치로
- * 계속 남겨둠, 값의 출처가 뭐든 항상 유효함) */
-#define CAM_RESPONSE_INTERVAL_SEC_DEFAULT 2  /* 사용자 확인된 허용 지연(1~2초) 안쪽 */
+ * 계속 남겨둠, 값의 출처가 뭐든 항상 유효함)
+ * 2026-08-10 Deep Sleep 전환 — 이 값이 곧 딥슬립 사이클 길이(esp_now_hub.c 페어링 전까지는
+ * 이 기본값으로 한두 사이클 돔). 새 값 구간(1/3/10/30/1800초)의 "빠름(3초)" 티어로 시작 —
+ * 짧아서 페어링 전 재시도가 빠르고, RWDT 예산도 그만큼 작게 잡을 수 있음. */
+#define CAM_RESPONSE_INTERVAL_SEC_DEFAULT 3
 
 static uint32_t s_capture_interval_sec  = 0;  /* app_main에서 Kconfig 기본값으로 초기화 */
 static uint32_t s_response_interval_sec = CAM_RESPONSE_INTERVAL_SEC_DEFAULT;
@@ -146,26 +151,80 @@ void cam_node_set_response_interval_sec(uint32_t sec)
     /* 채널동기 PING 주기를 그대로 연동 — "응답성"이라는 하나의 설정값이 두 군데(CAM 자신의
      * PING 주기 + Cntl의 무응답 타임아웃 산정)에 그대로 씀(2026-08-08 설계 대화 참고) */
     esp_now_channelsync_set_ping_interval_ms(s_response_interval_sec * 1000);
-    ESP_LOGI(TAG, "응답성 설정 변경: %us (PING 주기 연동)", (unsigned)s_response_interval_sec);
+    /* RWDT 재무장(2026-08-10) — 이 값이 이번 사이클의 실제 딥슬립 주기가 되므로, 워치독
+     * 예산도 그 값 기준으로 다시 잡아야 함(부팅 직후엔 확정 전 추정치로 무장돼 있었음,
+     * app_main 참고). 깨어있는 시간(페어링/설정수신/명령처리) 여유분으로 마진을 더함 */
+    rwdt_guard_arm(s_response_interval_sec + CONFIG_CAM_DEEPSLEEP_AWAKE_MARGIN_SEC);
+    ESP_LOGI(TAG, "응답성 설정 변경: %us (PING 주기 연동, RWDT 재무장 %us)",
+             (unsigned)s_response_interval_sec,
+             (unsigned)(s_response_interval_sec + CONFIG_CAM_DEEPSLEEP_AWAKE_MARGIN_SEC));
 }
 
 uint32_t cam_node_get_response_interval_sec(void) { return s_response_interval_sec; }
 
-/* 2026-08-08 — Light Sleep 재도입(2026-07-28엔 무조건 켜서 콘솔/DVP 타이밍이 깨졌던 전례
- * 있음, project_cam_esp_now_production 메모리 참고). 이번엔 esp_pm_lock으로 카메라 촬영/
- * 콘솔 명령/ESP-NOW 사진전송 구간만 명시적으로 깨어있게 잠그고, 그 외 진짜 유휴 구간에만
- * light sleep이 실제로 걸리게 함 — 호출부: camera_capture_one(이 파일), dev_console.c의
- * 명령 처리, esp_now_cam.c의 photo_transfer_task 각 요청 처리 구간 */
-static esp_pm_lock_handle_t s_no_sleep_lock = NULL;
+/* 딥슬립 웨이크 원인(2026-08-10) — app_main 최상단에서 capture_wake_reason()이 1회 판정.
+ * cam_wake_reason_t는 esp_now_link.h(공유 프로토콜 헤더, esp_now_cam.h를 통해 포함됨) 정의를
+ * 그대로 씀 — Cntl에 보고할 때도 같은 값을 그대로 실어보내므로(esp_now_cam.c의
+ * send_deep_sleep_stats) 별도 로컬 enum을 안 둠 */
+static cam_wake_reason_t s_wake_reason = CAM_WAKE_REASON_OTHER;
 
-void cam_node_sleep_lock_acquire(void)
+static void capture_wake_reason(void)
 {
-    if (s_no_sleep_lock) esp_pm_lock_acquire(s_no_sleep_lock);
+    esp_reset_reason_t rr = esp_reset_reason();
+    if (rr == ESP_RST_DEEPSLEEP) {
+        uint32_t causes = esp_sleep_get_wakeup_causes();  /* v6 비-deprecated 복수형 */
+        s_wake_reason = (causes & (1U << ESP_SLEEP_WAKEUP_TIMER))
+                         ? CAM_WAKE_REASON_TIMER : CAM_WAKE_REASON_OTHER;
+    } else if (rr == ESP_RST_WDT) {
+        s_wake_reason = CAM_WAKE_REASON_RWDT;
+    } else if (rr == ESP_RST_POWERON) {
+        s_wake_reason = CAM_WAKE_REASON_POWERON;
+    } else {
+        s_wake_reason = CAM_WAKE_REASON_OTHER;
+    }
+    ESP_LOGI(TAG, "웨이크 원인 판정: reset_reason=%d -> wake_reason=%d", rr, s_wake_reason);
 }
 
-void cam_node_sleep_lock_release(void)
+uint8_t cam_node_get_wake_reason(void) { return (uint8_t)s_wake_reason; }
+
+/* "지금 자도 되는가" 판정에 쓰는 유휴 타임스탬프(2026-08-10) — recv_cb가 의미있는 메시지를
+ * 처리할 때마다 cam_node_note_activity()로 갱신됨(esp_now_cam.c 참고) */
+static uint32_t s_last_activity_ms = 0;
+
+void cam_node_note_activity(void)
 {
-    if (s_no_sleep_lock) esp_pm_lock_release(s_no_sleep_lock);
+    s_last_activity_ms = (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* Deep Sleep 최소 유예/대기 상한(2026-08-10) — Kconfig로 노출할 만큼 자주 튜닝할 값은
+ * 아니라서 로컬 상수로 둠(RWDT 마진만 Kconfig, main/Kconfig.projbuild 참고).
+ * 적응형 반응시간(ESP_NOW_MSG_SLEEP_NOW) 도입 이후, 이 유휴여유 타이머는 주 경로가 아니라
+ * "신호가 유실됐을 때만 쓰이는 안전장치"로 성격이 바뀜 — Cntl의 적응형 반응시간 설정
+ * (10초/30초/1분, ui_main.c) 중 가장 긴 값(1분)보다 넉넉히 길게 잡아서, 정상적인 경우엔
+ * 거의 발동 안 하고 SLEEP_NOW가 항상 먼저 도착하게 함(2000ms->5000ms->70000ms로 성격이
+ * 바뀌며 상향) */
+#define CAM_DEEPSLEEP_IDLE_GRACE_MS       70000
+#define CAM_DEEPSLEEP_PAIR_WAIT_TIMEOUT_MS 15000 /* Cntl을 못 찾은 채 이 시간을 넘기면 포기
+                                                     하고 일단 자러 감(무한대기 방지, 다음
+                                                     사이클에 재시도) */
+
+/* Cntl이 ESP_NOW_MSG_SLEEP_NOW를 보내면 세팅(2026-08-10) — 남은 유휴여유를 기다리지 않고
+ * cam_node_wake_window_done()이 즉시 true를 반환하게 함(단, 바쁜 동안은 여전히 안 재움) */
+static volatile bool s_sleep_now_requested = false;
+
+void cam_node_note_sleep_now_requested(void)
+{
+    s_sleep_now_requested = true;
+}
+
+bool cam_node_wake_window_done(uint32_t awake_start_ms)
+{
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!esp_now_cam_is_paired()) return (now_ms - awake_start_ms) > CAM_DEEPSLEEP_PAIR_WAIT_TIMEOUT_MS;
+    if (esp_now_cam_is_busy()) return false;
+    if (s_sleep_now_requested) return true;
+    if (now_ms - s_last_activity_ms < CAM_DEEPSLEEP_IDLE_GRACE_MS) return false;
+    return true;
 }
 
 static bool s_camera_ready = false;
@@ -232,7 +291,6 @@ static SemaphoreHandle_t s_capture_mutex = NULL;
 
 static bool camera_capture_one(cam_capture_kind_t kind)
 {
-    cam_node_sleep_lock_acquire();  /* esp_camera_fb_get()의 DVP 타이밍은 CPU가 잠들면 안 됨 */
     xSemaphoreTake(s_capture_mutex, portMAX_DELAY);
 
     /* DMA 프레임 버퍼 슬롯(fb_count개)은 esp_camera_fb_get()+fb_return()으로 소비해야만
@@ -250,7 +308,6 @@ static bool camera_capture_one(cam_capture_kind_t kind)
     if (!fb) {
         ESP_LOGW(TAG, "esp_camera_fb_get 실패");
         xSemaphoreGive(s_capture_mutex);
-        cam_node_sleep_lock_release();
         return false;
     }
 
@@ -265,7 +322,6 @@ static bool camera_capture_one(cam_capture_kind_t kind)
     esp_camera_fb_return(fb);
 
     xSemaphoreGive(s_capture_mutex);
-    cam_node_sleep_lock_release();
     return ok;
 }
 
@@ -364,19 +420,18 @@ bool cam_node_capture_now_sized(const char *size_name)
 
 void app_main(void)
 {
-    /* 2026-08-08 — Light Sleep 2차 시도, 다시 되돌림(2026-07-28 1차 시도와 같은 실패 클래스).
-     * 이번엔 camera_capture_one/dev_console 명령/photo_transfer_task 구간마다 esp_pm_lock으로
-     * 깨어있게 잠갔는데도, 부팅 직후 "cam>" 프롬프트에서 사람이 아직 아무 명령도 안 친
-     * 유휴 상태(=CPU가 가장 먼저 light sleep에 들어가는 바로 그 구간)에서 이미 호스트→보드
-     * 쓰기 자체가 타임아웃남(실기 확인, pyserial write_timeout — 첫 ls 명령조차 안 먹힘).
-     * USB-Serial-JTAG 페리페럴이 이 칩의 light sleep wake source가 아닌 것으로 보임 — 락으로
-     * 지킬 수 있는 건 "명령 실행 중" 구간뿐인데, 정작 깨져있는 구간은 "명령을 기다리며 대기
-     * 중"(=우리가 의도적으로 재워두려던 바로 그 구간)이라 이 접근 자체로는 막을 수 없는
-     * 구조적 문제. project_cam_esp_now_production 메모리 참고 — 사용자 지시대로 "불안정하면
-     * 완전히 포기": light sleep은 다시 끔. cam_node_sleep_lock_acquire/release 호출부(이 파일/
-     * dev_console.c/esp_now_cam.c)는 남겨둠 — s_no_sleep_lock이 NULL이라 전부 안전하게
-     * no-op(다음에 완전히 다른 설계로 재검토할 때를 위한 자리만 유지). WiFi 모뎀슬립
-     * (esp_wifi_set_ps, 아래)은 이 문제와 무관 — 정상 동작 확인됨, 유지 */
+    /* Deep Sleep 주기적 웨이크로 전환(2026-08-10) — Light Sleep 3차 시도(2026-08-09)까지
+     * 실측한 결과 light_sleep_count가 순수 전원 상태에서도 0에 머물러 실제로 전혀 진입하지
+     * 않는 것으로 확인됐고, 근본 원인을 못 찾아 8/8에 이미 합의된 폴백으로 전환함
+     * (project_cntl_rtc_and_unified_sleep_plan 메모리 참고). 이번 방식은 CPU 주파수/모뎀슬립
+     * 튜닝이 아니라 "할 일 다 하면 명시적으로 esp_deep_sleep_start()를 부른다"는 완전히
+     * 다른 제어흐름 — 매 사이클 전체가 재부팅이라 상태를 하나도 안 들고 감(응답성/촬영주기도
+     * 로컬 저장 없이 매번 Kconfig 기본값에서 시작, 페어링되면 Cntl이 다시 채워줌).
+     * RWDT(rwdt_guard.c)가 이번 사이클 전체를 지키는 안전망 — 소프트웨어가 무슨 이유로든
+     * esp_deep_sleep_start()에 못 이르면 강제로 리셋시킴. */
+
+    capture_wake_reason();
+    rwdt_guard_arm(CAM_RESPONSE_INTERVAL_SEC_DEFAULT + CONFIG_CAM_DEEPSLEEP_AWAKE_MARGIN_SEC);
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -429,7 +484,7 @@ void app_main(void)
     esp_now_cam_set_status_led(GPIO_NUM_NC);  /* TODO: 실기 LED GPIO 확정되면 채우기 */
     esp_now_cam_init();
     /* esp_now_cam_init() 안에서 esp_now_channelsync_init()이 불려야 피어/타이머가 만들어짐 —
-     * 그 다음에 저장된(또는 기본) 응답성 설정을 반영 */
+     * 그 다음에 저장된(또는 기본) 응답성 설정을 반영(RWDT도 여기서 실제값으로 재무장됨) */
     cam_node_set_response_interval_sec(s_response_interval_sec);
 
     const esp_timer_create_args_t capture_args = { .callback = capture_timer_cb, .name = "cam_capture" };
@@ -439,8 +494,21 @@ void app_main(void)
         cam_node_set_auto_capture(true);
     }
 
-    dev_console_start();  /* 개발 단계 전용 — shot/ls/get 콘솔 명령, 실기 검증용(운영 빌드 제거 대상) */
+    ESP_LOGI(TAG, "CAM 노드 시작 (%s, 촬영주기=%us 응답성=%us, wake_reason=%d)", esp_now_cam_get_name(),
+             (unsigned)s_capture_interval_sec, (unsigned)s_response_interval_sec, s_wake_reason);
 
-    ESP_LOGI(TAG, "CAM 노드 시작 (%s, 촬영주기=%us 응답성=%us)", esp_now_cam_get_name(),
-             (unsigned)s_capture_interval_sec, (unsigned)s_response_interval_sec);
+#if CONFIG_CAM_DEEPSLEEP_ENABLE
+    dev_console_start();  /* 유지 — 딥슬립 사이클마다 USB 재열거됨(개발 시 감안) */
+
+    uint32_t awake_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    while (!cam_node_wake_window_done(awake_start_ms)) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    ESP_LOGI(TAG, "딥슬립 진입: %us 후 웨이크", (unsigned)s_response_interval_sec);
+    esp_sleep_enable_timer_wakeup((uint64_t)s_response_interval_sec * 1000000ULL);
+    esp_deep_sleep_start();  /* RWDT는 이미 무장돼있음, 안 건드림 */
+#else
+    dev_console_start();  /* 딥슬립 완전 비활성 — 상시 동작(벤치/콘솔 개발용, Kconfig 이스케이프 해치) */
+#endif
 }

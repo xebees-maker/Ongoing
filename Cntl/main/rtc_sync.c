@@ -147,3 +147,34 @@ uint32_t rtc_sync_get_unix_time(void)
 {
     return (uint32_t)time(NULL);
 }
+
+esp_err_t rtc_sync_set_datetime(int year, int month, int day, int hour, int min, int sec)
+{
+    if (!s_rtc_ready) return ESP_ERR_INVALID_STATE;
+
+    pcf85063a_datetime_t seed = {
+        .year  = (uint16_t)year,
+        .month = (uint8_t)month,
+        .day   = (uint8_t)day,
+        .dotw  = 0,
+        .hour  = (uint8_t)hour,
+        .min   = (uint8_t)min,
+        .sec   = (uint8_t)sec,
+    };
+    esp_err_t err = pcf85063a_set_time_date(&s_rtc_dev, seed);
+
+    struct tm tm_val = {
+        .tm_year = year - 1900,
+        .tm_mon  = month - 1,
+        .tm_mday = day,
+        .tm_hour = hour,
+        .tm_min  = min,
+        .tm_sec  = sec,
+    };
+    struct timeval tv = { .tv_sec = mktime(&tm_val), .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+
+    ESP_LOGI(TAG, "수동 시각 설정: %04d-%02d-%02d %02d:%02d:%02d (RTC 쓰기 %s)",
+             year, month, day, hour, min, sec, esp_err_to_name(err));
+    return err;
+}

@@ -57,6 +57,51 @@ static int                s_node_count = 0;
  * 반응 없던 문제의 원인으로 추정). 아래 뮤텍스로 s_nodes[]/s_node_count 접근 전체를 보호. */
 static SemaphoreHandle_t s_nodes_mutex = NULL;
 
+/* 적응형 반응시간(2026-08-10) — 마지막 사용자 조작 시각(esp_now_photo.c의 5개 액션 함수가
+ * esp_now_hub_note_user_action()으로 갱신). 전역 하나로 충분 — 지금은 CAM이 보통 1대라
+ * esp_now_hub_bench_start()/apply_response_interval_sec()이 이미 쓰는 단순화와 동일 원칙 */
+static uint32_t s_last_user_action_ms = 0;
+static esp_timer_handle_t s_adaptive_sleep_timer = NULL;
+
+void esp_now_hub_note_user_action(void)
+{
+    s_last_user_action_ms = (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* 페어링 직후 루틴 설정 핸드셰이크(SET_TIME+CAM_CONFIG_SET/ACK)가 끝날 시간 여유
+ * (2026-08-10) — 정밀 추적 대신 고정 마진으로 충분(핸드셰이크는 보통 수십~수백ms) */
+#define ADAPTIVE_SLEEP_PAIR_SETTLE_MS 1000
+#define ADAPTIVE_SLEEP_CHECK_INTERVAL_US (500 * 1000)
+
+/* 적응형 반응시간 조건(마지막 사용자 조작으로부터 device_config_get_adaptive_response_sec()
+ * 이상 조용함)을 만족하면, 지금 라디오 레벨로 페어링 확인된 CAM 전부에게 SLEEP_NOW를 보냄
+ * (2026-08-10) — CAM은 받으면 유휴여유를 기다리지 않고 곧바로 잠듦(cam_node.c 참고).
+ * sleep_now_sent로 사이클당 1회만 보냄 — n->paired는 CAM이 다음 웨이크에 ADVERTISE를 다시
+ * 보내야만 내려가는 필드라 딥슬립 구간 내내 true로 남아있어서, 이 가드가 없으면 이미 잠든
+ * CAM에게 500ms마다 계속 허공에 재전송하게 됨(실사용 중 발견 — 사이클당 13초+ 동안 스팸) */
+static void adaptive_sleep_timer_cb(void *arg)
+{
+    (void)arg;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t threshold_ms = device_config_get_adaptive_response_sec() * 1000U;
+    if (now_ms - s_last_user_action_ms < threshold_ms) return;
+
+    esp_now_sleep_now_t msg = {
+        .version  = ESP_NOW_LINK_VERSION,
+        .msg_type = ESP_NOW_MSG_SLEEP_NOW,
+    };
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_node_count; i++) {
+        if (s_nodes[i].kind != HUB_NODE_KIND_CAM || !s_nodes[i].paired) continue;
+        if (s_nodes[i].sleep_now_sent) continue;
+        if (now_ms - s_nodes[i].last_paired_ms < ADAPTIVE_SLEEP_PAIR_SETTLE_MS) continue;
+        esp_err_t err = esp_now_send(s_nodes[i].mac, (const uint8_t *)&msg, sizeof(msg));
+        ESP_LOGI(TAG, "SLEEP_NOW -> %s: %s", s_nodes[i].name, esp_err_to_name(err));
+        s_nodes[i].sleep_now_sent = true;
+    }
+    xSemaphoreGive(s_nodes_mutex);
+}
+
 static hub_node_kind_t classify_name(const char *name)
 {
     if (strncmp(name, "Cam-", 4) == 0)  return HUB_NODE_KIND_CAM;
@@ -163,6 +208,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 만들라고 지시). ADVERTISE 수신 자체가 "이 노드는 지금 언페어링 상태"라는
          * 확실한 증거이므로, 여기서 바로 paired를 내림 */
         bool was_paired = n->paired;
+        bool was_user_unpaired = n->user_unpaired;
+        bool ever_paired = n->ever_paired;
         n->paired = false;
         memcpy(n->name, msg->name, sizeof(n->name));
         n->name[ESP_NOW_LINK_NAME_LEN - 1] = '\0';
@@ -171,9 +218,24 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         char name_copy[ESP_NOW_LINK_NAME_LEN];
         strncpy(name_copy, n->name, sizeof(name_copy) - 1);
         name_copy[sizeof(name_copy) - 1] = '\0';
+        uint8_t mac_copy[6];
+        memcpy(mac_copy, info->src_addr, sizeof(mac_copy));
         xSemaphoreGive(s_nodes_mutex);
         if (was_paired) {
             ESP_LOGW(TAG, "%s가 재광고 시작 — 페어링 끊김으로 판단(desync 복구)", name_copy);
+        }
+        /* 자동 재페어링(2026-08-10, CAM Deep Sleep 전환) — CAM은 매 딥슬립 웨이크마다 완전
+         * 재부팅(상태 없음)되므로 ADVERTISE 수신이 곧 "새 사이클 시작"임. was_paired(방금
+         * 막 페어링이 풀린 순간)만 보고 재연결을 시도하면, 그 시도 자체가 무선 유실 등으로
+         * 실패했을 때(실기에서 확인됨 — "5회 시도 모두 무응답") 이후 어떤 ADVERTISE가 와도
+         * 다시 시도할 계기가 없어 영구히 "연결 대기 중"에 멈춰버림. ever_paired(이번 Cntl
+         * 부팅 세션에서 한 번이라도 페어링 성공했는가, esp_now_hub_node_t 참고)를 대신
+         * 써서 — 성공/실패와 무관하게 이 노드가 다시 광고할 때마다(즉 매 웨이크 사이클마다)
+         * 재연결을 계속 재시도함. 사용자가 명시적으로 연결 해제한 노드(user_unpaired)는
+         * 그대로 안 건드림 — 다음에 사용자가 직접 다시 붙여야 함(esp_now_hub_unpair의
+         * 원래 의도 유지) */
+        if (ever_paired && !was_user_unpaired) {
+            esp_now_hub_pair(mac_copy);
         }
 
         /* 사람이 페어링을 누르기 전이라도 즉시 응답 — 채널 스캔 중인 노드가 Cntl을
@@ -210,6 +272,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             bool was_paired = n->paired;
             if (!n->user_unpaired) {
                 n->paired = true;
+                n->ever_paired = true;  /* 2026-08-10 — 한 번 세팅되면 이번 부팅 세션 내내
+                                            유지, ADVERTISE 핸들러의 자동 재페어링 판단에 씀 */
+                n->last_paired_ms = now_ms;  /* esp_now_hub_is_reconnect_stuck()의 기준시각 */
+                n->sleep_now_sent = false;  /* 새 웨이크 사이클 시작 — 이번 사이클에 한 번은
+                                                다시 보낼 수 있어야 함 */
                 became_paired = !was_paired;
                 strncpy(name_copy, n->name, sizeof(name_copy) - 1);
             }
@@ -217,6 +284,13 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         xSemaphoreGive(s_nodes_mutex);
         if (became_paired) {
             ESP_LOGI(TAG, "페어링 완료: %s", name_copy);
+            /* 2026-08-10 — 방금 막 깨어나 페어링된 시점을 "마지막 사용자 조작"으로도 침 —
+             * 안 그러면 이 타임스탬프는 세션 최초 1회(자동 목록조회)에만 갱신되고 그 뒤로는
+             * 영원히 그대로라, Cntl이 계속 켜져 있는 한 두 번째 페어링부터는 "마지막 조작 이후
+             * 경과시간"이 이미 적응형 임계값을 훌쩍 넘겨 있어서 adaptive_sleep_timer_cb가
+             * 페어링 직후(설정간격 500ms 이내) 곧바로 SLEEP_NOW를 쏴버림 — 매 웨이크마다 사용자
+             * 반응 시간이 사실상 0이 되는 버그(실사용 중 발견, 3006 반복 원인) */
+            esp_now_hub_note_user_action();
             /* CAM/Sens는 자체 RTC가 없어서 페어링될 때마다 Cntl 시각을 알려줌 — 이게
              * 없으면 CAM의 시계가 부팅 시각(1970-01-01 근처)에 멈춰있어서 사진 파일명
              * (촬영시각 유닉스 타임스탬프)이 전부 1월 1일로 찍힘(2026-08-01 실기에서 확인) */
@@ -350,6 +424,31 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 볼 방법이 없음 — capture_stage와 같은 이유로 여기서 별도 폴링 상태를 갱신 */
         if (len < (int)sizeof(esp_now_cam_config_ack_t)) return;
         s_config_apply_stage = HUB_CONFIG_APPLY_ACKED;
+
+    } else if (msg_type == ESP_NOW_MSG_DEEP_SLEEP_STATS) {
+        /* CHANNEL_PING과 같은 성격 — 노드가 그냥 페어링 완료 직후 1회 보내기만 함(ACK 없음).
+         * 페어링 안 된 노드도 테이블엔 있을 수 있어서(발견됨~페어링 사이) find_node로 없으면
+         * 조용히 버림 — CAM이 아직 안 붙은 CNTL에도 브로드캐스트할 이유가 없어서 이 경우는
+         * 실제로는 거의 안 옴(esp_now_cam.c가 페어링 완료 직후에만 보냄).
+         * ds_cycle_count/ds_total_asleep_sec/ds_rwdt_catch_count는 CAM이 안 보내는 값 —
+         * CAM은 매 사이클 완전 재부팅이라 스스로 누적을 못 하므로, Cntl이 리포트를 받을
+         * 때마다 직접 누적함(2026-08-10) */
+        if (len < (int)sizeof(esp_now_deep_sleep_stats_t)) return;
+        const esp_now_deep_sleep_stats_t *stats = (const esp_now_deep_sleep_stats_t *)data;
+
+        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        esp_now_hub_node_t *n = find_node(info->src_addr);
+        if (n) {
+            n->last_seen_ms               = now_ms;
+            n->has_deepsleep_stats        = true;
+            n->ds_cycle_count++;
+            n->ds_total_asleep_sec       += stats->sleep_interval_sec;
+            if (stats->wake_reason == CAM_WAKE_REASON_RWDT) n->ds_rwdt_catch_count++;
+            n->ds_last_wake_reason        = stats->wake_reason;
+            n->ds_last_awake_uptime_ms    = stats->awake_uptime_ms;
+            n->ds_last_sleep_interval_sec = stats->sleep_interval_sec;
+        }
+        xSemaphoreGive(s_nodes_mutex);
     }
 }
 
@@ -465,6 +564,12 @@ void esp_now_hub_init(void)
     esp_err_t reset_err = esp_now_send(s_broadcast_addr, (const uint8_t *)&reset_msg, sizeof(reset_msg));
     ESP_LOGI(TAG, "HUB_RESET 브로드캐스트: %s", esp_err_to_name(reset_err));
 
+    const esp_timer_create_args_t adaptive_sleep_args = {
+        .callback = adaptive_sleep_timer_cb, .name = "adaptive_sleep",
+    };
+    esp_timer_create(&adaptive_sleep_args, &s_adaptive_sleep_timer);
+    esp_timer_start_periodic(s_adaptive_sleep_timer, ADAPTIVE_SLEEP_CHECK_INTERVAL_US);
+
     ESP_LOGI(TAG, "ESP-NOW 허브 시작됨 (STA)");
 }
 
@@ -506,18 +611,30 @@ int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max
     return count;
 }
 
-bool esp_now_hub_is_paired(const uint8_t *mac)
+bool esp_now_hub_is_reconnect_stuck(const uint8_t *mac)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     uint32_t timeout_ms = esp_now_hub_node_timeout_ms();
-    bool paired = false;
+    bool stuck = false;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     esp_now_hub_node_t *n = find_node(mac);
-    if (n && n->paired && (now_ms - n->last_seen_ms) <= timeout_ms) {
-        paired = true;
+    if (n && n->ever_paired && !n->paired && (now_ms - n->last_paired_ms) > timeout_ms) {
+        stuck = true;
     }
     xSemaphoreGive(s_nodes_mutex);
-    return paired;
+    return stuck;
+}
+
+hub_conn_state_t esp_now_hub_get_conn_state(const uint8_t *mac)
+{
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    esp_now_hub_node_t *n = find_node(mac);
+    bool ever_paired = n && n->ever_paired;
+    bool radio_paired = n && n->paired;
+    xSemaphoreGive(s_nodes_mutex);
+
+    if (!ever_paired || esp_now_hub_is_reconnect_stuck(mac)) return HUB_CONN_STATE_WAITING;
+    return radio_paired ? HUB_CONN_STATE_ACTIVE : HUB_CONN_STATE_PAIRED;
 }
 
 void esp_now_hub_pair(const uint8_t *mac)
@@ -548,6 +665,11 @@ void esp_now_hub_pair(const uint8_t *mac)
      * 페어링 상태 반영은 지금처럼 recv_cb의 PAIR_ACK 핸들러가 그대로 담당함(esp_now_tx는
      * 상태를 안 건드리는 순수 전송 스케줄러, esp_now_tx.h 참고) */
     static const uint8_t s_pair_ack_types[] = { ESP_NOW_MSG_PAIR_ACK };
+    /* 이 호출은 대부분 CAM Deep Sleep의 ADVERTISE 핸들러가 매 사이클 자동으로 거는 백그라운드
+     * 재연결 시도임(2026-08-10) — CAM이 아직 채널동기화 중이라 첫 시도가 무응답으로 실패하는
+     * 게 실기에서 흔했고(뒤이은 재시도가 곧 성공), 이건 connectionless 프로토콜에서 정상
+     * 범위. esp_now_tx.c가 이제 무응답이어도 UI 에러를 안 띄우므로(진단 로그만) 여기서
+     * 따로 신경 안 써도 됨(사용자 지적으로 esp_now_tx.c 자체를 그렇게 정리함) */
     esp_now_tx_enqueue(mac, &req, sizeof(req), s_pair_ack_types, 1, 500, 5, "페어링");
     ESP_LOGI(TAG, "PAIR_REQUEST -> %s 큐잉됨", name_copy);
 }
@@ -590,7 +712,7 @@ void esp_now_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec
     push_cam_config_to(mac);
 }
 
-void esp_now_hub_apply_response_interval_sec(uint32_t sec)
+bool esp_now_hub_apply_response_interval_sec(uint32_t sec)
 {
     device_config_set_response_interval_sec(sec);
 
@@ -609,6 +731,7 @@ void esp_now_hub_apply_response_interval_sec(uint32_t sec)
     for (int i = 0; i < target_count; i++) {
         push_cam_config_to(targets[i]);
     }
+    return target_count > 0;
 }
 
 void esp_now_hub_unpair(const uint8_t *mac)

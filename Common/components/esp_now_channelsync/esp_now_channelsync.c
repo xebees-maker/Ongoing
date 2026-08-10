@@ -5,12 +5,22 @@
 #include "esp_wifi.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_attr.h"
 
 static const char *TAG = "esp_now_chsync";
 
 #define SCAN_DWELL_US        (300 * 1000)
 #define SCAN_CHANNEL_MIN     1
 #define SCAN_CHANNEL_MAX     13
+
+/* 마지막으로 동기화 성공했던 채널(2026-08-10) — RTC 슬로우메모리(딥슬립 중에도 유지됨,
+ * 전원이 완전히 끊기거나 RWDT의 RESET_RTC 액션이 아닌 한 살아있음)에 저장해뒀다가 다음
+ * 웨이크 때 그 채널부터 먼저 시도. CAM Deep Sleep 전환 후 매 웨이크마다 채널스캔을 처음부터
+ * 다시 해야 했는데, 공유기(허브의 실제 채널)는 보통 세션 내내 안 바뀌므로 대부분의 사이클은
+ * 이 값 하나로 거의 즉시 동기화됨 — 값이 틀렸으면(채널이 실제로 바뀌었으면) 기존처럼
+ * 전체 스캔으로 자연히 폴백됨(증가/랩어라운드 로직이 시작점과 무관하게 전체 범위를 도니까).
+ * 설정값이 아니라 순수 성능 힌트라 잘못돼도 안전(최악의 경우 예전과 동일한 전체 스캔) */
+static RTC_DATA_ATTR uint8_t s_last_synced_channel = 0;  /* 0 = 유효한 값 없음(최초 부팅) */
 
 /* 기본 500ms마다 PING 왕복 확인, 연속 3회 무응답이면 동기화 끊김으로 판정. 매 라운드는
  * "직전 PING의 PONG이 왔는가"만 검사하고 바로 다음 PING을 보내는 단순한 구조라 별도의 응답
@@ -52,6 +62,19 @@ static void add_peer_if_needed(const uint8_t *mac)
     esp_now_add_peer(&peer);
 }
 
+/* scan_timer_cb와 enter_unsynced 둘 다 씀(2026-08-10, 아래 참고) — 지금 s_scan_channel에서
+ * 광고 1통 보냄 */
+static void send_advertise_on_current_channel(void)
+{
+    esp_now_advertise_t msg = {
+        .version  = ESP_NOW_LINK_VERSION,
+        .msg_type = ESP_NOW_MSG_ADVERTISE,
+    };
+    memcpy(msg.name, s_node_name, sizeof(msg.name));
+    memcpy(msg.mac, s_node_mac, sizeof(msg.mac));
+    esp_now_send(s_broadcast_addr, (const uint8_t *)&msg, sizeof(msg));
+}
+
 static void enter_unsynced(void)
 {
     s_synced = false;
@@ -59,8 +82,19 @@ static void enter_unsynced(void)
     s_pong_pending    = false;
     s_ping_fail_count = 0;
 
-    s_scan_channel = SCAN_CHANNEL_MIN;
+    /* 2026-08-10 — 마지막으로 성공했던 채널이 있으면 거기서 시작(위 s_last_synced_channel
+     * 주석 참고). 증가/랩어라운드(scan_timer_cb)는 시작점과 무관하게 전체 1~13 범위를
+     * 도니까, 값이 틀려도(허브가 채널을 바꿨어도) 안전하게 전체 스캔으로 이어짐 */
+    s_scan_channel = (s_last_synced_channel >= SCAN_CHANNEL_MIN && s_last_synced_channel <= SCAN_CHANNEL_MAX)
+                      ? s_last_synced_channel : SCAN_CHANNEL_MIN;
     esp_wifi_set_channel(s_scan_channel, WIFI_SECOND_CHAN_NONE);
+    /* 2026-08-10 — 시작 채널에서도 즉시 광고 1번 보냄(CAM Deep Sleep 실기 테스트에서 발견:
+     * 예전엔 scan_timer_cb가 "채널 증가 후 광고"만 해서, 시작 채널(SCAN_CHANNEL_MIN=1)
+     * 자체에서는 스캔이 한 바퀴(최대 3.9초) 다 돌아야만 광고가 나갔음 — 허브가 하필 채널 1에
+     * 있으면 매번 최악의 경우를 맞는 구조적 편향이 있었음. 이 즉시 전송으로 그 편향을 없앰:
+     * 허브가 지금 CAM이 있는 채널에 이미 있으면 거의 즉시 찾고, 아니면 기존처럼 스캔이
+     * 이어감(최악값은 그대로 유지, 더 나빠지지 않음) */
+    send_advertise_on_current_channel();
 
     if (s_scan_timer) {
         esp_timer_stop(s_scan_timer);
@@ -78,14 +112,7 @@ static void scan_timer_cb(void *arg)
     s_scan_channel++;
     if (s_scan_channel > SCAN_CHANNEL_MAX) s_scan_channel = SCAN_CHANNEL_MIN;
     esp_wifi_set_channel(s_scan_channel, WIFI_SECOND_CHAN_NONE);
-
-    esp_now_advertise_t msg = {
-        .version  = ESP_NOW_LINK_VERSION,
-        .msg_type = ESP_NOW_MSG_ADVERTISE,
-    };
-    memcpy(msg.name, s_node_name, sizeof(msg.name));
-    memcpy(msg.mac, s_node_mac, sizeof(msg.mac));
-    esp_now_send(s_broadcast_addr, (const uint8_t *)&msg, sizeof(msg));
+    send_advertise_on_current_channel();
 }
 
 static void ping_timer_cb(void *arg)
@@ -161,6 +188,7 @@ void esp_now_channelsync_on_recv(const esp_now_recv_info_t *info, uint8_t msg_ty
         s_scan_channel = actual_channel;
         esp_wifi_set_channel(s_scan_channel, WIFI_SECOND_CHAN_NONE);
         if (s_scan_timer) esp_timer_stop(s_scan_timer);
+        s_last_synced_channel = actual_channel;  /* 다음 웨이크가 여기서부터 먼저 시도 */
 
         s_synced          = true;
         s_ping_fail_count = 0;

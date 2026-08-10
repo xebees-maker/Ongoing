@@ -62,6 +62,7 @@ static const ui_err_entry_t s_err_table[] = {
     { UI_ERR_FONT_FILE_OPEN,      "폰트 파일 열기 실패" },
     { UI_ERR_FONT_CREATE,         "폰트 생성 실패" },
     { UI_ERR_HTTPD_START,         "웹서버 시작 실패" },
+    { UI_ERR_RTC_SET_FAILED,      "RTC 시각설정 실패" },
 };
 
 void ui_log_init(void)

@@ -61,6 +61,7 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_FONT_FILE_OPEN       5003  /* 폰트 파일 열기 실패 */
 #define UI_ERR_FONT_CREATE          5004  /* TinyTTF 폰트 인스턴스 생성 실패 */
 #define UI_ERR_HTTPD_START          5005  /* 웹서버(httpd_start) 시작 실패 */
+#define UI_ERR_RTC_SET_FAILED       5006  /* 설정 화면 수동 시각설정 — RTC 하드웨어 쓰기 실패 */
 
 void ui_log_add_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 

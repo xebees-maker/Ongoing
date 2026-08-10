@@ -5,6 +5,7 @@
 #include "device_config.h"
 #include "esp_now_photo.h"
 #include "ui_log.h"
+#include "rtc_sync.h"
 #include "esp_heap_caps.h"
 #include "esp_jpeg_dec.h"
 #include "esp_log.h"
@@ -70,6 +71,15 @@ static lv_obj_t          *s_photo_image         = NULL;  /* s_photo_box 안의 l
 static esp_now_hub_node_t s_dash_nodes[ESP_NOW_HUB_MAX_NODES];
 static esp_now_hub_node_t s_dash_nodes_prev[ESP_NOW_HUB_MAX_NODES];
 static int                s_dash_count_prev = -1;  /* -1: 아직 비교 대상 없음(첫 실행은 항상 그림) */
+
+/* 요약판넬 행의 상태 문구(페어됨/통신 중)만 매 틱 가볍게 갱신하기 위한 보조 배열
+ * (2026-08-10) — 행 자체(리스트 구조)는 ever_paired 기준으로만 다시 그리므로(위
+ * node_display_equal 참고) 라디오 레벨 paired 토글은 구조 재생성 없이 이 텍스트만
+ * 갱신해서 반영함(요약판넬만 이 세분화를 보여주기로 함, 사용자 지시) */
+static lv_obj_t *s_summary_row_objs[ESP_NOW_HUB_MAX_NODES];
+static uint8_t   s_summary_row_macs[ESP_NOW_HUB_MAX_NODES][6];
+static char      s_summary_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
+static int       s_summary_row_count = 0;
 static uint8_t            s_selected_cam_mac[6];
 static bool               s_has_selected_cam = false;  /* 지금촬영/목록/삭제 등이 쏠 대상 —
                                                             이제 "자동으로 찾은 유일한 CAM"이
@@ -99,10 +109,35 @@ static lv_obj_t *s_response_interval_dd    = NULL;
 static lv_obj_t *s_response_apply_btn      = NULL;
 static lv_obj_t *s_response_interval_label = NULL;
 static lv_obj_t *s_response_apply_lbl      = NULL;
+static lv_obj_t *s_response_help_label     = NULL;  /* 2026-08-10 — 드롭다운 선택값의 풀이
+                                                        (즉시/빠름/균형/절전/최대절전 의미) */
 static int       s_response_interval_applied_idx = -1;
+
+/* 적응형 반응시간 행(2026-08-10) — 마지막 사용자 조작 후 이만큼 조용해야 CAM에 SLEEP_NOW.
+ * CAM에는 전송 안 되는 Cntl 내부 판단값이라(esp_now_hub.c 참고), Apply해도 네트워크 왕복이
+ * 없어서 진행팝업 없이 즉시 반영됨(다른 두 Apply 버튼과 다른 점) */
+static lv_obj_t *s_adaptive_response_dd    = NULL;
+static lv_obj_t *s_adaptive_apply_btn      = NULL;
+static lv_obj_t *s_adaptive_response_label = NULL;
+static lv_obj_t *s_adaptive_apply_lbl      = NULL;
+static lv_obj_t *s_adaptive_help_label     = NULL;
+static int       s_adaptive_response_applied_idx = -1;
 
 static lv_obj_t *s_restart_label     = NULL;
 static lv_obj_t *s_restart_btn_lbl   = NULL;
+
+/* 수동 시각설정 행(2026-08-09, RTC 부팅 시딩 버그 수정에 이어지는 작업) — [라벨][현재
+ * 시각][설정] 인라인. 현재 시각 라벨은 refresh_clock()이 로고부제 시계와 같이 1초마다
+ * 갱신(언어 무관, 그냥 숫자라 refresh_lang_texts엔 등록 안 함) */
+static lv_obj_t *s_time_label       = NULL;
+static lv_obj_t *s_time_value_label = NULL;
+static lv_obj_t *s_time_set_btn_lbl = NULL;
+
+/* 버튼 폭 통일(2026-08-09, 사용자 지시) — 팝업 버튼 포함 전부 하나의 폭. ui_init()
+ * 끝에서 그 시점까지 만들어진 메인 화면 버튼들의 실측 자연폭 중 최댓값으로 한 번 정해짐
+ * (하드코딩 대신 실측 — 언어 전환/문구 변경에도 안 깨짐). add_modal_button()이 이후 뜨는
+ * 모든 팝업 버튼에 이 값을 그대로 적용 */
+static lv_coord_t s_action_btn_width = 0;
 
 /* 드롭다운 옵션 문자열의 줄 순서 == 이 배열의 인덱스 순서(초 단위) — 반드시 같이 바꿀 것.
  * 2026-08-08 — "10초"를 뺌: 실기에서 자동촬영 타이머가 이 짧은 주기로 ESP-NOW 활동과
@@ -110,7 +145,13 @@ static lv_obj_t *s_restart_btn_lbl   = NULL;
  * 넣었지만, UI에서부터 실제로 안 되는 값을 보여주지 않는 게 맞음 — cam_node.c의
  * clamp_capture_interval_sec 참고) */
 static const uint32_t s_capture_interval_values[]  = { 0, 1800, 3600, 10800, 36000 };
-static const uint32_t s_response_interval_values[] = { 1, 2, 5, 10 };
+/* 2026-08-10, CAM Deep Sleep 전환 — 이 값이 곧 딥슬립 사이클 길이가 되므로 절전 정도가
+ * 극단적으로 갈리는 5단계로 재정의(즉시/빠름/균형/절전/최대절전). 각 값의 의미는
+ * s_response_help_texts(아래)와 사용자 확인된 표 그대로 — 반드시 같이 바꿀 것 */
+static const uint32_t s_response_interval_values[] = { 1, 3, 10, 30, 1800 };
+/* 적응형 반응시간(2026-08-10) — 10초/30초/1분. STR_OPT_ADAPTIVE_RESPONSE_LIST 순서와
+ * 반드시 같이 맞출 것 */
+static const uint32_t s_adaptive_response_values[] = { 10, 30, 60 };
 
 static int find_value_index(const uint32_t *values, int count, uint32_t v)
 {
@@ -151,6 +192,24 @@ static bool       s_has_selected_file_id = false;
  * 쌓인 로그를 화면에서 직접 보는 용도로 벤더 데모(analytics 위젯) 대신 넣음 */
 static lv_obj_t *s_log_container = NULL;
 static lv_obj_t *s_log_label     = NULL;
+
+/* 통계 탭 좌측 절전상태 판넬 — CAM의 Deep Sleep 사이클 통계(ESP_NOW_MSG_DEEP_SLEEP_STATS,
+ * 2026-08-10 Light Sleep 폐기 후 개편)를 로그처럼 한 줄씩 누적(사용자 지시: 최신값으로
+ * 덮어쓰는 대신 매번 새 줄로, 2026-08-09) — s_log_container/s_log_label과 같은 구조.
+ * s_power_panel_title은 refresh_lang_texts에서 갱신 */
+static lv_obj_t *s_power_panel_title = NULL;
+static lv_obj_t *s_power_list        = NULL;  /* 스크롤 컨테이너(s_log_container 대응) */
+static lv_obj_t *s_power_log_label   = NULL;  /* 누적 텍스트(s_log_label 대응) */
+
+/* ds_cycle_count 하나만 비교하면 됨(2026-08-10) — 매 리포트가 항상 새 사이클이라 Light
+ * Sleep 시절처럼 여러 필드를 같이 diff할 필요가 없어짐(단조증가 카운터) */
+typedef struct {
+    uint8_t  mac[6];
+    bool     used;
+    uint32_t last_cycle_count;
+} power_log_track_t;
+static power_log_track_t s_power_log_track[ESP_NOW_HUB_MAX_NODES];
+static char s_power_log_buf[2048] = "";
 
 /* 설정탭 카메라 리스트/상황판 1초 갱신 타이머 — 팝업/뷰어가 떠 있는 동안은 일시정지
  * (모달 위에서 터치하는 도중에 뒤에서 리스트를 지우고 다시 그리면 터치 처리와 간섭해서
@@ -225,6 +284,17 @@ static void error_poll_tick(lv_timer_t *t)
         lv_obj_delete(s_toast);
         s_toast = NULL;
     }
+    /* 에러 이력이 전부 확인/소진되면 경고 아이콘도 같이 끔 — s_error_active일 때만
+     * 확인(평소엔 폴링 낭비 없음). 2026-08-10 — 예전엔 ui_log_clear_err()로 "일시적이고
+     * 스스로 해소됨"을 자동으로 지우는 별도 경로가 있었는데, 그 경로의 유일한 용도였던
+     * 구 UI_ERR_NOT_PAIRED 상시폴링 방식 자체가 require_active_or_report()의 즉시판정
+     * 방식으로 바뀌면서 더는 호출되는 곳이 없어 함수째 제거함(죽은 코드) */
+    if (s_error_active) {
+        int codes[UI_ERR_HISTORY_CAP];
+        if (ui_log_get_error_history(codes, UI_ERR_HISTORY_CAP) == 0) {
+            set_logo_warning(false);
+        }
+    }
 }
 
 static void set_checked(lv_obj_t *cb, bool checked)
@@ -245,6 +315,9 @@ static void update_lang_buttons(void)
 static void force_camera_list_redraw(void);
 /* 목록 개수 라벨("N개"/"N Pic.") 갱신 — 정의는 refresh_photo_list_ui 근처(아래) */
 static void update_list_info_label(void);
+/* 응답성 드롭다운 선택값의 도움말 텍스트 갱신 — 정의는 update_response_apply_enabled
+ * 근처(아래) */
+static void update_response_help_text(void);
 
 static void refresh_lang_texts(void)
 {
@@ -292,8 +365,14 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_capture_apply_lbl, ui_str(STR_BTN_APPLY));
     lv_label_set_text(s_response_interval_label, ui_str(STR_LABEL_RESPONSE_INTERVAL));
     lv_label_set_text(s_response_apply_lbl, ui_str(STR_BTN_APPLY));
+    lv_label_set_text(s_adaptive_response_label, ui_str(STR_LABEL_ADAPTIVE_RESPONSE));
+    lv_label_set_text(s_adaptive_apply_lbl, ui_str(STR_BTN_APPLY));
+    lv_label_set_text(s_adaptive_help_label, ui_str(STR_HELP_ADAPTIVE_RESPONSE));
     lv_label_set_text(s_restart_label, ui_str(STR_LABEL_RESTART_DEVICE));
     lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
+    lv_label_set_text(s_time_label, ui_str(STR_LABEL_TIME));
+    lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
+    lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
 
     /* 드롭다운 옵션 문자열 자체도 언어별이라 다시 채워야 함 — lv_dropdown_set_options는
      * 선택 인덱스를 0으로 리셋시키므로, 지금 선택돼있던 인덱스를 기억했다가 그대로
@@ -305,6 +384,11 @@ static void refresh_lang_texts(void)
     uint16_t response_sel = lv_dropdown_get_selected(s_response_interval_dd);
     lv_dropdown_set_options(s_response_interval_dd, ui_str(STR_OPT_RESPONSE_INTERVAL_LIST));
     lv_dropdown_set_selected(s_response_interval_dd, response_sel);
+    update_response_help_text();  /* 도움말도 언어 전환 시 다시 채움(선택 인덱스는 그대로) */
+
+    uint16_t adaptive_sel = lv_dropdown_get_selected(s_adaptive_response_dd);
+    lv_dropdown_set_options(s_adaptive_response_dd, ui_str(STR_OPT_ADAPTIVE_RESPONSE_LIST));
+    lv_dropdown_set_selected(s_adaptive_response_dd, adaptive_sel);
 }
 
 /* 실제 반영(ui_lang_set — s_lang 갱신 + nvs 저장)이 끝난 뒤에만 라디오/라벨을 갱신한다
@@ -367,6 +451,8 @@ static lv_obj_t *add_modal_button(lv_obj_t *btn_row, ui_str_id_t text_id, lv_eve
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, ui_str(text_id));
     lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    if (s_action_btn_width > 0) lv_obj_set_width(btn, s_action_btn_width);
+    lv_obj_center(lbl);  /* 폭 통일로 버튼이 레이블보다 넓어진 경우 텍스트 중앙정렬(2026-08-09) */
     return btn;
 }
 
@@ -507,6 +593,14 @@ static esp_now_hub_node_t s_camera_nodes[ESP_NOW_HUB_MAX_NODES];
 static esp_now_hub_node_t s_camera_nodes_prev[ESP_NOW_HUB_MAX_NODES];
 static int                s_camera_count_prev = -1;  /* -1: 아직 비교 대상 없음(첫 실행은 항상 그림) */
 
+/* 요약판넬(s_summary_row_objs)과 동일한 이유(2026-08-10) — 행 구조 자체는 ever_paired
+ * 기준으로만 다시 그려지므로, 라디오 레벨 paired 토글(페어됨<->통신 중)만으로는 재생성이
+ * 안 트리거됨 — 이 배열로 행 텍스트만 매 틱 따로 갱신 */
+static lv_obj_t *s_camera_row_objs[ESP_NOW_HUB_MAX_NODES];
+static uint8_t   s_camera_row_macs[ESP_NOW_HUB_MAX_NODES][6];
+static char      s_camera_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
+static int       s_camera_row_count = 0;
+
 static void force_camera_list_redraw(void)
 {
     s_camera_count_prev = -1;
@@ -515,10 +609,14 @@ static void force_camera_list_redraw(void)
 /* 화면에 실제로 보이는 정보만 비교(last_seen_ms는 keepalive마다 바뀌지만 화면엔 안 나오므로
  * 제외) — 매초 리스트를 통째로 지우고 다시 그리던 게 터치 처리와 간섭해서 반응이 느려지거나
  * 안 먹는 문제(연결해제 팝업, 언어 라디오 버튼 모두)의 원인이었음, 바뀐 게 없으면 건너뜀 */
+/* 2026-08-10 connectionless 모델 정정(사용자 지적) — 화면에 보이는 "바뀜" 여부는
+ * ever_paired(세션 내 한 번이라도 페어링됨, sticky) 기준이어야 함. 라디오 레벨 paired는
+ * CAM 딥슬립 사이클마다 정상적으로 순간 false를 스치므로, 이 필드로 비교하면 매 사이클
+ * 리스트가 깜빡이며 다시 그려짐(사용자 지적 — 목록/판넬이 끊김처럼 보이는 원인) */
 static bool node_display_equal(const esp_now_hub_node_t *a, const esp_now_hub_node_t *b)
 {
     return memcmp(a->mac, b->mac, sizeof(a->mac)) == 0 &&
-           a->kind == b->kind && a->paired == b->paired &&
+           a->kind == b->kind && a->ever_paired == b->ever_paired &&
            strcmp(a->name, b->name) == 0;
 }
 
@@ -527,8 +625,25 @@ static void cb_camera_item_clicked(lv_event_t *e)
     lv_obj_t *btn = lv_event_get_target(e);
     esp_now_hub_node_t *node = (esp_now_hub_node_t *)lv_obj_get_user_data(btn);
     if (!node) return;
-    if (node->paired) show_unpair_confirm_popup(node);
-    else              show_pair_confirm_popup(node);
+    if (esp_now_hub_get_conn_state(node->mac) != HUB_CONN_STATE_WAITING) show_unpair_confirm_popup(node);
+    else                                                                 show_pair_confirm_popup(node);
+}
+
+/* 행 텍스트만(WAITING/PAIRED/ACTIVE 상태문구) 매 틱 갱신 — 구조(행 개수/순서)는 안 건드림,
+ * refresh_camera_list()가 실제로 다시 그렸을 때만 s_camera_row_count가 갱신되므로 그 전까진
+ * 이전 행 목록을 그대로 갱신함(요약판넬과 동일 패턴, 2026-08-10) */
+static void refresh_camera_row_status_text(void)
+{
+    for (int i = 0; i < s_camera_row_count; i++) {
+        hub_conn_state_t st = esp_now_hub_get_conn_state(s_camera_row_macs[i]);
+        ui_str_id_t status_id = (st == HUB_CONN_STATE_WAITING) ? STR_STATUS_CONNECTING
+                               : (st == HUB_CONN_STATE_ACTIVE) ? STR_STATUS_ACTIVE
+                               : STR_STATUS_PAIRED;
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s (%s)", s_camera_row_names[i], ui_str(status_id));
+        lv_obj_t *lbl = lv_obj_get_child(s_camera_row_objs[i], 0);
+        if (lbl) lv_label_set_text(lbl, buf);
+    }
 }
 
 static void refresh_camera_list(lv_timer_t *t)
@@ -540,33 +655,40 @@ static void refresh_camera_list(lv_timer_t *t)
     for (int i = 0; !changed && i < count; i++) {
         if (!node_display_equal(&s_camera_nodes[i], &s_camera_nodes_prev[i])) changed = true;
     }
-    if (!changed) return;  /* 화면에 보이는 내용이 그대로면 지우고 다시 그릴 필요 없음 */
-    memcpy(s_camera_nodes_prev, s_camera_nodes, sizeof(esp_now_hub_node_t) * count);
-    s_camera_count_prev = count;
+    if (changed) {
+        memcpy(s_camera_nodes_prev, s_camera_nodes, sizeof(esp_now_hub_node_t) * count);
+        s_camera_count_prev = count;
 
-    /* 그 순간 사용자가 행을 누르고 있는 중이면 LVGL 입력장치가 방금 지워진 객체를 계속
-     * 참조하게 돼서 이후 터치가 깨짐 — clean 직전에 이 리스트(자식 포함) 관련 입력장치
-     * 상태를 먼저 리셋 */
-    lv_indev_reset(NULL, s_camera_list);
-    lv_obj_clean(s_camera_list);
+        /* 그 순간 사용자가 행을 누르고 있는 중이면 LVGL 입력장치가 방금 지워진 객체를 계속
+         * 참조하게 돼서 이후 터치가 깨짐 — clean 직전에 이 리스트(자식 포함) 관련 입력장치
+         * 상태를 먼저 리셋 */
+        lv_indev_reset(NULL, s_camera_list);
+        lv_obj_clean(s_camera_list);
+        s_camera_row_count = 0;
 
-    /* 대기중/연결된 장치가 하나도 없으면 "없음" 문구 대신 리스트 자체를 숨김 —
-     * 측정기/카메라 상황판 판넬과 다르게, 이 리스트는 원래 대기중인 게 있을 때만
-     * 보이는 컨트롤이라 "없음" 메시지 자체가 나올 상황이 아님(사용자 확인) */
-    if (count == 0) {
-        lv_obj_add_flag(s_camera_list, LV_OBJ_FLAG_HIDDEN);
-        return;
+        /* 대기중/연결된 장치가 하나도 없으면 "없음" 문구 대신 리스트 자체를 숨김 —
+         * 측정기/카메라 상황판 판넬과 다르게, 이 리스트는 원래 대기중인 게 있을 때만
+         * 보이는 컨트롤이라 "없음" 메시지 자체가 나올 상황이 아님(사용자 확인) */
+        if (count == 0) {
+            lv_obj_add_flag(s_camera_list, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(s_camera_list, LV_OBJ_FLAG_HIDDEN);
+            for (int i = 0; i < count; i++) {
+                lv_obj_t *row = lv_list_add_button(s_camera_list, NULL, "");
+                lv_obj_set_style_text_font(row, ui_font_get(UI_FONT_SIZE_18), 0);
+                lv_obj_set_user_data(row, &s_camera_nodes[i]);
+                lv_obj_add_event_cb(row, cb_camera_item_clicked, LV_EVENT_CLICKED, NULL);
+                if (i < ESP_NOW_HUB_MAX_NODES) {
+                    s_camera_row_objs[i] = row;
+                    memcpy(s_camera_row_macs[i], s_camera_nodes[i].mac, 6);
+                    strncpy(s_camera_row_names[i], s_camera_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
+                    s_camera_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
+                }
+            }
+            s_camera_row_count = (count < ESP_NOW_HUB_MAX_NODES) ? count : ESP_NOW_HUB_MAX_NODES;
+        }
     }
-    lv_obj_remove_flag(s_camera_list, LV_OBJ_FLAG_HIDDEN);
-    for (int i = 0; i < count; i++) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "%s (%s)", s_camera_nodes[i].name,
-                 ui_str(s_camera_nodes[i].paired ? STR_STATUS_CONNECTED : STR_STATUS_CONNECTING));
-        lv_obj_t *row = lv_list_add_button(s_camera_list, NULL, buf);
-        lv_obj_set_style_text_font(row, ui_font_get(UI_FONT_SIZE_18), 0);
-        lv_obj_set_user_data(row, &s_camera_nodes[i]);
-        lv_obj_add_event_cb(row, cb_camera_item_clicked, LV_EVENT_CLICKED, NULL);
-    }
+    refresh_camera_row_status_text();  /* 2026-08-10 — 구조 변경 여부와 무관하게 매 틱 갱신 */
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -582,6 +704,11 @@ static lv_obj_t *create_dashboard_panel(lv_obj_t *parent, ui_str_id_t title_id, 
     lv_obj_t *box = lv_obj_create(parent);
     lv_obj_set_size(box, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    /* inner padding(판넬 테두리↔제목/내용)은 기본테마 값(pad_all=20px) 유지가 원칙이지만,
+     * 위쪽만 2px 살짝 줄임(2026-08-09, 사용자 지시 — 탭바↔판넬 간격 조정 이어서). 판넬 안
+     * 항목 간 간격(row-to-row gap)은 기본값(11px)에서 10px로 명시 지정 */
+    lv_obj_set_style_pad_top(box, 18, 0);
+    lv_obj_set_style_pad_row(box, 10, 0);
 
     lv_obj_t *title = lv_label_create(box);
     lv_label_set_text(title, ui_str(title_id));
@@ -634,6 +761,22 @@ static void set_selected_file_id(uint32_t file_id)
 static uint32_t s_synced_file_id = 0;
 static bool     s_has_synced_file_id = false;
 
+/* 2026-08-10 — 사진가져오기/목록갱신/지금촬영/전체삭제 4곳이 전부 같은 문제를 겪고 있었음:
+ * WAITING(진짜 연결 안 됨)일 때 그냥 요청+진행팝업을 띄우면, esp_now_photo.c 내부의
+ * require_paired()가 요청 자체를 조용히 안 보내는데 팝업은 그걸 몰라서 cam_response_timeout_ms()
+ * 예산을 다 채운 뒤에야 "무응답"으로 오인 표시함(3006/3007/4004 등, 원인이 다 같음). 액션마다
+ * 반복 작성하지 않고 여기 한 곳으로 모음 — 나중에 SENS를 붙일 때도(같은 connectionless
+ * WAITING/PAIRED/ACTIVE 모델이므로) mac만 바꿔 그대로 재사용 가능. what은 로그/토스트에 쓸
+ * 짧은 동작 이름("사진 가져오기" 등, esp_now_tx_enqueue의 what과 같은 관례) */
+static bool require_active_or_report(const uint8_t *mac, const char *what)
+{
+    if (esp_now_hub_get_conn_state(mac) == HUB_CONN_STATE_WAITING) {
+        ui_log_add_err(UI_ERR_NOT_PAIRED, "%s 불가 — CAM 연결 대기 중", what);
+        return false;
+    }
+    return true;
+}
+
 static void reconcile_selection(lv_obj_t *row, bool show_popup)
 {
     if (s_selected_row && s_selected_row != row) {
@@ -660,6 +803,8 @@ static void reconcile_selection(lv_obj_t *row, bool show_popup)
      * (2026-08-05, 선택-도착 불일치 버그 수정) */
     consume_ready_photo_if_current();
 
+    if (!require_active_or_report(s_selected_cam_mac, "사진 가져오기")) return;
+
     esp_now_photo_fetch_by_id(s_selected_cam_mac, s_selected_file_id);
     if (show_popup) show_fetch_progress_popup();
 }
@@ -677,10 +822,11 @@ static void cb_photo_row_select(lv_event_t *e)
 static void cb_photo_delete_confirm(void *ctx)
 {
     uint32_t file_id = (uint32_t)(uintptr_t)ctx;
-    if (s_has_selected_cam) {
-        esp_now_photo_delete(s_selected_cam_mac, file_id);
-        esp_now_photo_list_request(s_selected_cam_mac);  /* 삭제 반영된 목록으로 갱신 */
-    }
+    if (!s_has_selected_cam) return;
+    if (!require_active_or_report(s_selected_cam_mac, "사진 삭제")) return;
+
+    esp_now_photo_delete(s_selected_cam_mac, file_id);
+    esp_now_photo_list_request(s_selected_cam_mac);  /* 삭제 반영된 목록으로 갱신 */
 }
 
 static void show_photo_delete_confirm(uint32_t file_id)
@@ -978,15 +1124,30 @@ static void consume_ready_photo_if_current(void)
 typedef bool (*progress_tick_fn_t)(lv_obj_t *box);  /* true=완료, 팝업 자동 닫힘 */
 
 /* CAM 응답을 무한정 기다리지 않기 위한 공용 타임아웃 — 지금촬영/모두지우기/사진가져오기가
- * 전부 이 값을 씀(각자 계산 기준은 다를 수 있음: 총 경과시간 vs 마지막 진행 이후 경과시간) */
-#define CAM_RESPONSE_TIMEOUT_MS 8000
+ * 전부 이 값을 씀(각자 계산 기준은 다를 수 있음: 총 경과시간 vs 마지막 진행 이후 경과시간).
+ * 2026-08-10 — 고정 8초였던 걸 "응답성" 설정에 맞춰 늘어나게 바꿈: CAM이 정상적으로(버그
+ * 아님) 딥슬립 중이었을 때 명령이 도착하면 esp_now_tx.c도 이제 응답성 예산만큼 재시도하는데,
+ * 이 값이 그보다 짧게 고정돼 있으면 실제 재시도가 아직 끝나기도 전에 팝업이 먼저 NORESPONSE로
+ * 포기해버려서 esp_now_tx.c 쪽 수정이 무의미해짐(실사용 중 3006 반복으로 발견). 같은
+ * 30초 상한/여유마진 원칙을 여기서도 그대로 재사용(esp_now_tx.c의 TX_RESPONSE_BUDGET_CAP_SEC/
+ * TX_WAKE_MARGIN_MS와 값 동기화 — 두 곳 중 하나만 바뀌면 다시 어긋나므로 값 바꿀 땐 같이) */
+static uint32_t cam_response_timeout_ms(void)
+{
+    uint32_t sec = device_config_get_response_interval_sec();
+    if (sec > 30U) sec = 30U;  /* 최대절전(30분) 티어는 팝업을 30분간 띄워둘 수 없어 상한 적용 */
+    return sec * 1000U + 3000U;  /* +3초: CAM 웨이크 후 페어링 핸드셰이크 여유 */
+}
 
 static lv_obj_t          *s_progress_popup_overlay = NULL;
 static lv_obj_t          *s_progress_popup_box = NULL;
 static lv_timer_t        *s_progress_popup_timer = NULL;
 static progress_tick_fn_t s_progress_tick_fn = NULL;
 static lv_obj_t          *s_progress_popup_cancel_btn = NULL;
-static lv_obj_t          *s_progress_popup_cancel_lbl = NULL;
+static lv_obj_t          *s_progress_popup_status_lbl = NULL;  /* "취소" 눌렀을 때만 보이는
+                                                                    상태 문구 — 버튼 자체 텍스트는
+                                                                    안 바뀜(2026-08-09, 버튼 폭
+                                                                    고정 후 긴 문구가 삐져나오던
+                                                                    문제 수정) */
 static bool               s_progress_popup_cancel_requested = false;
 
 static void close_progress_popup(void)
@@ -1002,7 +1163,7 @@ static void close_progress_popup(void)
     s_progress_popup_box = NULL;
     s_progress_tick_fn = NULL;
     s_progress_popup_cancel_btn = NULL;
-    s_progress_popup_cancel_lbl = NULL;
+    s_progress_popup_status_lbl = NULL;
     s_progress_popup_cancel_requested = false;
     resume_bg_timers();
 }
@@ -1013,7 +1174,7 @@ static void close_progress_popup(void)
  * 직후 사용자가 다른 항목을 선택하면 아직 끝나지 않은 이전 요청의 뒤늦은 응답이 새
  * 선택 위에 잘못 표시되는 경쟁 상태로 이어짐(실기에서 재현: "선택한 사진과 다른 사진이
  * 보임"). 이제는 라벨/버튼만 "종료 대기 중"으로 바꾸고 모달은 유지 — 각 흐름의
- * tick_fn이 실제 완료(READY/ERROR)나 자체 타임아웃(CAM_RESPONSE_TIMEOUT_MS)을 만나
+ * tick_fn이 실제 완료(READY/ERROR)나 자체 타임아웃(cam_response_timeout_ms())을 만나
  * true를 반환할 때만 진짜로 닫힘(아래 progress_popup_tick, 안 건드림) — 그래서 무한정
  * 막히진 않고 상한이 있음 */
 static void cb_progress_popup_cancel(lv_event_t *e)
@@ -1022,7 +1183,10 @@ static void cb_progress_popup_cancel(lv_event_t *e)
     if (s_progress_popup_cancel_requested) return;  /* 중복 클릭 무시 */
     s_progress_popup_cancel_requested = true;
     if (s_progress_popup_cancel_btn) lv_obj_add_state(s_progress_popup_cancel_btn, LV_STATE_DISABLED);
-    if (s_progress_popup_cancel_lbl) lv_label_set_text(s_progress_popup_cancel_lbl, ui_str(STR_BTN_CANCEL_PENDING));
+    if (s_progress_popup_status_lbl) {
+        lv_label_set_text(s_progress_popup_status_lbl, ui_str(STR_STATUS_CANCEL_PENDING));
+        lv_obj_remove_flag(s_progress_popup_status_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static void progress_popup_tick(lv_timer_t *t)
@@ -1047,9 +1211,13 @@ static lv_obj_t *show_progress_popup(progress_tick_fn_t tick_fn)
 
 static void start_progress_popup(lv_obj_t *box)
 {
+    s_progress_popup_status_lbl = lv_label_create(box);
+    lv_label_set_text(s_progress_popup_status_lbl, "");
+    lv_obj_set_style_text_font(s_progress_popup_status_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_flag(s_progress_popup_status_lbl, LV_OBJ_FLAG_HIDDEN);  /* 취소 누르기 전엔 숨김 */
+
     lv_obj_t *btn_row = create_modal_btn_row(box);
     s_progress_popup_cancel_btn = add_modal_button(btn_row, STR_BTN_CANCEL, cb_progress_popup_cancel, NULL);
-    s_progress_popup_cancel_lbl = lv_obj_get_child(s_progress_popup_cancel_btn, 0);
     s_progress_popup_timer = lv_timer_create(progress_popup_tick, 200, NULL);
 }
 
@@ -1091,7 +1259,7 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
         }
 
         bool resolved  = (stage == ESP_NOW_CAPTURE_STAGE_CAPTURED || stage == ESP_NOW_CAPTURE_STAGE_CAPTURE_FAILED);
-        bool timedout  = !resolved && lv_tick_elaps(s_capture_popup_stage_start_ms) > CAM_RESPONSE_TIMEOUT_MS;
+        bool timedout  = !resolved && lv_tick_elaps(s_capture_popup_stage_start_ms) > cam_response_timeout_ms();
         if (!resolved && !timedout) return false;
 
         if (!resolved) {
@@ -1127,7 +1295,7 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
         set_stage_label(s_capture_stage_label, 2, STR_CAPTURE_STAGE3_DONE, green);
         return true;
     }
-    if (lv_tick_elaps(s_capture_popup_stage_start_ms) > CAM_RESPONSE_TIMEOUT_MS) {
+    if (lv_tick_elaps(s_capture_popup_stage_start_ms) > cam_response_timeout_ms()) {
         set_stage_label(s_capture_stage_label, 2, STR_CAPTURE_STAGE3_UNKNOWN, red);
         return true;
     }
@@ -1155,6 +1323,8 @@ static void cb_capture_now(lv_event_t *e)
 {
     (void)e;
     if (!s_has_selected_cam) return;
+    if (!require_active_or_report(s_selected_cam_mac, "지금촬영")) return;
+
     show_capture_popup();
     esp_now_photo_capture_now(s_selected_cam_mac);
 }
@@ -1194,7 +1364,7 @@ static bool fetch_popup_tick_fn(lv_obj_t *box)
     if (received != s_fetch_last_received) {
         s_fetch_last_received = received;
         s_fetch_last_progress_ms = lv_tick_get();
-    } else if (lv_tick_elaps(s_fetch_last_progress_ms) > CAM_RESPONSE_TIMEOUT_MS) {
+    } else if (lv_tick_elaps(s_fetch_last_progress_ms) > cam_response_timeout_ms()) {
         /* 라벨에 STALLED를 써도 true 반환 즉시 팝업이 같은 틱에서 지워져서 실제로는
          * 한 번도 화면에 안 그려짐(2026-08-02, 사용자 지적 — capture_popup_tick_fn의
          * NORESPONSE와 동일한 문제) — ui_log_add_err의 토스트가 실제 통보 경로 */
@@ -1253,7 +1423,7 @@ static bool renew_list_tick_fn(lv_obj_t *box)
 {
     (void)box;
     if (sync_photo_list_tick(-1)) return true;
-    if (lv_tick_elaps(s_renew_list_start_ms) > CAM_RESPONSE_TIMEOUT_MS) {
+    if (lv_tick_elaps(s_renew_list_start_ms) > cam_response_timeout_ms()) {
         ui_log_add_err(UI_ERR_LIST_NORESPONSE, "목록 갱신 요청에 CAM 응답 없음(타임아웃)");
         return true;
     }
@@ -1264,6 +1434,8 @@ static void cb_renew_list(lv_event_t *e)
 {
     (void)e;
     if (!s_has_selected_cam) return;
+    if (!require_active_or_report(s_selected_cam_mac, "목록 갱신")) return;
+
     esp_now_photo_list_request(s_selected_cam_mac);
 
     s_renew_list_start_ms = lv_tick_get();
@@ -1306,7 +1478,7 @@ static bool delete_all_tick_fn(lv_obj_t *box)
     if (s_delete_all_stage == DELETE_ALL_STAGE_WAIT_ACK) {
         esp_now_delete_all_state_t st = esp_now_photo_delete_all_get_state();
         bool acked   = (st == ESP_NOW_DELETE_ALL_STATE_ACKED);
-        bool timedout = !acked && lv_tick_elaps(s_delete_all_stage_start_ms) > CAM_RESPONSE_TIMEOUT_MS;
+        bool timedout = !acked && lv_tick_elaps(s_delete_all_stage_start_ms) > cam_response_timeout_ms();
         if (!acked && !timedout) return false;
 
         if (acked) {
@@ -1330,7 +1502,7 @@ static bool delete_all_tick_fn(lv_obj_t *box)
         set_stage_label(s_delete_all_stage_label, 1, STR_DELETEALL_STAGE2_DONE, green);
         return true;
     }
-    if (lv_tick_elaps(s_delete_all_stage_start_ms) > CAM_RESPONSE_TIMEOUT_MS) {
+    if (lv_tick_elaps(s_delete_all_stage_start_ms) > cam_response_timeout_ms()) {
         set_stage_label(s_delete_all_stage_label, 1, STR_DELETEALL_STAGE2_UNKNOWN, red);
         return true;  /* 포기하고 닫되, 기존 목록엔 손 안 댐 */
     }
@@ -1340,6 +1512,8 @@ static bool delete_all_tick_fn(lv_obj_t *box)
 static void cb_delete_all_confirmed(void *ctx)
 {
     (void)ctx;
+    if (!require_active_or_report(s_selected_cam_mac, "전체삭제")) return;
+
     esp_now_photo_delete_all(s_selected_cam_mac);
 
     s_delete_all_stage = DELETE_ALL_STAGE_WAIT_ACK;
@@ -1456,14 +1630,21 @@ static void refresh_dashboard(lv_timer_t *t)
         lv_indev_reset(NULL, s_summary_list);  /* refresh_camera_list와 동일한 이유 */
         lv_obj_clean(s_summary_list);
         for (int i = 0; i < total; i++) {
-            if (!s_dash_nodes[i].paired) continue;
-            paired_count++;
-            char buf[48];
-            snprintf(buf, sizeof(buf), "%s (%s)", s_dash_nodes[i].name, ui_str(STR_STATUS_OK));
+            if (esp_now_hub_get_conn_state(s_dash_nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
             lv_obj_t *row = lv_label_create(s_summary_list);
-            lv_label_set_text(row, buf);
             lv_obj_set_style_text_font(row, ui_font_get(UI_FONT_SIZE_18), 0);
+            /* 상태문구(페어됨/통신 중)는 매 틱 아래에서 따로 갱신 — 여기선 자리만 만듦.
+             * 행 객체+mac+이름을 기억해뒀다가 구조 재생성 없이 텍스트만 갱신(2026-08-10,
+             * 사용자 지시 — 이 자리만 페어됨/통신 중을 세분화해서 보여줌) */
+            if (paired_count < ESP_NOW_HUB_MAX_NODES) {
+                s_summary_row_objs[paired_count] = row;
+                memcpy(s_summary_row_macs[paired_count], s_dash_nodes[i].mac, 6);
+                strncpy(s_summary_row_names[paired_count], s_dash_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
+                s_summary_row_names[paired_count][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
+            }
+            paired_count++;
         }
+        s_summary_row_count = (paired_count < ESP_NOW_HUB_MAX_NODES) ? paired_count : ESP_NOW_HUB_MAX_NODES;
         /* 연결된 장치가 없을 때는 리스트 안에 문구를 넣는 대신(리스트 아이템 스타일이 입혀져서
          * 측정기/카메라 판넬의 "없음" 라벨과 모양·색이 달라 보였음, 사용자 지적) 측정기/카메라
          * 판넬과 똑같은 방식으로 별도의 일반 라벨(s_summary_empty)을 보여줌 */
@@ -1476,10 +1657,22 @@ static void refresh_dashboard(lv_timer_t *t)
         }
     }
 
+    /* 요약판넬 상태문구(페어됨/통신 중)는 dash_changed와 무관하게 매 틱 갱신 —
+     * 라디오 레벨 paired 토글만으로는 구조 재생성(dash_changed)을 안 트리거하므로
+     * (위 node_display_equal 참고), 문구만 따로 살아있게 갱신함(2026-08-10) */
+    for (int i = 0; i < s_summary_row_count; i++) {
+        hub_conn_state_t st = esp_now_hub_get_conn_state(s_summary_row_macs[i]);
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s (%s)", s_summary_row_names[i],
+                 ui_str(st == HUB_CONN_STATE_ACTIVE ? STR_STATUS_ACTIVE : STR_STATUS_PAIRED));
+        lv_label_set_text(s_summary_row_objs[i], buf);
+    }
+
     /* 판넬2: 측정기 — 연결된 SENS 있으면 틀(TODO)만, 없으면 없음 라벨 */
     bool sensor_connected = false;
     for (int i = 0; i < total; i++) {
-        if (s_dash_nodes[i].paired && s_dash_nodes[i].kind == HUB_NODE_KIND_SENS) { sensor_connected = true; break; }
+        if (s_dash_nodes[i].kind == HUB_NODE_KIND_SENS &&
+            esp_now_hub_get_conn_state(s_dash_nodes[i].mac) != HUB_CONN_STATE_WAITING) { sensor_connected = true; break; }
     }
     if (sensor_connected) {
         lv_obj_add_flag(s_sensor_empty, LV_OBJ_FLAG_HIDDEN);
@@ -1496,11 +1689,14 @@ static void refresh_dashboard(lv_timer_t *t)
     uint8_t            cam_macs[ESP_NOW_HUB_MAX_NODES][6];
     int cam_count = 0;
     for (int i = 0; i < total; i++) {
-        if (s_dash_nodes[i].paired && s_dash_nodes[i].kind == HUB_NODE_KIND_CAM) {
-            cam_nodes[cam_count] = s_dash_nodes[i];
-            memcpy(cam_macs[cam_count], s_dash_nodes[i].mac, 6);
-            cam_count++;
-        }
+        /* 2026-08-10 connectionless 모델 — WAITING이 아니면(PAIRED든 ACTIVE든) 계속
+         * "아는 카메라"로 취급. CAM이 딥슬립 사이 무선 무응답 구간(라디오 레벨 paired=false)
+         * 이어도 목록/판넬이 깜빡이며 빠졌다 나왔다 하지 않게 함(사용자 지적) */
+        if (s_dash_nodes[i].kind != HUB_NODE_KIND_CAM) continue;
+        if (esp_now_hub_get_conn_state(s_dash_nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
+        cam_nodes[cam_count] = s_dash_nodes[i];
+        memcpy(cam_macs[cam_count], s_dash_nodes[i].mac, 6);
+        cam_count++;
     }
     rebuild_camera_dropdown_if_changed(cam_nodes, cam_macs, cam_count);
 
@@ -1566,6 +1762,81 @@ static void refresh_log_box(lv_timer_t *t)
     lv_obj_scroll_to_y(s_log_container, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
+/* 통계 탭 좌측 절전상태 판넬 갱신(2026-08-09) — 최신값으로 덮어쓰지 않고 로그처럼 한 줄씩
+ * 누적(사용자 지시). 값이 실제로 바뀐 경우에만 새 줄 추가(2초 tick마다 찍으면 스팸이라
+ * mac별 마지막 값을 기억해서 diff) — 로그박스(s_log_container/refresh_log_box)와 동일한
+ * "누적 버퍼 + wrap 라벨 + 자동 스크롤" 구조 */
+static void refresh_power_panel(lv_timer_t *t)
+{
+    (void)t;
+    esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
+    int count = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, nodes, ESP_NOW_HUB_MAX_NODES);
+
+    bool appended = false;
+    for (int i = 0; i < count; i++) {
+        if (!nodes[i].has_deepsleep_stats) continue;
+
+        power_log_track_t *tr = NULL;
+        for (int j = 0; j < ESP_NOW_HUB_MAX_NODES; j++) {
+            if (s_power_log_track[j].used && memcmp(s_power_log_track[j].mac, nodes[i].mac, 6) == 0) {
+                tr = &s_power_log_track[j];
+                break;
+            }
+        }
+        if (!tr) {
+            for (int j = 0; j < ESP_NOW_HUB_MAX_NODES; j++) {
+                if (!s_power_log_track[j].used) {
+                    tr = &s_power_log_track[j];
+                    tr->used = true;
+                    memcpy(tr->mac, nodes[i].mac, 6);
+                    tr->last_cycle_count = UINT32_MAX;  /* 이 장치의 첫 값은 무조건 한 줄 찍히게 */
+                    break;
+                }
+            }
+        }
+        if (!tr) continue;  /* 자리 없음 — MAX_NODES 이상은 원래 못 옴 */
+        /* ds_cycle_count는 Cntl이 리포트를 받을 때마다 직접 증가시키는 단조증가 카운터라
+         * (esp_now_hub.c) 이것 하나만 비교하면 "새 보고서가 왔는가"를 정확히 알 수 있음
+         * (2026-08-10, Light Sleep 시절엔 count=0이 계속 이어지는 상태를 여러 필드로 힘겹게
+         * 구분해야 했음 — 매 사이클이 곧 새 리포트인 이 구조에선 그 문제 자체가 없어짐) */
+        if (tr->last_cycle_count == nodes[i].ds_cycle_count) continue;
+        tr->last_cycle_count = nodes[i].ds_cycle_count;
+
+        const char *wake_str;
+        switch (nodes[i].ds_last_wake_reason) {
+            case CAM_WAKE_REASON_TIMER:   wake_str = ui_str(STR_WAKE_REASON_TIMER); break;
+            case CAM_WAKE_REASON_RWDT:    wake_str = ui_str(STR_WAKE_REASON_RWDT); break;
+            case CAM_WAKE_REASON_POWERON: wake_str = ui_str(STR_WAKE_REASON_POWERON); break;
+            default:                      wake_str = ui_str(STR_WAKE_REASON_OTHER); break;
+        }
+        char line[128];
+        lv_snprintf(line, sizeof(line), ui_str(STR_DEEPSLEEP_LINE_FMT), nodes[i].name,
+                    (unsigned long)nodes[i].ds_cycle_count, wake_str,
+                    (unsigned long)(nodes[i].ds_last_awake_uptime_ms / 1000),
+                    (unsigned long)nodes[i].ds_last_sleep_interval_sec,
+                    (unsigned long)nodes[i].ds_total_asleep_sec,
+                    (unsigned long)nodes[i].ds_rwdt_catch_count);
+
+        size_t cur_len  = strlen(s_power_log_buf);
+        size_t line_len = strlen(line);
+        if (cur_len + line_len + 2 > sizeof(s_power_log_buf)) {
+            size_t keep_from = sizeof(s_power_log_buf) / 2;
+            memmove(s_power_log_buf, s_power_log_buf + keep_from, cur_len - keep_from + 1);
+            cur_len = strlen(s_power_log_buf);
+        }
+        strcat(s_power_log_buf, line);
+        strcat(s_power_log_buf, "\n");
+        appended = true;
+    }
+
+    if (appended) {
+        lv_label_set_text(s_power_log_label, s_power_log_buf);
+        lv_obj_scroll_to_y(s_power_list, LV_COORD_MAX, LV_ANIM_OFF);
+    } else if (count == 0 && s_power_log_buf[0] == '\0') {
+        lv_label_set_text(s_power_log_label, ui_str(STR_PANEL_NO_CAMERA));
+    }
+}
+
 /* 그룹박스 하나 생성 — 제목 라벨을 넣고 box 자체를 반환. 내용물은 호출부가 box의 직접
  * 자식으로 채움 — 여러 개를 가로로 나열해야 하면(예: 제어기 박스의 라벨+버튼) 호출부가
  * 자기 필요에 맞는 row 컨테이너를 직접 만들어서 넣을 것(예전처럼 여기서 자동으로 빈
@@ -1575,6 +1846,10 @@ static lv_obj_t *create_group_box(lv_obj_t *parent, ui_str_id_t title_id)
     lv_obj_t *box = lv_obj_create(parent);
     lv_obj_set_size(box, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    /* create_dashboard_panel과 같은 이유(2026-08-09) — 위쪽 inner padding만 2px 축소,
+     * row-to-row gap은 기본값(11px)에서 10px로 명시 지정 */
+    lv_obj_set_style_pad_top(box, 18, 0);
+    lv_obj_set_style_pad_row(box, 10, 0);
 
     lv_obj_t *title = lv_label_create(box);
     lv_label_set_text(title, ui_str(title_id));
@@ -1600,6 +1875,134 @@ static void refresh_clock(lv_timer_t *t)
     char buf[20];
     snprintf(buf, sizeof(buf), "%s - CH%u", time_buf, (unsigned)esp_now_hub_get_wifi_channel());
     lv_label_set_text(s_clock_label, buf);
+
+    /* 설정탭 시각설정 행의 현재값 표시 — 이 타이머가 만들어지는 시점(1786행)엔 아직
+     * option_page/system_group_box가 안 생겨서 첫 즉시호출 땐 NULL, 이후 타이머 tick부터
+     * 채워짐 */
+    if (s_time_value_label) {
+        char date_buf[20];
+        strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %H:%M", &tm_buf);
+        lv_label_set_text(s_time_value_label, date_buf);
+    }
+}
+
+/* ════════════════════════════════════════════════════════════
+ * 수동 시각설정 팝업(2026-08-09) — 연/월/일/시/분 드롭다운 5개 + 확인/취소.
+ * RTC 부팅 시딩 버그(assets_root/time_sync.txt가 8/1에 박제된 채 안 갱신되던 문제,
+ * [[project-cntl-rtc-and-unified-sleep-plan]]) 수정에 이어지는 항목 — 그 자동 경로가
+ * 실패하거나 device가 오래 꺼져있던 경우를 위한 최종 수동 보정 수단.
+ * ════════════════════════════════════════════════════════════ */
+#define SETTIME_YEAR_SPAN_BEFORE 2   /* 드롭다운 연도 범위: (지금해-2) ~ (지금해+8) */
+#define SETTIME_YEAR_SPAN_AFTER  8
+
+/* count개, start부터 fmt(예: "%04d"/"%02d") 형식으로 개행-구분 옵션 문자열을 만듦
+ * (연/월/일/시/분 드롭다운 공용) — 정적 문자열로 하드코딩하면 연도 목록이 시간이 지나며
+ * 낡는 문제가 있어서(이번에 고친 time_sync.txt 버그와 같은 종류) 매번 현재 연도 기준으로
+ * 생성함 */
+static void build_numeric_options(char *out, size_t out_cap, int start, int count, const char *fmt)
+{
+    size_t pos = 0;
+    for (int i = 0; i < count; i++) {
+        int room = (int)(out_cap - pos);
+        if (room <= 0) break;
+        int written = snprintf(out + pos, (size_t)room, "%s", (i == 0) ? "" : "\n");
+        pos += (size_t)written;
+        room = (int)(out_cap - pos);
+        if (room <= 0) break;
+        written = snprintf(out + pos, (size_t)room, fmt, start + i);
+        pos += (size_t)written;
+    }
+}
+
+typedef struct {
+    lv_obj_t *year_dd;
+    lv_obj_t *month_dd;
+    lv_obj_t *day_dd;
+    lv_obj_t *hour_dd;
+    lv_obj_t *min_dd;
+    int       year_base;
+} settime_popup_state_t;
+
+static settime_popup_state_t s_settime_state;
+
+static void cb_settime_confirm(lv_event_t *e)
+{
+    settime_popup_state_t *st = &s_settime_state;
+    int year  = st->year_base + (int)lv_dropdown_get_selected(st->year_dd);
+    int month = 1 + (int)lv_dropdown_get_selected(st->month_dd);
+    int day   = 1 + (int)lv_dropdown_get_selected(st->day_dd);
+    int hour  = (int)lv_dropdown_get_selected(st->hour_dd);
+    int min   = (int)lv_dropdown_get_selected(st->min_dd);
+
+    esp_err_t err = rtc_sync_set_datetime(year, month, day, hour, min, 0);
+    if (err != ESP_OK) {
+        ui_log_add_err(UI_ERR_RTC_SET_FAILED, "RTC 시각설정 실패: %s", esp_err_to_name(err));
+    }
+    refresh_clock(NULL);  /* 로고부제 + 이 행의 표시값을 새 시각으로 즉시 갱신(다음 1초 tick까지 안 기다림) */
+    cb_modal_close(e);
+}
+
+/* 팝업 안에 [라벨][드롭다운] 한 쌍을 만드는 헬퍼 — 연/월/일/시/분 다섯 번 반복돼서 공통화 */
+static lv_obj_t *add_settime_dropdown(lv_obj_t *row, int start, int count, const char *fmt,
+                                       int selected, int width)
+{
+    char options[256];
+    build_numeric_options(options, sizeof(options), start, count, fmt);
+
+    lv_obj_t *dd = lv_dropdown_create(row);
+    lv_dropdown_set_options(dd, options);
+    lv_dropdown_set_selected(dd, (uint16_t)selected);
+    lv_obj_set_width(dd, width);
+    lv_obj_set_style_text_font(dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    return dd;
+}
+
+static void show_settime_popup(void)
+{
+    time_t now = time(NULL);
+    struct tm tm_buf;
+    localtime_r(&now, &tm_buf);
+    int cur_year = tm_buf.tm_year + 1900;
+
+    settime_popup_state_t *st = &s_settime_state;
+    st->year_base = cur_year - SETTIME_YEAR_SPAN_BEFORE;
+    int year_count = SETTIME_YEAR_SPAN_BEFORE + SETTIME_YEAR_SPAN_AFTER + 1;
+
+    lv_obj_t *box = create_modal();
+    lv_obj_set_width(box, 460);  /* 드롭다운 5개가 나란히 들어가야 해서 공용 모달 기본폭(420)보다 넓힘 */
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, ui_str(STR_TITLE_SET_TIME));
+    lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    lv_obj_t *picker_row = lv_obj_create(box);
+    lv_obj_set_size(picker_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(picker_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(picker_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(picker_row, 0, 0);
+    lv_obj_set_style_pad_column(picker_row, 4, 0);
+
+    st->year_dd  = add_settime_dropdown(picker_row, st->year_base, year_count, "%04d",
+                                         cur_year - st->year_base, 78);
+    st->month_dd = add_settime_dropdown(picker_row, 1, 12, "%02d", tm_buf.tm_mon, 62);
+    st->day_dd   = add_settime_dropdown(picker_row, 1, 31, "%02d", tm_buf.tm_mday - 1, 62);
+
+    lv_obj_t *sep = lv_label_create(picker_row);
+    lv_label_set_text(sep, " ");
+
+    st->hour_dd  = add_settime_dropdown(picker_row, 0, 24, "%02d", tm_buf.tm_hour, 62);
+    st->min_dd   = add_settime_dropdown(picker_row, 0, 60, "%02d", tm_buf.tm_min, 62);
+
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_settime_confirm, NULL);
+    add_modal_button(btn_row, STR_BTN_CANCEL, cb_modal_close, NULL);
+}
+
+static void cb_settime_btn(lv_event_t *e)
+{
+    (void)e;
+    show_settime_popup();
 }
 
 /* 소프트 재시작 — 물리적으로 전원을 뽑지 않고도 복구할 수 있게(2026-08-01, 사용자 요청).
@@ -1640,8 +2043,50 @@ static void update_response_apply_enabled(void)
     else lv_obj_add_state(s_response_apply_btn, LV_STATE_DISABLED);
 }
 
+/* 응답성 드롭다운 선택값의 풀이를 별도 도움말 텍스트로 표시(2026-08-10) — 드롭다운 자체엔
+ * 짧은 라벨(1초/3초/...)만 있어서, 그 값이 실제로 뭘 뜻하는지(즉시/빠름/균형/절전/최대절전)
+ * 를 s_response_help_label에 채움. 순서는 s_response_interval_values와 반드시 같이 맞출 것 */
+static void update_response_help_text(void)
+{
+    static const ui_str_id_t s_help_ids[] = {
+        STR_RESPONSE_HELP_0, STR_RESPONSE_HELP_1, STR_RESPONSE_HELP_2,
+        STR_RESPONSE_HELP_3, STR_RESPONSE_HELP_4,
+    };
+    uint16_t idx = lv_dropdown_get_selected(s_response_interval_dd);
+    if (idx < (sizeof(s_help_ids) / sizeof(s_help_ids[0]))) {
+        lv_label_set_text(s_response_help_label, ui_str(s_help_ids[idx]));
+    }
+}
+
 static void cb_capture_interval_changed(lv_event_t *e) { (void)e; update_capture_apply_enabled(); }
-static void cb_response_interval_changed(lv_event_t *e) { (void)e; update_response_apply_enabled(); }
+static void cb_response_interval_changed(lv_event_t *e)
+{
+    (void)e;
+    update_response_apply_enabled();
+    update_response_help_text();
+}
+
+static void update_adaptive_apply_enabled(void)
+{
+    bool changed = (lv_dropdown_get_selected(s_adaptive_response_dd) != (uint16_t)s_adaptive_response_applied_idx);
+    if (changed) lv_obj_clear_state(s_adaptive_apply_btn, LV_STATE_DISABLED);
+    else lv_obj_add_state(s_adaptive_apply_btn, LV_STATE_DISABLED);
+}
+
+static void cb_adaptive_response_changed(lv_event_t *e) { (void)e; update_adaptive_apply_enabled(); }
+
+/* CAM에 안 보내는 Cntl 내부값이라(esp_now_hub.c 참고) 네트워크 왕복이 없음 — 다른 두
+ * Apply(촬영주기/응답성)처럼 진행팝업을 띄울 이유가 없어서 즉시 저장하고 버튼만 도로 끔 */
+static void cb_apply_adaptive_response(lv_event_t *e)
+{
+    (void)e;
+    uint16_t idx = lv_dropdown_get_selected(s_adaptive_response_dd);
+    uint32_t sec = (idx < (sizeof(s_adaptive_response_values) / sizeof(s_adaptive_response_values[0])))
+                   ? s_adaptive_response_values[idx] : 0;
+    device_config_set_adaptive_response_sec(sec);
+    s_adaptive_response_applied_idx = idx;
+    update_adaptive_apply_enabled();
+}
 
 static bool config_apply_tick_fn(lv_obj_t *box)
 {
@@ -1660,7 +2105,7 @@ static bool config_apply_tick_fn(lv_obj_t *box)
         esp_now_hub_config_apply_stage_clear();
         return true;
     }
-    if (lv_tick_elaps(s_config_apply_start_ms) > CAM_RESPONSE_TIMEOUT_MS) {
+    if (lv_tick_elaps(s_config_apply_start_ms) > cam_response_timeout_ms()) {
         lv_label_set_text(s_config_apply_label, ui_str(STR_CONFIG_APPLY_STALLED));
         lv_obj_set_style_text_color(s_config_apply_label, lv_palette_main(LV_PALETTE_RED), 0);
         ui_log_add_err(UI_ERR_CONFIG_NORESPONSE, "설정 적용 요청에 CAM 응답 없음(타임아웃)");
@@ -1699,7 +2144,16 @@ static void cb_apply_capture_interval(lv_event_t *e)
                    ? s_capture_interval_values[idx] : 0;
     s_config_apply_target = CONFIG_APPLY_TARGET_CAPTURE;
     s_config_apply_pending_idx = idx;
+    /* device_config에는 항상 저장되고, CAM은 매 웨이크(=매 접속)마다 무조건 최신값을
+     * 다시 받아가므로(push_cam_config_to()가 PAIR_ACK 시점에도 자동 호출됨) WAITING이어도
+     * "진짜 실패"가 아니라 "다음 접속에 반영될 정상 대기 상태"임 — 2026-08-10, 사용자
+     * 지적으로 require_active_or_report()(2007 에러) 대신 응답성 적용과 동일하게 정보
+     * 로그만 남기도록 수정(처음엔 실수로 2007과 "저장됨" 안내가 동시에 뜨는 모순이 있었음) */
     esp_now_hub_apply_cam_capture_interval_sec(s_selected_cam_mac, sec);
+    if (esp_now_hub_get_conn_state(s_selected_cam_mac) == HUB_CONN_STATE_WAITING) {
+        ui_log_add("촬영주기 저장됨 — CAM 재연결 시 자동 반영");
+        return;
+    }
     show_config_apply_popup();
 }
 
@@ -1711,7 +2165,14 @@ static void cb_apply_response_interval(lv_event_t *e)
                    ? s_response_interval_values[idx] : 0;
     s_config_apply_target = CONFIG_APPLY_TARGET_RESPONSE;
     s_config_apply_pending_idx = idx;
-    esp_now_hub_apply_response_interval_sec(sec);
+    /* 반환값으로 판단(2026-08-10) — 이 설정은 특정 CAM 하나가 아니라 "지금 ACTIVE한 CAM
+     * 전부"가 대상이라 require_active_or_report()의 mac 하나 기준 검사가 안 맞음. 대상이
+     * 하나도 없으면(전부 WAITING) 값은 저장됐지만 응답 대기 팝업은 안 띄움 — 다른 4개
+     * 통신 기능과 동일 원칙 */
+    if (!esp_now_hub_apply_response_interval_sec(sec)) {
+        ui_log_add("응답성 저장됨 — CAM 재연결 시 자동 반영");
+        return;
+    }
     show_config_apply_popup();
 }
 
@@ -1750,6 +2211,11 @@ void ui_init(void)
     LV_IMAGE_DECLARE(img_lvgl_logo);
     lv_image_set_src(s_logo_icon, &img_lvgl_logo);
     lv_obj_align(s_logo_icon, LV_ALIGN_LEFT_MID, -LV_HOR_RES / 2 + 25, 0);
+    /* 2026-08-10 — 경고 중이 아니어도 지금까지의 에러 이력을 언제든 확인할 수 있게 정상
+     * 상태 로고도 탭 가능하게(cb_logo_warning_tap 재사용 — 팝업 내용 자체는 경고 유무와
+     * 무관하게 항상 "지금 남아있는 이력"을 보여줌, 없으면 STR_ERROR_LIST_EMPTY) */
+    lv_obj_add_flag(s_logo_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_logo_icon, cb_logo_warning_tap, LV_EVENT_CLICKED, NULL);
 
     /* 경고 상태일 때만 보이는 아이콘 — 배경 박스 없이 느낌표 삼각형 아이콘 그 자체
      * (2026-08-01, 사용자가 참고 이미지로 지적: 빨간 네모가 아니라 노란/흰색 삼각형
@@ -1790,6 +2256,19 @@ void ui_init(void)
     /* 상황판 — 판넬 3개(요약/측정기/카메라), 1초마다 연결 상태 반영 */
     lv_obj_t *dashboard_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_DASHBOARD));
     lv_obj_set_flex_flow(dashboard_page, LV_FLEX_FLOW_COLUMN);
+    /* 기본 테마 패딩(이 화면 DISP_LARGE 버킷 PAD_DEF=20px)이 판넬-화면 가장자리 간격과
+     * 판넬 사이 세로 간격 둘 다에 그대로 쓰이고 있었음 — 절반(10px)로 줄임(2026-08-09,
+     * 사용자 지시. 오른쪽은 스크롤바가 이미 자리를 차지해서 왼쪽만 특히 신경써 달라고
+     * 했지만 좌우 대칭이 자연스러워서 pad_hor로 양쪽 다 줄임 — list_panel의 기존 10px
+     * 축소와 같은 값) */
+    lv_obj_set_style_pad_hor(dashboard_page, 5, 0);  /* screen-edge gap 추가로 절반(2026-08-09) */
+    lv_obj_set_style_pad_row(dashboard_page, 5, 0);  /* inter-panel gap 추가로 절반(2026-08-09) */
+    /* 탭바↔첫 판넬 사이 세로 간격 — page 자신의 pad_top(기본값 20, 지금까지 미조정)을
+     * 좌우와 같은 비율로 절반. 판넬 자체 내부 padding은 안 건드림(2026-08-09) */
+    lv_obj_set_style_pad_top(dashboard_page, 5, 0);  /* 추가로 절반(2026-08-09) */
+    /* 페이지 배경을 기본테마 밝은 회색(lighten 4)보다 한 단계 어둡게(2026-08-09, 사용자 지시) */
+    lv_obj_set_style_bg_color(dashboard_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    lv_obj_set_style_bg_opa(dashboard_page, LV_OPA_COVER, 0);
 
     lv_obj_t *summary_box = create_dashboard_panel(dashboard_page, STR_PANEL_SUMMARY, 0);
     /* lv_list는 카드 형태(회색 배경+테두리) 기본 스타일이 입혀져 있어서 측정기/카메라
@@ -1962,12 +2441,45 @@ void ui_init(void)
 
     s_dashboard_timer = lv_timer_create(refresh_dashboard, 1000, NULL);
 
+    /* 좌(절전상태)/우(기존 로그) 2판넬 가로 배치(2026-08-09, 사용자 지시) */
     lv_obj_t *stats_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_STATISTICS));
-    lv_obj_set_flex_flow(stats_page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_flow(stats_page, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_all(stats_page, 4, 0);
+    lv_obj_set_style_pad_column(stats_page, 4, 0);
+    lv_obj_set_style_bg_color(stats_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    lv_obj_set_style_bg_opa(stats_page, LV_OPA_COVER, 0);
+
+    lv_obj_t *power_box = lv_obj_create(stats_page);
+    lv_obj_set_size(power_box, 0, LV_PCT(100));
+    lv_obj_set_flex_grow(power_box, 1);
+    lv_obj_set_flex_flow(power_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(power_box, 6, 0);
+
+    s_power_panel_title = lv_label_create(power_box);
+    lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
+    lv_obj_set_style_text_font(s_power_panel_title, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* s_log_container와 동일 구조 — 스크롤 컨테이너 + 폭 100% wrap 라벨 하나, 텍스트를
+     * 통째로 갈아끼우고 맨 아래로 자동 스크롤(2026-08-09, 로그처럼 누적 지시) */
+    s_power_list = lv_obj_create(power_box);
+    lv_obj_set_size(s_power_list, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(s_power_list, 1);
+    lv_obj_set_scroll_dir(s_power_list, LV_DIR_VER);
+    lv_obj_set_style_border_width(s_power_list, 0, 0);
+    lv_obj_set_style_bg_opa(s_power_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_power_list, 6, 0);
+
+    s_power_log_label = lv_label_create(s_power_list);
+    lv_label_set_long_mode(s_power_log_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_power_log_label, LV_PCT(100));
+    lv_obj_set_style_text_font(s_power_log_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_power_log_label, "");
+
+    lv_timer_create(refresh_power_panel, 2000, NULL);
 
     s_log_container = lv_obj_create(stats_page);
-    lv_obj_set_size(s_log_container, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_size(s_log_container, 0, LV_PCT(100));
+    lv_obj_set_flex_grow(s_log_container, 1);
     lv_obj_set_scroll_dir(s_log_container, LV_DIR_VER);
     lv_obj_set_style_pad_all(s_log_container, 6, 0);
 
@@ -1981,28 +2493,30 @@ void ui_init(void)
 
     lv_obj_t *option_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_OPTION));
     lv_obj_set_flex_flow(option_page, LV_FLEX_FLOW_COLUMN);
+    /* dashboard_page와 같은 이유로 절반(10px) 축소(2026-08-09) — 그룹박스-화면 가장자리
+     * 간격 + 그룹박스 사이 세로 간격 */
+    lv_obj_set_style_pad_hor(option_page, 5, 0);  /* screen-edge gap 추가로 절반(2026-08-09) */
+    lv_obj_set_style_pad_row(option_page, 5, 0);  /* inter-panel gap 추가로 절반(2026-08-09) */
+    lv_obj_set_style_pad_top(option_page, 5, 0);  /* 추가로 절반(2026-08-09) */
+    lv_obj_set_style_bg_color(option_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    lv_obj_set_style_bg_opa(option_page, LV_OPA_COVER, 0);
 
     /* 그룹박스 4개(세로로 나열): 제어기/측정기/영상/시스템 — 내용은 아직 시스템(언어
      * 전환)만 채움, 나머지는 제목만 있는 빈 틀. 언어 행: 라벨 왼쪽 정렬 + 선택
      * 버튼(한글/English) 오른쪽 정렬, 선택된 버튼은 다른 색으로 표시 */
     lv_obj_t *cntl_box = create_group_box(option_page, STR_GROUP_CNTL);
 
-    /* 리스트뷰 컨테이너 — 다른 설정 화면처럼, 제어기 설정 항목들을 리스트 아이템 형태로
-     * 담음(지금은 언어 하나뿐이지만 나중에 항목이 늘어나면 같은 리스트 안에 행이 늘어나는
-     * 구조). 언어는 탭하면 팝업이 뜨는 방식 대신, 라디오 컨트롤을 행 안에 그대로 박아넣어서
-     * 바로 선택되게 함(사용자 지시) */
-    lv_obj_t *cntl_list = lv_list_create(cntl_box);
-    lv_obj_set_size(cntl_list, LV_PCT(100), LV_SIZE_CONTENT);
-
-    /* 언어 행 — 라벨+버튼그룹을 가로로 나열해야 해서 리스트의 직접 자식으로 별도 row
-     * 컨테이너를 만듦 */
-    lv_obj_t *cntl_row = lv_obj_create(cntl_list);
+    /* 언어 행 — lv_list로 감쌌던 걸 제거(2026-08-09, 사용자 지적: lv_list는 회색
+     * 배경+테두리가 있는 카드 스타일이 기본이라 영상/시스템 그룹(일반 컨테이너 직접 자식,
+     * 아래 capture_row/response_row/time_row 참고)과 판넬 간 수직 간격/배경이 눈에 띄게
+     * 다르게 보였음 — 다른 그룹들과 똑같이 group box(cntl_box)의 직접 자식으로 둠 */
+    lv_obj_t *cntl_row = lv_obj_create(cntl_box);
     lv_obj_set_size(cntl_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(cntl_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(cntl_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(cntl_row, 0, 0);
     lv_obj_set_style_pad_hor(cntl_row, 12, 0);
-    lv_obj_set_style_pad_ver(cntl_row, 20, 0);  /* 사용자 요청: 행 높이 2배 정도로 키움 */
+    lv_obj_set_style_pad_ver(cntl_row, 0, 0);  /* row 자체 상하 padding — 용어정의 후 0으로(2026-08-09) */
 
     s_lang_label = lv_label_create(cntl_row);
     lv_label_set_text(s_lang_label, ui_str(STR_LABEL_LANGUAGE));
@@ -2030,13 +2544,13 @@ void ui_init(void)
     update_lang_buttons();  /* 초기 선택 상태(기본 UI_LANG_KO) 반영 */
 
     /* 재시작 버튼 — 물리적 전원 재연결 없이 소프트 리셋(2026-08-01, 사용자 요청) */
-    lv_obj_t *restart_row = lv_obj_create(cntl_list);
+    lv_obj_t *restart_row = lv_obj_create(cntl_box);
     lv_obj_set_size(restart_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(restart_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(restart_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(restart_row, 0, 0);
     lv_obj_set_style_pad_hor(restart_row, 12, 0);
-    lv_obj_set_style_pad_ver(restart_row, 20, 0);
+    lv_obj_set_style_pad_ver(restart_row, 0, 0);
 
     s_restart_label = lv_label_create(restart_row);
     lv_label_set_text(s_restart_label, ui_str(STR_LABEL_RESTART_DEVICE));
@@ -2065,7 +2579,7 @@ void ui_init(void)
     lv_obj_set_flex_align(capture_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(capture_row, 0, 0);
     lv_obj_set_style_pad_hor(capture_row, 12, 0);
-    lv_obj_set_style_pad_ver(capture_row, 20, 0);
+    lv_obj_set_style_pad_ver(capture_row, 0, 0);
 
     s_capture_interval_label = lv_label_create(capture_row);
     lv_label_set_text(s_capture_interval_label, ui_str(STR_LABEL_CAPTURE_INTERVAL));
@@ -2100,7 +2614,7 @@ void ui_init(void)
     lv_obj_set_flex_align(response_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(response_row, 0, 0);
     lv_obj_set_style_pad_hor(response_row, 12, 0);
-    lv_obj_set_style_pad_ver(response_row, 20, 0);
+    lv_obj_set_style_pad_ver(response_row, 0, 0);
 
     s_response_interval_label = lv_label_create(response_row);
     lv_label_set_text(s_response_interval_label, ui_str(STR_LABEL_RESPONSE_INTERVAL));
@@ -2122,4 +2636,106 @@ void ui_init(void)
     s_response_apply_lbl = lv_label_create(s_response_apply_btn);
     lv_label_set_text(s_response_apply_lbl, ui_str(STR_BTN_APPLY));
     lv_obj_set_style_text_font(s_response_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 응답성 도움말 행(2026-08-10) — 드롭다운/버튼 없이 라벨 하나만, response_row 바로
+     * 아래 형제 행(time_row와 같은 방식으로 system_group_box에 얹음) */
+    lv_obj_t *response_help_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(response_help_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(response_help_row, 0, 0);
+    lv_obj_set_style_pad_hor(response_help_row, 12, 0);
+    lv_obj_set_style_pad_ver(response_help_row, 0, 0);
+
+    s_response_help_label = lv_label_create(response_help_row);
+    lv_obj_set_width(s_response_help_label, LV_PCT(100));
+    lv_label_set_long_mode(s_response_help_label, LV_LABEL_LONG_WRAP);
+    lv_obj_add_style(s_response_help_label, &style_text_muted, 0);
+    lv_obj_set_style_text_font(s_response_help_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    update_response_help_text();  /* 부팅 직후 현재 선택값 반영 */
+
+    /* 적응형 반응시간 행(2026-08-10) — 응답성 행과 같은 [라벨][드롭다운][Apply] 구조.
+     * CAM에 안 보내는 Cntl 내부값(esp_now_hub.c의 adaptive_sleep_timer_cb 참고) */
+    lv_obj_t *adaptive_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(adaptive_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(adaptive_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(adaptive_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(adaptive_row, 0, 0);
+    lv_obj_set_style_pad_hor(adaptive_row, 12, 0);
+    lv_obj_set_style_pad_ver(adaptive_row, 0, 0);
+
+    s_adaptive_response_label = lv_label_create(adaptive_row);
+    lv_label_set_text(s_adaptive_response_label, ui_str(STR_LABEL_ADAPTIVE_RESPONSE));
+    lv_obj_set_style_text_font(s_adaptive_response_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_adaptive_response_dd = lv_dropdown_create(adaptive_row);
+    lv_dropdown_set_options(s_adaptive_response_dd, ui_str(STR_OPT_ADAPTIVE_RESPONSE_LIST));
+    s_adaptive_response_applied_idx = find_value_index(s_adaptive_response_values,
+        sizeof(s_adaptive_response_values) / sizeof(s_adaptive_response_values[0]),
+        device_config_get_adaptive_response_sec());
+    lv_dropdown_set_selected(s_adaptive_response_dd, (uint16_t)s_adaptive_response_applied_idx);
+    lv_obj_set_style_text_font(s_adaptive_response_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_adaptive_response_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_adaptive_response_dd, cb_adaptive_response_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    s_adaptive_apply_btn = lv_button_create(adaptive_row);
+    lv_obj_add_event_cb(s_adaptive_apply_btn, cb_apply_adaptive_response, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_state(s_adaptive_apply_btn, LV_STATE_DISABLED);
+    s_adaptive_apply_lbl = lv_label_create(s_adaptive_apply_btn);
+    lv_label_set_text(s_adaptive_apply_lbl, ui_str(STR_BTN_APPLY));
+    lv_obj_set_style_text_font(s_adaptive_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 적응형 반응시간 도움말 행 — response_help_row와 같은 구조(고정 문구 하나뿐, 값별로 안 바뀜) */
+    lv_obj_t *adaptive_help_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(adaptive_help_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(adaptive_help_row, 0, 0);
+    lv_obj_set_style_pad_hor(adaptive_help_row, 12, 0);
+    lv_obj_set_style_pad_ver(adaptive_help_row, 0, 0);
+
+    s_adaptive_help_label = lv_label_create(adaptive_help_row);
+    lv_obj_set_width(s_adaptive_help_label, LV_PCT(100));
+    lv_label_set_long_mode(s_adaptive_help_label, LV_LABEL_LONG_WRAP);
+    lv_obj_add_style(s_adaptive_help_label, &style_text_muted, 0);
+    lv_obj_set_style_text_font(s_adaptive_help_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_adaptive_help_label, ui_str(STR_HELP_ADAPTIVE_RESPONSE));
+
+    /* 시각설정 행(2026-08-09) — [라벨][현재시각][설정] 인라인, 응답성 행과 같은 구조 */
+    lv_obj_t *time_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(time_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(time_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(time_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(time_row, 0, 0);
+    lv_obj_set_style_pad_hor(time_row, 12, 0);
+    lv_obj_set_style_pad_ver(time_row, 0, 0);
+
+    s_time_label = lv_label_create(time_row);
+    lv_label_set_text(s_time_label, ui_str(STR_LABEL_TIME));
+    lv_obj_set_style_text_font(s_time_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_time_value_label = lv_label_create(time_row);
+    lv_obj_add_style(s_time_value_label, &style_text_muted, 0);
+    lv_obj_set_style_text_font(s_time_value_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    refresh_clock(NULL);  /* 다음 1초 tick 전까지 빈 채로 안 보이게 즉시 한 번 채움(로고부제와 동일 이유) */
+
+    lv_obj_t *time_set_btn = lv_button_create(time_row);
+    lv_obj_add_event_cb(time_set_btn, cb_settime_btn, LV_EVENT_CLICKED, NULL);
+    s_time_set_btn_lbl = lv_label_create(time_set_btn);
+    lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
+    lv_obj_set_style_text_font(s_time_set_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 버튼 폭 통일(2026-08-09, 사용자 지시) — 지금까지 만든 메인 화면 버튼들의 실측
+     * 자연폭 중 최댓값을 기준폭으로 잡아 전부에 적용. 팝업 버튼(add_modal_button)은
+     * s_action_btn_width가 여기서 설정된 뒤부터 뜨므로 자동으로 같은 폭을 받음.
+     * 사진목록의 del_btn(휴지통 아이콘, 반복되는 작은 버튼)은 성격이 달라 제외 */
+    lv_obj_t *action_buttons[] = {
+        btn_capture, btn_renew, btn_delete_all, restart_btn,
+        s_capture_apply_btn, s_response_apply_btn, s_adaptive_apply_btn, time_set_btn,
+    };
+    lv_obj_update_layout(lv_screen_active());
+    for (size_t i = 0; i < sizeof(action_buttons) / sizeof(action_buttons[0]); i++) {
+        lv_coord_t w = lv_obj_get_width(action_buttons[i]);
+        if (w > s_action_btn_width) s_action_btn_width = w;
+    }
+    for (size_t i = 0; i < sizeof(action_buttons) / sizeof(action_buttons[0]); i++) {
+        lv_obj_set_width(action_buttons[i], s_action_btn_width);
+        lv_obj_center(lv_obj_get_child(action_buttons[i], 0));  /* 레이블 중앙정렬(2026-08-09) */
+    }
 }

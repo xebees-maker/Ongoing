@@ -51,13 +51,11 @@ static int cmd_ls(int argc, char **argv)
 {
     (void)argc; (void)argv;
     note_console_activity();
-    cam_node_sleep_lock_acquire();  /* SD 목록조회 도중 light sleep 진입 방지(2026-08-08) */
 
     uint32_t ids[CAM_STORAGE_MAX_FILES];
     int count = cam_storage_list(PHOTO_REQUEST_MODE_ALL, 0, ids, CAM_STORAGE_MAX_FILES);
     if (count < 0) {
         printf("BEGIN_LS\nFAIL (SD 목록 조회 실패)\nEND_LS\n");
-        cam_node_sleep_lock_release();
         return 1;
     }
 
@@ -76,7 +74,6 @@ static int cmd_ls(int argc, char **argv)
     }
     printf("총 %d개\n", count);
     printf("END_LS\n");
-    cam_node_sleep_lock_release();
     return 0;
 }
 
@@ -84,9 +81,7 @@ static int cmd_clear(int argc, char **argv)
 {
     (void)argc; (void)argv;
     note_console_activity();
-    cam_node_sleep_lock_acquire();  /* SD 전체삭제 도중 light sleep 진입 방지(2026-08-08) */
     int deleted = cam_storage_delete_all();
-    cam_node_sleep_lock_release();
     if (deleted < 0) {
         printf("FAIL (삭제 중 오류)\n");
         return 1;
@@ -215,10 +210,6 @@ static int cmd_get(int argc, char **argv)
         return 1;
     }
 
-    /* SD 읽기+USB-JTAG 전송 도중 light sleep 진입 방지(2026-08-08) — 호스트가 느리면 수 초
-     * 걸릴 수 있는 구간이라 특히 중요 */
-    cam_node_sleep_lock_acquire();
-
     printf("BEGIN_BIN id=%u size=%u\n", (unsigned)file_id, (unsigned)size);
     fflush(stdout);
 
@@ -233,7 +224,6 @@ static int cmd_get(int argc, char **argv)
 
     printf("\nEND_BIN\n");
 
-    cam_node_sleep_lock_release();
     free(buf);
     fclose(fp);
     return ok ? 0 : 1;

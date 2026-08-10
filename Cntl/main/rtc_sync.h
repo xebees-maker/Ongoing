@@ -23,6 +23,12 @@ esp_err_t rtc_sync_init(void);
 /* 현재 시각(RTC로 세팅된 시스템 클록 기준) — 페어링 시 노드에 알려줄 때 씀 */
 uint32_t rtc_sync_get_unix_time(void);
 
+/* 설정 화면에서 사용자가 수동으로 시각을 맞출 때 씀 — RTC 하드웨어와 시스템 클록(시각
+ * 표시에 쓰는 time()/localtime_r 기준)을 둘 다 갱신. year는 네 자리(예: 2026),
+ * month는 1-12. 이후로는 RTC가 build/time_sync.txt 시드값보다 항상 최신이라 그 경로들은
+ * rtc_sync_init에서 자연히 안 타게 됨. */
+esp_err_t rtc_sync_set_datetime(int year, int month, int day, int hour, int min, int sec);
+
 #ifdef __cplusplus
 }
 #endif

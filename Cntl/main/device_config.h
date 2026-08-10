@@ -31,6 +31,13 @@ void     device_config_set_cam_capture_interval_sec(uint32_t sec);
 uint32_t device_config_get_response_interval_sec(void);
 void     device_config_set_response_interval_sec(uint32_t sec);
 
+/* 적응형 반응시간(초, 2026-08-10) — 마지막 사용자 조작(지금촬영/목록갱신/삭제/전체삭제/
+ * 사진선택) 이후 이만큼 조용하면 esp_now_hub가 현재 페어링된 CAM에 SLEEP_NOW를 보내
+ * 유휴여유를 기다리지 않고 즉시 재움. 기본값 10초. CAM에는 전송 안 함(Cntl 내부 판단
+ * 기준일 뿐) */
+uint32_t device_config_get_adaptive_response_sec(void);
+void     device_config_set_adaptive_response_sec(uint32_t sec);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,6 +1,6 @@
 #include "esp_now_cam.h"
 #include "cam_storage.h"
-#include "cam_node.h"  /* cam_node_set_capture_interval_sec/set_response_interval_sec/sleep_lock_* */
+#include "cam_node.h"  /* cam_node_set_capture_interval_sec/set_response_interval_sec/get_wake_reason/note_activity */
 
 #include <string.h>
 #include <stdio.h>
@@ -36,6 +36,27 @@ static bool    s_paired = false;
 static uint8_t s_hub_mac[6] = { 0 };
 
 static gpio_num_t s_led_pin = GPIO_NUM_NC;
+
+/* Deep Sleep 사이클 통계(2026-08-10) — 요청-응답 아님(ACK 없음), CHANNEL_PING처럼 그냥
+ * 보내기만 함. CAM_CONFIG_SET 처리 직후 1회만 보냄(recv_cb의 ESP_NOW_MSG_CAM_CONFIG_SET
+ * 핸들러 참고) — 페어링 직후 바로 보내면 아직 Cntl의 실제 설정값을 못 받은 상태라
+ * sleep_interval_sec이 Kconfig 기본값으로 잘못 찍히는 문제가 있었음(실사용 중 발견) —
+ * 반드시 설정 반영 이후여야 정확함. Light Sleep 시절의 주기 타이머 방식과 달리, 딥슬립
+ * 사이클마다 재부팅되는 구조에서는 "깨어있는 동안 1회"가 곧 "사이클마다 1회"와 같음. */
+static void send_deep_sleep_stats(void)
+{
+    esp_now_deep_sleep_stats_t stats = {
+        .version  = ESP_NOW_LINK_VERSION,
+        .msg_type = ESP_NOW_MSG_DEEP_SLEEP_STATS,
+        .wake_reason        = (uint8_t)cam_node_get_wake_reason(),
+        .awake_uptime_ms    = (uint32_t)(esp_timer_get_time() / 1000),
+        .sleep_interval_sec = cam_node_get_response_interval_sec(),
+    };
+    esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&stats, sizeof(stats));
+    ESP_LOGI(TAG, "DEEP_SLEEP_STATS 전송: wake_reason=%u awake_ms=%u interval=%us (%s)",
+             stats.wake_reason, (unsigned)stats.awake_uptime_ms,
+             (unsigned)stats.sleep_interval_sec, esp_err_to_name(err));
+}
 
 /* --- 사진 전송 --- */
 /* recv_cb(WiFi 태스크)에서 바로 처리하기엔 무거운 요청(촬영/파일 I/O/여러 건 전송)을
@@ -651,18 +672,24 @@ static void run_transfer_bench(esp_now_bench_mode_t mode, uint16_t duration_sec)
              (unsigned long long)(xfer_count > 0 ? min_elapsed_ms : 0), (unsigned long long)max_elapsed_ms);
 }
 
+/* 딥슬립 웨이크 윈도우 판정(cam_node.c의 cam_node_wake_window_done())이 "지금 자도 되는지"
+ * 확인할 때 이 큐가 처리 중인지 알아야 함(2026-08-10) — Light Sleep 시절의 esp_pm_lock
+ * (cam_node_sleep_lock_*)이 하던 "바쁜 구간" 표시를 대체. 처리 종류가 여럿이라 매
+ * return/continue 지점마다 짝을 맞추는 대신, 이번 반복 시작에 세우고 끝에 내림 */
+static volatile bool s_transfer_busy = false;
+
+bool esp_now_cam_is_busy(void)
+{
+    return s_transfer_busy || (s_photo_request_queue && uxQueueMessagesWaiting(s_photo_request_queue) > 0);
+}
+
 static void photo_transfer_task(void *arg)
 {
     (void)arg;
     cam_task_request_t item;
     for (;;) {
         if (xQueueReceive(s_photo_request_queue, &item, portMAX_DELAY) != pdTRUE) continue;
-
-        /* ESP-NOW 사진전송/목록조회/삭제 도중 light sleep 진입 방지(2026-08-08) — 큐에서
-         * 하나 뽑아 처리하는 이 블록 전체가 "바쁜 구간". 이 태스크 루프를 도는 동안(다음
-         * xQueueReceive로 돌아가기 전까지) 계속 잠금 — 처리 종류가 여럿이라 매 return/continue
-         * 지점마다 짝을 맞추는 대신, 이번 반복 시작에 걸고 끝에 푸는 편이 실수하기 어려움 */
-        cam_node_sleep_lock_acquire();
+        s_transfer_busy = true;
 
         if (item.kind == CAM_TASK_REQ_BENCH) {
             if (s_paired) {
@@ -672,7 +699,7 @@ static void photo_transfer_task(void *arg)
                     run_transfer_bench((esp_now_bench_mode_t)item.bench_mode, item.bench_duration_sec);
                 }
             }
-            cam_node_sleep_lock_release();
+            s_transfer_busy = false;
             continue;
         }
 
@@ -684,11 +711,11 @@ static void photo_transfer_task(void *arg)
              * 동안 들어오는 중복을 계속 걸러낼 수 있음 */
             if (s_paired) send_photo_list();
             s_list_request_pending = false;
-            cam_node_sleep_lock_release();
+            s_transfer_busy = false;
             continue;
         }
         if (!s_paired) {
-            cam_node_sleep_lock_release();
+            s_transfer_busy = false;
             continue;
         }
 
@@ -702,7 +729,7 @@ static void photo_transfer_task(void *arg)
             };
             esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
             ESP_LOGI(TAG, "PHOTO_DELETE_ALL_ACK(성공=%d, %d개) 전송: %s", ack.success, deleted, esp_err_to_name(err));
-            cam_node_sleep_lock_release();
+            s_transfer_busy = false;
             continue;
         }
 
@@ -735,7 +762,7 @@ static void photo_transfer_task(void *arg)
                                                       NULL, 0, NULL);
             if (err == ESP_OK) esp_now_channelsync_notify_alive();  /* 위 헤더 설명 참고 */
             ESP_LOGI(TAG, "CAPTURE_STATUS(%s) 전송: %s", captured ? "SUCCESS" : "FAILED", esp_err_to_name(err));
-            cam_node_sleep_lock_release();
+            s_transfer_busy = false;
             continue;
         }
 
@@ -757,7 +784,7 @@ static void photo_transfer_task(void *arg)
             if (s_request_generation != item.generation) break;  /* 더 최신 요청으로 대체됨 */
             send_one_photo_sr(ids[i], item.generation);
         }
-        cam_node_sleep_lock_release();
+        s_transfer_busy = false;
     }
 }
 
@@ -790,6 +817,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     if (msg_type == ESP_NOW_MSG_PHOTO_REQUEST) {
         if (!s_paired || len < (int)sizeof(esp_now_photo_request_t)) return;
+        cam_node_note_activity();
         esp_now_photo_request_t req;
         memcpy(&req, data, sizeof(req));
 
@@ -838,6 +866,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     if (msg_type == ESP_NOW_MSG_BENCH_START) {
         if (!s_paired || len < (int)sizeof(esp_now_bench_start_t)) return;
+        cam_node_note_activity();
         esp_now_bench_start_t req;
         memcpy(&req, data, sizeof(req));
         cam_task_request_t item = { .kind = CAM_TASK_REQ_BENCH, .bench_duration_sec = req.duration_sec,
@@ -858,6 +887,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             ESP_LOGI(TAG, "PHOTO_LIST_REQUEST 중복 수신 — 무시(이미 처리 중)");
             return;
         }
+        cam_node_note_activity();
         cam_task_request_t item = { .kind = CAM_TASK_REQ_LIST };
         if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
             ESP_LOGW(TAG, "PHOTO_LIST_REQUEST 큐 가득 — 무시");
@@ -869,6 +899,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     if (msg_type == ESP_NOW_MSG_PHOTO_DELETE_ALL_REQUEST) {
         if (!s_paired || len < (int)sizeof(esp_now_photo_delete_all_request_t)) return;
+        cam_node_note_activity();
         cam_task_request_t item = { .kind = CAM_TASK_REQ_DELETE_ALL };
         if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
             ESP_LOGW(TAG, "PHOTO_DELETE_ALL_REQUEST 큐 가득 — 무시");
@@ -881,6 +912,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 드라이버 태스크)에서 바로 처리 — SD 파일 쓰기 하나뿐이라 photo_transfer_task
          * 큐로 넘길 만큼 무겁지 않음(다른 핸들러들과 동일 판단, 예: PHOTO_DELETE_REQUEST) */
         if (!s_paired || len < (int)sizeof(esp_now_cam_config_t)) return;
+        cam_node_note_activity();  /* 2026-08-10 — 페어링 직후 항상 오는 메시지, 이걸 처리하는
+                                       동안은 곧바로 딥슬립에 들어가지 않게 유휴타이머 갱신 */
         esp_now_cam_config_t cfg;
         memcpy(&cfg, data, sizeof(cfg));
         cam_node_set_capture_interval_sec(cfg.capture_interval_sec);
@@ -901,11 +934,18 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         };
         esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
         ESP_LOGI(TAG, "CAM_CONFIG_ACK 전송: %s", esp_err_to_name(err));
+        /* 2026-08-10 — 딥슬립 통계는 여기(설정 반영 직후)에서 보내야 정확함. 예전엔 페어링
+         * 직후(recv_cb의 PAIR_REQUEST 핸들러)에 바로 보냈는데, 그 시점엔 아직 CAM_CONFIG_SET을
+         * 못 받아서 s_response_interval_sec이 Kconfig 기본값(3초)인 채로 보고됨 — 실제로는
+         * 딴 값(예: 10초)으로 곧 재설정될 예정인데도 통계탭엔 옛 값이 찍히는 버그가 실사용
+         * 중 발견됨("응답성을 10초로 적용했는데 I=3으로 계속 나옴") */
+        send_deep_sleep_stats();
         return;
     }
 
     if (msg_type == ESP_NOW_MSG_PHOTO_DELETE_REQUEST) {
         if (!s_paired || len < (int)sizeof(esp_now_photo_delete_request_t)) return;
+        cam_node_note_activity();
         esp_now_photo_delete_request_t req;
         memcpy(&req, data, sizeof(req));
         esp_err_t err = cam_storage_delete(req.file_id);
@@ -944,6 +984,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             s_paired = false;
             set_led(LED_PATTERN_BLINK_FAST);
         }
+        return;
+    }
+
+    /* 적응형 반응시간(2026-08-10) — Cntl이 "이번 사이클에 더 할 일 없다"고 판단하면 보냄.
+     * 남은 유휴여유 타이머를 기다리지 않고 곧바로 잘 수 있게 함(cam_node.c 참고) */
+    if (msg_type == ESP_NOW_MSG_SLEEP_NOW) {
+        if (!s_paired || len < (int)sizeof(esp_now_sleep_now_t)) return;
+        ESP_LOGI(TAG, "SLEEP_NOW 수신 — 유휴여유 생략하고 즉시 딥슬립 준비");
+        cam_node_note_sleep_now_requested();
         return;
     }
 
@@ -993,6 +1042,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     memcpy(ack.node_mac, s_mac, sizeof(ack.node_mac));
     esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
     ESP_LOGI(TAG, "페어링됨: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
+
+    /* 딥슬립 통계 전송은 CAM_CONFIG_SET 처리 직후로 옮김(2026-08-10) — 그때가 돼야
+     * s_response_interval_sec이 실제 적용될 값으로 갱신돼 있음(recv_cb의
+     * ESP_NOW_MSG_CAM_CONFIG_SET 핸들러 참고) */
+    cam_node_note_activity();
 }
 
 void esp_now_cam_set_status_led(gpio_num_t pin)
@@ -1026,6 +1080,8 @@ void esp_now_cam_init(void)
      * 브로드캐스트 피어 등록도 이 컴포넌트가 알아서 함 */
     esp_now_channelsync_init(s_name, s_mac, on_channel_synced, on_channel_lost_sync);
     set_led(LED_PATTERN_BLINK_FAST);
+    /* 딥슬립 통계(send_deep_sleep_stats)는 여기서 주기 전송하지 않음 — 페어링 완료 직후
+     * recv_cb의 PAIR_REQUEST 핸들러에서 1회만 보냄(위 함수 정의 주석 참고) */
 }
 
 const char *esp_now_cam_get_name(void) { return s_name; }
