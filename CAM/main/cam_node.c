@@ -20,6 +20,7 @@
 #include "esp_check.h"
 #include "esp_system.h"
 #include "esp_sleep.h"
+#include "esp_attr.h"
 #include "nvs_flash.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -56,6 +57,17 @@ static const char *TAG = "cam_node";
     #define CAM_VIDEO_FB_COUNT      1
 #endif
 #define CAM_JPEG_QUALITY        12
+/* 부팅 시 노출/게인(AEC/AGC) 수렴용 워밍업 프레임 수(2026-08-10) — 예전엔 esp_camera_init()
+ * 직후 무조건 vTaskDelay(2000ms)로 "어림잡아 2초 기다림"이었는데, 근거 주석이 전혀 없었고
+ * (Espressif FAQ: "esp_camera_init() 안의 지연은 제거를 시도해볼 수 있다") 실제로 필요한 건
+ * "시간"이 아니라 "센서가 몇 프레임을 실제로 캡처해서 AEC/AGC를 수렴시키는 것" — 매 촬영 전
+ * 스테일 프레임 비우기(camera_capture_one() 참고)와는 목적이 다름(그건 fb_count개만 비워서
+ * DMA 큐 신선도만 맞추는 것, 이건 노출 수렴). esp_camera_fb_get()이 진짜 새 프레임이 찍힐
+ * 때까지 블로킹하므로, 정해진 시간을 기다리는 대신 실제 프레임 N장을 흘려보내는 쪽이 더
+ * 정확하고(센서의 실제 프레임 주기에 맞춰짐) 보통 더 빠름. 값은 사용자 실무 경험 기준
+ * (2026-08-10, "버리는 프레임은 최대 2개, 보통 1개") — 5장은 과했음이 실측으로 확인됨(가짜
+ * "속도 개선 안 됨" 결과의 원인) */
+#define CAM_WARMUP_FRAME_COUNT  2
 
 #if CONFIG_CAM_JPEG_VGA
     #define CAM_FRAME_SIZE  FRAMESIZE_VGA
@@ -168,6 +180,19 @@ uint32_t cam_node_get_response_interval_sec(void) { return s_response_interval_s
  * send_deep_sleep_stats) 별도 로컬 enum을 안 둠 */
 static cam_wake_reason_t s_wake_reason = CAM_WAKE_REASON_OTHER;
 
+/* 2026-08-10 — "직전에 실제로 잔 시간"을 딥슬립 경계 너머로 전달하는 용도. esp_deep_sleep_start()
+ * 직전에 이번에 쓸 응답성 값을 여기 적어두면, 다음 부팅(=이번 사이클이 끝난 뒤) 때 그대로
+ * 남아있음(RTC 슬로우메모리는 딥슬립 중에도 전원 유지). CAM은 완전 재부팅이라 "얼마나 잤는지"를
+ * 직접 잴 방법이 없는데, 타이머 기반 딥슬립은 설정한 시간만큼 정확히 자므로(RWDT 개입만
+ * 없었다면) 이 값을 그대로 "실제 잔 시간"으로 신뢰할 수 있음 — wake_reason이 TIMER일 때만
+ * (아래 send_deep_sleep_stats에서 판단) */
+static RTC_DATA_ATTR uint32_t s_last_actual_sleep_sec = 0;
+
+uint32_t cam_node_get_last_actual_sleep_sec(void)
+{
+    return (s_wake_reason == CAM_WAKE_REASON_TIMER) ? s_last_actual_sleep_sec : 0;
+}
+
 static void capture_wake_reason(void)
 {
     esp_reset_reason_t rr = esp_reset_reason();
@@ -275,12 +300,31 @@ static esp_err_t camera_init(void)
         s->set_saturation(s, -2);
     }
 
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    /* 2026-08-10 — SD에 저장해서 육안 확인하는 진단판은 main 태스크 스택오버플로우로
+     * 되돌림(cam_storage_save_capture()가 이 지점의 기본 스택엔 너무 무거웠음) — 버리기만
+     * 하는 원래 방식 유지, 화질 확인은 실제 촬영 경로(camera_capture_one())로 이미 충분히 됨 */
+    int64_t warmup_start_us = esp_timer_get_time();
+    for (int i = 0; i < CAM_WARMUP_FRAME_COUNT; i++) {
+        camera_fb_t *warmup_fb = esp_camera_fb_get();
+        if (warmup_fb) esp_camera_fb_return(warmup_fb);
+    }
+    ESP_LOGI(TAG, "노출 워밍업 %d프레임 소요: %lldms", CAM_WARMUP_FRAME_COUNT,
+             (esp_timer_get_time() - warmup_start_us) / 1000);
 
     s_camera_ready = true;
     ESP_LOGI(TAG, "카메라 초기화 완료 (XCLK=%dMHz, fb_count=%d, 해상도 %d, JPEG q=%d)",
              CAM_VIDEO_XCLK_FREQ_HZ / 1000000, CAM_VIDEO_FB_COUNT, CAM_FRAME_SIZE, CAM_JPEG_QUALITY);
     return ESP_OK;
+}
+
+/* 필요시 초기화(2026-08-10) — 촬영이 실제로 필요해진 시점(수동/자동 둘 다)에만 호출.
+ * 이미 이번 사이클에 한 번 초기화됐으면(s_camera_ready) 그대로 통과, 재초기화 안 함 */
+static esp_err_t ensure_camera_ready(void)
+{
+    if (s_camera_ready) return ESP_OK;
+    esp_err_t err = camera_init();
+    if (err != ESP_OK) ESP_LOGE(TAG, "카메라 초기화 실패(필요시 초기화)");
+    return err;
 }
 
 /* 자동(타이머)/수동(shot) 캡처가 절대 동시에 안 돌게 직렬화 — esp_camera_fb_get()이 최대
@@ -291,6 +335,8 @@ static SemaphoreHandle_t s_capture_mutex = NULL;
 
 static bool camera_capture_one(cam_capture_kind_t kind)
 {
+    if (ensure_camera_ready() != ESP_OK) return false;
+
     xSemaphoreTake(s_capture_mutex, portMAX_DELAY);
 
     /* DMA 프레임 버퍼 슬롯(fb_count개)은 esp_camera_fb_get()+fb_return()으로 소비해야만
@@ -389,8 +435,10 @@ bool cam_node_capture_now(void)
 
 bool cam_node_capture_now_sized(const char *size_name)
 {
-    if (!s_camera_ready) {
-        ESP_LOGW(TAG, "수동 촬영 요청 — 카메라 미초기화 상태");
+    /* 2026-08-10 — 필요시 초기화: 해상도 오버라이드(size_name)는 esp_camera_sensor_get()으로
+     * 센서 핸들이 필요해서 camera_capture_one() 진입 전에 여기서 먼저 준비돼 있어야 함 */
+    if (ensure_camera_ready() != ESP_OK) {
+        ESP_LOGW(TAG, "수동 촬영 요청 — 카메라 초기화 실패");
         return false;
     }
 
@@ -456,9 +504,11 @@ void app_main(void)
      * 값(CAM_CAPTURE_10S)까지도 안전측으로 걸러줌 — 크래시 안전장치 주석 참고 */
     s_capture_interval_sec = clamp_capture_interval_sec(CAM_CAPTURE_INTERVAL_MS / 1000);
 
-    if (camera_init() != ESP_OK) {
-        ESP_LOGE(TAG, "카메라 초기화 실패");
-    }
+    /* 2026-08-10 — 카메라는 여기서 무조건 초기화하지 않음(필요시 초기화로 전환, 사용자 지시).
+     * CAM이 깨는 이유는 대부분 "명령을 받기 위해서"이지 촬영이 아님 — 실제로 촬영이 필요한
+     * 순간(수동 CAPTURE_NOW 또는 자동촬영 주기 도달)에만 ensure_camera_ready()가 호출됨
+     * (camera_capture_one() 참고). 즉 이번 사이클에 촬영 요청이 하나도 없으면 카메라 하드웨어
+     * 초기화 비용(워밍업 포함) 자체가 한 번도 발생하지 않고 그대로 다시 잠듦 */
 
     /* Cntl과는 ESP-NOW로만 붙음 — 로컬 HTTP 대시보드도, AP도 안 씀(Cntl도 STA,
      * esp_now_hub.c:171). AP 모드였을 때는 100ms마다 비콘을 계속 내보내야 했는데,
@@ -506,6 +556,7 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "딥슬립 진입: %us 후 웨이크", (unsigned)s_response_interval_sec);
+    s_last_actual_sleep_sec = s_response_interval_sec;  /* 다음 부팅 때 "직전에 실제로 잔 시간"으로 보고 */
     esp_sleep_enable_timer_wakeup((uint64_t)s_response_interval_sec * 1000000ULL);
     esp_deep_sleep_start();  /* RWDT는 이미 무장돼있음, 안 건드림 */
 #else

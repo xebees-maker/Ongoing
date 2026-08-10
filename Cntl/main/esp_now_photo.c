@@ -137,15 +137,36 @@ static volatile esp_now_photo_list_state_t s_list_state = ESP_NOW_PHOTO_LIST_STA
 static uint32_t                   s_sd_total_kb = 0;  /* 최근 목록 응답에 실려온 CAM SD 용량 */
 static uint32_t                   s_sd_used_kb  = 0;
 
-/* 목록 항목(PHOTO_LIST_ENTRY)은 청크와 달리 ACK/재전송이 없는 단발성 esp_now_send라
- * 유실될 수 있음 — 유실된 게 하필 마지막 항목(=file_id 오름차순으로 보내므로 항상
- * 최신 사진)이면 Cntl 목록에서 최신 사진이 통째로 빠지고, 그 앞의(이미 봤던) 사진이
- * index 0으로 보여서 "선택은 되는데 안 가져옴"처럼 보임(2026-08-02 실기에서 확인).
- * LIST_DONE의 count와 실제 수신 개수를 대조해 다르면 재요청 — 청크의 3회 재시도와
- * 같은 원칙 */
-#define PHOTO_LIST_MAX_RETRIES 2
+/* 2026-08-10 — 목록도 청크와 같은 "1요청 -> N항목 -> 1완료" 패턴이라 SR(Selective Repeat)
+ * 방식으로 재설계: 개별 항목이 index를 갖고 오므로 비트맵으로 정확히 누락분을 추적하고,
+ * LIST_DONE_ACK가 그 인덱스만 알려주면 CAM이 그것만 재전송(esp_now_cam.c의
+ * resend_list_entries() 참고) — "개수 안 맞으면 통째로 다시 요청"하던 예전 방식은 제거함
+ * (안쪽 재요청 예산이 바깥쪽 팝업 타임아웃 예산과 안 맞물려서 3005/3007이 같이 뜨는 문제의
+ * 원인이었음, 실사용 중 발견) */
+#define PHOTO_LIST_NACK_MAX_ROUNDS 3
 static uint8_t  s_list_cam_mac[6];
-static int      s_list_retry_count = 0;
+static uint16_t s_list_expected_count = 0;  /* 첫 LIST_DONE에서 받은 진짜 총 개수(LIST_MAX
+                                                초과분 포함) — 화면엔 min(이 값, LIST_MAX)만 */
+static int      s_list_nack_rounds_used = 0;
+static uint8_t  s_list_bitmap[(ESP_NOW_PHOTO_LIST_MAX + 7) / 8];
+static uint16_t s_list_received_count = 0;  /* 진행팝업 정체감지용(2026-08-10) — 딥슬립
+                                                웨이크대기+채널동기화+SR 여러 라운드가 합쳐지면
+                                                총 소요시간이 고정예산 하나로는 부족해질 수 있어서,
+                                                fetch처럼 "마지막 진행 이후 경과시간" 기준으로
+                                                바꿈(실사용 중 3007 오탐으로 발견 — 데이터는 항상
+                                                왔는데 팝업만 먼저 포기했음) */
+
+static inline void list_bitmap_clear(void) { memset(s_list_bitmap, 0, sizeof(s_list_bitmap)); }
+static inline void list_bitmap_set(uint16_t idx)
+{
+    if (idx >= ESP_NOW_PHOTO_LIST_MAX) return;
+    s_list_bitmap[idx / 8] |= (uint8_t)(1u << (idx % 8));
+}
+static inline bool list_bitmap_test(uint16_t idx)
+{
+    if (idx >= ESP_NOW_PHOTO_LIST_MAX) return false;
+    return (s_list_bitmap[idx / 8] >> (idx % 8)) & 1;
+}
 
 void esp_now_photo_init(void)
 {
@@ -623,7 +644,10 @@ void esp_now_photo_list_request(const uint8_t *cam_mac)
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_list_state = ESP_NOW_PHOTO_LIST_STATE_REQUESTING;
     s_list_count = 0;
-    s_list_retry_count = 0;
+    s_list_expected_count = 0;
+    s_list_nack_rounds_used = 0;
+    s_list_received_count = 0;
+    list_bitmap_clear();
     memcpy(s_list_cam_mac, cam_mac, sizeof(s_list_cam_mac));
     xSemaphoreGive(s_mutex);
 
@@ -636,12 +660,15 @@ static void handle_list_entry(const uint8_t *data, int len)
     const esp_now_photo_list_entry_t *entry = (const esp_now_photo_list_entry_t *)data;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_list_state == ESP_NOW_PHOTO_LIST_STATE_REQUESTING && s_list_count < ESP_NOW_PHOTO_LIST_MAX) {
-        s_list_items[s_list_count].file_id      = entry->file_id;
-        s_list_items[s_list_count].kind         = entry->kind;
-        s_list_items[s_list_count].capture_time = entry->capture_time;
-        s_list_items[s_list_count].file_size    = entry->file_size;
-        s_list_count++;
+    /* index로 직접 씀(순서/재전송 무관하게 항상 제자리) — LIST_MAX를 넘는 인덱스는 화면에
+     * 어차피 안 보여줄 항목이라 조용히 버림(기존 "먼저 온 LIST_MAX개만" 동작과 동일) */
+    if (s_list_state == ESP_NOW_PHOTO_LIST_STATE_REQUESTING && entry->index < ESP_NOW_PHOTO_LIST_MAX) {
+        s_list_items[entry->index].file_id      = entry->file_id;
+        s_list_items[entry->index].kind         = entry->kind;
+        s_list_items[entry->index].capture_time = entry->capture_time;
+        s_list_items[entry->index].file_size    = entry->file_size;
+        if (!list_bitmap_test(entry->index)) s_list_received_count++;
+        list_bitmap_set(entry->index);
     }
     xSemaphoreGive(s_mutex);
 
@@ -652,17 +679,21 @@ static void handle_list_entry(const uint8_t *data, int len)
 /* PHOTO_LIST_DONE_ACK를 항상 보냄(2026-08-05, Layer 1) — DONE_ACK와 동일한 원칙. CAM은
  * esp_now_reliable_request()로 이 응답을 기다리므로 재요청이 필요하면 CAM이 알아서 LIST_DONE을
  * 다시 보냄(레이어가 재시도를 대신함) — Cntl이 3번 반복 전송할 필요 없음 */
-static void send_list_done_ack(void)
+/* missing_count==0이면 완료를 뜻하는 PHOTO_LIST_DONE_ACK — 청크의 send_done_ack()와 동일
+ * 원칙(2026-08-10, SR 전환). CAM은 esp_now_reliable_request()로 이 응답을 기다리며,
+ * missing_count>0이면 그 인덱스만 재전송(esp_now_cam.c의 resend_list_entries() 참고) */
+static void send_list_done_ack(uint16_t missing_count, const uint16_t *missing_idx)
 {
-    esp_now_photo_list_done_t ack = {
-        .version     = ESP_NOW_LINK_VERSION,
-        .msg_type    = ESP_NOW_MSG_PHOTO_LIST_DONE_ACK,
-        .count       = (uint16_t)s_list_count,
-        .sd_total_kb = 0,
-        .sd_used_kb  = 0,
-    };
+    static esp_now_photo_list_done_t ack;  /* static — 800B+ 구조체를 스택에 안 둠(기존 원칙) */
+    ack.version       = ESP_NOW_LINK_VERSION;
+    ack.msg_type      = ESP_NOW_MSG_PHOTO_LIST_DONE_ACK;
+    ack.count         = s_list_expected_count;
+    ack.sd_total_kb   = 0;
+    ack.sd_used_kb    = 0;
+    ack.missing_count = missing_count;
+    if (missing_count > 0) memcpy(ack.missing_idx, missing_idx, missing_count * sizeof(uint16_t));
     esp_err_t err = esp_now_send(s_list_cam_mac, (const uint8_t *)&ack, sizeof(ack));
-    ESP_LOGI(TAG, "PHOTO_LIST_DONE_ACK 전송(count=%d): %s", s_list_count, esp_err_to_name(err));
+    ESP_LOGI(TAG, "PHOTO_LIST_DONE_ACK 전송(누락 %u개): %s", missing_count, esp_err_to_name(err));
 }
 
 static void handle_list_done(const uint8_t *data, int len)
@@ -671,32 +702,42 @@ static void handle_list_done(const uint8_t *data, int len)
     const esp_now_photo_list_done_t *done = (const esp_now_photo_list_done_t *)data;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_list_state == ESP_NOW_PHOTO_LIST_STATE_REQUESTING) {
-        if (done->count != s_list_count && s_list_retry_count < PHOTO_LIST_MAX_RETRIES) {
-            s_list_retry_count++;
-            int got = s_list_count, want = done->count, retry = s_list_retry_count;
-            uint8_t mac_copy[6];
-            memcpy(mac_copy, s_list_cam_mac, sizeof(mac_copy));
-            xSemaphoreGive(s_mutex);
-            send_list_done_ack();  /* 재요청 전에도 일단 지금까지 받은 결과는 확인해줌 */
-            ui_log_add_err(UI_ERR_LIST_COUNT_MISMATCH, "목록 %d/%d개만 수신 — 재요청(%d/%d)",
-                            got, want, retry, PHOTO_LIST_MAX_RETRIES);
-            xSemaphoreTake(s_mutex, portMAX_DELAY);
-            s_list_count = 0;  /* 재요청이라 처음부터 새로 받음 */
-            xSemaphoreGive(s_mutex);
-            send_list_request_raw(mac_copy);
-            return;
-        }
-        if (done->count != s_list_count) {
-            ui_log_add_err(UI_ERR_LIST_COUNT_MISMATCH, "목록 %d/%d개만 수신 — 재시도 포기, 있는 것만 표시",
-                            s_list_count, done->count);
-        }
-        s_list_state  = ESP_NOW_PHOTO_LIST_STATE_READY;
-        s_sd_total_kb = done->sd_total_kb;
-        s_sd_used_kb  = done->sd_used_kb;
+    if (s_list_state != ESP_NOW_PHOTO_LIST_STATE_REQUESTING) {
+        xSemaphoreGive(s_mutex);
+        /* 모르는 거래 — 청크의 handle_done()과 동일 원칙으로 무응답(CAM은 자기
+         * reliable_request 타임아웃으로 알아서 포기함) */
+        return;
     }
+
+    s_list_expected_count = done->count;
+    s_sd_total_kb = done->sd_total_kb;
+    s_sd_used_kb  = done->sd_used_kb;
+    uint16_t capped = (done->count < ESP_NOW_PHOTO_LIST_MAX) ? done->count : ESP_NOW_PHOTO_LIST_MAX;
+
+    static uint16_t missing_idx[ESP_NOW_PHOTO_LIST_MAX];
+    uint16_t n = 0;
+    for (uint16_t idx = 0; idx < capped; idx++) {
+        if (!list_bitmap_test(idx)) missing_idx[n++] = idx;
+    }
+
+    if (n > 0 && s_list_nack_rounds_used < PHOTO_LIST_NACK_MAX_ROUNDS) {
+        s_list_nack_rounds_used++;
+        int round = s_list_nack_rounds_used;
+        xSemaphoreGive(s_mutex);
+        send_list_done_ack(n, missing_idx);
+        ui_log_add("목록 항목 %u개 누락 — 재전송 요청(라운드 %d/%d)", n, round, PHOTO_LIST_NACK_MAX_ROUNDS);
+        return;
+    }
+
+    if (n > 0) {
+        ui_log_add_err(UI_ERR_LIST_COUNT_MISMATCH, "목록 %u개 누락 — 재전송 라운드 소진, 있는 것만 표시",
+                        n);
+    }
+    s_list_count  = capped;  /* 빈틈은 esp_now_photo_list_get_items()가 비트맵으로 건너뜀 */
+    s_list_state  = ESP_NOW_PHOTO_LIST_STATE_READY;
     xSemaphoreGive(s_mutex);
-    send_list_done_ack();
+    send_list_done_ack(0, NULL);  /* CAM에게 "더 안 보내도 됨" 통보(라운드 소진이라 포기한
+                                     경우도 포함 — 실제로 남은 누락과 무관하게 항상 0) */
 }
 
 esp_now_photo_list_state_t esp_now_photo_list_get_state(void)
@@ -710,14 +751,24 @@ esp_now_photo_list_state_t esp_now_photo_list_get_state(void)
 int esp_now_photo_list_get_items(esp_now_photo_list_item_t *out, int max)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    int count = s_list_count;
-    if (count > max) count = max;
-    /* CAM은 오래된 것부터(오름차순) 보내는데, 화면엔 최신이 위로 오는 게 자연스러워서 뒤집어서 복사 */
-    for (int i = 0; i < count; i++) {
-        out[i] = s_list_items[s_list_count - 1 - i];
+    /* CAM은 오래된 것부터(오름차순) 보내는데, 화면엔 최신이 위로 오는 게 자연스러워서
+     * 역순으로 훑음. 2026-08-10, SR 전환 — NACK 라운드 소진 후에도 못 받은 인덱스는 빈틈으로
+     * 남을 수 있어서(예전엔 항상 촘촘했음) 비트맵으로 확인하고 건너뜀 */
+    int n = 0;
+    for (int idx = s_list_count - 1; idx >= 0 && n < max; idx--) {
+        if (!list_bitmap_test((uint16_t)idx)) continue;
+        out[n++] = s_list_items[idx];
     }
     xSemaphoreGive(s_mutex);
-    return count;
+    return n;
+}
+
+/* REQUESTING 중일 때만 의미 있음 — 락 없이 읽음(get_chunk_progress()와 동일 원칙, 표시용으로만
+ * 쓰여서 uint16 tearing 정도는 무해) */
+void esp_now_photo_list_get_progress(uint16_t *received, uint16_t *total)
+{
+    *received = s_list_received_count;
+    *total    = s_list_expected_count;
 }
 
 void esp_now_photo_list_ack(void)

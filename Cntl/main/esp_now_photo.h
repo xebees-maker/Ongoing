@@ -113,6 +113,10 @@ esp_now_photo_list_state_t esp_now_photo_list_get_state(void);
 /* READY일 때 목록을 out에 채워서 개수 반환(최대 ESP_NOW_PHOTO_LIST_MAX, 최신순) */
 int esp_now_photo_list_get_items(esp_now_photo_list_item_t *out, int max);
 
+/* REQUESTING 중일 때만 의미 있음 — 진행팝업의 정체 감지용(get_chunk_progress()와 동일 패턴,
+ * 2026-08-10). total은 LIST_DONE 도착 전까지 0(아직 몇 개인지 모름) */
+void esp_now_photo_list_get_progress(uint16_t *received, uint16_t *total);
+
 /* UI가 READY 목록을 화면에 반영한 뒤 호출 — 상태를 IDLE로 돌려서 다음 폴링 때 같은
  * 목록을 중복 처리하지 않게 함 */
 void esp_now_photo_list_ack(void);

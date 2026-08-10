@@ -105,6 +105,9 @@ typedef enum {
     STR_LABEL_ADAPTIVE_RESPONSE,
     STR_OPT_ADAPTIVE_RESPONSE_LIST,
     STR_HELP_ADAPTIVE_RESPONSE,
+    /* 절전상태 판넬 일시멈춤 단추(2026-08-10) */
+    STR_BTN_PAUSE,
+    STR_BTN_RESUME,
     STR_COUNT,
 } ui_str_id_t;
 

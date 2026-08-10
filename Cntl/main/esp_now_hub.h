@@ -58,15 +58,25 @@ typedef struct {
     uint32_t        last_seen_ms;
     /* Deep Sleep 사이클 통계(2026-08-10, ESP_NOW_MSG_DEEP_SLEEP_STATS) — 보낼 수 있는
      * 노드(CAM)만 채워짐, has_deepsleep_stats=false면 아직 한 번도 못 받음(구버전 노드이거나
-     * 막 페어링됨). ds_cycle_count/ds_total_asleep_sec/ds_rwdt_catch_count는 Cntl이 리포트를
-     * 받을 때마다 직접 누적(CAM은 딥슬립마다 완전 재부팅이라 자기 사이클 수를 기억 못 함) */
+     * 막 페어링됨). ds_cycle_count/ds_rwdt_catch_count는 Cntl이 리포트를 받을 때마다 직접
+     * 누적(CAM은 딥슬립마다 완전 재부팅이라 자기 사이클 수를 기억 못 함) */
     bool            has_deepsleep_stats;
     uint32_t        ds_cycle_count;
-    uint32_t        ds_total_asleep_sec;
+    /* 직전에 실제로 잔 시간(초) — 누적 아님, 매 리포트마다 그대로 덮어씀(2026-08-10, 사용자
+     * 지시). CAM이 RTC_DATA_ATTR로 딥슬립 경계 너머 전달한 값(cam_node.c 참고) — 예전엔
+     * "앞으로 잘 예정 시간"을 누적해서 아직 안 잔 걸 잔 걸로 잘못 보여주는 버그가 있었음 */
+    uint32_t        ds_last_actual_sleep_sec;
     uint32_t        ds_rwdt_catch_count;
     uint8_t         ds_last_wake_reason;
     uint32_t        ds_last_awake_uptime_ms;
     uint32_t        ds_last_sleep_interval_sec;
+    /* 2026-08-10 — adaptive_sleep_timer_cb()가 SLEEP_NOW를 보낼 때 판단 근거를 여기 남겨둠 —
+     * 통계탭 판넬에 자체 줄로(사용자 지시, -mm:ss와 함께) 표시하려는 것. sleep_now_send_count는
+     * ds_cycle_count와 같은 방식의 단조증가 세대번호 — refresh_power_panel()이 이게 바뀔 때만
+     * 새 줄을 추가(안 그러면 안 바뀐 값을 매 틱마다 다시 찍게 됨) */
+    uint32_t        last_sleep_now_elapsed_ms;
+    uint32_t        last_sleep_now_threshold_ms;
+    uint32_t        sleep_now_send_count;
 } esp_now_hub_node_t;
 
 void esp_now_hub_init(void);

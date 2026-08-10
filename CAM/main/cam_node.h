@@ -39,6 +39,10 @@ uint32_t cam_node_get_response_interval_sec(void);
  *         판정(cam_wake_reason_t, esp_now_link.h) */
 uint8_t cam_node_get_wake_reason(void);
 
+/** @brief 직전에 실제로 잔 시간(초, 2026-08-10) — RTC 메모리로 딥슬립 경계 너머 전달됨.
+ *         wake_reason이 TIMER가 아니면(RWDT/POWERON) 0 — 실제로 안 잤으므로 */
+uint32_t cam_node_get_last_actual_sleep_sec(void);
+
 /** @brief 지금 자도 되는가 판정(2026-08-10, Deep Sleep 제어흐름) — 페어링 완료 + 유휴
  *         + 최소 유예시간 경과, 또는 Cntl 못 찾은 채 상한시간 초과 */
 bool cam_node_wake_window_done(uint32_t awake_start_ms);

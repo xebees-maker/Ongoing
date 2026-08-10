@@ -91,8 +91,10 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_PANEL_DEEPSLEEP]            = { "절전 상태",                   "Power Status" },
     /* 2026-08-10 사용자 지시로 축약 포맷 확정 — awake/I/slept/R 라벨은 언어 무관 고정,
      * 라벨-숫자 사이 공백 추가(가독성), interval->I, "RWDT n회"/"RWDT xn"->"R n" */
-    [STR_DEEPSLEEP_LINE_FMT]         = { "%s: 사이클#%lu [%s] awake %lu초/I %lu초, slept %lu초, R %lu",
-                                          "%s: cycle#%lu [%s] awake %lus/I %lus, slept %lus, R %lu" },
+    /* awake만 ms 단위(2026-08-10) — 필요시 초기화+채널기억 최적화 이후 1초 미만이 흔해져서
+     * 초 단위로는 대부분 0으로 뭉개짐(정보 없음) */
+    [STR_DEEPSLEEP_LINE_FMT]         = { "%s: 사이클#%lu [%s] awake %lums/I %lu초, slept %lu초, R %lu",
+                                          "%s: cycle#%lu [%s] awake %lums/I %lus, slept %lus, R %lu" },
     [STR_WAKE_REASON_TIMER]          = { "정상",                       "normal" },
     [STR_WAKE_REASON_RWDT]           = { "RWDT복구",                   "RWDT-caught" },
     [STR_WAKE_REASON_POWERON]        = { "전원인가",                   "power-on" },
@@ -111,6 +113,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_OPT_ADAPTIVE_RESPONSE_LIST]  = { "10초\n30초\n1분",           "10S\n30S\n1M" },
     [STR_HELP_ADAPTIVE_RESPONSE]      = { "조작이 멈출 때까지 절전하지 않음",
                                            "Won't power-save until you stop interacting" },
+    [STR_BTN_PAUSE]                   = { "일시멈춤",                  "Pause" },
+    [STR_BTN_RESUME]                  = { "재개",                      "Resume" },
 };
 
 void ui_lang_load(void)

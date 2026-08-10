@@ -84,7 +84,8 @@ static void adaptive_sleep_timer_cb(void *arg)
     (void)arg;
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     uint32_t threshold_ms = device_config_get_adaptive_response_sec() * 1000U;
-    if (now_ms - s_last_user_action_ms < threshold_ms) return;
+    uint32_t elapsed_ms = now_ms - s_last_user_action_ms;
+    if (elapsed_ms < threshold_ms) return;
 
     esp_now_sleep_now_t msg = {
         .version  = ESP_NOW_LINK_VERSION,
@@ -94,9 +95,22 @@ static void adaptive_sleep_timer_cb(void *arg)
     for (int i = 0; i < s_node_count; i++) {
         if (s_nodes[i].kind != HUB_NODE_KIND_CAM || !s_nodes[i].paired) continue;
         if (s_nodes[i].sleep_now_sent) continue;
-        if (now_ms - s_nodes[i].last_paired_ms < ADAPTIVE_SLEEP_PAIR_SETTLE_MS) continue;
-        esp_err_t err = esp_now_send(s_nodes[i].mac, (const uint8_t *)&msg, sizeof(msg));
-        ESP_LOGI(TAG, "SLEEP_NOW -> %s: %s", s_nodes[i].name, esp_err_to_name(err));
+        uint32_t since_paired_ms = now_ms - s_nodes[i].last_paired_ms;
+        if (since_paired_ms < ADAPTIVE_SLEEP_PAIR_SETTLE_MS) continue;
+        /* 2026-08-10 — 판단 근거를 노드에 저장(로그 대신 통계탭 사이클 줄에 같이 표시, 사용자
+         * 지시 — 로그는 스크롤돼서 놓치기 쉬움). refresh_power_panel()이 다음 리포트 때 같이 찍음 */
+        s_nodes[i].last_sleep_now_elapsed_ms   = elapsed_ms;
+        s_nodes[i].last_sleep_now_threshold_ms = threshold_ms;
+        ESP_LOGI(TAG, "SLEEP_NOW -> %s: 조용%lums(임계값%lums) 페어링후%lums",
+                 s_nodes[i].name, (unsigned long)elapsed_ms, (unsigned long)threshold_ms,
+                 (unsigned long)since_paired_ms);
+        s_nodes[i].sleep_now_send_count++;
+        /* 2026-08-10 — reliable stack으로 전환("chunk는 SR, 나머지는 reliable" 원칙). 타이머
+         * 콜백에서 직접 esp_now_send()로 fire-and-forget하던 걸 esp_now_tx 큐로 옮김 — 이
+         * 콜백은 시스템 타이머 태스크에서 도니까 여기서 블로킹 재시도(esp_now_reliable_request)를
+         * 직접 부르면 안 되고, 기존 관례대로 큐잉만 하고 실제 재시도는 esp_now_tx 태스크가 함 */
+        static const uint8_t s_sleep_now_ack_types[] = { ESP_NOW_MSG_SLEEP_NOW_ACK };
+        esp_now_tx_enqueue(s_nodes[i].mac, &msg, sizeof(msg), s_sleep_now_ack_types, 1, 300, 3, "SLEEP_NOW");
         s_nodes[i].sleep_now_sent = true;
     }
     xSemaphoreGive(s_nodes_mutex);
@@ -254,6 +268,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
         esp_now_hub_node_t *n = find_node(info->src_addr);
         bool became_paired = false;
+        bool first_ever_pairing = false;  /* 2026-08-10 — 이번 부팅 세션에서 이 노드와 "정말
+                                              처음" 붙는 순간만 true. 매 재페어링(단순 생존확인
+                                              사이클)과 구분하기 위함 — 아래 became_paired 블록
+                                              참고 */
         char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
         hub_node_kind_t kind_copy = HUB_NODE_KIND_UNKNOWN;
         if (n) {
@@ -270,6 +288,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * true로 잡혀서, 페어링된 CAM/Sens에 SET_TIME을 1초마다 무한정 계속 보내고
              * 있었음(2026-08-03, CAM 시리얼 로그로 발견 — 8초 사이에 SET_TIME이 9번 옴) */
             bool was_paired = n->paired;
+            bool was_ever_paired = n->ever_paired;
             if (!n->user_unpaired) {
                 n->paired = true;
                 n->ever_paired = true;  /* 2026-08-10 — 한 번 세팅되면 이번 부팅 세션 내내
@@ -278,19 +297,22 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 n->sleep_now_sent = false;  /* 새 웨이크 사이클 시작 — 이번 사이클에 한 번은
                                                 다시 보낼 수 있어야 함 */
                 became_paired = !was_paired;
+                first_ever_pairing = became_paired && !was_ever_paired;
                 strncpy(name_copy, n->name, sizeof(name_copy) - 1);
             }
         }
         xSemaphoreGive(s_nodes_mutex);
         if (became_paired) {
             ESP_LOGI(TAG, "페어링 완료: %s", name_copy);
-            /* 2026-08-10 — 방금 막 깨어나 페어링된 시점을 "마지막 사용자 조작"으로도 침 —
-             * 안 그러면 이 타임스탬프는 세션 최초 1회(자동 목록조회)에만 갱신되고 그 뒤로는
-             * 영원히 그대로라, Cntl이 계속 켜져 있는 한 두 번째 페어링부터는 "마지막 조작 이후
-             * 경과시간"이 이미 적응형 임계값을 훌쩍 넘겨 있어서 adaptive_sleep_timer_cb가
-             * 페어링 직후(설정간격 500ms 이내) 곧바로 SLEEP_NOW를 쏴버림 — 매 웨이크마다 사용자
-             * 반응 시간이 사실상 0이 되는 버그(실사용 중 발견, 3006 반복 원인) */
-            esp_now_hub_note_user_action();
+            /* 2026-08-10 — "최초 페어링"과 "단순 생존확인 재페어링"을 구분(사용자 지적으로
+             * 재설계). 처음엔 모든 became_paired에서 이 리셋을 했는데, 그러면 페어링(=CAM이
+             * "할 일 있어요?" 확인하러 온 것뿐, 진짜 사용자 조작 아님) 자체가 매 사이클
+             * "방금 조작 있었음"으로 잡혀서, 할 일이 전혀 없어도 매번 적응형 시간을 전부
+             * 소모하고서야 재웠음(불필요하게 사이클당 최대 적응형시간만큼 더 깨어있었음,
+             * 실사용 중 -mm:ss 타임스탬프 분석으로 발견). first_ever_pairing(이번 세션 이
+             * 노드와 정말 처음 붙는 순간)에만 리셋해서 최초 연결 직후엔 반응시간을 주고,
+             * 그 이후 순수 생존확인 사이클은 리셋 안 해서 할 일 없으면 곧바로 재울 수 있게 함 */
+            if (first_ever_pairing) esp_now_hub_note_user_action();
             /* CAM/Sens는 자체 RTC가 없어서 페어링될 때마다 Cntl 시각을 알려줌 — 이게
              * 없으면 CAM의 시계가 부팅 시각(1970-01-01 근처)에 멈춰있어서 사진 파일명
              * (촬영시각 유닉스 타임스탬프)이 전부 1월 1일로 찍힘(2026-08-01 실기에서 확인) */
@@ -430,9 +452,13 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 페어링 안 된 노드도 테이블엔 있을 수 있어서(발견됨~페어링 사이) find_node로 없으면
          * 조용히 버림 — CAM이 아직 안 붙은 CNTL에도 브로드캐스트할 이유가 없어서 이 경우는
          * 실제로는 거의 안 옴(esp_now_cam.c가 페어링 완료 직후에만 보냄).
-         * ds_cycle_count/ds_total_asleep_sec/ds_rwdt_catch_count는 CAM이 안 보내는 값 —
-         * CAM은 매 사이클 완전 재부팅이라 스스로 누적을 못 하므로, Cntl이 리포트를 받을
-         * 때마다 직접 누적함(2026-08-10) */
+         * ds_cycle_count/ds_rwdt_catch_count는 CAM이 안 보내는 값 — CAM은 매 사이클 완전
+         * 재부팅이라 스스로 누적을 못 하므로, Cntl이 리포트를 받을 때마다 직접 누적함
+         * (2026-08-10). ds_last_actual_sleep_sec은 반대로 누적 안 함(2026-08-10, 사용자
+         * 지시 — "이번 회차에 얼마 잤는지만 알면 됨") — 예전엔 여기서 stats->sleep_interval_sec
+         * (앞으로 잘 예정 시간, 아직 실행 안 됨)을 "이미 잔 시간"인 것처럼 누적하는 버그가
+         * 있었음(실사용 중 "방금 페어링됐는데 벌써 잤다고 나온다"는 지적으로 발견) —
+         * actual_last_sleep_sec(CAM이 RTC로 넘겨준 진짜 직전 수면시간)을 그대로 덮어씀 */
         if (len < (int)sizeof(esp_now_deep_sleep_stats_t)) return;
         const esp_now_deep_sleep_stats_t *stats = (const esp_now_deep_sleep_stats_t *)data;
 
@@ -442,7 +468,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             n->last_seen_ms               = now_ms;
             n->has_deepsleep_stats        = true;
             n->ds_cycle_count++;
-            n->ds_total_asleep_sec       += stats->sleep_interval_sec;
+            n->ds_last_actual_sleep_sec   = stats->actual_last_sleep_sec;
             if (stats->wake_reason == CAM_WAKE_REASON_RWDT) n->ds_rwdt_catch_count++;
             n->ds_last_wake_reason        = stats->wake_reason;
             n->ds_last_awake_uptime_ms    = stats->awake_uptime_ms;

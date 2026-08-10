@@ -200,6 +200,10 @@ static lv_obj_t *s_log_label     = NULL;
 static lv_obj_t *s_power_panel_title = NULL;
 static lv_obj_t *s_power_list        = NULL;  /* 스크롤 컨테이너(s_log_container 대응) */
 static lv_obj_t *s_power_log_label   = NULL;  /* 누적 텍스트(s_log_label 대응) */
+static lv_obj_t   *s_power_log_pause_btn = NULL;
+static lv_obj_t   *s_power_log_pause_lbl = NULL;
+static lv_timer_t *s_power_panel_timer   = NULL;  /* 일시멈춤 단추가 pause/resume(2026-08-10) */
+static bool        s_power_log_paused    = false;
 
 /* ds_cycle_count 하나만 비교하면 됨(2026-08-10) — 매 리포트가 항상 새 사이클이라 Light
  * Sleep 시절처럼 여러 필드를 같이 diff할 필요가 없어짐(단조증가 카운터) */
@@ -207,6 +211,7 @@ typedef struct {
     uint8_t  mac[6];
     bool     used;
     uint32_t last_cycle_count;
+    uint32_t last_sleep_now_send_count;  /* 2026-08-10 — SLEEP_NOW 발신도 별도 줄로(사용자 지시) */
 } power_log_track_t;
 static power_log_track_t s_power_log_track[ESP_NOW_HUB_MAX_NODES];
 static char s_power_log_buf[2048] = "";
@@ -1417,14 +1422,29 @@ static void show_fetch_progress_popup(void)
 /* 목록갱신 버튼 — 예전엔 요청만 보내고 끝이라 응답이 없어도 사용자가 알 방법이
  * 없었음(2026-08-02, 사용자 지적: "아무 짓도 안하는 건지 목록이 없는 건지 모르겠다") —
  * 지금촬영/모두지우기/사진가져오기와 같은 공용 진행팝업+타임아웃 토스트로 통일 */
-static uint32_t s_renew_list_start_ms;
+static uint32_t s_renew_list_last_progress_ms;
+static uint16_t s_renew_list_last_received;
 
+/* 2026-08-10 — "시작부터 총 경과시간" 기준에서 fetch_popup_tick_fn()과 동일한 "마지막 진행
+ * 이후 경과시간"(정체 감지) 기준으로 변경. 딥슬립 웨이크대기+채널동기화+SR 여러 라운드가
+ * 합쳐지면 총 소요시간이 고정예산 하나로는 부족할 수 있는데, 그동안 항목이 계속 들어오고
+ * 있다면(=정체 아님) 조급하게 포기할 이유가 없음 — 실사용 중 "데이터는 항상 오는데 팝업만
+ * 먼저 3007로 포기" 패턴으로 발견 */
 static bool renew_list_tick_fn(lv_obj_t *box)
 {
     (void)box;
     if (sync_photo_list_tick(-1)) return true;
-    if (lv_tick_elaps(s_renew_list_start_ms) > cam_response_timeout_ms()) {
-        ui_log_add_err(UI_ERR_LIST_NORESPONSE, "목록 갱신 요청에 CAM 응답 없음(타임아웃)");
+
+    uint16_t received = 0, total = 0;
+    esp_now_photo_list_get_progress(&received, &total);
+    if (received != s_renew_list_last_received) {
+        s_renew_list_last_received = received;
+        s_renew_list_last_progress_ms = lv_tick_get();
+        return false;
+    }
+    if (lv_tick_elaps(s_renew_list_last_progress_ms) > cam_response_timeout_ms()) {
+        ui_log_add_err(UI_ERR_LIST_NORESPONSE, "목록 갱신 요청에 CAM 응답 없음(정체, %u/%u개)",
+                        (unsigned)received, (unsigned)total);
         return true;
     }
     return false;
@@ -1438,7 +1458,8 @@ static void cb_renew_list(lv_event_t *e)
 
     esp_now_photo_list_request(s_selected_cam_mac);
 
-    s_renew_list_start_ms = lv_tick_get();
+    s_renew_list_last_progress_ms = lv_tick_get();
+    s_renew_list_last_received = 0;
     lv_obj_t *box = show_progress_popup(renew_list_tick_fn);
 
     lv_obj_t *spinner = lv_spinner_create(box);
@@ -1762,6 +1783,21 @@ static void refresh_log_box(lv_timer_t *t)
     lv_obj_scroll_to_y(s_log_container, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
+/* 2026-08-10, 사용자 지시 — 값을 읽는 동안 로그가 계속 밀리면 불편하니 일시멈춤 단추 추가.
+ * 타이머 자체를 pause/resume(lv_timer_pause/resume) — 멈춰있는 동안은 새 줄이 아예 안 쌓임 */
+static void cb_power_log_pause_toggle(lv_event_t *e)
+{
+    (void)e;
+    s_power_log_paused = !s_power_log_paused;
+    if (s_power_log_paused) {
+        if (s_power_panel_timer) lv_timer_pause(s_power_panel_timer);
+        lv_label_set_text(s_power_log_pause_lbl, ui_str(STR_BTN_RESUME));
+    } else {
+        if (s_power_panel_timer) lv_timer_resume(s_power_panel_timer);
+        lv_label_set_text(s_power_log_pause_lbl, ui_str(STR_BTN_PAUSE));
+    }
+}
+
 /* 통계 탭 좌측 절전상태 판넬 갱신(2026-08-09) — 최신값으로 덮어쓰지 않고 로그처럼 한 줄씩
  * 누적(사용자 지시). 값이 실제로 바뀐 경우에만 새 줄 추가(2초 tick마다 찍으면 스팸이라
  * mac별 마지막 값을 기억해서 diff) — 로그박스(s_log_container/refresh_log_box)와 동일한
@@ -1790,11 +1826,38 @@ static void refresh_power_panel(lv_timer_t *t)
                     tr->used = true;
                     memcpy(tr->mac, nodes[i].mac, 6);
                     tr->last_cycle_count = UINT32_MAX;  /* 이 장치의 첫 값은 무조건 한 줄 찍히게 */
+                    tr->last_sleep_now_send_count = nodes[i].sleep_now_send_count;  /* 첫 값은
+                                                                                        과거분이라 안 찍음 */
                     break;
                 }
             }
         }
         if (!tr) continue;  /* 자리 없음 — MAX_NODES 이상은 원래 못 옴 */
+
+        /* 2026-08-10 — SLEEP_NOW 발신도 자체 줄로(사용자 지시, -mm:ss 포함) — ds_cycle_count
+         * 게이트와 독립적으로 검사해야 "보낸 바로 그 순간"에 줄이 찍힘(다음 사이클 리포트까지
+         * 안 기다림) */
+        if (tr->last_sleep_now_send_count != nodes[i].sleep_now_send_count) {
+            tr->last_sleep_now_send_count = nodes[i].sleep_now_send_count;
+            char sn_line[96];
+            uint32_t sn_total_sec = lv_tick_get() / 1000;
+            /* 2026-08-10, 사용자 지시 — "조용"->"Idle"로, 임계값 표시는 제거(더 이상 판단
+             * 근거로 안 씀 — 최초 페어링만 리셋하는 걸로 바뀌어서 매번 다른 임계값 비교가
+             * 큰 의미가 없어짐). #ff0000 ... #로 빨간색(CAM 리포트=검정/기본색과 구분) */
+            lv_snprintf(sn_line, sizeof(sn_line), "#ff0000 %s: SLEEP_NOW Idle%ums -%02lu:%02lu#",
+                        nodes[i].name, (unsigned)nodes[i].last_sleep_now_elapsed_ms,
+                        (unsigned long)(sn_total_sec / 60), (unsigned long)(sn_total_sec % 60));
+            size_t sn_cur_len  = strlen(s_power_log_buf);
+            size_t sn_line_len = strlen(sn_line);
+            if (sn_cur_len + sn_line_len + 2 > sizeof(s_power_log_buf)) {
+                size_t keep_from = sizeof(s_power_log_buf) / 2;
+                memmove(s_power_log_buf, s_power_log_buf + keep_from, sn_cur_len - keep_from + 1);
+            }
+            strcat(s_power_log_buf, sn_line);
+            strcat(s_power_log_buf, "\n");
+            appended = true;
+        }
+
         /* ds_cycle_count는 Cntl이 리포트를 받을 때마다 직접 증가시키는 단조증가 카운터라
          * (esp_now_hub.c) 이것 하나만 비교하면 "새 보고서가 왔는가"를 정확히 알 수 있음
          * (2026-08-10, Light Sleep 시절엔 count=0이 계속 이어지는 상태를 여러 필드로 힘겹게
@@ -1809,13 +1872,20 @@ static void refresh_power_panel(lv_timer_t *t)
             case CAM_WAKE_REASON_POWERON: wake_str = ui_str(STR_WAKE_REASON_POWERON); break;
             default:                      wake_str = ui_str(STR_WAKE_REASON_OTHER); break;
         }
-        char line[128];
+        char line[144];
         lv_snprintf(line, sizeof(line), ui_str(STR_DEEPSLEEP_LINE_FMT), nodes[i].name,
                     (unsigned long)nodes[i].ds_cycle_count, wake_str,
-                    (unsigned long)(nodes[i].ds_last_awake_uptime_ms / 1000),
+                    (unsigned long)nodes[i].ds_last_awake_uptime_ms,
                     (unsigned long)nodes[i].ds_last_sleep_interval_sec,
-                    (unsigned long)nodes[i].ds_total_asleep_sec,
+                    (unsigned long)nodes[i].ds_last_actual_sleep_sec,
                     (unsigned long)nodes[i].ds_rwdt_catch_count);
+        /* 2026-08-10 — 이 줄이 실제로 몇 시(mm:ss, Cntl 부팅 후 경과) 찍혔는지 붙여서, 줄 사이
+         * 실제 간격을 육안으로 바로 잴 수 있게 함(사용자 지시 — "20초마다 뜬다" 같은 관찰을
+         * 스톱워치 없이 확인하기 위함) */
+        uint32_t total_sec = lv_tick_get() / 1000;
+        size_t line_len_now = strlen(line);
+        lv_snprintf(line + line_len_now, sizeof(line) - line_len_now, " -%02lu:%02lu",
+                    (unsigned long)(total_sec / 60), (unsigned long)(total_sec % 60));
 
         size_t cur_len  = strlen(s_power_log_buf);
         size_t line_len = strlen(line);
@@ -2441,23 +2511,38 @@ void ui_init(void)
 
     s_dashboard_timer = lv_timer_create(refresh_dashboard, 1000, NULL);
 
-    /* 좌(절전상태)/우(기존 로그) 2판넬 가로 배치(2026-08-09, 사용자 지시) */
+    /* 위(절전상태)/아래(기존 로그) 2판넬 세로 배치(2026-08-10, 사용자 지시로 가로->세로 변경 —
+     * 절전상태를 더 눈에 띄게 위로) */
     lv_obj_t *stats_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_STATISTICS));
-    lv_obj_set_flex_flow(stats_page, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_flow(stats_page, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(stats_page, 4, 0);
-    lv_obj_set_style_pad_column(stats_page, 4, 0);
+    lv_obj_set_style_pad_row(stats_page, 4, 0);
     lv_obj_set_style_bg_color(stats_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
     lv_obj_set_style_bg_opa(stats_page, LV_OPA_COVER, 0);
 
     lv_obj_t *power_box = lv_obj_create(stats_page);
-    lv_obj_set_size(power_box, 0, LV_PCT(100));
-    lv_obj_set_flex_grow(power_box, 1);
+    lv_obj_set_size(power_box, LV_PCT(100), 320);  /* 2026-08-10, 사용자 지시 — 고정 320px */
     lv_obj_set_flex_flow(power_box, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(power_box, 6, 0);
 
-    s_power_panel_title = lv_label_create(power_box);
+    /* 제목 + 일시멈춤 단추를 한 행에(2026-08-10, 사용자 지시 — 값 읽는 동안 로그가 계속
+     * 밀리지 않게 멈출 수 있게) */
+    lv_obj_t *power_title_row = lv_obj_create(power_box);
+    lv_obj_set_size(power_title_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(power_title_row, 0, 0);
+    lv_obj_set_style_pad_all(power_title_row, 0, 0);
+    lv_obj_set_flex_flow(power_title_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(power_title_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    s_power_panel_title = lv_label_create(power_title_row);
     lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
     lv_obj_set_style_text_font(s_power_panel_title, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_power_log_pause_btn = lv_button_create(power_title_row);
+    lv_obj_add_event_cb(s_power_log_pause_btn, cb_power_log_pause_toggle, LV_EVENT_CLICKED, NULL);
+    s_power_log_pause_lbl = lv_label_create(s_power_log_pause_btn);
+    lv_label_set_text(s_power_log_pause_lbl, ui_str(STR_BTN_PAUSE));
+    lv_obj_set_style_text_font(s_power_log_pause_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* s_log_container와 동일 구조 — 스크롤 컨테이너 + 폭 100% wrap 라벨 하나, 텍스트를
      * 통째로 갈아끼우고 맨 아래로 자동 스크롤(2026-08-09, 로그처럼 누적 지시) */
@@ -2473,12 +2558,15 @@ void ui_init(void)
     lv_label_set_long_mode(s_power_log_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_power_log_label, LV_PCT(100));
     lv_obj_set_style_text_font(s_power_log_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_recolor(s_power_log_label, true);  /* 2026-08-10 — C/S 줄을 색으로 구분(사용자
+                                                        지시, "로그가 지저분해서 안 보인다") —
+                                                        #RRGGBB text# 인라인 색상 문법 활성화 */
     lv_label_set_text(s_power_log_label, "");
 
-    lv_timer_create(refresh_power_panel, 2000, NULL);
+    s_power_panel_timer = lv_timer_create(refresh_power_panel, 2000, NULL);
 
     s_log_container = lv_obj_create(stats_page);
-    lv_obj_set_size(s_log_container, 0, LV_PCT(100));
+    lv_obj_set_size(s_log_container, LV_PCT(100), 0);
     lv_obj_set_flex_grow(s_log_container, 1);
     lv_obj_set_scroll_dir(s_log_container, LV_DIR_VER);
     lv_obj_set_style_pad_all(s_log_container, 6, 0);

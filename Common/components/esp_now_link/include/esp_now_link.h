@@ -125,14 +125,19 @@ typedef enum {
                                               * 조용하면(그리고 페어링 직후 루틴 설정 전달까지
                                               * 끝났으면) 이걸 보냄 — CAM은 받으면 남은 유휴여유
                                               * 타이머를 기다리지 않고 1초 이내로 즉시
-                                              * esp_deep_sleep_start()로 진입. 유실돼도 CAM의
-                                              * 자체 유휴여유 타이머(이제 안전장치, 값 상향됨)가
-                                              * 결국 재워주므로 무해 — 페이로드 없음, ACK 없음
-                                              * (CHANNEL_PING과 같은 성격, 안 와도 상태가 안
-                                              * 꼬임) */
+                                              * esp_deep_sleep_start()로 진입. */
+    ESP_NOW_MSG_SLEEP_NOW_ACK = 35,          /* CAM -> Cntl: SLEEP_NOW 수신 확인(2026-08-10 —
+                                              * "chunk는 SR, 나머지는 reliable stack" 원칙에 따라
+                                              * fire-and-forget에서 전환. Cntl은 이제
+                                              * esp_now_tx(esp_now_reliable_request)로 보내고 이
+                                              * ACK을 기다림 — 유실 시 재시도, 매 사이클 진짜로
+                                              * 전달됐는지 확인 가능해짐(격주기로 유실되던 문제
+                                              * 진단 목적) */
 } esp_now_msg_type_t;
 
-/* ESP_NOW_MSG_SLEEP_NOW 페이로드 — 특별한 정보 없이 신호 자체가 전부 */
+/* ESP_NOW_MSG_SLEEP_NOW 페이로드 — 특별한 정보 없이 신호 자체가 전부.
+ * ESP_NOW_MSG_SLEEP_NOW_ACK도 이 구조체를 msg_type만 바꿔 그대로 재사용(2026-08-10, 이
+ * 코드베이스의 기존 관례 — PHOTO_DONE_ACK 등과 동일 원칙) */
 typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
@@ -357,12 +362,22 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
+    uint16_t index;           /* 이번 목록 전송에서 이 항목의 위치(0..count-1) — 2026-08-10,
+                                * SR 방식 도입. 유실분을 정확히 콕 집어 재전송하려면 순번이
+                                * 필요함(청크의 chunk_idx와 같은 역할) */
     uint32_t file_id;        /* CAM의 M/T 공용 순번 — 위 설명 참고 */
     uint8_t  kind;            /* cam_capture_kind_t: 'M' 또는 'T' */
     uint32_t capture_time;   /* 파일의 FAT 수정시각(유닉스 타임스탬프) — 촬영시각 표시용 */
     uint32_t file_size;
 } esp_now_photo_list_entry_t;
 
+/* 2026-08-10 — 목록도 청크와 똑같이 "1요청 -> N개 항목 -> 1완료" 패턴인데, 그동안 개별
+ * LIST_ENTRY는 ACK/재전송 없는 단발 전송이었고 신뢰성은 "개수 안 맞으면 통째로 다시 요청"
+ * (최대 2회)이라는 훨씬 조악한 방식뿐이었음 — 실사용 중 3005/3007 동시발생으로 발견(바깥쪽
+ * 팝업 타임아웃 1배 예산에, 안쪽 재요청 루프가 최대 3배까지 써서 서로 안 맞물림).
+ * "chunk는 SR, 나머지는 reliable 요청-응답"이라는 대원칙에 따르면 목록도 대량 다중항목
+ * 전송이라 청크와 같은 카테고리 — chunk_nack_t와 동일한 missing_idx 방식을 그대로 적용해서
+ * LIST_DONE_ACK가 빠진 인덱스만 콕 집어 알려주고, "통째로 다시" 재요청 루프 자체를 없앰 */
 typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
@@ -371,9 +386,13 @@ typedef struct __attribute__((packed)) {
                              * 추가(2026-08-01). 0이면 CAM이 조회 실패했다는 뜻(구버전 CAM과도
                              * 호환 — 안 채워진 필드는 그냥 0으로 옴) */
     uint32_t sd_used_kb;   /* 사용 중인 용량(KB) */
+    uint16_t missing_count;  /* LIST_DONE_ACK에서만 의미 있음(0..ESP_NOW_PHOTO_NACK_MAX_INDICES) —
+                                LIST_DONE 쪽(CAM->Cntl)은 항상 0, 무시 */
+    uint16_t missing_idx[ESP_NOW_PHOTO_NACK_MAX_INDICES];
 } esp_now_photo_list_done_t;
 /* ESP_NOW_MSG_PHOTO_LIST_DONE_ACK(2026-08-05, Layer 1)도 이 구조체를 msg_type만 바꿔서
- * 그대로 재사용 — 필드 의미가 이미 동일함(count 등), "항상 보낸다"만 새로운 규칙 */
+ * 그대로 재사용 — 필드 의미가 이미 동일함(count 등), "항상 보낸다"만 새로운 규칙.
+ * missing_idx 추가(2026-08-10)로 청크의 PHOTO_DONE_ACK와 완전히 같은 패턴이 됨 */
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;
@@ -490,5 +509,11 @@ typedef struct __attribute__((packed)) {
     uint8_t  msg_type;
     uint8_t  wake_reason;           /* cam_wake_reason_t */
     uint32_t awake_uptime_ms;       /* 이번 사이클 기상~페어링 완료까지 경과시간 */
-    uint32_t sleep_interval_sec;    /* 이번에 적용 중인 딥슬립 주기(=response_interval_sec) */
+    uint32_t sleep_interval_sec;    /* 이번에 적용 중인 딥슬립 주기(=response_interval_sec) —
+                                        앞으로 잘 예정 시간(설정값), 실제로 잔 시간이 아님 */
+    uint32_t actual_last_sleep_sec; /* 2026-08-10 — 직전에 실제로 잤던 시간(RTC_DATA_ATTR로
+                                        딥슬립 경계를 넘겨 전달, cam_node.c 참고). wake_reason이
+                                        TIMER가 아니면(RWDT/POWERON) 0 — 실제로 안 잤으므로.
+                                        Cntl은 이 값을 누적하지 않고 사이클마다 그대로 보여줌
+                                        (사용자 지시 — "이번 회차에 얼마 잤는지만 알면 됨") */
 } esp_now_deep_sleep_stats_t;
