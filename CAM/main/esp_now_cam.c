@@ -81,6 +81,9 @@ typedef struct {
 
 static QueueHandle_t s_photo_request_queue = NULL;
 static volatile bool s_list_request_pending = false;  /* recv_cb 중복 LIST_REQUEST 억제용 */
+static volatile bool s_list_abort_requested = false;  /* 2026-08-11 — Cntl이 PHOTO_LIST_ERROR를
+                                                           보내면 세팅, send_photo_list()가
+                                                           다음 배치 보내기 전에 확인하고 중단 */
 
 /* 청크 신뢰성 재설계(2026-08-03) — "매 청크마다 로컬 라디오의 물리계층 ACK를 기다렸다가
  * 다음으로 넘어가는" 예전 방식을 완전히 버림. 그 "ACK"는 상대(Cntl) 애플리케이션이 실제로
@@ -487,92 +490,88 @@ static bool send_one_photo_sr(uint32_t file_id, uint32_t my_generation)
     return true;
 }
 
-/* 목록 항목 SR 재전송(2026-08-10) — resend_chunks()와 동일 원칙: 통째로 다시 보내는 대신
- * LIST_DONE_ACK가 콕 집은 index만 다시 조회해서 보냄. ids[]는 send_photo_list()가 이번
- * 요청에 쓴 것과 동일한 배열(재조회 없이 그대로 재사용 — SD 상태가 전송 도중 바뀔 일은
- * 없다고 가정, 청크가 열어둔 파일 핸들을 그대로 쓰는 것과 같은 전제) */
-static void resend_list_entries(const uint32_t *ids, int count, const esp_now_photo_list_done_t *ack)
-{
-    esp_now_photo_list_entry_t entry = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_LIST_ENTRY };
-    for (uint16_t i = 0; i < ack->missing_count; i++) {
-        uint16_t idx;
-        memcpy(&idx, &ack->missing_idx[i], sizeof(idx));  /* packed 멤버 주소 정렬 문제 회피(resend_chunks와 동일) */
-        if (idx >= count) continue;
-        uint32_t size = 0, capture_time = 0;
-        char kind = 0;
-        if (cam_storage_stat(ids[idx], &size, &kind, &capture_time) != ESP_OK) continue;
-        entry.index        = idx;
-        entry.file_id      = ids[idx];
-        entry.kind         = (uint8_t)kind;
-        entry.capture_time = capture_time;
-        entry.file_size    = size;
-        esp_now_send(s_hub_mac, (const uint8_t *)&entry, sizeof(entry));
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
-    ESP_LOGI(TAG, "목록 NACK 재전송 완료: %u개", (unsigned)ack->missing_count);
-}
-
-/* 목록 요청 — 파일 내용 전송 없이 file_id/크기만 하나씩 알려줌. 최대 500장까지 있을 수
- * 있는 순회+개별 send()라 recv_cb(WiFi 태스크)에서 바로 안 하고 여기서 처리.
- * 2026-08-10 SR 재설계 — 예전엔 "개수 안 맞으면 Cntl이 통째로 재요청"이었는데, 이게 청크와
- * 달리 신뢰성 계층이 없는 방치된 구멍이었음(실사용 중 3005/3007 동시발생으로 발견 — Cntl의
- * 팝업 타임아웃 예산과 이 통째재요청 루프의 실제 소요시간이 안 맞물림). 청크와 동일하게
- * LIST_DONE_ACK가 빠진 index만 콕 집어 알려주면 그것만 재전송하는 방식으로 교체 */
+/* 목록 요청 — 파일 내용 전송 없이 file_id/크기만 알려줌. 최대 500장 처리라
+ * recv_cb(WiFi 태스크)에서 바로 안 하고 여기서 처리.
+ * 2026-08-11 전면 재설계(사용자 지시) — 예전(2026-08-10 SR 방식: 파일당 1메시지 unreliable
+ * 스트리밍 + LIST_DONE_ACK 누락 인덱스 재전송)도 실사용 중 3005/3007 동시발생으로 또 문제가
+ * 발견됨(자동목록갱신은 항상 성공하는데 수동은 실패 — 조사 중 SD 스캔이 파일마다 stat()을
+ * 두 번씩 하던 비효율과, 스트리밍이 애초에 unreliable이라 유실 자체가 사후에만 발견되는
+ * 구조적 문제가 같이 드러남). 이번엔 "reliable로 보내면 사후 누락복구 자체가 필요 없다"는
+ * 방향 — 순서: 개수 먼저(LIST_COUNT) -> 항목들을 배치로 묶어 reliable 전송(LIST_BATCH) ->
+ * 완료(LIST_DONE). 개수 대조는 Cntl이 하고, 어긋나면 PHOTO_LIST_ERROR로 알려줌
+ * (esp_now_photo.c 참고) — 받으면 s_list_abort_requested로 다음 배치 전에 중단 */
 static void send_photo_list(void)
 {
-    uint32_t ids[CAM_STORAGE_MAX_FILES];
-    int count = cam_storage_list(PHOTO_REQUEST_MODE_ALL, 0, ids, CAM_STORAGE_MAX_FILES);
-    ESP_LOGI(TAG, "PHOTO_LIST_REQUEST -> %d개 항목 전송", count);
-
-    esp_now_photo_list_entry_t entry = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_LIST_ENTRY };
-    int sent = 0;
-    for (int i = 0; i < count && s_paired; i++) {
-        uint32_t size = 0, capture_time = 0;
-        char kind = 0;
-        if (cam_storage_stat(ids[i], &size, &kind, &capture_time) != ESP_OK) continue;
-        entry.index        = (uint16_t)i;
-        entry.file_id      = ids[i];
-        entry.kind         = (uint8_t)kind;
-        entry.capture_time = capture_time;
-        entry.file_size    = size;
-        esp_now_send(s_hub_mac, (const uint8_t *)&entry, sizeof(entry));
-        sent++;
-        vTaskDelay(pdMS_TO_TICKS(5));  /* CHUNK 전송과 동일한 이유 — ESP-NOW 큐 과부하 방지 */
-    }
+    static esp_now_photo_list_item_t items[CAM_STORAGE_MAX_FILES];  /* static — 500*15=7500B,
+                                                                        스택 회피(기존 원칙) */
+    int count = cam_storage_list_full(items, CAM_STORAGE_MAX_FILES);
+    if (count < 0) count = 0;
+    ESP_LOGI(TAG, "PHOTO_LIST_REQUEST -> %d개 항목(reliable, 배치 %d개씩)",
+             count, ESP_NOW_PHOTO_LIST_BATCH_MAX);
 
     uint32_t sd_total_kb = 0, sd_used_kb = 0;
     cam_storage_get_sd_usage(&sd_total_kb, &sd_used_kb);  /* 실패해도 0/0으로 채워져서 그대로 보냄 */
 
-    esp_now_photo_list_done_t done = {
-        .version     = ESP_NOW_LINK_VERSION,
-        .msg_type    = ESP_NOW_MSG_PHOTO_LIST_DONE,
-        .count       = (uint16_t)sent,
-        .sd_total_kb = sd_total_kb,
-        .sd_used_kb  = sd_used_kb,
+    /* 1) 개수 먼저 — Cntl이 이후 배치 수신 중 진행률/최종 대조 기준으로 씀 */
+    esp_now_photo_list_count_t count_msg = {
+        .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_LIST_COUNT,
+        .count = (uint16_t)count, .sd_total_kb = sd_total_kb, .sd_used_kb = sd_used_kb,
     };
-    static const uint8_t s_list_done_ack_types[] = { ESP_NOW_MSG_PHOTO_LIST_DONE_ACK };
-    static esp_now_photo_list_done_t ack;  /* static — 800B+ 구조체 스택 회피(기존 원칙) */
-
-    for (int round = 0; round < MAX_NACK_ROUNDS; round++) {
-        size_t reply_len = 0;
-        esp_err_t err = esp_now_reliable_request(s_hub_mac, &done, sizeof(done),
-                                                  s_list_done_ack_types, 1,
-                                                  800, 3,
-                                                  &ack, sizeof(ack), &reply_len);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "PHOTO_LIST_DONE_ACK 무응답(라운드 %d) — 판단 보류", round + 1);
-            return;
-        }
-        esp_now_channelsync_notify_alive();  /* 위 헤더 설명 참고 */
-        if (ack.missing_count == 0) {
-            ESP_LOGI(TAG, "PHOTO_LIST_DONE_ACK 완료 확인(%d개, SD %u/%uKB, 라운드 %d)",
-                     sent, (unsigned)sd_used_kb, (unsigned)sd_total_kb, round + 1);
-            return;
-        }
-        ESP_LOGI(TAG, "LIST_DONE_ACK: %u개 누락 — 재전송(라운드 %d/%d)", (unsigned)ack.missing_count, round + 1, MAX_NACK_ROUNDS);
-        resend_list_entries(ids, count, &ack);
+    static const uint8_t s_count_ack_types[] = { ESP_NOW_MSG_PHOTO_LIST_COUNT_ACK };
+    static esp_now_photo_list_count_t count_ack;
+    esp_err_t err = esp_now_reliable_request(s_hub_mac, &count_msg, sizeof(count_msg),
+                                              s_count_ack_types, 1, 800, 3,
+                                              &count_ack, sizeof(count_ack), NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "PHOTO_LIST_COUNT_ACK 무응답 — 목록 전송 포기");
+        return;
     }
-    ESP_LOGW(TAG, "목록 재전송 라운드 소진");
+    esp_now_channelsync_notify_alive();
+
+    /* 2) 항목들을 배치로 나눠서 reliable 전송 */
+    static const uint8_t s_batch_ack_types[] = { ESP_NOW_MSG_PHOTO_LIST_BATCH_ACK };
+    static esp_now_photo_list_batch_t batch;      /* static — 963B, 스택 회피 */
+    static esp_now_photo_list_batch_t batch_ack;
+    int sent = 0;
+    while (sent < count && s_paired && !s_list_abort_requested) {
+        int n = count - sent;
+        if (n > ESP_NOW_PHOTO_LIST_BATCH_MAX) n = ESP_NOW_PHOTO_LIST_BATCH_MAX;
+        batch.version     = ESP_NOW_LINK_VERSION;
+        batch.msg_type    = ESP_NOW_MSG_PHOTO_LIST_BATCH;
+        batch.entry_count = (uint8_t)n;
+        memcpy(batch.entries, &items[sent], (size_t)n * sizeof(esp_now_photo_list_item_t));
+        size_t send_len = 3 + (size_t)n * sizeof(esp_now_photo_list_item_t);  /* 채운 만큼만
+                                                                                   보냄(대역폭 절약) */
+        err = esp_now_reliable_request(s_hub_mac, &batch, send_len,
+                                        s_batch_ack_types, 1, 800, 3,
+                                        &batch_ack, sizeof(batch_ack), NULL);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "PHOTO_LIST_BATCH_ACK 무응답(%d/%d 전송됨) — 목록 전송 포기", sent, count);
+            return;
+        }
+        sent += n;
+        esp_now_channelsync_notify_alive();
+    }
+    if (s_list_abort_requested) {
+        ESP_LOGW(TAG, "PHOTO_LIST_ERROR 수신으로 목록 전송 중단(%d/%d)", sent, count);
+        s_list_abort_requested = false;
+        return;
+    }
+    if (!s_paired) return;
+
+    /* 3) 완료 신호 — 더 이상 개수/누락 정보 안 실음(개수는 이미 1번에서 옴, 배치 자체가
+     * reliable이라 누락 추적 자체가 불필요) */
+    esp_now_photo_list_done_t done = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_LIST_DONE };
+    static const uint8_t s_done_ack_types[] = { ESP_NOW_MSG_PHOTO_LIST_DONE_ACK };
+    static esp_now_photo_list_done_t done_ack;
+    err = esp_now_reliable_request(s_hub_mac, &done, sizeof(done),
+                                    s_done_ack_types, 1, 800, 3,
+                                    &done_ack, sizeof(done_ack), NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "PHOTO_LIST_DONE_ACK 무응답 — Cntl 쪽 판단(개수 대조 타임아웃)에 맡김");
+        return;
+    }
+    ESP_LOGI(TAG, "목록 전송 완료(%d개, SD %u/%uKB)", sent, (unsigned)sd_used_kb, (unsigned)sd_total_kb);
 }
 
 /* 처리량 벤치마크(2026-08-04) — 프로토콜 신뢰성 레이어를 만들기 전에, 지금 이 채널
@@ -947,6 +946,19 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         return;
     }
 
+    if (msg_type == ESP_NOW_MSG_PHOTO_LIST_ERROR) {
+        /* 2026-08-11 — Cntl이 목록 수신 중 개수 불일치를 판정하면 보냄(esp_now_photo.c 참고).
+         * send_photo_list()가 다음 배치 전송 전에 이 플래그를 확인하고 중단함(위 함수 참고).
+         * 별도 상태/캐시를 갖고 있지 않은 설계(배치가 reliable이라 재조회 캐시가 애초에
+         * 불필요)라 여기서 더 정리할 메모리는 없음 — 플래그 세팅 + ACK 회신이 전부 */
+        if (!s_paired || len < (int)sizeof(esp_now_photo_list_done_t)) return;
+        s_list_abort_requested = true;
+        ESP_LOGW(TAG, "PHOTO_LIST_ERROR 수신 — 목록 전송 중단 요청됨");
+        esp_now_photo_list_done_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_LIST_ERROR_ACK };
+        esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
+        return;
+    }
+
     if (msg_type == ESP_NOW_MSG_CAM_CONFIG_SET) {
         /* 2026-08-08 — 촬영주기(배터리/SD)+응답성(연결성/절전) 원격 설정. recv_cb(ESP-NOW
          * 드라이버 태스크)에서 바로 처리 — SD 파일 쓰기 하나뿐이라 photo_transfer_task
@@ -1131,3 +1143,14 @@ void esp_now_cam_init(void)
 
 const char *esp_now_cam_get_name(void) { return s_name; }
 bool esp_now_cam_is_paired(void) { return s_paired; }
+
+/* 2026-08-11 — 예전의 70초 자율취침 폴백을 대체(사용자 지시). fire-and-forget으로 충분 —
+ * 유실돼도 cam_node_wake_window_done()이 다음 주기에 또 보냄(SLEEP_NOW_ACK 같은 확인
+ * 응답 체계는 불필요, 반복 자체가 재시도 역할을 함) */
+void esp_now_cam_send_sleep_now_request(void)
+{
+    if (!s_paired) return;
+    esp_now_sleep_now_t req = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SLEEP_NOW_REQUEST };
+    esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&req, sizeof(req));
+    ESP_LOGI(TAG, "SLEEP_NOW_REQUEST 전송(재요청): %s", esp_err_to_name(err));
+}

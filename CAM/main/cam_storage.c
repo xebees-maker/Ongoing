@@ -77,6 +77,9 @@ typedef struct {
     uint32_t file_id;
     char     kind;
     time_t   mtime;   /* FAT 수정시각 — 정렬/필터/순환삭제/다음 순번 결정 전부 이 기준 */
+    uint32_t size;    /* 2026-08-11 추가 — scan_all_files()가 어차피 stat()을 이미 하므로
+                        * st_size를 공짜로 같이 담아둠(목록 전송이 파일마다 또 stat() 안
+                        * 해도 되게, cam_storage_list_full() 참고) */
 } file_entry_t;
 
 /* 파일명 길이 = kind(1) + 순번(CAM_STORAGE_SEQ_DIGITS) + ".jpg"(4) */
@@ -115,6 +118,7 @@ static int scan_all_files(file_entry_t *entries, int max)
         entries[count].file_id = seq;
         entries[count].kind    = kind;
         entries[count].mtime   = st.st_mtime;
+        entries[count].size    = (uint32_t)st.st_size;
         count++;
     }
     closedir(dir);
@@ -267,6 +271,25 @@ int cam_storage_list(photo_request_mode_t mode, uint32_t param, uint32_t *out_fi
     for (int i = 0; i < total && count < max; i++) {
         if (mode == PHOTO_REQUEST_MODE_RECENT_HOURS && all[i].mtime < cutoff) continue;
         out_file_ids[count++] = all[i].file_id;
+    }
+    return count;
+}
+
+int cam_storage_list_full(esp_now_photo_list_item_t *out_items, int max)
+{
+    file_entry_t all[CAM_STORAGE_MAX_FILES];
+    int total = scan_all_files(all, CAM_STORAGE_MAX_FILES);
+    if (total < 0) return -1;
+    qsort(all, total, sizeof(all[0]), cmp_by_file_id);  /* 오래된 것부터 */
+
+    int count = 0;
+    for (int i = 0; i < total && count < max; i++) {
+        out_items[count].index        = (uint16_t)count;
+        out_items[count].file_id      = all[i].file_id;
+        out_items[count].kind         = (uint8_t)all[i].kind;
+        out_items[count].capture_time = (uint32_t)all[i].mtime;
+        out_items[count].file_size    = all[i].size;
+        count++;
     }
     return count;
 }

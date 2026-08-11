@@ -33,12 +33,16 @@ static lv_obj_t *s_btn_ko = NULL;
 static lv_obj_t *s_btn_en = NULL;
 
 /* 로고아이콘 정상/경고 두 상태 — 확인 안 한 실패(메모리/통신)가 하나라도 있으면 경고
- * 아이콘(빨간 바탕+노란 느낌표)으로 바뀜(2026-08-01, 사용자 지시). 토스트는 몇 초 뒤
- * 사라지지만 이 아이콘은 세션 내내(재부팅 전까지) 남아있어서 "한 번이라도 실패가
- * 있었다"를 계속 알려줌 */
+ * 아이콘으로 바뀜(2026-08-01, 사용자 지시). 토스트는 몇 초 뒤 사라지지만 이 아이콘은
+ * 세션 내내(재부팅 전까지) 남아있어서 "한 번이라도 실패가 있었다"를 계속 알려줌.
+ * 2026-08-11, 사용자 지시로 에러/워닝 두 심각도로 분리 — 에러=빨간 느낌표(확인해도
+ * 아이콘 유지, 재부팅 전까지 안 없어짐), 워닝=기존 노란 느낌표(팝업으로 확인하면
+ * 그 즉시 아이콘 원상복구). 둘 다 활성이면 더 심각한 에러(빨강)가 우선 — 아이콘 색은
+ * update_logo_warning_display()에서 매번 다시 계산 */
 static lv_obj_t *s_logo_icon    = NULL;
 static lv_obj_t *s_logo_warning = NULL;
 static bool      s_error_active = false;
+static bool      s_warn_active  = false;
 
 /* 상단 에러 토스트 — 진행팝업(create_modal)과 달리 배경을 안 가리고 입력도 안 막음,
  * 몇 초 뒤 자동으로 없어짐 */
@@ -147,16 +151,27 @@ static lv_coord_t s_action_btn_width = 0;
 static const uint32_t s_capture_interval_values[]  = { 0, 1800, 3600, 10800, 36000 };
 /* 2026-08-10, CAM Deep Sleep 전환 — 이 값이 곧 딥슬립 사이클 길이가 되므로 절전 정도가
  * 극단적으로 갈리는 5단계로 재정의(즉시/빠름/균형/절전/최대절전). 각 값의 의미는
- * s_response_help_texts(아래)와 사용자 확인된 표 그대로 — 반드시 같이 바꿀 것 */
-static const uint32_t s_response_interval_values[] = { 1, 3, 10, 30, 1800 };
-/* 적응형 반응시간(2026-08-10) — 10초/30초/1분. STR_OPT_ADAPTIVE_RESPONSE_LIST 순서와
- * 반드시 같이 맞출 것 */
-static const uint32_t s_adaptive_response_values[] = { 10, 30, 60 };
+ * s_response_help_texts(아래)와 사용자 확인된 표 그대로 — 반드시 같이 바꿀 것.
+ * 2026-08-11, 사용자 지시로 첫 단계를 1(1초마다 반복 취침)에서 0(센티널 — "아예 안 재움")
+ * 으로 정정 — "즉시" 등급은 원래부터 짧은 주기로 반복 취침한다는 뜻이 아니라 딥슬립
+ * 자체를 안 한다는 의도였음(오해로 1초 리터럴 값이 들어가 있었음). 0이면 CNTL은
+ * SLEEP_NOW를 아예 안 보내고(esp_now_hub.c try_send_sleep_now), CAM도 재요청 없이 그냥
+ * 계속 깨있음(cam_node.c cam_node_wake_window_done) */
+static const uint32_t s_response_interval_values[] = { 0, 3, 10, 30, 1800 };
+/* 적응형 반응시간(2026-08-10) — 10초/30초/1분/5분(2026-08-11, 사용자 지시로 5분 추가).
+ * STR_OPT_ADAPTIVE_RESPONSE_LIST 순서와 반드시 같이 맞출 것 */
+static const uint32_t s_adaptive_response_values[] = { 10, 30, 60, 300 };
 
 static int find_value_index(const uint32_t *values, int count, uint32_t v)
 {
     for (int i = 0; i < count; i++) if (values[i] == v) return i;
-    return 0;
+    /* 2026-08-11 버그수정 — 예전엔 못 찾으면 0을 반환했는데, 호출부(s_*_applied_idx)는
+     * "-1 = 아직 모름/적용된 적 없음"을 이미 그 의미로 쓰고 있었음(선언부 주석 참고).
+     * 0을 반환하면 "못 찾음"과 "인덱스 0이 진짜 적용된 값"이 구분이 안 돼서, 오늘
+     * s_response_interval_values의 첫 값을 1->0으로 바꾼 뒤 예전에 저장된 값(1)이 새
+     * 배열에 없어 못 찾았는데도 우연히 인덱스 0("즉시")과 같은 값으로 취급돼 Apply
+     * 버튼이 처음부터 비활성 상태로 잘못 잠겨있었음(실사용 중 발견) */
+    return -1;
 }
 
 /* 대시보드 썸네일(판넬) 디코드 버퍼 — 목표 해상도가 고정(320x240)이라 매번 free+새로
@@ -176,7 +191,7 @@ static lv_obj_t   *s_capture_stage_label[3];
 
 /* CAM SD카드 사진 목록(내용 없이 file_id+크기만) — 탭하면 그 사진을 fetch_by_id로 받아서
  * 플레이스홀더에 표시, 삭제 버튼은 확인 팝업 거쳐서 삭제 */
-static esp_now_photo_list_item_t s_current_list[ESP_NOW_PHOTO_LIST_MAX];
+static esp_now_photo_list_view_item_t s_current_list[ESP_NOW_PHOTO_LIST_MAX];
 static int                        s_current_list_count = 0;
 
 /* 선택 상태의 진짜 모델은 file_id(s_selected_file_id) — s_selected_row는 그 모델을 지금
@@ -192,6 +207,8 @@ static bool       s_has_selected_file_id = false;
  * 쌓인 로그를 화면에서 직접 보는 용도로 벤더 데모(analytics 위젯) 대신 넣음 */
 static lv_obj_t *s_log_container = NULL;
 static lv_obj_t *s_log_label     = NULL;
+static lv_obj_t *s_log_panel_title = NULL;  /* 2026-08-11 — 스크롤 안 되는 고정 제목 행, 페이지
+                                                스크롤을 잡기 위한 영역. refresh_lang_texts에서 갱신 */
 
 /* 통계 탭 좌측 절전상태 판넬 — CAM의 Deep Sleep 사이클 통계(ESP_NOW_MSG_DEEP_SLEEP_STATS,
  * 2026-08-10 Light Sleep 폐기 후 개편)를 로그처럼 한 줄씩 누적(사용자 지시: 최신값으로
@@ -235,12 +252,14 @@ static void resume_bg_timers(void)
 }
 
 /* ════════════════════════════════════════════════════════════
- * 에러 토스트 + 로고 경고 아이콘 — 메모리/통신 실패를 로그(통계 탭)에만 남기지 않고
+ * 토스트 + 로고 경고 아이콘 — 메모리/통신 실패를 로그(통계 탭)에만 남기지 않고
  * 화면에 바로 보여주기 위함(2026-08-01, 사용자 지시: "네 코드가 에러처리가 없어서
- * 지금까지 헤멘거잖아"). ui_log_add_err()로 남긴 실패가 있으면 200ms 폴링 타이머가
- * 잡아서 토스트로 띄우고, 로고를 경고 아이콘으로 바꿈.
+ * 지금까지 헤멘거잖아"). ui_log_add_err()/ui_log_add_warn()으로 남긴 게 있으면 200ms
+ * 폴링 타이머가 잡아서 토스트로 띄우고, 로고를 경고 아이콘으로 바꿈.
+ * 2026-08-11, 사용자 지시로 에러/워닝 색 분리(빨강/노랑) — bg_color를 매개변수로 받게
+ * 일반화(예전 show_error_toast, 이름도 변경)
  * ════════════════════════════════════════════════════════════ */
-static void show_error_toast(const char *msg)
+static void show_toast(const char *msg, lv_color_t bg_color)
 {
     if (s_toast) {
         lv_obj_delete(s_toast);
@@ -249,7 +268,7 @@ static void show_error_toast(const char *msg)
     s_toast = lv_obj_create(lv_screen_active());
     lv_obj_set_size(s_toast, LV_PCT(85), LV_SIZE_CONTENT);
     lv_obj_align(s_toast, LV_ALIGN_TOP_MID, 0, 85);  /* tab bar(75px) 바로 아래 */
-    lv_obj_set_style_bg_color(s_toast, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_bg_color(s_toast, bg_color, 0);
     lv_obj_set_style_bg_opa(s_toast, LV_OPA_90, 0);
     lv_obj_set_style_pad_all(s_toast, 10, 0);
 
@@ -263,17 +282,24 @@ static void show_error_toast(const char *msg)
     s_toast_expire_ms = lv_tick_get() + 4000;
 }
 
-static void set_logo_warning(bool active)
+/* s_error_active/s_warn_active가 바뀔 때마다 호출 — 아이콘 표시 여부 + 색을 다시 계산.
+ * 에러가 하나라도 있으면 빨강이 우선(둘 다 활성이어도), 에러 없이 워닝만 있으면 노랑
+ * (2026-08-11, 사용자 지시) */
+static void update_logo_warning_display(void)
 {
-    if (active == s_error_active) return;
-    s_error_active = active;
+    bool active = s_error_active || s_warn_active;
     if (s_logo_icon) {
         if (active) lv_obj_add_flag(s_logo_icon, LV_OBJ_FLAG_HIDDEN);
         else        lv_obj_remove_flag(s_logo_icon, LV_OBJ_FLAG_HIDDEN);
     }
     if (s_logo_warning) {
-        if (active) lv_obj_remove_flag(s_logo_warning, LV_OBJ_FLAG_HIDDEN);
-        else        lv_obj_add_flag(s_logo_warning, LV_OBJ_FLAG_HIDDEN);
+        if (active) {
+            lv_obj_remove_flag(s_logo_warning, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_style_text_color(s_logo_warning,
+                s_error_active ? lv_palette_main(LV_PALETTE_RED) : lv_color_hex(0xFFCC00), 0);
+        } else {
+            lv_obj_add_flag(s_logo_warning, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
@@ -282,24 +308,26 @@ static void error_poll_tick(lv_timer_t *t)
     (void)t;
     char err[128];
     if (ui_log_get_pending_error(err, sizeof(err))) {
-        show_error_toast(err);
-        set_logo_warning(true);
+        show_toast(err, lv_palette_main(LV_PALETTE_RED));
+        s_error_active = true;
+        update_logo_warning_display();
+    }
+    char warn[128];
+    if (ui_log_get_pending_warn(warn, sizeof(warn))) {
+        show_toast(warn, lv_color_hex(0xFFCC00));
+        s_warn_active = true;
+        update_logo_warning_display();
     }
     if (s_toast && lv_tick_get() >= s_toast_expire_ms) {
         lv_obj_delete(s_toast);
         s_toast = NULL;
     }
-    /* 에러 이력이 전부 확인/소진되면 경고 아이콘도 같이 끔 — s_error_active일 때만
-     * 확인(평소엔 폴링 낭비 없음). 2026-08-10 — 예전엔 ui_log_clear_err()로 "일시적이고
+    /* 에러는 절대 자동으로/확인해도 안 지워짐(2026-08-11, 사용자 지시 — "에러는 아이콘
+     * 원상복구 안 함"). 워닝은 팝업에서 확인할 때만 지워짐(cb_error_warn_list_close 참고) —
+     * 여기 폴링에서는 건드리지 않음. 2026-08-10 — 예전엔 ui_log_clear_err()로 "일시적이고
      * 스스로 해소됨"을 자동으로 지우는 별도 경로가 있었는데, 그 경로의 유일한 용도였던
      * 구 UI_ERR_NOT_PAIRED 상시폴링 방식 자체가 require_active_or_report()의 즉시판정
      * 방식으로 바뀌면서 더는 호출되는 곳이 없어 함수째 제거함(죽은 코드) */
-    if (s_error_active) {
-        int codes[UI_ERR_HISTORY_CAP];
-        if (ui_log_get_error_history(codes, UI_ERR_HISTORY_CAP) == 0) {
-            set_logo_warning(false);
-        }
-    }
 }
 
 static void set_checked(lv_obj_t *cb, bool checked)
@@ -378,6 +406,7 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_time_label, ui_str(STR_LABEL_TIME));
     lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
     lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
+    lv_label_set_text(s_log_panel_title, ui_str(STR_PANEL_GENERAL_LOG));
 
     /* 드롭다운 옵션 문자열 자체도 언어별이라 다시 채워야 함 — lv_dropdown_set_options는
      * 선택 인덱스를 0으로 리셋시키므로, 지금 선택돼있던 인덱스를 기억했다가 그대로
@@ -472,14 +501,34 @@ static lv_obj_t *create_modal_btn_row(lv_obj_t *box)
     return btn_row;
 }
 
-/* 경고 로고 탭 — 지금까지 쌓인 에러 코드를 전부 목록으로 보여줌(2026-08-01, 사용자
+/* 경고 로고 탭 닫기 — 일반 cb_modal_close와 똑같이 모달을 닫지만, 추가로 워닝 이력을
+ * 지우고 아이콘을 갱신함(2026-08-11, 사용자 지시: "워닝코드를 본 경우... 로고 아이콘
+ * 원상 복구. 에러는 아이콘 원상복구 안 함" — 팝업으로 확인하는 행위 자체가 워닝만
+ * 해제시키는 트리거) */
+static void cb_error_warn_list_close(lv_event_t *e)
+{
+    ui_log_clear_warn_history();
+    s_warn_active = false;
+    update_logo_warning_display();
+
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_t *overlay = lv_obj_get_parent(lv_obj_get_parent(lv_obj_get_parent(btn)));
+    lv_obj_delete(overlay);
+    resume_bg_timers();
+}
+
+/* 경고 로고 탭 — 지금까지 쌓인 에러+워닝 코드를 전부 목록으로 보여줌(2026-08-01, 사용자
  * 지시: "로고를 찍으면 error code를 보여주는 팝업... 누적된 게 있으면 여러 개를
- * 보여줄 수도"). 코드+짧은 설명을 한 줄씩, 확인 누르면 닫힘(목록 자체는 안 지움) */
+ * 보여줄 수도"). 에러는 "Exxxx"(빨강), 워닝은 "Wxxxx"(어두운 노랑 — 팝업 배경이 밝아서
+ * 원래 아이콘/토스트에 쓰는 밝은 노랑 0xFFCC00은 가독성이 떨어짐, 2026-08-11 사용자 지시
+ * 반영) 한 줄씩. 확인 누르면 에러 목록은 그대로, 워닝 목록만 지워짐(cb_error_warn_list_close) */
 static void cb_logo_warning_tap(lv_event_t *e)
 {
     (void)e;
-    int codes[UI_ERR_HISTORY_CAP];
-    int n = ui_log_get_error_history(codes, UI_ERR_HISTORY_CAP);
+    int err_codes[UI_ERR_HISTORY_CAP];
+    int err_n = ui_log_get_error_history(err_codes, UI_ERR_HISTORY_CAP);
+    int warn_codes[UI_WARN_HISTORY_CAP];
+    int warn_n = ui_log_get_warn_history(warn_codes, UI_WARN_HISTORY_CAP);
 
     lv_obj_t *box = create_modal();
 
@@ -487,22 +536,31 @@ static void cb_logo_warning_tap(lv_event_t *e)
     lv_label_set_text(title, ui_str(STR_TITLE_ERROR_LIST));
     lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    if (n == 0) {
+    if (err_n == 0 && warn_n == 0) {
         lv_obj_t *lbl = lv_label_create(box);
         lv_label_set_text(lbl, ui_str(STR_ERROR_LIST_EMPTY));
         lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
     } else {
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < err_n; i++) {
             char buf[160];
-            snprintf(buf, sizeof(buf), "[%04d] %s", codes[i], ui_log_err_desc(codes[i]));
+            snprintf(buf, sizeof(buf), "E%04d %s", err_codes[i], ui_log_err_desc(err_codes[i]));
             lv_obj_t *lbl = lv_label_create(box);
             lv_label_set_text(lbl, buf);
             lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+            lv_obj_set_style_text_color(lbl, lv_palette_main(LV_PALETTE_RED), 0);
+        }
+        for (int i = 0; i < warn_n; i++) {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "W%04d %s", warn_codes[i], ui_log_warn_desc(warn_codes[i]));
+            lv_obj_t *lbl = lv_label_create(box);
+            lv_label_set_text(lbl, buf);
+            lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0xB8860B), 0);
         }
     }
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_modal_close, NULL);
+    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_error_warn_list_close, NULL);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -1421,32 +1479,85 @@ static void show_fetch_progress_popup(void)
 
 /* 목록갱신 버튼 — 예전엔 요청만 보내고 끝이라 응답이 없어도 사용자가 알 방법이
  * 없었음(2026-08-02, 사용자 지적: "아무 짓도 안하는 건지 목록이 없는 건지 모르겠다") —
- * 지금촬영/모두지우기/사진가져오기와 같은 공용 진행팝업+타임아웃 토스트로 통일 */
-static uint32_t s_renew_list_last_progress_ms;
-static uint16_t s_renew_list_last_received;
+ * 지금촬영/모두지우기/사진가져오기와 같은 공용 진행팝업+타임아웃 토스트로 통일.
+ * 2026-08-11 재설계(사용자 지시) — 스피너+퍼센트 대신 지금촬영 팝업과 같은 2줄 스택 라벨로
+ * "가져오기 명령 전송/목록 수신 중/성공(실패)" 단계를 직접 보여줌 */
+typedef enum {
+    LIST_POPUP_STAGE_SENT = 0,   /* 1단계: 명령 전송, COUNT 응답 대기 */
+    LIST_POPUP_STAGE_RECEIVING,  /* 2단계: 배치 수신 중, READY/ERROR/정체 대기 */
+} list_popup_stage_t;
+
+static list_popup_stage_t s_list_popup_stage;
+static uint32_t           s_list_popup_stage_start_ms;
+static lv_obj_t           *s_list_stage_label[2];
+static uint32_t           s_renew_list_last_progress_ms;
+static uint16_t           s_renew_list_last_received;
 
 /* 2026-08-10 — "시작부터 총 경과시간" 기준에서 fetch_popup_tick_fn()과 동일한 "마지막 진행
- * 이후 경과시간"(정체 감지) 기준으로 변경. 딥슬립 웨이크대기+채널동기화+SR 여러 라운드가
+ * 이후 경과시간"(정체 감지) 기준으로 변경. 딥슬립 웨이크대기+채널동기화 여러 라운드가
  * 합쳐지면 총 소요시간이 고정예산 하나로는 부족할 수 있는데, 그동안 항목이 계속 들어오고
  * 있다면(=정체 아님) 조급하게 포기할 이유가 없음 — 실사용 중 "데이터는 항상 오는데 팝업만
  * 먼저 3007로 포기" 패턴으로 발견 */
 static bool renew_list_tick_fn(lv_obj_t *box)
 {
     (void)box;
-    if (sync_photo_list_tick(-1)) return true;
+    lv_color_t grey  = lv_palette_main(LV_PALETTE_GREY);
+    lv_color_t green = lv_palette_main(LV_PALETTE_GREEN);
+    lv_color_t red   = lv_palette_main(LV_PALETTE_RED);
 
-    uint16_t received = 0, total = 0;
-    esp_now_photo_list_get_progress(&received, &total);
-    if (received != s_renew_list_last_received) {
-        s_renew_list_last_received = received;
+    if (s_list_popup_stage == LIST_POPUP_STAGE_SENT) {
+        bool acked    = esp_now_photo_list_count_received();
+        bool timedout = lv_tick_elaps(s_list_popup_stage_start_ms) > cam_response_timeout_ms();
+        if (!acked && !timedout) return false;
+
+        if (!acked) {
+            set_stage_label(s_list_stage_label, 0, STR_LIST_STAGE1_NORESPONSE, red);
+            ui_log_add_err(UI_ERR_LIST_NORESPONSE, "목록 요청에 CAM 응답 없음(무응답)");
+            return true;
+        }
+
+        set_stage_label(s_list_stage_label, 0, STR_LIST_STAGE1_DONE, green);
+        set_stage_label(s_list_stage_label, 1, STR_LIST_STAGE2_PROGRESS, grey);
+        s_list_popup_stage            = LIST_POPUP_STAGE_RECEIVING;
+        s_list_popup_stage_start_ms   = lv_tick_get();
+        s_renew_list_last_received    = 0;  /* handle_list_count()가 COUNT 도착 시 0으로 리셋함 */
         s_renew_list_last_progress_ms = lv_tick_get();
         return false;
     }
-    if (lv_tick_elaps(s_renew_list_last_progress_ms) > cam_response_timeout_ms()) {
-        ui_log_add_err(UI_ERR_LIST_NORESPONSE, "목록 갱신 요청에 CAM 응답 없음(정체, %u/%u개)",
-                        (unsigned)received, (unsigned)total);
+
+    if (s_list_popup_stage == LIST_POPUP_STAGE_RECEIVING) {
+        esp_now_photo_list_state_t state = esp_now_photo_list_get_state();
+        uint16_t received = 0, total = 0;
+        esp_now_photo_list_get_progress(&received, &total);
+
+        if (received != s_renew_list_last_received) {
+            s_renew_list_last_received    = received;
+            s_renew_list_last_progress_ms = lv_tick_get();
+        }
+        bool resolved = (state == ESP_NOW_PHOTO_LIST_STATE_READY || state == ESP_NOW_PHOTO_LIST_STATE_ERROR);
+        bool stalled  = !resolved && lv_tick_elaps(s_renew_list_last_progress_ms) > cam_response_timeout_ms();
+
+        if (!resolved && !stalled) return false;
+
+        if (stalled) {
+            lv_label_set_text_fmt(s_list_stage_label[1], ui_str(STR_LIST_STAGE2_STALLED_FMT),
+                                   (unsigned)received, (unsigned)total);
+            lv_obj_set_style_text_color(s_list_stage_label[1], red, 0);
+            ui_log_add_err(UI_ERR_LIST_NORESPONSE, "목록 갱신 요청에 CAM 응답 없음(정체, %u/%u개)",
+                            (unsigned)received, (unsigned)total);
+        } else if (state == ESP_NOW_PHOTO_LIST_STATE_ERROR) {
+            lv_label_set_text_fmt(s_list_stage_label[1], ui_str(STR_LIST_STAGE2_MISMATCH_FMT),
+                                   (unsigned)received, (unsigned)total);
+            lv_obj_set_style_text_color(s_list_stage_label[1], red, 0);
+            esp_now_photo_list_ack();
+        } else {  /* READY */
+            refresh_photo_list_ui(-1);
+            esp_now_photo_list_ack();
+            set_stage_label(s_list_stage_label, 1, STR_LIST_STAGE2_SUCCESS, green);
+        }
         return true;
     }
+
     return false;
 }
 
@@ -1458,17 +1569,17 @@ static void cb_renew_list(lv_event_t *e)
 
     esp_now_photo_list_request(s_selected_cam_mac);
 
-    s_renew_list_last_progress_ms = lv_tick_get();
-    s_renew_list_last_received = 0;
+    s_list_popup_stage          = LIST_POPUP_STAGE_SENT;
+    s_list_popup_stage_start_ms = lv_tick_get();
+
     lv_obj_t *box = show_progress_popup(renew_list_tick_fn);
 
-    lv_obj_t *spinner = lv_spinner_create(box);
-    lv_obj_set_size(spinner, 40, 40);
-    lv_obj_align(spinner, LV_ALIGN_TOP_MID, 0, 0);
-
-    lv_obj_t *label = lv_label_create(box);
-    lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(label, ui_str(STR_LIST_RENEW_PROGRESS));
+    for (int i = 0; i < 2; i++) {
+        s_list_stage_label[i] = lv_label_create(box);
+        lv_obj_set_style_text_font(s_list_stage_label[i], ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_label_set_text(s_list_stage_label[i], "");
+    }
+    set_stage_label(s_list_stage_label, 0, STR_LIST_STAGE1_PROGRESS, lv_palette_main(LV_PALETTE_GREY));
 
     start_progress_popup(box);
 }
@@ -1843,10 +1954,18 @@ static void refresh_power_panel(lv_timer_t *t)
             uint32_t sn_total_sec = lv_tick_get() / 1000;
             /* 2026-08-10, 사용자 지시 — "조용"->"Idle"로, 임계값 표시는 제거(더 이상 판단
              * 근거로 안 씀 — 최초 페어링만 리셋하는 걸로 바뀌어서 매번 다른 임계값 비교가
-             * 큰 의미가 없어짐). #ff0000 ... #로 빨간색(CAM 리포트=검정/기본색과 구분) */
-            lv_snprintf(sn_line, sizeof(sn_line), "#ff0000 %s: SLEEP_NOW Idle%ums -%02lu:%02lu#",
-                        nodes[i].name, (unsigned)nodes[i].last_sleep_now_elapsed_ms,
-                        (unsigned long)(sn_total_sec / 60), (unsigned long)(sn_total_sec % 60));
+             * 큰 의미가 없어짐).
+             * 2026-08-11, 최종 결론 — #RRGGBB 인라인 recolor 마크업 시도 3회(단어 하나로
+             * 좁힘 → 밑줄 제거 → 줄 전체를 경계 없이 통째로 감싸기까지) 전부 실기에서
+             * 똑같이 깨짐(여는 태그 "#ff0000 "가 줄 맨 앞에 리터럴로 그대로 노출) — 마지막
+             * 시도는 줄 안에 attribute 경계가 아예 없는 가장 단순한 형태였는데도 동일하게
+             * 깨졌으므로, wrap이나 인자 밀림 같은 부분적 원인이 아니라 recolor 자체가 이
+             * 라벨에서 작동하지 않는다고 결론(사용자 확인). 파싱이 아예 필요 없는 순수
+             * 텍스트 마커(">>> ")로 최종 확정 — CAM 리포트 줄과 SLEEP_NOW 줄은 색이 아니라
+             * 이 마커 유무로 구분 */
+            lv_snprintf(sn_line, sizeof(sn_line), "[%02lu:%02lu] >>> %s: SLEEPNOW Idle%ums",
+                        (unsigned long)(sn_total_sec / 60), (unsigned long)(sn_total_sec % 60),
+                        nodes[i].name, (unsigned)nodes[i].last_sleep_now_elapsed_ms);
             size_t sn_cur_len  = strlen(s_power_log_buf);
             size_t sn_line_len = strlen(sn_line);
             if (sn_cur_len + sn_line_len + 2 > sizeof(s_power_log_buf)) {
@@ -1872,20 +1991,20 @@ static void refresh_power_panel(lv_timer_t *t)
             case CAM_WAKE_REASON_POWERON: wake_str = ui_str(STR_WAKE_REASON_POWERON); break;
             default:                      wake_str = ui_str(STR_WAKE_REASON_OTHER); break;
         }
+        /* 2026-08-10 — 이 줄이 실제로 몇 시(mm:ss, Cntl 부팅 후 경과) 찍혔는지 붙여서, 줄 사이
+         * 실제 간격을 육안으로 바로 잴 수 있게 함(사용자 지시 — "20초마다 뜬다" 같은 관찰을
+         * 스톱워치 없이 확인하기 위함). 2026-08-11 — 줄 끝(-mm:ss)에서 줄 맨 앞([mm:ss] )으로
+         * 이동(사용자 지시) */
+        uint32_t total_sec = lv_tick_get() / 1000;
         char line[144];
-        lv_snprintf(line, sizeof(line), ui_str(STR_DEEPSLEEP_LINE_FMT), nodes[i].name,
+        int prefix_len = lv_snprintf(line, sizeof(line), "[%02lu:%02lu] ",
+                    (unsigned long)(total_sec / 60), (unsigned long)(total_sec % 60));
+        lv_snprintf(line + prefix_len, sizeof(line) - prefix_len, ui_str(STR_DEEPSLEEP_LINE_FMT), nodes[i].name,
                     (unsigned long)nodes[i].ds_cycle_count, wake_str,
                     (unsigned long)nodes[i].ds_last_awake_uptime_ms,
                     (unsigned long)nodes[i].ds_last_sleep_interval_sec,
                     (unsigned long)nodes[i].ds_last_actual_sleep_sec,
                     (unsigned long)nodes[i].ds_rwdt_catch_count);
-        /* 2026-08-10 — 이 줄이 실제로 몇 시(mm:ss, Cntl 부팅 후 경과) 찍혔는지 붙여서, 줄 사이
-         * 실제 간격을 육안으로 바로 잴 수 있게 함(사용자 지시 — "20초마다 뜬다" 같은 관찰을
-         * 스톱워치 없이 확인하기 위함) */
-        uint32_t total_sec = lv_tick_get() / 1000;
-        size_t line_len_now = strlen(line);
-        lv_snprintf(line + line_len_now, sizeof(line) - line_len_now, " -%02lu:%02lu",
-                    (unsigned long)(total_sec / 60), (unsigned long)(total_sec % 60));
 
         size_t cur_len  = strlen(s_power_log_buf);
         size_t line_len = strlen(line);
@@ -2520,13 +2639,56 @@ void ui_init(void)
     lv_obj_set_style_bg_color(stats_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
     lv_obj_set_style_bg_opa(stats_page, LV_OPA_COVER, 0);
 
+    /* 2026-08-11, 사용자 지시 — 일반로그/전력로그 위아래 순서 맞바꿈(일반로그가 위, 전력로그가
+     * 아래). 두 블록 내용 자체는 그대로, stats_page에 자식으로 추가되는 순서만 바뀜(LVGL
+     * flex-column은 생성 순서대로 위→아래 배치) */
+    lv_obj_t *log_box = lv_obj_create(stats_page);
+    /* 2026-08-11, 사용자 지시 — "전력, 일반 모두 320 픽셀로 맞춰": power_box와 동일하게
+     * 고정 320px(전에 flex_grow로 남는 ~73px만 나눠 갖던 걸 여기서 되돌림). power_box(320)
+     * + log_box(320) 합이 실제 콘텐츠 영역(~393px)보다 커지므로 stats_page 자체가 정상적으로
+     * overflow해서 스크롤이 필요해짐 — 이게 의도(사용자: "스크롤 하겠다는 거니까, 화면
+     * 크기에 맞추면 안되지") — power_title_row/log_title_row가 그 바깥 스크롤을 잡는
+     * 고정 영역 역할 */
+    lv_obj_set_size(log_box, LV_PCT(100), 320);
+    lv_obj_set_flex_flow(log_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(log_box, 6, 0);
+
+    lv_obj_t *log_title_row = lv_obj_create(log_box);
+    lv_obj_set_size(log_title_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(log_title_row, 0, 0);
+    lv_obj_set_style_pad_all(log_title_row, 0, 0);
+    lv_obj_set_flex_flow(log_title_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(log_title_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    s_log_panel_title = lv_label_create(log_title_row);
+    lv_label_set_text(s_log_panel_title, ui_str(STR_PANEL_GENERAL_LOG));
+    lv_obj_set_style_text_font(s_log_panel_title, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_log_container = lv_obj_create(log_box);
+    lv_obj_set_size(s_log_container, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(s_log_container, 1);
+    lv_obj_set_scroll_dir(s_log_container, LV_DIR_VER);
+    lv_obj_set_style_border_width(s_log_container, 0, 0);
+    lv_obj_set_style_pad_all(s_log_container, 6, 0);
+
+    s_log_label = lv_label_create(s_log_container);
+    lv_label_set_long_mode(s_log_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_log_label, LV_PCT(100));
+    lv_obj_set_style_text_font(s_log_label, ui_font_get(UI_FONT_SIZE_24), 0);
+    lv_label_set_text(s_log_label, "");
+
+    lv_timer_create(refresh_log_box, 500, NULL);
+
     lv_obj_t *power_box = lv_obj_create(stats_page);
     lv_obj_set_size(power_box, LV_PCT(100), 320);  /* 2026-08-10, 사용자 지시 — 고정 320px */
     lv_obj_set_flex_flow(power_box, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(power_box, 6, 0);
 
     /* 제목 + 일시멈춤 단추를 한 행에(2026-08-10, 사용자 지시 — 값 읽는 동안 로그가 계속
-     * 밀리지 않게 멈출 수 있게) */
+     * 밀리지 않게 멈출 수 있게). 2026-08-11 — 이 행은 스크롤 컨테이너(s_power_list) 밖의
+     * 고정 영역이라, 여기를 탭+드래그하면 안쪽 리스트가 가로채지 않고 바깥 stats_page가
+     * 스크롤됨(사용자 지시 — 로그 판넬이 전체 다 내부 스크롤 입력을 받아서 페이지 스크롤을
+     * 잡을 영역이 없었던 문제의 해결책) */
     lv_obj_t *power_title_row = lv_obj_create(power_box);
     lv_obj_set_size(power_title_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_style_border_width(power_title_row, 0, 0);
@@ -2558,26 +2720,12 @@ void ui_init(void)
     lv_label_set_long_mode(s_power_log_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_power_log_label, LV_PCT(100));
     lv_obj_set_style_text_font(s_power_log_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_recolor(s_power_log_label, true);  /* 2026-08-10 — C/S 줄을 색으로 구분(사용자
-                                                        지시, "로그가 지저분해서 안 보인다") —
-                                                        #RRGGBB text# 인라인 색상 문법 활성화 */
+    /* 2026-08-10 — C/S 줄을 구분하려고 recolor(#RRGGBB text#) 켰었으나, 2026-08-11에 3가지
+     * 형태 다 실기에서 깨지는 걸 확인하고 recolor 자체를 포기(순수 텍스트 ">>> " 마커로
+     * 대체, refresh_power_panel 참고) — 더 이상 안 쓰므로 켜두지 않음 */
     lv_label_set_text(s_power_log_label, "");
 
     s_power_panel_timer = lv_timer_create(refresh_power_panel, 2000, NULL);
-
-    s_log_container = lv_obj_create(stats_page);
-    lv_obj_set_size(s_log_container, LV_PCT(100), 0);
-    lv_obj_set_flex_grow(s_log_container, 1);
-    lv_obj_set_scroll_dir(s_log_container, LV_DIR_VER);
-    lv_obj_set_style_pad_all(s_log_container, 6, 0);
-
-    s_log_label = lv_label_create(s_log_container);
-    lv_label_set_long_mode(s_log_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(s_log_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_log_label, ui_font_get(UI_FONT_SIZE_24), 0);
-    lv_label_set_text(s_log_label, "");
-
-    lv_timer_create(refresh_log_box, 500, NULL);
 
     lv_obj_t *option_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_OPTION));
     lv_obj_set_flex_flow(option_page, LV_FLEX_FLOW_COLUMN);
@@ -2678,7 +2826,11 @@ void ui_init(void)
     s_capture_interval_applied_idx = find_value_index(s_capture_interval_values,
         sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]),
         device_config_get_cam_capture_interval_sec());
-    lv_dropdown_set_selected(s_capture_interval_dd, (uint16_t)s_capture_interval_applied_idx);
+    /* find_value_index가 -1(못 찾음)을 반환할 수 있음(2026-08-11) — 그대로 두면 applied_idx
+     * 비교 로직(Apply 버튼 활성화 판단)에 -1이 정확히 필요하지만, 드롭다운 표시용 인덱스는
+     * 항상 유효한 범위여야 하므로 여기서만 0으로 방어 */
+    lv_dropdown_set_selected(s_capture_interval_dd,
+        (uint16_t)(s_capture_interval_applied_idx >= 0 ? s_capture_interval_applied_idx : 0));
     /* 드롭다운 기본폰트는 한글 글리프가 없는 LVGL 내장 폰트 — 닫힌 상태 표시(MAIN)와 펼친
      * 목록(lv_dropdown_get_list) 둘 다 커스텀 TTF로 따로 지정해야 함(안 하면 깨져 보임,
      * 2026-08-08 실기에서 확인 — cntl_row의 s_btn_ko 체크박스와 같은 이유) */
@@ -2688,7 +2840,11 @@ void ui_init(void)
 
     s_capture_apply_btn = lv_button_create(capture_row);
     lv_obj_add_event_cb(s_capture_apply_btn, cb_apply_capture_interval, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_state(s_capture_apply_btn, LV_STATE_DISABLED);  /* 부팅 직후엔 표시값==저장값 */
+    /* 2026-08-11 버그수정 — "부팅 직후엔 표시값==저장값"이라는 가정이 항상 맞지는 않음(저장된
+     * 값이 지금 프리셋 목록에 없으면 applied_idx=-1이라 드롭다운 표시와 실제 적용값이 다를 수
+     * 있음, device_config 버전불일치 폴백 사고로 실사용 중 발견) — 무조건 비활성화하지 말고
+     * 실제 일치 여부로 판단 */
+    update_capture_apply_enabled();
     s_capture_apply_lbl = lv_label_create(s_capture_apply_btn);  /* 전역: refresh_lang_texts에서 갱신 */
     lv_label_set_text(s_capture_apply_lbl, ui_str(STR_BTN_APPLY));
     lv_obj_set_style_text_font(s_capture_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -2713,14 +2869,15 @@ void ui_init(void)
     s_response_interval_applied_idx = find_value_index(s_response_interval_values,
         sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0]),
         device_config_get_response_interval_sec());
-    lv_dropdown_set_selected(s_response_interval_dd, (uint16_t)s_response_interval_applied_idx);
+    lv_dropdown_set_selected(s_response_interval_dd,
+        (uint16_t)(s_response_interval_applied_idx >= 0 ? s_response_interval_applied_idx : 0));
     lv_obj_set_style_text_font(s_response_interval_dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_response_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_response_interval_dd, cb_response_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     s_response_apply_btn = lv_button_create(response_row);
     lv_obj_add_event_cb(s_response_apply_btn, cb_apply_response_interval, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_state(s_response_apply_btn, LV_STATE_DISABLED);
+    update_response_apply_enabled();  /* 2026-08-11 버그수정 — capture_interval과 동일 이유 */
     s_response_apply_lbl = lv_label_create(s_response_apply_btn);
     lv_label_set_text(s_response_apply_lbl, ui_str(STR_BTN_APPLY));
     lv_obj_set_style_text_font(s_response_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -2741,7 +2898,7 @@ void ui_init(void)
     update_response_help_text();  /* 부팅 직후 현재 선택값 반영 */
 
     /* 적응형 반응시간 행(2026-08-10) — 응답성 행과 같은 [라벨][드롭다운][Apply] 구조.
-     * CAM에 안 보내는 Cntl 내부값(esp_now_hub.c의 adaptive_sleep_timer_cb 참고) */
+     * CAM에 안 보내는 Cntl 내부값(esp_now_hub.c의 esp_now_hub_note_user_action 참고) */
     lv_obj_t *adaptive_row = lv_obj_create(system_group_box);
     lv_obj_set_size(adaptive_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(adaptive_row, LV_FLEX_FLOW_ROW);
@@ -2759,14 +2916,15 @@ void ui_init(void)
     s_adaptive_response_applied_idx = find_value_index(s_adaptive_response_values,
         sizeof(s_adaptive_response_values) / sizeof(s_adaptive_response_values[0]),
         device_config_get_adaptive_response_sec());
-    lv_dropdown_set_selected(s_adaptive_response_dd, (uint16_t)s_adaptive_response_applied_idx);
+    lv_dropdown_set_selected(s_adaptive_response_dd,
+        (uint16_t)(s_adaptive_response_applied_idx >= 0 ? s_adaptive_response_applied_idx : 0));
     lv_obj_set_style_text_font(s_adaptive_response_dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_adaptive_response_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_adaptive_response_dd, cb_adaptive_response_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     s_adaptive_apply_btn = lv_button_create(adaptive_row);
     lv_obj_add_event_cb(s_adaptive_apply_btn, cb_apply_adaptive_response, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_state(s_adaptive_apply_btn, LV_STATE_DISABLED);
+    update_adaptive_apply_enabled();  /* 2026-08-11 버그수정 — capture_interval과 동일 이유 */
     s_adaptive_apply_lbl = lv_label_create(s_adaptive_apply_btn);
     lv_label_set_text(s_adaptive_apply_lbl, ui_str(STR_BTN_APPLY));
     lv_obj_set_style_text_font(s_adaptive_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);

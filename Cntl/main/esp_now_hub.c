@@ -59,61 +59,84 @@ static SemaphoreHandle_t s_nodes_mutex = NULL;
 
 /* 적응형 반응시간(2026-08-10) — 마지막 사용자 조작 시각(esp_now_photo.c의 5개 액션 함수가
  * esp_now_hub_note_user_action()으로 갱신). 전역 하나로 충분 — 지금은 CAM이 보통 1대라
- * esp_now_hub_bench_start()/apply_response_interval_sec()이 이미 쓰는 단순화와 동일 원칙 */
+ * esp_now_hub_bench_start()/apply_response_interval_sec()이 이미 쓰는 단순화와 동일 원칙.
+ * 2026-08-11 재설계 — 예전엔 500ms마다 "지났나?" 폴링했는데, esp_timer_start_once로 원샷
+ * 타이머를 걸고 조작이 있을 때마다 esp_timer_restart로 카운트다운을 리셋하는 방식으로
+ * 전환(사용자 지시) — 폴링/경과시간 계산 자체가 없어짐. s_last_user_action_ms는 이제 로그
+ * 표시용(last_sleep_now_elapsed_ms 계산)으로만 남음 */
 static uint32_t s_last_user_action_ms = 0;
-static esp_timer_handle_t s_adaptive_sleep_timer = NULL;
+static esp_timer_handle_t s_adaptive_deadline_timer = NULL;
+/* true = 마지막 리셋 이후 적응형 반응시간만큼 조용히 흘렀음(원샷 타이머가 끝까지 살아서
+ * 콜백이 불림). note_user_action()이 다시 리셋할 때마다 false로 */
+static bool s_adaptive_deadline_elapsed = false;
+
+static void try_send_sleep_now(esp_now_hub_node_t *n);  /* 전방 선언 — CAM_CONFIG_ACK 핸들러에서도 씀 */
+
+static void adaptive_deadline_cb(void *arg)
+{
+    (void)arg;
+    s_adaptive_deadline_elapsed = true;
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_node_count; i++) {
+        try_send_sleep_now(&s_nodes[i]);
+    }
+    xSemaphoreGive(s_nodes_mutex);
+}
 
 void esp_now_hub_note_user_action(void)
 {
     s_last_user_action_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    s_adaptive_deadline_elapsed = false;
+    if (s_adaptive_deadline_timer) {
+        esp_timer_stop(s_adaptive_deadline_timer);  /* 안 돌고 있었으면 ESP_ERR_INVALID_STATE, 무해 */
+        uint32_t threshold_us = device_config_get_adaptive_response_sec() * 1000000U;
+        esp_timer_start_once(s_adaptive_deadline_timer, threshold_us);
+    }
 }
 
-/* 페어링 직후 루틴 설정 핸드셰이크(SET_TIME+CAM_CONFIG_SET/ACK)가 끝날 시간 여유
- * (2026-08-10) — 정밀 추적 대신 고정 마진으로 충분(핸드셰이크는 보통 수십~수백ms) */
-#define ADAPTIVE_SLEEP_PAIR_SETTLE_MS 1000
-#define ADAPTIVE_SLEEP_CHECK_INTERVAL_US (500 * 1000)
-
-/* 적응형 반응시간 조건(마지막 사용자 조작으로부터 device_config_get_adaptive_response_sec()
- * 이상 조용함)을 만족하면, 지금 라디오 레벨로 페어링 확인된 CAM 전부에게 SLEEP_NOW를 보냄
- * (2026-08-10) — CAM은 받으면 유휴여유를 기다리지 않고 곧바로 잠듦(cam_node.c 참고).
+/* SLEEP_NOW 전송 조건 — 오직 적응형 반응시간 경과(s_adaptive_deadline_elapsed) 하나뿐.
+ * 2026-08-11 재설계(사용자 지시) — 예전엔 CAM_CONFIG_ACK 수신도 조건에 넣었는데("설정
+ * 핸드셰이크가 끝나야 재운다"), 사용자가 이건 원래 의도와 다르다고 지적: "CNTL 슬립용
+ * 타이머는 CAM의 config ack나 pairing 유지 통신과는 무관해야 되". 주된 명제는 "할 일 없는
+ * 캠을 빠르게 계속 재우는 것" — CONFIG_ACK 자체는 사이클당 1회 통신일 뿐 슬립 여부와는
+ * 무관하고, "할 일이 있다"는 신호는 이미 esp_now_hub_note_user_action()을 호출하는 기존
+ * 5개 액션 함수(사진가져오기/삭제/지금촬영/목록갱신/전체삭제, 전송 중 청크 수신 포함)와
+ * 사용자 터치가 전부 커버하고 있어서 별도 게이트가 필요 없음.
+ * 이 함수는 두 시점에서 호출됨 — (1) 적응형 타이머 자체가 만료되는 순간(adaptive_deadline_cb)
+ * (2) 캠이 깨서 보고(DEEP_SLEEP_STATS)를 보내온 순간 — 그 둘 중 나중에 와서 조건을 만족시키는
+ * 쪽에서 실제로 전송됨. 호출자가 이미 s_nodes_mutex를 들고 있어야 함.
  * sleep_now_sent로 사이클당 1회만 보냄 — n->paired는 CAM이 다음 웨이크에 ADVERTISE를 다시
  * 보내야만 내려가는 필드라 딥슬립 구간 내내 true로 남아있어서, 이 가드가 없으면 이미 잠든
- * CAM에게 500ms마다 계속 허공에 재전송하게 됨(실사용 중 발견 — 사이클당 13초+ 동안 스팸) */
-static void adaptive_sleep_timer_cb(void *arg)
+ * CAM에게 계속 허공에 재전송하게 됨(2026-08-10 실사용 중 발견) */
+static void try_send_sleep_now(esp_now_hub_node_t *n)
 {
-    (void)arg;
-    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    uint32_t threshold_ms = device_config_get_adaptive_response_sec() * 1000U;
-    uint32_t elapsed_ms = now_ms - s_last_user_action_ms;
-    if (elapsed_ms < threshold_ms) return;
+    if (n->kind != HUB_NODE_KIND_CAM || !n->paired) return;
+    /* 2026-08-11, 사용자 지시 — 응답성 0("즉시"/Live)이면 애초에 안 재움. "즉시"는 짧은
+     * 주기로 반복 취침한다는 뜻이 아니라 딥슬립 자체를 안 한다는 뜻(사용자: "1초=0초=즉시
+     * 인거라 캠을 안재우겠다는 건데") */
+    if (device_config_get_response_interval_sec() == 0) return;
+    if (n->sleep_now_sent) return;
+    if (!s_adaptive_deadline_elapsed) return;
 
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    /* 2026-08-10 — 판단 근거를 노드에 저장(로그 대신 통계탭 사이클 줄에 같이 표시, 사용자
+     * 지시 — 로그는 스크롤돼서 놓치기 쉬움). refresh_power_panel()이 다음 리포트 때 같이 찍음 */
+    n->last_sleep_now_elapsed_ms   = now_ms - s_last_user_action_ms;
+    n->last_sleep_now_threshold_ms = device_config_get_adaptive_response_sec() * 1000U;
+    ESP_LOGI(TAG, "SLEEP_NOW -> %s: 조용%lums(임계값%lums)",
+             n->name, (unsigned long)n->last_sleep_now_elapsed_ms,
+             (unsigned long)n->last_sleep_now_threshold_ms);
+    n->sleep_now_send_count++;
+    /* 2026-08-10 — reliable stack으로 전환("chunk는 SR, 나머지는 reliable" 원칙). 호출부가
+     * 타이머 콜백이거나 ESP-NOW recv 콜백이라 여기서 블로킹 재시도(esp_now_reliable_request)를
+     * 직접 부르면 안 되고, 기존 관례대로 큐잉만 하고 실제 재시도는 esp_now_tx 태스크가 함 */
     esp_now_sleep_now_t msg = {
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_SLEEP_NOW,
     };
-    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-    for (int i = 0; i < s_node_count; i++) {
-        if (s_nodes[i].kind != HUB_NODE_KIND_CAM || !s_nodes[i].paired) continue;
-        if (s_nodes[i].sleep_now_sent) continue;
-        uint32_t since_paired_ms = now_ms - s_nodes[i].last_paired_ms;
-        if (since_paired_ms < ADAPTIVE_SLEEP_PAIR_SETTLE_MS) continue;
-        /* 2026-08-10 — 판단 근거를 노드에 저장(로그 대신 통계탭 사이클 줄에 같이 표시, 사용자
-         * 지시 — 로그는 스크롤돼서 놓치기 쉬움). refresh_power_panel()이 다음 리포트 때 같이 찍음 */
-        s_nodes[i].last_sleep_now_elapsed_ms   = elapsed_ms;
-        s_nodes[i].last_sleep_now_threshold_ms = threshold_ms;
-        ESP_LOGI(TAG, "SLEEP_NOW -> %s: 조용%lums(임계값%lums) 페어링후%lums",
-                 s_nodes[i].name, (unsigned long)elapsed_ms, (unsigned long)threshold_ms,
-                 (unsigned long)since_paired_ms);
-        s_nodes[i].sleep_now_send_count++;
-        /* 2026-08-10 — reliable stack으로 전환("chunk는 SR, 나머지는 reliable" 원칙). 타이머
-         * 콜백에서 직접 esp_now_send()로 fire-and-forget하던 걸 esp_now_tx 큐로 옮김 — 이
-         * 콜백은 시스템 타이머 태스크에서 도니까 여기서 블로킹 재시도(esp_now_reliable_request)를
-         * 직접 부르면 안 되고, 기존 관례대로 큐잉만 하고 실제 재시도는 esp_now_tx 태스크가 함 */
-        static const uint8_t s_sleep_now_ack_types[] = { ESP_NOW_MSG_SLEEP_NOW_ACK };
-        esp_now_tx_enqueue(s_nodes[i].mac, &msg, sizeof(msg), s_sleep_now_ack_types, 1, 300, 3, "SLEEP_NOW");
-        s_nodes[i].sleep_now_sent = true;
-    }
-    xSemaphoreGive(s_nodes_mutex);
+    static const uint8_t s_sleep_now_ack_types[] = { ESP_NOW_MSG_SLEEP_NOW_ACK };
+    esp_now_tx_enqueue(n->mac, &msg, sizeof(msg), s_sleep_now_ack_types, 1, 300, 3, "SLEEP_NOW");
+    n->sleep_now_sent = true;
 }
 
 static hub_node_kind_t classify_name(const char *name)
@@ -296,6 +319,9 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 n->last_paired_ms = now_ms;  /* esp_now_hub_is_reconnect_stuck()의 기준시각 */
                 n->sleep_now_sent = false;  /* 새 웨이크 사이클 시작 — 이번 사이클에 한 번은
                                                 다시 보낼 수 있어야 함 */
+                n->config_acked_this_cycle = false;  /* 2026-08-11 — 이번 사이클 설정
+                                                          핸드셰이크는 아직 안 끝남 */
+                n->sleep_now_request_count = 0;  /* 2026-08-11 — 새 사이클, 재요청 카운트 리셋 */
                 became_paired = !was_paired;
                 first_ever_pairing = became_paired && !was_ever_paired;
                 strncpy(name_copy, n->name, sizeof(name_copy) - 1);
@@ -433,7 +459,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     } else if (msg_type == ESP_NOW_MSG_PHOTO_META || msg_type == ESP_NOW_MSG_PHOTO_CHUNK ||
                msg_type == ESP_NOW_MSG_PHOTO_DONE || msg_type == ESP_NOW_MSG_CAPTURE_STATUS ||
-               msg_type == ESP_NOW_MSG_PHOTO_LIST_ENTRY || msg_type == ESP_NOW_MSG_PHOTO_LIST_DONE ||
+               msg_type == ESP_NOW_MSG_PHOTO_LIST_COUNT || msg_type == ESP_NOW_MSG_PHOTO_LIST_BATCH ||
+               msg_type == ESP_NOW_MSG_PHOTO_LIST_DONE ||
                msg_type == ESP_NOW_MSG_PHOTO_DELETE_ACK || msg_type == ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK ||
                msg_type == ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST) {
         /* ESP-NOW는 recv_cb를 하나만 등록할 수 있어서, 사진 관련 프로토콜(전송/목록/삭제/
@@ -446,6 +473,13 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 볼 방법이 없음 — capture_stage와 같은 이유로 여기서 별도 폴링 상태를 갱신 */
         if (len < (int)sizeof(esp_now_cam_config_ack_t)) return;
         s_config_apply_stage = HUB_CONFIG_APPLY_ACKED;
+        /* 2026-08-11 — SLEEP_NOW 조건에서 CONFIG_ACK를 뺐으므로(사용자 지시, try_send_sleep_now
+         * 참고) 여기선 더 이상 슬립을 트리거하지 않음. config_acked_this_cycle은 통계
+         * 로그(DEEP_SLEEP_STATS 수신 핸들러) 표시용으로만 남겨둠 */
+        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        esp_now_hub_node_t *acked_node = find_node(info->src_addr);
+        if (acked_node) acked_node->config_acked_this_cycle = true;
+        xSemaphoreGive(s_nodes_mutex);
 
     } else if (msg_type == ESP_NOW_MSG_DEEP_SLEEP_STATS) {
         /* CHANNEL_PING과 같은 성격 — 노드가 그냥 페어링 완료 직후 1회 보내기만 함(ACK 없음).
@@ -473,6 +507,50 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             n->ds_last_wake_reason        = stats->wake_reason;
             n->ds_last_awake_uptime_ms    = stats->awake_uptime_ms;
             n->ds_last_sleep_interval_sec = stats->sleep_interval_sec;
+            /* 2026-08-11 — 예전엔 이 수신 지점에 로그가 없어서 화면 전력판넬에서만 보이던
+             * 정보(연속으로 두 번 보고/두 번 SLEEP_NOW 같은 순서 이상 현상)를 시리얼로는
+             * 확인할 수 없었음 — CONFIG_ACK/SLEEP_NOW와 같은 스타일로 여기도 로그 추가 */
+            ESP_LOGI(TAG, "DEEP_SLEEP_STATS 수신 <- %s: 사이클#%lu wake=%u config_acked=%d sleep_now_sent=%d",
+                     n->name, (unsigned long)n->ds_cycle_count, (unsigned)stats->wake_reason,
+                     (int)n->config_acked_this_cycle, (int)n->sleep_now_sent);
+            /* 2026-08-11 — 캠의 웨이크(보고) 도착 그 자체가 SLEEP_NOW 조건을 다시 확인해볼
+             * 계기 중 하나(사용자 지시: "캠이 웨이크를 보냈을 때 같은 조건이라면 또 즉시
+             * 슬립을 보내"). 적응형 타이머가 이미 만료돼있었으면(오래 조용한 뒤 뒤늦게
+             * 재페어링된 경우 등) 다음 타이머 틱을 기다릴 필요 없이 여기서 바로 보냄 —
+             * 확인만 하는 것이지 이 수신 자체가 타이머를 리셋시키진 않음(사용자 확인) */
+            try_send_sleep_now(n);
+        }
+        xSemaphoreGive(s_nodes_mutex);
+
+    } else if (msg_type == ESP_NOW_MSG_SLEEP_NOW_REQUEST) {
+        /* 2026-08-11 — CAM이 "페어링됐는데 SLEEP_NOW를 못 받았다"고 재요청(사용자 지시:
+         * 70초 자율취침 폴백 대신 이 프로토콜로 대체). 워닝으로 남기고, sleep_now_sent를
+         * 리셋해서 다시 시도 — 이전 시도가 진짜 유실됐다면 이번엔 성공할 수 있음.
+         * SLEEP_NOW_REQUEST_ERROR_THRESHOLD번 넘게 반복되면 재시도로도 안 풀리는
+         * 상태라고 보고 에러코드로 격상(사용자 지시: "CNTL이 이걸 못 보내는 상태면
+         * 에러코드로 표시").
+         * 2026-08-11 추가 — CNTL이 아직 idle 임계값에 도달 못 해서(할 일이 있어서) 정상적으로
+         * 슬립을 못 주는 중이면(s_adaptive_deadline_elapsed==false) 이 재요청은 "유실 의심"이
+         * 아니라 그냥 "아직 때가 안 됐다"는 정상 상황 — 워닝/카운트 없이 조용히 무시(사용자
+         * 지시: "CNTL이 정상적으로 슬립을 못 주는 상태(busy)에서는 그냥 씹어야겠는데" —
+         * 실사용 중 자동목록갱신처럼 CNTL이 바쁠 때 재요청이 계속 오는 게 확인돼서 발견) */
+        if (len < (int)sizeof(esp_now_sleep_now_t)) return;
+        if (!s_adaptive_deadline_elapsed) return;  /* 아직 idle 아님 — 정상, 조용히 무시 */
+        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        esp_now_hub_node_t *req_node = find_node(info->src_addr);
+        if (req_node) {
+            req_node->sleep_now_request_count++;
+            ESP_LOGW(TAG, "SLEEP_NOW_REQUEST 수신 <- %s (%lu번째)",
+                     req_node->name, (unsigned long)req_node->sleep_now_request_count);
+            ui_log_add_warn(UI_WARN_SLEEP_NOW_NORESPONSE, "%s: SLEEP_NOW 재요청(%lu번째)",
+                             req_node->name, (unsigned long)req_node->sleep_now_request_count);
+#define SLEEP_NOW_REQUEST_ERROR_THRESHOLD 3
+            if (req_node->sleep_now_request_count >= SLEEP_NOW_REQUEST_ERROR_THRESHOLD) {
+                ui_log_add_err(UI_ERR_SLEEP_NOW_FAILED, "%s: SLEEP_NOW %d회 재요청에도 전달 안 됨",
+                               req_node->name, SLEEP_NOW_REQUEST_ERROR_THRESHOLD);
+            }
+            req_node->sleep_now_sent = false;  /* 재시도 허용 */
+            try_send_sleep_now(req_node);
         }
         xSemaphoreGive(s_nodes_mutex);
     }
@@ -590,11 +668,13 @@ void esp_now_hub_init(void)
     esp_err_t reset_err = esp_now_send(s_broadcast_addr, (const uint8_t *)&reset_msg, sizeof(reset_msg));
     ESP_LOGI(TAG, "HUB_RESET 브로드캐스트: %s", esp_err_to_name(reset_err));
 
-    const esp_timer_create_args_t adaptive_sleep_args = {
-        .callback = adaptive_sleep_timer_cb, .name = "adaptive_sleep",
+    /* 2026-08-11 — 원샷으로 생성만 해두고 여기선 안 돌림. 실제 시작은
+     * esp_now_hub_note_user_action()이 esp_timer_start_once로 처음 걸 때(최초 페어링 또는
+     * 진짜 사용자 조작 시점) — 그 전엔 조용함을 잴 기준 시각 자체가 없으므로 */
+    const esp_timer_create_args_t adaptive_deadline_args = {
+        .callback = adaptive_deadline_cb, .name = "adaptive_deadline",
     };
-    esp_timer_create(&adaptive_sleep_args, &s_adaptive_sleep_timer);
-    esp_timer_start_periodic(s_adaptive_sleep_timer, ADAPTIVE_SLEEP_CHECK_INTERVAL_US);
+    esp_timer_create(&adaptive_deadline_args, &s_adaptive_deadline_timer);
 
     ESP_LOGI(TAG, "ESP-NOW 허브 시작됨 (STA)");
 }

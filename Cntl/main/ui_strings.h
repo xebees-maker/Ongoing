@@ -70,7 +70,15 @@ typedef enum {
     STR_DELETEALL_STAGE2_PROGRESS,
     STR_DELETEALL_STAGE2_DONE,
     STR_DELETEALL_STAGE2_UNKNOWN,
-    STR_LIST_RENEW_PROGRESS,
+    /* 목록가져오기 진행팝업 2단계(2026-08-11 재설계 — 배치화 이후 전체가 수백ms 안에 끝나서
+     * 단계 표시가 있어야 사람 눈에 실제로 뭐가 되고 있는지 보임, 사용자 지시) */
+    STR_LIST_STAGE1_PROGRESS,
+    STR_LIST_STAGE1_DONE,
+    STR_LIST_STAGE1_NORESPONSE,
+    STR_LIST_STAGE2_PROGRESS,
+    STR_LIST_STAGE2_SUCCESS,
+    STR_LIST_STAGE2_MISMATCH_FMT,
+    STR_LIST_STAGE2_STALLED_FMT,
     STR_LIST_EMPTY,
     STR_LABEL_CAPTURE_INTERVAL,
     STR_LABEL_RESPONSE_INTERVAL,
@@ -108,6 +116,9 @@ typedef enum {
     /* 절전상태 판넬 일시멈춤 단추(2026-08-10) */
     STR_BTN_PAUSE,
     STR_BTN_RESUME,
+    /* 일반 로그 판넬 제목(2026-08-11) — 스크롤 안 되는 고정 타이틀 행(페이지 스크롤을
+     * 잡기 위한 영역, ui_main.c) */
+    STR_PANEL_GENERAL_LOG,
     STR_COUNT,
 } ui_str_id_t;
 

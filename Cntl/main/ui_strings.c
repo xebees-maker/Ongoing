@@ -66,7 +66,15 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_DELETEALL_STAGE2_DONE]      = { "2. 목록 갱신 완료",         "2. List refreshed" },
     [STR_DELETEALL_STAGE2_UNKNOWN]   = { "2. 상태 확인 불가 — 목록갱신으로 다시 확인하세요",
                                           "2. Unable to verify — use Renew list to check again" },
-    [STR_LIST_RENEW_PROGRESS]        = { "목록 갱신 중...",             "Refreshing list..." },
+    [STR_LIST_STAGE1_PROGRESS]       = { "1. 가져오기 명령 전송 중...", "1. Sending fetch command..." },
+    [STR_LIST_STAGE1_DONE]           = { "1. 가져오기 명령 전송됨",     "1. Fetch command sent" },
+    [STR_LIST_STAGE1_NORESPONSE]     = { "1. 카메라 응답 없음",         "1. No response from camera" },
+    [STR_LIST_STAGE2_PROGRESS]       = { "2. 목록 수신 중...",           "2. Receiving list..." },
+    [STR_LIST_STAGE2_SUCCESS]        = { "2. 목록 수신 성공",           "2. List received" },
+    [STR_LIST_STAGE2_MISMATCH_FMT]   = { "2. 목록 수신 실패: 개수 불일치(%u/%u개)",
+                                          "2. List receive failed: count mismatch (%u/%u)" },
+    [STR_LIST_STAGE2_STALLED_FMT]    = { "2. 목록 수신 실패: 응답 없음(%u/%u개)",
+                                          "2. List receive failed: no response (%u/%u)" },
     [STR_LIST_EMPTY]                 = { "사진 없음",                   "No Picture" },
     [STR_LABEL_CAPTURE_INTERVAL]     = { "촬영 주기",                   "Capture interval" },
     [STR_LABEL_RESPONSE_INTERVAL]    = { "응답성",                     "Responsiveness" },
@@ -84,7 +92,9 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     /* 2026-08-10 CAM Deep Sleep 전환 — 값 구간 재정의(1/3/10/30/1800초), 짧은 라벨만
      * 표시하고 뜻은 별도 도움말 텍스트로(STR_RESPONSE_HELP_0..4, 아래) — 순서는
      * ui_main.c의 s_response_interval_values와 반드시 같이 맞출 것 */
-    [STR_OPT_RESPONSE_INTERVAL_LIST] = { "1초\n3초\n10초\n30초\n30분",     "1S\n3S\n10S\n30S\n30M" },
+    /* 2026-08-11, 사용자 지시 — 첫 단계는 더 이상 리터럴 초 값이 아니라(값 자체가 0으로
+     * 바뀜, ui_main.c의 s_response_interval_values 참고) "즉시"/"Live" 라벨로 고정 */
+    [STR_OPT_RESPONSE_INTERVAL_LIST] = { "즉시\n3초\n10초\n30초\n30분",     "Live\n3S\n10S\n30S\n30M" },
     [STR_LABEL_TIME]                 = { "시각",                       "Time" },
     [STR_BTN_SET_TIME]               = { "설정",                       "Set" },
     [STR_TITLE_SET_TIME]             = { "시각 설정",                   "Set time" },
@@ -110,11 +120,12 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_RESPONSE_HELP_4] = { "최대절전모드 — 수동촬영은 포기, 자동촬영분만 확인",
                                "Max power-save - manual capture unavailable, auto-captures only" },
     [STR_LABEL_ADAPTIVE_RESPONSE]     = { "적응형 반응시간",           "Adaptive responsiveness" },
-    [STR_OPT_ADAPTIVE_RESPONSE_LIST]  = { "10초\n30초\n1분",           "10S\n30S\n1M" },
+    [STR_OPT_ADAPTIVE_RESPONSE_LIST]  = { "10초\n30초\n1분\n5분",           "10S\n30S\n1M\n5M" },
     [STR_HELP_ADAPTIVE_RESPONSE]      = { "조작이 멈출 때까지 절전하지 않음",
                                            "Won't power-save until you stop interacting" },
     [STR_BTN_PAUSE]                   = { "일시멈춤",                  "Pause" },
     [STR_BTN_RESUME]                  = { "재개",                      "Resume" },
+    [STR_PANEL_GENERAL_LOG]           = { "일반 로그",                 "General Log" },
 };
 
 void ui_lang_load(void)

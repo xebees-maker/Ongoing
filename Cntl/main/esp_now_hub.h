@@ -50,11 +50,20 @@ typedef struct {
      * 판단하는 기준 */
     uint32_t        last_paired_ms;
     /* 이번 페어링에서 이미 SLEEP_NOW를 보냈는가(2026-08-10) — PAIR_ACK 수신 시 false로
-     * 리셋, adaptive_sleep_timer_cb가 보낸 뒤 true로 세팅. 없으면 CAM이 실제로는 첫 신호
+     * 리셋, try_send_sleep_now()가 보낸 뒤 true로 세팅. 없으면 CAM이 실제로는 첫 신호
      * 받고 바로 잠들었어도(확인 응답이 없는 fire-and-forget이라 Cntl은 모름) 다음
-     * ADVERTISE 올 때까지 500ms마다 계속 허공에 재전송하게 됨(실사용 중 발견, 무해하지만
-     * 낭비) */
+     * ADVERTISE 올 때까지 계속 허공에 재전송하게 됨(실사용 중 발견, 무해하지만 낭비) */
     bool            sleep_now_sent;
+    /* 2026-08-11 — 이번 페어링 사이클에서 CAM_CONFIG_ACK를 받았는가. PAIR_ACK 수신 시 false로
+     * 리셋, CAM_CONFIG_ACK 수신 시 true. SLEEP_NOW 전송 조건 중 하나(적응형 반응시간 경과 +
+     * 이 값이 true) — 예전엔 "페어링 후 1초 지났으면 설정 핸드셰이크가 끝났겠지"라고
+     * 추측(ADAPTIVE_SLEEP_PAIR_SETTLE_MS 고정값)했는데, CAM_CONFIG_SET이 이미 reliable
+     * stack(ACK+재시도)이라 실제 완료 이벤트를 그대로 쓸 수 있어서 추측을 없앰 */
+    bool            config_acked_this_cycle;
+    /* 2026-08-11 — CAM이 SLEEP_NOW_REQUEST(재요청)를 보낼 때마다 증가, PAIR_ACK 수신 시
+     * 0으로 리셋. 임계치(SLEEP_NOW_REQUEST_ERROR_THRESHOLD) 넘으면 워닝 대신 에러코드로
+     * 격상(recv_cb의 SLEEP_NOW_REQUEST 핸들러 참고) */
+    uint32_t        sleep_now_request_count;
     uint32_t        last_seen_ms;
     /* Deep Sleep 사이클 통계(2026-08-10, ESP_NOW_MSG_DEEP_SLEEP_STATS) — 보낼 수 있는
      * 노드(CAM)만 채워짐, has_deepsleep_stats=false면 아직 한 번도 못 받음(구버전 노드이거나
@@ -70,7 +79,7 @@ typedef struct {
     uint8_t         ds_last_wake_reason;
     uint32_t        ds_last_awake_uptime_ms;
     uint32_t        ds_last_sleep_interval_sec;
-    /* 2026-08-10 — adaptive_sleep_timer_cb()가 SLEEP_NOW를 보낼 때 판단 근거를 여기 남겨둠 —
+    /* 2026-08-10 — try_send_sleep_now()가 SLEEP_NOW를 보낼 때 판단 근거를 여기 남겨둠 —
      * 통계탭 판넬에 자체 줄로(사용자 지시, -mm:ss와 함께) 표시하려는 것. sleep_now_send_count는
      * ds_cycle_count와 같은 방식의 단조증가 세대번호 — refresh_power_panel()이 이게 바뀔 때만
      * 새 줄을 추가(안 그러면 안 바뀐 값을 매 틱마다 다시 찍게 됨) */

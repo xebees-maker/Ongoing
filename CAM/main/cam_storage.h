@@ -47,6 +47,15 @@ int cam_storage_list(photo_request_mode_t mode, uint32_t param, uint32_t *out_fi
 esp_err_t cam_storage_stat(uint32_t file_id, uint32_t *out_size, char *out_kind, uint32_t *out_capture_time);
 
 /**
+ * @brief 저장된 모든 사진의 전체 정보(id/종류/촬영시각/크기)를 file_id 오름차순으로
+ *        한 번에 채움 — 목록 전송(PHOTO_LIST) 전용, 파일마다 별도 cam_storage_stat()
+ *        호출이 필요 없음(2026-08-11, scan_all_files가 애초에 stat()으로 갖고 있던
+ *        정보를 그대로 재사용 — 예전엔 이 정보를 파일마다 다시 조회해서 이중으로 느렸음)
+ * @return 채운 개수(0 이상), 실패 시 음수
+ */
+int cam_storage_list_full(esp_now_photo_list_item_t *out_items, int max);
+
+/**
  * @brief file_id에 해당하는 파일을 읽기 모드로 열고 크기를 알려줌 — 호출자가 청크 단위로
  *        fread()해서 ESP-NOW로 보내면 됨. 다 쓰면 fclose() 호출.
  */

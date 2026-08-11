@@ -133,6 +133,31 @@ typedef enum {
                                               * ACK을 기다림 — 유실 시 재시도, 매 사이클 진짜로
                                               * 전달됐는지 확인 가능해짐(격주기로 유실되던 문제
                                               * 진단 목적) */
+    ESP_NOW_MSG_SLEEP_NOW_REQUEST = 36,      /* CAM -> Cntl: "페어링된 채로 대기 중인데 아직
+                                              * SLEEP_NOW를 못 받았음, 다시 보내달라"
+                                              * (2026-08-11, 사용자 지시). CAM은 페어링 후
+                                              * SLEEP_NOW 없이 일정 간격(CAM_DEEPSLEEP_NUDGE_
+                                              * INTERVAL_MS) 이상 대기하면 이걸 반복 전송하며
+                                              * 계속 깨있음 — 예전의 "70초 지나면 그냥 자율적으로
+                                              * 자버림" 폴백을 대체(사용자 지시: "이 모든 경우에
+                                              * 캠은 알아서 잘 수 없다고" — CNTL이 SLEEP_NOW를
+                                              * 명시적으로 줄 때만 잠) */
+
+    /* 2026-08-11 재설계 — 목록 프로토콜 전체를 reliable 기반으로 교체(사용자 지시).
+     * 예전 ESP_NOW_MSG_PHOTO_LIST_ENTRY(파일당 1개, unreliable)와 missing_count/missing_idx
+     * 기반 SR 사후복구는 폐기 — "chunk는 SR, 나머지는 reliable"라는 대원칙에 따르면 목록도
+     * (청크처럼 대량이지만) 매 항목이 작아서 여러 개를 한 배치로 묶어 reliable_request 하나로
+     * 보내는 게 더 맞다고 판단(사용자: "reliable이므로 누락 확인이나 재전송은 필요 없어") */
+    ESP_NOW_MSG_PHOTO_LIST_COUNT = 37,       /* CAM -> Cntl: 스캔 완료, 스트리밍 시작 전에
+                                              * 전체 개수/SD 용량 먼저 알림(reliable) */
+    ESP_NOW_MSG_PHOTO_LIST_COUNT_ACK = 38,   /* Cntl -> CAM */
+    ESP_NOW_MSG_PHOTO_LIST_BATCH = 39,       /* CAM -> Cntl: 항목 여러 개를 한 패킷에 묶어서
+                                              * reliable로 전송(esp_now_photo_list_batch_t 참고) */
+    ESP_NOW_MSG_PHOTO_LIST_BATCH_ACK = 40,   /* Cntl -> CAM */
+    ESP_NOW_MSG_PHOTO_LIST_ERROR = 41,       /* Cntl -> CAM: 개수 불일치(조기 DONE 또는
+                                              * 전부 받았는데 DONE 무응답) — CAM은 받으면 이번
+                                              * 목록 전송 관련 상태/메모리를 정리하고 대기로 복귀 */
+    ESP_NOW_MSG_PHOTO_LIST_ERROR_ACK = 42,   /* CAM -> Cntl */
 } esp_now_msg_type_t;
 
 /* ESP_NOW_MSG_SLEEP_NOW 페이로드 — 특별한 정보 없이 신호 자체가 전부.
@@ -359,25 +384,15 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
 } esp_now_photo_list_request_t;
 
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-    uint16_t index;           /* 이번 목록 전송에서 이 항목의 위치(0..count-1) — 2026-08-10,
-                                * SR 방식 도입. 유실분을 정확히 콕 집어 재전송하려면 순번이
-                                * 필요함(청크의 chunk_idx와 같은 역할) */
-    uint32_t file_id;        /* CAM의 M/T 공용 순번 — 위 설명 참고 */
-    uint8_t  kind;            /* cam_capture_kind_t: 'M' 또는 'T' */
-    uint32_t capture_time;   /* 파일의 FAT 수정시각(유닉스 타임스탬프) — 촬영시각 표시용 */
-    uint32_t file_size;
-} esp_now_photo_list_entry_t;
-
-/* 2026-08-10 — 목록도 청크와 똑같이 "1요청 -> N개 항목 -> 1완료" 패턴인데, 그동안 개별
- * LIST_ENTRY는 ACK/재전송 없는 단발 전송이었고 신뢰성은 "개수 안 맞으면 통째로 다시 요청"
- * (최대 2회)이라는 훨씬 조악한 방식뿐이었음 — 실사용 중 3005/3007 동시발생으로 발견(바깥쪽
- * 팝업 타임아웃 1배 예산에, 안쪽 재요청 루프가 최대 3배까지 써서 서로 안 맞물림).
- * "chunk는 SR, 나머지는 reliable 요청-응답"이라는 대원칙에 따르면 목록도 대량 다중항목
- * 전송이라 청크와 같은 카테고리 — chunk_nack_t와 동일한 missing_idx 방식을 그대로 적용해서
- * LIST_DONE_ACK가 빠진 인덱스만 콕 집어 알려주고, "통째로 다시" 재요청 루프 자체를 없앰 */
+/* 2026-08-11 재설계(사용자 지시) — 예전엔 파일당 1메시지 unreliable 스트리밍 +
+ * missing_idx 기반 SR 사후복구였는데(2026-08-10 도입, 실사용 중 3005/3007 동시발생으로
+ * 발견된 문제의 임시 봉합), 이번엔 아예 "reliable로 보내면 사후 누락복구 자체가 필요
+ * 없다"는 방향으로 다시 설계. 순서:
+ *   1) CAM -> Cntl: PHOTO_LIST_COUNT (전체 개수를 스트리밍 전에 미리 알림)
+ *   2) CAM -> Cntl: PHOTO_LIST_BATCH ×M (항목 여러 개를 한 배치로 묶어 reliable 전송)
+ *   3) CAM -> Cntl: PHOTO_LIST_DONE (단순 완료 신호)
+ * Cntl은 받은 개수 vs count를 비교해서 어긋나면(DONE이 조기 도착 / 다 받았는데 DONE
+ * 무응답) PHOTO_LIST_ERROR로 CAM에 알리고, CAM은 관련 상태/메모리를 정리 후 대기로 복귀 */
 typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
@@ -386,10 +401,36 @@ typedef struct __attribute__((packed)) {
                              * 추가(2026-08-01). 0이면 CAM이 조회 실패했다는 뜻(구버전 CAM과도
                              * 호환 — 안 채워진 필드는 그냥 0으로 옴) */
     uint32_t sd_used_kb;   /* 사용 중인 용량(KB) */
-    uint16_t missing_count;  /* LIST_DONE_ACK에서만 의미 있음(0..ESP_NOW_PHOTO_NACK_MAX_INDICES) —
-                                LIST_DONE 쪽(CAM->Cntl)은 항상 0, 무시 */
-    uint16_t missing_idx[ESP_NOW_PHOTO_NACK_MAX_INDICES];
+} esp_now_photo_list_count_t;
+/* ESP_NOW_MSG_PHOTO_LIST_COUNT_ACK도 이 구조체를 msg_type만 바꿔 재사용(기존 관례) */
+
+typedef struct __attribute__((packed)) {
+    uint16_t index;           /* 전체 목록에서 이 항목의 위치(0..count-1) — 화면 정렬/디버깅용,
+                                * 유실 추적 목적 아님(배치 자체가 reliable이라 불필요) */
+    uint32_t file_id;        /* CAM의 M/T 공용 순번 — 위 설명 참고 */
+    uint8_t  kind;            /* cam_capture_kind_t: 'M' 또는 'T' */
+    uint32_t capture_time;   /* 파일의 FAT 수정시각(유닉스 타임스탬프) — 촬영시각 표시용 */
+    uint32_t file_size;
+} esp_now_photo_list_item_t;  /* 15바이트 */
+
+/* ESP-NOW V2 페이로드 한도 1470바이트(다른 곳과 동일 근거, 위 esp_now_photo_chunk_t 주석
+ * 참고) 안에서 안전하게 — 헤더 3바이트 + 64*15바이트 = 963바이트 */
+#define ESP_NOW_PHOTO_LIST_BATCH_MAX 64
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint8_t  entry_count;    /* 이 배치에 실제로 채워진 개수(<= ESP_NOW_PHOTO_LIST_BATCH_MAX) */
+    esp_now_photo_list_item_t entries[ESP_NOW_PHOTO_LIST_BATCH_MAX];
+} esp_now_photo_list_batch_t;
+/* ESP_NOW_MSG_PHOTO_LIST_BATCH_ACK도 이 구조체를 msg_type만 바꿔 재사용(entries는 안 봄,
+ * 매칭 확인용으로만 씀 — 기존 관례) */
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
 } esp_now_photo_list_done_t;
+/* ESP_NOW_MSG_PHOTO_LIST_DONE_ACK도 이 구조체 재사용.
+ * ESP_NOW_MSG_PHOTO_LIST_ERROR/_ERROR_ACK도 이 구조체 재사용(신호 자체가 전부, 페이로드 불필요) */
 /* ESP_NOW_MSG_PHOTO_LIST_DONE_ACK(2026-08-05, Layer 1)도 이 구조체를 msg_type만 바꿔서
  * 그대로 재사용 — 필드 의미가 이미 동일함(count 등), "항상 보낸다"만 새로운 규칙.
  * missing_idx 추가(2026-08-10)로 청크의 PHOTO_DONE_ACK와 완전히 같은 패턴이 됨 */

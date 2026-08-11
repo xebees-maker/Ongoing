@@ -35,6 +35,8 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_REQUEST_BUSY         2006  /* 이미 수신 중이라 새 요청 무시됨 */
 #define UI_ERR_NOT_PAIRED           2007  /* 요청 시점에 이미 언페어링 상태(desync 포함) —
                                              전송 자체를 안 하고 재연결을 시도함 */
+#define UI_ERR_SLEEP_NOW_FAILED     2008  /* CAM이 SLEEP_NOW_REQUEST(재요청)를 임계치 이상
+                                             반복해도 CNTL이 SLEEP_NOW를 못 전달함(2026-08-11) */
 
 #define UI_ERR_META_TOO_BIG         3001  /* CAM이 보낸 사진이 고정 수신 버퍼보다 큼 */
 #define UI_ERR_CHUNK_MISSING        3002  /* 청크 누락 — 재조립 실패 */
@@ -62,6 +64,12 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_FONT_CREATE          5004  /* TinyTTF 폰트 인스턴스 생성 실패 */
 #define UI_ERR_HTTPD_START          5005  /* 웹서버(httpd_start) 시작 실패 */
 #define UI_ERR_RTC_SET_FAILED       5006  /* 설정 화면 수동 시각설정 — RTC 하드웨어 쓰기 실패 */
+#define UI_ERR_CONFIG_FILE_MISMATCH 5007  /* device_config.bin 버전/크기 불일치 — 기본값으로
+                                             폴백됨(저장된 설정 유실). 2026-08-11 — 예전엔
+                                             ESP_LOGW만 남기고 화면엔 표시가 없어서, 다른 설정을
+                                             하나라도 Apply하면 그 폴백 기본값이 새 파일에
+                                             그대로 눌러써져 영구화되는 사고로 이어짐(응답성이
+                                             조용히 2로 굳어버림) — 화면에도 반드시 보이게 함 */
 
 void ui_log_add_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
@@ -75,3 +83,20 @@ int ui_log_get_error_history(int *out_codes, int max);
 
 /* code에 대응하는 짧은 설명 문자열(찾는 코드가 없으면 "알 수 없는 에러") */
 const char *ui_log_err_desc(int code);
+
+/* 2026-08-11 — 워닝 레벨(사용자 지시). 에러(UI_ERR_*)와 별개 체계: 에러는 아이콘이
+ * 재부팅 전까지 계속 남지만, 워닝은 사용자가 팝업으로 확인하면 그 즉시 이력이 지워지고
+ * 로고 아이콘도 정상으로 돌아옴 — "잠깐 있었지만 지금은 괜찮을 수도 있는" 신호라는
+ * 성격 차이를 반영. 코드 네임스페이스는 에러와 안 겹치게 6xxx대(현재 유일한 용도:
+ * SLEEP_NOW 재요청) */
+#define UI_WARN_SLEEP_NOW_NORESPONSE 6001  /* CAM이 SLEEP_NOW 재요청(SLEEP_NOW_REQUEST)을
+                                              보냄 — 이전에 보낸 SLEEP_NOW가 유실됐을 가능성 */
+
+void ui_log_add_warn(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+bool ui_log_get_pending_warn(char *out, size_t out_cap);
+#define UI_WARN_HISTORY_CAP 16
+int ui_log_get_warn_history(int *out_codes, int max);
+const char *ui_log_warn_desc(int code);
+/* 워닝 팝업을 닫을 때 호출 — 이력을 비워서 로고 아이콘이 정상으로 돌아가게 함(에러와
+ * 다른 점, 위 주석 참고) */
+void ui_log_clear_warn_history(void);

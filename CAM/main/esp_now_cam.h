@@ -21,5 +21,9 @@ bool esp_now_cam_is_paired(void);
  *         윈도우 판정(cam_node.c의 cam_node_wake_window_done())에 씀 */
 bool esp_now_cam_is_busy(void);
 
+/** @brief 페어링됐는데 SLEEP_NOW를 아직 못 받아서 재요청(ESP_NOW_MSG_SLEEP_NOW_REQUEST)을
+ *         보냄(2026-08-11) — cam_node_wake_window_done()이 주기적으로 호출 */
+void esp_now_cam_send_sleep_now_request(void);
+
 /** @brief Green 상태 LED GPIO 등록 (esp_now_cam_init() 이전에 호출) */
 void esp_now_cam_set_status_led(gpio_num_t pin);

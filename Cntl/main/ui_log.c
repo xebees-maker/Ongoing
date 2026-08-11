@@ -45,6 +45,7 @@ static const ui_err_entry_t s_err_table[] = {
     { UI_ERR_SEND_DELETE_ALL_REQ, "전체삭제 요청 전송 실패" },
     { UI_ERR_REQUEST_BUSY,        "요청 무시됨(이미 수신중)" },
     { UI_ERR_NOT_PAIRED,          "페어링 끊김 — 재연결 시도" },
+    { UI_ERR_SLEEP_NOW_FAILED,    "SLEEP_NOW 전달 실패(재요청 반복)" },
     { UI_ERR_META_TOO_BIG,        "사진이 수신 버퍼보다 큼" },
     { UI_ERR_CHUNK_MISSING,       "청크 누락" },
     { UI_ERR_CRC_MISMATCH,        "CRC 불일치" },
@@ -175,6 +176,99 @@ const char *ui_log_err_desc(int code)
         if (s_err_table[i].code == code) return s_err_table[i].desc;
     }
     return "알 수 없는 에러";
+}
+
+/* 2026-08-11 — 워닝 레벨. 에러(위)와 완전히 별개 상태를 가지는 이유는 ui_log.h 주석
+ * 참고(확인하면 지워짐 vs 안 지워짐) — 그 차이 자체가 두 이력을 하나로 합쳐서 플래그로
+ * 구분하는 것보다 완전히 분리된 구조가 더 단순함 */
+#define UI_LOG_WARN_CAP 128
+static char s_last_warn[UI_LOG_WARN_CAP];
+static bool s_warn_pending = false;
+static int  s_warn_history[UI_WARN_HISTORY_CAP];
+static int  s_warn_history_count = 0;
+
+static const ui_err_entry_t s_warn_table[] = {
+    { UI_WARN_SLEEP_NOW_NORESPONSE, "SLEEP_NOW 재요청(유실 의심)" },
+};
+
+static void push_warn_history_locked(int code)
+{
+    for (int i = 0; i < s_warn_history_count; i++) {
+        if (s_warn_history[i] == code) return;
+    }
+    if (s_warn_history_count < UI_WARN_HISTORY_CAP) {
+        s_warn_history[s_warn_history_count++] = code;
+    }
+}
+
+void ui_log_add_warn(int code, const char *fmt, ...)
+{
+    if (!s_mutex) return;
+
+    char msg[144];
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+    if (n <= 0) return;
+
+    char line[160];
+    int total = snprintf(line, sizeof(line), "[W%04d] %s", code, msg);
+    if (total <= 0) return;
+    size_t add_len = ((size_t)total < sizeof(line) - 1) ? (size_t)total : sizeof(line) - 2;
+    line[add_len] = '\0';
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    strncpy(s_last_warn, line, UI_LOG_WARN_CAP - 1);
+    s_last_warn[UI_LOG_WARN_CAP - 1] = '\0';
+    s_warn_pending = true;
+    push_warn_history_locked(code);
+
+    line[add_len] = '\n';
+    append_locked(line, add_len + 1);
+    xSemaphoreGive(s_mutex);
+}
+
+bool ui_log_get_pending_warn(char *out, size_t out_cap)
+{
+    if (!s_mutex || out_cap == 0) return false;
+
+    bool had = false;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_warn_pending) {
+        strncpy(out, s_last_warn, out_cap - 1);
+        out[out_cap - 1] = '\0';
+        s_warn_pending = false;
+        had = true;
+    }
+    xSemaphoreGive(s_mutex);
+    return had;
+}
+
+int ui_log_get_warn_history(int *out_codes, int max)
+{
+    if (!s_mutex) return 0;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    int n = (s_warn_history_count < max) ? s_warn_history_count : max;
+    for (int i = 0; i < n; i++) out_codes[i] = s_warn_history[i];
+    xSemaphoreGive(s_mutex);
+    return n;
+}
+
+const char *ui_log_warn_desc(int code)
+{
+    for (size_t i = 0; i < sizeof(s_warn_table) / sizeof(s_warn_table[0]); i++) {
+        if (s_warn_table[i].code == code) return s_warn_table[i].desc;
+    }
+    return "알 수 없는 워닝";
+}
+
+void ui_log_clear_warn_history(void)
+{
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_warn_history_count = 0;
+    xSemaphoreGive(s_mutex);
 }
 
 void ui_log_get_snapshot(char *out, size_t out_cap)

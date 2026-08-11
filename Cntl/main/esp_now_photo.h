@@ -94,24 +94,36 @@ void esp_now_photo_fetch_by_id(const uint8_t *cam_mac, uint32_t file_id);
  * ──────────────────────────────────────────────────────────── */
 #define ESP_NOW_PHOTO_LIST_MAX 64  /* CAM SD엔 최대 500장까지 있을 수 있지만 화면 리스트라 제한 */
 
+/* 2026-08-11 — esp_now_link.h에 배치 프로토콜용 동명(wire) 구조체가 새로 생겨서 이름 충돌
+ * 방지로 개명(esp_now_photo_list_item_t -> _view_item_t). 필드는 화면 표시에 필요한 것만 남긴
+ * 로컬 저장용이라 wire 구조체의 index는 없음(배열 위치 자체가 index 역할) */
 typedef struct {
     uint32_t file_id;       /* CAM의 M/T 공용 순번(더 이상 타임스탬프 아님, 2026-08-01 재설계) */
     uint8_t  kind;           /* 'M' 또는 'T' */
     uint32_t capture_time;   /* 파일의 FAT 수정시각(유닉스 타임스탬프) — 촬영시각 표시용 */
     uint32_t file_size;
-} esp_now_photo_list_item_t;
+} esp_now_photo_list_view_item_t;
 
 typedef enum {
     ESP_NOW_PHOTO_LIST_STATE_IDLE = 0,
     ESP_NOW_PHOTO_LIST_STATE_REQUESTING,
     ESP_NOW_PHOTO_LIST_STATE_READY,
+    ESP_NOW_PHOTO_LIST_STATE_ERROR,  /* 2026-08-11 — DONE이 이미 아는 개수보다 적게 받은 상태로
+                                        조기도착(개수 불일치). get_progress()의 received/expected가
+                                        실패 시점 값 그대로 남아있어 팝업이 사유를 표시할 수 있음 */
 } esp_now_photo_list_state_t;
 
 void esp_now_photo_list_request(const uint8_t *cam_mac);
 esp_now_photo_list_state_t esp_now_photo_list_get_state(void);
 
+/* PHOTO_LIST_COUNT 응답을 받았는지(=CAM이 요청을 실제로 받아 처리를 시작했는지) — 진행팝업의
+ * "명령 전송" 단계 완료 판정용(2026-08-11). get_progress()의 total>0을 대신 쓰면 CAM의 실제
+ * 목록이 0개인 경우(예: 방금 모두지우기 직후)를 "아직 응답 없음"으로 잘못 판정하게 되므로
+ * 별도 플래그로 분리함 */
+bool esp_now_photo_list_count_received(void);
+
 /* READY일 때 목록을 out에 채워서 개수 반환(최대 ESP_NOW_PHOTO_LIST_MAX, 최신순) */
-int esp_now_photo_list_get_items(esp_now_photo_list_item_t *out, int max);
+int esp_now_photo_list_get_items(esp_now_photo_list_view_item_t *out, int max);
 
 /* REQUESTING 중일 때만 의미 있음 — 진행팝업의 정체 감지용(get_chunk_progress()와 동일 패턴,
  * 2026-08-10). total은 LIST_DONE 도착 전까지 0(아직 몇 개인지 모름) */
