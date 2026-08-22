@@ -11,6 +11,8 @@
 #include "draw/lv_draw_buf_private.h"
 #include "ui_font.h"
 #include "esp_http_server.h"
+#include "esp_event.h"
+#include "esp_netif.h"
 #include "esp_now_hub.h"
 #include "esp_now_photo.h"
 #include "esp_now_tx.h"
@@ -69,18 +71,59 @@ static esp_err_t photo_get_handler(httpd_req_t *req)
 
 static void web_dashboard_start_stub(void)
 {
+    ui_log_add("Web: entered web_dashboard_start_stub()");
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    /* 2026-08-21 — 5005(httpd_start 실패) 원인 확인됨: 부팅 이 시점엔 내부(비-PSRAM) DRAM이
+     * 거의 바닥남(실기 확인: free internal=1419B) — HTTPD_DEFAULT_CONFIG()의 task_caps
+     * 기본값이 MALLOC_CAP_INTERNAL이라 태스크 스택을 내부 RAM에서만 찾다가 실패함. PSRAM은
+     * 넉넉하니(같은 시점 free heap=263660B) 여기로 돌림(esp_lv_adapter의 stack_in_psram,
+     * 폰트 버퍼의 font_buf_malloc과 동일 원칙) */
+    config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     httpd_handle_t server = NULL;
-    if (httpd_start(&server, &config) != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_start failed");
-        ui_log_add_err(UI_ERR_HTTPD_START, "웹서버 시작 실패");
+    esp_err_t err = httpd_start(&server, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_start failed: %s (free heap=%u, free internal=%u)",
+                 esp_err_to_name(err), (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        /* 2026-08-21 — 시리얼 캡처 도구가 계속 불안정해서 원인 코드를 못 잡았음. 화면
+         * 로그(통계 탭)에도 원인+여유메모리를 바로 보이게 해서 시리얼 없이도 확인 가능하게 함 */
+        ui_log_add_err(UI_ERR_HTTPD_START, "Web server start failed: %s (heap=%uB, internal=%uB)",
+                       esp_err_to_name(err), (unsigned)esp_get_free_heap_size(),
+                       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         return;
     }
+    ui_log_add("Web: httpd_start SUCC");
     static const httpd_uri_t root_uri = { .uri = "/", .method = HTTP_GET, .handler = root_get_handler };
-    httpd_register_uri_handler(server, &root_uri);
+    esp_err_t root_err = httpd_register_uri_handler(server, &root_uri);
+    ui_log_add("Web: '/' register %s", root_err == ESP_OK ? "SUCC" : "FAIL");
     static const httpd_uri_t photo_uri = { .uri = "/photo", .method = HTTP_GET, .handler = photo_get_handler };
-    httpd_register_uri_handler(server, &photo_uri);
-    ESP_LOGI(TAG, "Web dashboard (stub) started");
+    esp_err_t photo_err = httpd_register_uri_handler(server, &photo_uri);
+    ui_log_add("Web: '/photo' register %s", photo_err == ESP_OK ? "SUCC" : "FAIL");
+    /* 2026-08-21 — 성공할 때도 같은 여유메모리를 남김(사용자 지시) — 실패할 때만 찍으면
+     * "언제부터 빠듯해지기 시작했는지" 추세를 못 봄. 5005는 이 시점 내부RAM이 간당간당할
+     * 때만 뜨는 경계선 증상이라, 성공한 부팅들의 수치도 같이 쌓여야 나중에 진짜 임계점을
+     * 추적할 수 있음 */
+    unsigned free_heap = (unsigned)esp_get_free_heap_size();
+    unsigned free_internal = (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "Web dashboard (stub) started (free heap=%u, free internal=%u)", free_heap, free_internal);
+    ui_log_add("Web server started (heap=%uB, internal=%uB)", free_heap, free_internal);
+}
+
+/* 2026-08-21 — 예전엔 app_main() 맨 끝에서 esp_now_hub_init() 직후 곧바로 불렀는데, 그
+ * 시점엔 WiFi가 아직 인증/연결 단계라 IP를 받기도 전이었음(실기 로그로 확인: httpd_start가
+ * IP_EVENT_STA_GOT_IP보다 1초 이상 먼저 실행됨) — 이게 5005(httpd_start 실패)가 항상 뜨던
+ * 원인. IP를 실제로 받은 뒤에 시작하도록 이벤트로 미룸. 재연결로 GOT_IP가 여러 번 올 수
+ * 있어서 한 번만 시작하게 플래그로 막음(두 번째부터는 이미 떠있는 서버라 재호출해도 무해하지만
+ * 깔끔하게) */
+static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    (void)arg; (void)event_base; (void)event_data;
+    static bool s_started = false;
+    ui_log_add("IP_EVENT(id=%ld) received, s_started=%d", (long)event_id, (int)s_started);
+    if (event_id == IP_EVENT_STA_GOT_IP && !s_started) {
+        s_started = true;
+        web_dashboard_start_stub();
+    }
 }
 
 static void *font_buf_malloc(size_t size, lv_color_format_t cf)
@@ -187,9 +230,11 @@ void app_main(void)
     /* Cntl 통합 테스트 4단계 → CAM 연결 기능: WiFi+ESP-NOW 허브(페어링/노드테이블 포함) —
      * Cntl main.c와 동일하게 UI 뜬 뒤 마지막에 켬 */
     esp_now_photo_init();
-    esp_now_hub_init();
+    esp_now_hub_init();  /* 내부에서 esp_netif_init()+esp_event_loop_create_default() 호출 —
+                             아래 이벤트 등록은 반드시 그 다음이어야 함 */
     esp_now_tx_init();
 
-    /* Cntl 통합 테스트 5단계: 웹 대시보드(HTTP 서버, 최소 버전) */
-    web_dashboard_start_stub();
+    /* 웹 대시보드는 실제로 IP를 받은 뒤에 시작(위 ip_event_handler 참고, 5005 버그 수정) */
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                         &ip_event_handler, NULL, NULL));
 }

@@ -13,6 +13,17 @@
  * 광고/스캔 상태머신)으로 Cntl의 실제 채널을 찾는다. */
 #define ESP_NOW_LINK_CHANNEL 1
 
+/* 2026-08-21 — 노드(CAM/Sens)가 아직 페어링 전일 때 "짧게 깨서 페어링 시도, 못 찾으면
+ * 짧게 자고 재시도"를 반복하는 주기의 절반값(초 단위) — 깨어서 시도하는 시간과 못 찾고
+ * 자는 시간이 둘 다 이 값과 같음(현재 CAM: cam_node.c의 CAM_DEEPSLEEP_PAIR_WAIT_TIMEOUT_MS/
+ * CAM_DEEPSLEEP_RETRY_SLEEP_SEC가 이 값을 그대로 씀). 이걸 CNTL/CAM/Sens가 전부 참조하는
+ * 공용 헤더에 두는 이유 — CNTL의 PAIR_REQUEST 재시도 총 구간이 이 값의 2배는 돼야 사용자가
+ * 언제 버튼을 누르든 노드의 깨어있는 위상과 반드시 겹침(나이키스트 원칙, 사용자 지시 —
+ * esp_now_hub.c의 PAIR_REQUEST_RETRY_ATTEMPTS 계산 참고). CNTL이 이 상수를 몰래 다른 값으로
+ * 따로 들고 있으면 다시 어긋날 수 있어서 CAM/Sens가 실제로 쓰는 값과 반드시 같은 자리에서
+ * 가져와야 함 */
+#define ESP_NOW_NODE_UNPAIRED_RETRY_SEC 3
+
 typedef enum {
     ESP_NOW_MSG_ADVERTISE = 1,
     ESP_NOW_MSG_PAIR_REQUEST = 2,
@@ -158,6 +169,30 @@ typedef enum {
                                               * 전부 받았는데 DONE 무응답) — CAM은 받으면 이번
                                               * 목록 전송 관련 상태/메모리를 정리하고 대기로 복귀 */
     ESP_NOW_MSG_PHOTO_LIST_ERROR_ACK = 42,   /* CAM -> Cntl */
+
+    /* 2026-08-21 — "CAM/Sens는 지능 없음, Cntl이 상태관리 전담" 원칙 재확인 후 정리.
+     * 전체삭제가 파일 개수에 따라 오래 걸릴 수 있는데(수백 개면 수십 초), 예전엔 Cntl이
+     * "접수됐는지"와 "다 지웠는지"를 하나의 응답(DELETE_ALL_ACK)/하나의 고정 타임아웃으로
+     * 뭉뚱그려 판단해서, 실제로는 CAM이 정상 작업 중인데 Cntl이 먼저 포기하고 다음 단계로
+     * 넘어가는 오탐이 있었음(진짜 ACK는 늦게 도착). 지금촬영의 RECEIVED/SUCCESS 2단계
+     * 패턴과 동일하게 분리 — CAM은 접수 즉시(삭제 시작 전) 지울 개수를 먼저 알리고, Cntl은
+     * 그 개수 기준으로 완료 대기 예산을 계산해서 진짜 완료 ACK만 완료로 인정함 */
+    ESP_NOW_MSG_PHOTO_DELETE_ALL_RECEIVED = 43,  /* CAM -> Cntl: DELETE_ALL_REQUEST 접수,
+                                              * 삭제 시작 전 지울 파일개수를 먼저 알림 */
+
+    /* SET_TIME이 예전엔 raw esp_now_send로 보내고 끝(무응답 무보장)이었음 — 나머지 모든
+     * Cntl->노드 요청이 reliable stack(esp_now_tx/esp_now_reliable_request) 위에 있는 것과
+     * 어긋나서 통일(2026-08-21) */
+    ESP_NOW_MSG_SET_TIME_ACK = 44,           /* CAM/Sens -> Cntl: SET_TIME 수신+적용 확인 */
+
+    /* PHOTO_META가 예전엔 "3번 그냥 쏘고 끝"(ACK 없음, 청크 전송도 확인 없이 바로 시작)이라
+     * 유일하게 reliable 전환에서 빠져있던 메시지였음(2026-08-21) — 이게 실제 버그의 근본
+     * 원인이었음: 3개의 중복 사본 중 하나가 늦게 도착하면 CNTL이 이미 SR로 받고 있던
+     * 진행상황(비트맵)을 그 시점에 통째로 리셋해버림(handle_meta()가 매번 무조건 리셋).
+     * reliable로 바꾸면 CAM이 META_ACK을 받기 전엔 청크 전송 자체를 시작 안 하므로, 청크가
+     * 이미 시작된 뒤에 늦은 META 사본이 끼어드는 경쟁 상태가 구조적으로 사라짐(사용자 지적:
+     * "SR 자체가 가드니까" — 별도 중복방어 코드 불필요) */
+    ESP_NOW_MSG_PHOTO_META_ACK = 45,         /* Cntl -> CAM: PHOTO_META 수신 확인, "항상" 보냄 */
 } esp_now_msg_type_t;
 
 /* ESP_NOW_MSG_SLEEP_NOW 페이로드 — 특별한 정보 없이 신호 자체가 전부.
@@ -303,6 +338,9 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
 } esp_now_photo_done_t;
 
+/* ESP_NOW_MSG_PHOTO_META_ACK(2026-08-21)도 이 구조체를 msg_type만 바꿔 그대로 재사용 —
+ * 내용이 필요 없는 순수 확인 응답이라는 의미가 완전히 같음(SLEEP_NOW_ACK와 동일 원칙) */
+
 /* 청크 전송 신뢰성 재설계(2026-08-03) — "핸드셰이크처럼 매 청크마다 응답을 기다리면서도,
  * 정작 그 응답이 로컬 라디오의 물리계층 ACK일 뿐 상대 애플리케이션이 실제로 받았다는
  * 진짜 확인이 아니었던" 이전 설계를 버림(사용자 지적: "그거 handshake도 아니고 streaming도
@@ -344,12 +382,25 @@ typedef struct __attribute__((packed)) {
 } esp_now_photo_window_status_req_t;
 
 /* 지금촬영(CAPTURE_NOW) 진행 상태 — Cntl UI가 진행 팝업 단계 표시에 씀.
- * RECEIVED: CAM이 요청을 접수(아직 촬영 전). SUCCESS/FAILED: 촬영 자체의 성공/실패
- * (전송은 SUCCESS 뒤에 기존 META/CHUNK/DONE으로 이어짐, FAILED면 곧바로 DONE만 옴). */
+ * RECEIVED: CAM이 요청을 접수(아직 촬영 전). SUCCESS/FAILED: 촬영 자체의 성공/실패.
+ *
+ * 2026-08-21 — INIT_NEEDED/INIT_DONE/CAPTURING 추가(사용자 설계). 예전엔 RECEIVED 이후
+ * 아무 중간신호 없이 촬영이 끝날 때까지(카메라 초기화+워밍업+실촬영, XCLK가 낮으면 수 초까지
+ * 걸릴 수 있음) 블로킹 대기했고, Cntl은 "응답성" 설정에서 나온 무선 왕복용 타이머 하나로만
+ * 무응답을 판정해서 4004가 자주 오탐됐음(사용자 지적: "네 코드 스타일 문제야" — 성격이 다른
+ * 대기를 같은 타이머로 뭉뚱그림). 이제 각 전환마다 별도 신호+별도 타임아웃으로 판정:
+ *   RECEIVED -> (카메라 이미 준비됐으면 곧장 CAPTURING, 아니면) INIT_NEEDED -> INIT_DONE
+ *            -> CAPTURING -> SUCCESS/FAILED
+ * 초기화가 필요 없는 경우 INIT_NEEDED/INIT_DONE 두 단계는 아예 안 보내고 건너뜀(Cntl 팝업도
+ * 그 두 단계를 안 보여줌). RECEIVED만 recv_cb 컨텍스트라 fire-and-forget 예외, 나머지는 전부
+ * CAPTURE_STATUS_ACK을 기다리는 reliable(feedback_default_to_reliable_messaging 메모리 참고) */
 typedef enum {
-    CAM_CAPTURE_STATUS_RECEIVED = 0,
-    CAM_CAPTURE_STATUS_SUCCESS  = 1,
-    CAM_CAPTURE_STATUS_FAILED   = 2,
+    CAM_CAPTURE_STATUS_RECEIVED    = 0,
+    CAM_CAPTURE_STATUS_SUCCESS     = 1,
+    CAM_CAPTURE_STATUS_FAILED      = 2,
+    CAM_CAPTURE_STATUS_INIT_NEEDED = 3,  /* 카메라 아직 이번 사이클에 초기화 안 됨 — 지금 시작 */
+    CAM_CAPTURE_STATUS_INIT_DONE   = 4,  /* esp_camera_init() 완료 */
+    CAM_CAPTURE_STATUS_CAPTURING   = 5,  /* 실제 촬영(워밍업+실샷) 시작 직전 */
 } cam_capture_status_t;
 
 typedef struct __attribute__((packed)) {
@@ -454,10 +505,27 @@ typedef struct __attribute__((packed)) {
     uint32_t unix_time;
 } esp_now_set_time_t;
 
+/* ESP_NOW_MSG_SET_TIME_ACK(2026-08-21) — 페이로드 없음, 응답이 왔다는 사실 자체가 의미의
+ * 전부(esp_now_capture_status_ack_t와 동일 패턴) */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_set_time_ack_t;
+
 typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
 } esp_now_photo_delete_all_request_t;
+
+/* ESP_NOW_MSG_PHOTO_DELETE_ALL_RECEIVED(2026-08-21) — CAM이 삭제 시작 "전"에 보냄. count는
+ * 지금부터 지울 파일 개수(cam_storage_count_files()) — Cntl이 이 값으로 완료 대기 예산을
+ * 계산함(esp_now_photo_delete_all_ack_t의 deleted_count는 "실제로 지운 개수"라 의미가 다름,
+ * 필드명도 구분해둠) */
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint16_t count;
+} esp_now_photo_delete_all_received_t;
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;
@@ -492,6 +560,24 @@ typedef struct __attribute__((packed)) {
                                         무응답 타임아웃 산정에 그대로 쓰임 — 두 값 다 이 하나의
                                         설정에서 파생(사용자가 직접 지정, 0=레거시/기본 500ms
                                         틱 그대로 유지) */
+    uint8_t  agc_enable;             /* 2026-08-21 추가 — 1=자동게인(AGC) 켬, 0=끔(마지막
+                                        자동값에 고정). 세로줄 노이즈 진단용 — 센서 원본 API
+                                        sensor_t::set_gain_ctrl() 그대로 매핑 */
+    uint8_t  aec_enable;             /* 2026-08-21 추가 — 1=자동노출(AEC) 켬, 0=끔(마지막
+                                        자동값에 고정). sensor_t::set_exposure_ctrl() 매핑 */
+    uint8_t  xclk_mhz;                /* 2026-08-21 추가 — 픽셀클럭(MHz), 화질/노이즈 진단용
+                                        프리셋(5/10/20/24). 카메라가 이미 초기화된 상태면
+                                        sensor_t::set_xclk()로 즉시 반영, 아니면 다음 필요시
+                                        초기화 때 이 값으로 esp_camera_init() 호출됨 */
+    uint8_t  nack_max_rounds;         /* 2026-08-21 추가 — 청크 전송 NACK/DONE_ACK 최대
+                                        재전송 라운드 수. CAM(몇 번 재전송하고 포기할지)과
+                                        Cntl(몇 번까지 기다리다 포기할지)이 각자 독립적으로
+                                        판단 기준으로 쓰는 값이라 반드시 같은 숫자여야 함 —
+                                        예전엔 양쪽에 따로 하드코딩했다가 off-by-one으로
+                                        어긋나서 Cntl이 CAM이 이미 포기한 후에도 무한정
+                                        기다리는 버그가 있었음(3006 오탐). CNTL이 유일한
+                                        소유자, CAM은 이 값을 그대로 씀(0이면 CAM 쪽 기존
+                                        기본값 유지 — 구버전 CNTL과의 호환 여유) */
 } esp_now_cam_config_t;
 
 /* CAM -> Cntl: CAM_CONFIG_SET 적용 결과 확인(2026-08-08) */

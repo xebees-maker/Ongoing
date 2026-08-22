@@ -57,16 +57,33 @@ static void file_path_kind(uint32_t file_id, char kind, char *out, size_t out_le
     snprintf(out, out_len, "%s/%c%s.jpg", BSP_CAM_SD_MOUNT_POINT, kind, seq_str);
 }
 
-/* file_id(=순번)만으로는 M/T 중 어느 쪽인지 몰라서 둘 다 시도 — M/T가 순번을 공유하는 한
- * 같은 seq가 두 kind에 동시에 존재할 수 없어서 결과는 항상 유일함 */
+/* 2026-08-21 — 워밍업 프레임 화질 확인용 임시 진단 kind('A'/'B', CAM_WARMUP_FRAME_COUNT=2
+ * 프레임 기준 하나씩) 추가. M/T와 똑같이 목록/삭제/순번공유 대상에 포함시켜서 Cntl 목록에서
+ * 실제 촬영본(M)과 나란히 보고 비교할 수 있게 함 — 적정 워밍업 프레임 수가 확정되면
+ * (cam_node.c의 CAM_WARMUP_FRAME_COUNT 주석 참고) 이 kind들과 관련 코드는 지워도 됨,
+ * 정식 기능 아님 */
+#define CAM_STORAGE_KIND_COUNT 4
+static const char s_valid_kinds[CAM_STORAGE_KIND_COUNT] = {
+    CAM_CAPTURE_KIND_MANUAL, CAM_CAPTURE_KIND_AUTO, 'A', 'B'
+};
+
+static bool is_valid_kind(char kind)
+{
+    for (int i = 0; i < CAM_STORAGE_KIND_COUNT; i++) {
+        if (s_valid_kinds[i] == kind) return true;
+    }
+    return false;
+}
+
+/* file_id(=순번)만으로는 어느 kind인지 몰라서 등록된 kind를 전부 시도 — 전부 순번을
+ * 공유하는 한 같은 seq가 두 kind에 동시에 존재할 수 없어서 결과는 항상 유일함 */
 static bool resolve_path(uint32_t file_id, char *out, size_t out_len, char *out_kind)
 {
-    const char kinds[2] = { CAM_CAPTURE_KIND_MANUAL, CAM_CAPTURE_KIND_AUTO };
-    for (int i = 0; i < 2; i++) {
-        file_path_kind(file_id, kinds[i], out, out_len);
+    for (int i = 0; i < CAM_STORAGE_KIND_COUNT; i++) {
+        file_path_kind(file_id, s_valid_kinds[i], out, out_len);
         struct stat st;
         if (stat(out, &st) == 0) {
-            if (out_kind) *out_kind = kinds[i];
+            if (out_kind) *out_kind = s_valid_kinds[i];
             return true;
         }
     }
@@ -98,7 +115,7 @@ static int scan_all_files(file_entry_t *entries, int max)
         size_t len = strlen(ent->d_name);
         if (len != CAM_STORAGE_FNAME_LEN /* "M002A.jpg" */) continue;
         char kind = ent->d_name[0];
-        if (kind != CAM_CAPTURE_KIND_MANUAL && kind != CAM_CAPTURE_KIND_AUTO) continue;
+        if (!is_valid_kind(kind)) continue;
         if (strcmp(ent->d_name + 1 + CAM_STORAGE_SEQ_DIGITS, ".jpg") != 0) continue;
 
         uint32_t seq = 0;
@@ -338,6 +355,28 @@ esp_err_t cam_storage_delete(uint32_t file_id)
     return ESP_OK;
 }
 
+/* 2026-08-21 — DELETE_ALL_RECEIVED(esp_now_cam.c)이 삭제 시작 "전"에 개수를 먼저 알려야 해서
+ * 신설. cam_storage_delete_all()과 완전히 같은 필터로 세기만 함(파일 열기/삭제 없음, readdir만
+ * 도니까 빠름) — Cntl이 이 개수로 완료 대기 예산을 계산하므로 실제로 지워질 개수와 반드시
+ * 일치해야 함(필터 로직 수정 시 두 함수 같이 맞출 것) */
+int cam_storage_count_files(void)
+{
+    DIR *dir = opendir(BSP_CAM_SD_MOUNT_POINT);
+    if (!dir) return -1;
+
+    int count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        size_t len = strlen(ent->d_name);
+        if (len != CAM_STORAGE_FNAME_LEN) continue;
+        if (!is_valid_kind(ent->d_name[0])) continue;
+        if (strcmp(ent->d_name + 1 + CAM_STORAGE_SEQ_DIGITS, ".jpg") != 0) continue;
+        count++;
+    }
+    closedir(dir);
+    return count;
+}
+
 int cam_storage_delete_all(void)
 {
     DIR *dir = opendir(BSP_CAM_SD_MOUNT_POINT);
@@ -348,7 +387,7 @@ int cam_storage_delete_all(void)
     while ((ent = readdir(dir)) != NULL) {
         size_t len = strlen(ent->d_name);
         if (len != CAM_STORAGE_FNAME_LEN) continue;
-        if (ent->d_name[0] != CAM_CAPTURE_KIND_MANUAL && ent->d_name[0] != CAM_CAPTURE_KIND_AUTO) continue;
+        if (!is_valid_kind(ent->d_name[0])) continue;
         if (strcmp(ent->d_name + 1 + CAM_STORAGE_SEQ_DIGITS, ".jpg") != 0) continue;
 
         char path[64];

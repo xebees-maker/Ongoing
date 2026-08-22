@@ -68,12 +68,19 @@ void esp_now_photo_get_chunk_progress(uint16_t *received, uint16_t *total);
 /* ────────────────────────────────────────────────────────────
  * 2. 지금촬영 — 진행 팝업 단계 추적(사진 전송은 안 함, 위 헤더 설명 참고)
  * ──────────────────────────────────────────────────────────── */
+/* 2026-08-21 핸드셰이크 재설계(사용자 설계) — INIT_NEEDED/INIT_DONE/CAPTURING 추가, 각각
+ * 독립된 타임아웃으로 판정(project_cntl_cam_capture_now_handshake_redesign 메모리 참고).
+ * 카메라 초기화가 필요 없는 경우 INIT_NEEDED/INIT_DONE은 아예 안 오고 ACKED에서 바로
+ * CAPTURING으로 넘어감 — 팝업도 그 두 단계를 건너뛰고 표시함(ui_main.c 참고) */
 typedef enum {
     ESP_NOW_CAPTURE_STAGE_NONE = 0,
     ESP_NOW_CAPTURE_STAGE_SENT,             /* 1단계: Cntl -> CAM 요청 보냄, 접수 대기 */
     ESP_NOW_CAPTURE_STAGE_ACKED,            /* 1단계 완료: CAM이 접수 확인 */
-    ESP_NOW_CAPTURE_STAGE_CAPTURED,         /* 2단계 완료: 촬영 성공 */
-    ESP_NOW_CAPTURE_STAGE_CAPTURE_FAILED,   /* 2단계 완료: 촬영 실패 */
+    ESP_NOW_CAPTURE_STAGE_INIT_NEEDED,      /* 카메라 초기화 시작 */
+    ESP_NOW_CAPTURE_STAGE_INIT_DONE,        /* 카메라 초기화 완료 */
+    ESP_NOW_CAPTURE_STAGE_CAPTURING,        /* 실제 촬영(워밍업+실샷) 시작 */
+    ESP_NOW_CAPTURE_STAGE_CAPTURED,         /* 최종: 촬영 성공 */
+    ESP_NOW_CAPTURE_STAGE_CAPTURE_FAILED,   /* 최종: 촬영 실패(초기화 실패 포함) */
 } esp_now_capture_stage_t;
 
 /* Cntl -> CAM: 즉시 새로 촬영하라는 요청 — 사진은 안 받음(CAPTURE_STATUS까지만) */
@@ -148,10 +155,17 @@ void esp_now_photo_delete_all(const uint8_t *cam_mac);
 typedef enum {
     ESP_NOW_DELETE_ALL_STATE_NONE = 0,
     ESP_NOW_DELETE_ALL_STATE_REQUESTED,
+    ESP_NOW_DELETE_ALL_STATE_RECEIVED,  /* 2026-08-21 — CAM이 접수하고 지울 개수를 알려온 상태.
+                                            아직 실제 삭제 완료는 아님 — ACKED와 구분 */
     ESP_NOW_DELETE_ALL_STATE_ACKED,
 } esp_now_delete_all_state_t;
 
 esp_now_delete_all_state_t esp_now_photo_delete_all_get_state(void);
+
+/* RECEIVED 이상(RECEIVED/ACKED) 상태일 때만 의미 있음 — CAM이 삭제 시작 전에 보고한,
+ * "지금부터 지울" 개수(완료 대기 예산 계산용). ACKED 상태의 deleted_count(실제로 지운
+ * 개수, 아래 get_count())와는 다른 값 — 정상이면 같겠지만 의미상 분리해둠 */
+uint16_t esp_now_photo_delete_all_get_received_count(void);
 
 /* ACKED 상태일 때만 의미 있음 */
 bool     esp_now_photo_delete_all_get_success(void);

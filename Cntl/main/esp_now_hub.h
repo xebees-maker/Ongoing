@@ -95,6 +95,10 @@ void esp_now_hub_init(void);
  * 상시 표시하는 용도로 추가 */
 uint8_t esp_now_hub_get_wifi_channel(void);
 
+/* 2026-08-21 — CNTL 자신의 STA IP 문자열("192.168.0.17" 형식) — 상황판 요약의 웹 대시보드
+ * URL 표시용. 아직 IP를 못 받았으면 빈 문자열("") 반환 */
+const char *esp_now_hub_get_own_ip_str(void);
+
 /* kind로 필터링해서 살아있는(timeout 이내) 노드만 out에 채워서 개수 반환 —
  * kind=HUB_NODE_KIND_UNKNOWN이면 전체(필터 없음) */
 int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max);
@@ -148,6 +152,14 @@ void esp_now_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec
  * 뜻 — 호출부(ui_main.c)가 이 경우 응답 대기 팝업을 띄우지 않고 "저장만 됨" 안내로 대체함
  * (그래도 값 자체는 항상 device_config에 저장됨 — 다음 페어링 때 자동 재반영) */
 bool esp_now_hub_apply_response_interval_sec(uint32_t sec);
+
+/* 2026-08-21 — AGC(자동게인)/AEC(자동노출) On/Off, 카메라별 설정이라 촬영주기와 동일하게
+ * mac 하나만 대상으로 함(세로줄 노이즈 진단용) */
+void esp_now_hub_apply_cam_agc_enable(const uint8_t *mac, bool enable);
+void esp_now_hub_apply_cam_aec_enable(const uint8_t *mac, bool enable);
+
+/* 2026-08-21 — XCLK(MHz) 프리셋, 위와 동일 패턴(카메라별 설정) */
+void esp_now_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz);
 
 /* 설정탭 Apply 버튼 진행팝업용 상태 폴링(2026-08-08) — esp_now_photo_get_capture_stage()와
  * 같은 패턴. IDLE=아직 아무 것도 안 보냄, SENT=push_cam_config_to() 호출됨(esp_now_tx가

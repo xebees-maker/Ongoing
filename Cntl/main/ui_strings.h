@@ -49,6 +49,10 @@ typedef enum {
     STR_MSG_DELETE_PHOTO_CONFIRM,
     STR_CAPTURE_STAGE1_PROGRESS,
     STR_CAPTURE_STAGE1_DONE,
+    STR_CAPTURE_STAGE2_INIT_NEEDED,  /* 2026-08-21 핸드셰이크 재설계 — 카메라 초기화 필요할
+                                         때만 순서대로 표시(불필요하면 건너뜀) */
+    STR_CAPTURE_STAGE2_INIT_DONE,
+    STR_CAPTURE_STAGE2_CAPTURING,
     STR_CAPTURE_STAGE2_SUCCESS,
     STR_CAPTURE_STAGE2_FAILED,
     STR_CAPTURE_STAGE2_NORESPONSE,
@@ -64,9 +68,12 @@ typedef enum {
     STR_BTN_DELETE_ALL,
     STR_MSG_DELETE_ALL_CONFIRM,
     STR_DELETEALL_STAGE1_PROGRESS,
+    STR_DELETEALL_STAGE1_DELETING_FMT,  /* 2026-08-21 — 접수 확인(개수 통보) 후 실제 삭제
+                                            대기 단계, 개수 표시 */
     STR_DELETEALL_STAGE1_DONE,
     STR_DELETEALL_STAGE1_FAILED,
     STR_DELETEALL_STAGE1_NORESPONSE,
+    STR_DELETEALL_STAGE1_STOPPED_FMT,   /* 2026-08-21 — 접수는 됐지만 완료 응답 없음 */
     STR_DELETEALL_STAGE2_PROGRESS,
     STR_DELETEALL_STAGE2_DONE,
     STR_DELETEALL_STAGE2_UNKNOWN,
@@ -82,6 +89,10 @@ typedef enum {
     STR_LIST_EMPTY,
     STR_LABEL_CAPTURE_INTERVAL,
     STR_LABEL_RESPONSE_INTERVAL,
+    STR_LABEL_AGC,  /* 2026-08-21 — 세로줄 노이즈 진단용 */
+    STR_LABEL_AEC,
+    STR_LABEL_XCLK,
+    STR_OPT_XCLK_LIST,
     STR_BTN_APPLY,
     STR_CONFIG_APPLY_PROGRESS,
     STR_CONFIG_APPLY_STALLED,
@@ -119,6 +130,9 @@ typedef enum {
     /* 일반 로그 판넬 제목(2026-08-11) — 스크롤 안 되는 고정 타이틀 행(페이지 스크롤을
      * 잡기 위한 영역, ui_main.c) */
     STR_PANEL_GENERAL_LOG,
+    /* 요약판넬 1~2번째줄(2026-08-21, 사용자 지시) — 웹 대시보드 URL / 여유메모리 상시표시 */
+    STR_LABEL_WEB,
+    STR_LABEL_MEMORY,
     STR_COUNT,
 } ui_str_id_t;
 

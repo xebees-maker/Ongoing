@@ -61,6 +61,10 @@ int cam_storage_list_full(esp_now_photo_list_item_t *out_items, int max);
  */
 esp_err_t cam_storage_open_read(uint32_t file_id, FILE **out_fp, uint32_t *out_size);
 
+/** @brief cam_storage_delete_all()이 지울 파일 개수를 미리 셈(삭제 없이 readdir만) — CAM이
+ *  삭제 시작 전 DELETE_ALL_RECEIVED로 이 개수를 먼저 알림 @return 개수, 실패 시 음수 */
+int cam_storage_count_files(void);
+
 /** @brief 저장된 모든 사진을 삭제 (개발용 clear 명령) @return 삭제한 개수, 실패 시 음수 */
 int cam_storage_delete_all(void);
 

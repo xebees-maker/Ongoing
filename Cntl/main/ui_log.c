@@ -5,12 +5,17 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "esp_heap_caps.h"
+#include "lvgl.h"
 
 /* 부팅 시 한 번만 잡고 계속 재사용하는 고정 버퍼(다른 모듈들과 동일 원칙) — 꽉 차면
  * 오래된 앞부분을 memmove로 밀어내고 뒤에 이어붙임(단순 append 버퍼, 진짜 링버퍼는
- * 아님 — 화면에 그대로 이어붙여 보여주기엔 이 편이 더 단순함) */
+ * 아님 — 화면에 그대로 이어붙여 보여주기엔 이 편이 더 단순함).
+ * 2026-08-21 — 내부(비-PSRAM) DRAM이 httpd_start 실패(5005)를 겪을 만큼 빠듯했던 걸 실기로
+ * 확인(free internal=1111~1419B) — 텍스트 버퍼라 빠른 접근이 필수가 아니어서 PSRAM으로
+ * 옮김(6.1KB, 이 파일 하나가 내부RAM 사용량 2위였음) */
 #define UI_LOG_BUF_CAP 6144
-static char s_buf[UI_LOG_BUF_CAP + 1];
+static char *s_buf = NULL;
 static size_t s_len = 0;
 static SemaphoreHandle_t s_mutex;
 
@@ -58,6 +63,9 @@ static const ui_err_entry_t s_err_table[] = {
     { UI_ERR_DELETE_ALL_FAILED,   "전체삭제 실패" },
     { UI_ERR_CAPTURE_FAILED,      "촬영 실패" },
     { UI_ERR_CAPTURE_NORESPONSE,  "지금촬영 무응답" },
+    { UI_ERR_DELETE_ALL_NORESPONSE, "전체삭제 접수 무응답(통신 끊김)" },
+    { UI_ERR_DELETE_ALL_STOPPED,  "전체삭제 중단됨(완료 무응답)" },
+    { UI_ERR_SET_TIME_NORESPONSE, "시각동기화 무응답" },
     { UI_ERR_FONT_FILE_MISSING,   "폰트 파일 없음" },
     { UI_ERR_FONT_BUF_ALLOC,      "폰트 버퍼 할당 실패" },
     { UI_ERR_FONT_FILE_OPEN,      "폰트 파일 열기 실패" },
@@ -69,6 +77,7 @@ static const ui_err_entry_t s_err_table[] = {
 void ui_log_init(void)
 {
     s_mutex = xSemaphoreCreateMutex();
+    s_buf = heap_caps_malloc(UI_LOG_BUF_CAP + 1, MALLOC_CAP_SPIRAM);
 }
 
 /* 내부용 — 호출부가 이미 뮤텍스를 잡고 있어야 함 */
@@ -85,18 +94,34 @@ static void append_locked(const char *line, size_t add_len)
     s_buf[s_len] = '\0';
 }
 
+/* 2026-08-22, 사용자 지시 — 일반/전력 로그 포맷 통일용 공용 타임스탬프 함수. lv_tick_get()
+ * 기반이라 ui_log_add류(폰트/화면 초기화 이전에도 호출될 수 있음)에서 써도 안전함 —
+ * LVGL 틱 카운터 자체는 화면 위젯 존재 여부와 무관하게 계속 흐름 */
+void ui_log_format_timestamp(char *buf, size_t cap)
+{
+    uint32_t total_sec = lv_tick_get() / 1000;
+    snprintf(buf, cap, "[%02lu:%02lu] ", (unsigned long)(total_sec / 60), (unsigned long)(total_sec % 60));
+}
+
 void ui_log_add(const char *fmt, ...)
 {
-    if (!s_mutex) return;
+    if (!s_mutex || !s_buf) return;
 
-    char line[160];
+    char ts[16];
+    ui_log_format_timestamp(ts, sizeof(ts));
+
+    char msg[144];
     va_list args;
     va_start(args, fmt);
-    int n = vsnprintf(line, sizeof(line), fmt, args);
+    int n = vsnprintf(msg, sizeof(msg), fmt, args);
     va_end(args);
     if (n <= 0) return;
 
-    size_t add_len = ((size_t)n < sizeof(line) - 1) ? (size_t)n : sizeof(line) - 2;
+    char line[160];
+    int total = snprintf(line, sizeof(line), "%s%s", ts, msg);
+    if (total <= 0) return;
+
+    size_t add_len = ((size_t)total < sizeof(line) - 1) ? (size_t)total : sizeof(line) - 2;
     line[add_len] = '\n';
     add_len++;
 
@@ -118,7 +143,7 @@ static void push_history_locked(int code)
 
 void ui_log_add_err(int code, const char *fmt, ...)
 {
-    if (!s_mutex) return;
+    if (!s_mutex || !s_buf) return;
 
     char msg[144];
     va_list args;
@@ -127,8 +152,11 @@ void ui_log_add_err(int code, const char *fmt, ...)
     va_end(args);
     if (n <= 0) return;
 
+    char ts[16];
+    ui_log_format_timestamp(ts, sizeof(ts));
+
     char line[160];
-    int total = snprintf(line, sizeof(line), "[%04d] %s", code, msg);
+    int total = snprintf(line, sizeof(line), "%s[%04d] %s", ts, code, msg);
     if (total <= 0) return;
     size_t add_len = ((size_t)total < sizeof(line) - 1) ? (size_t)total : sizeof(line) - 2;
     line[add_len] = '\0';
@@ -203,7 +231,7 @@ static void push_warn_history_locked(int code)
 
 void ui_log_add_warn(int code, const char *fmt, ...)
 {
-    if (!s_mutex) return;
+    if (!s_mutex || !s_buf) return;
 
     char msg[144];
     va_list args;
@@ -212,8 +240,11 @@ void ui_log_add_warn(int code, const char *fmt, ...)
     va_end(args);
     if (n <= 0) return;
 
+    char ts[16];
+    ui_log_format_timestamp(ts, sizeof(ts));
+
     char line[160];
-    int total = snprintf(line, sizeof(line), "[W%04d] %s", code, msg);
+    int total = snprintf(line, sizeof(line), "%s[W%04d] %s", ts, code, msg);
     if (total <= 0) return;
     size_t add_len = ((size_t)total < sizeof(line) - 1) ? (size_t)total : sizeof(line) - 2;
     line[add_len] = '\0';
@@ -273,7 +304,7 @@ void ui_log_clear_warn_history(void)
 
 void ui_log_get_snapshot(char *out, size_t out_cap)
 {
-    if (!s_mutex || out_cap == 0) return;
+    if (!s_mutex || !s_buf || out_cap == 0) return;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     size_t n = (s_len < out_cap - 1) ? s_len : out_cap - 1;

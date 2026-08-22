@@ -10,6 +10,10 @@
 void ui_log_init(void);
 void ui_log_add(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/* buf에 "[mm:ss] "(Cntl 부팅 후 경과) 채움 — 일반/전력 로그 공용, 한 곳에서만 계산
+ * (2026-08-22, 사용자 지시 — 로그 포맷 통일 시 두 로그가 같은 함수를 불러써야 함) */
+void ui_log_format_timestamp(char *buf, size_t cap);
+
 /* out에 최근 로그 스냅샷을 널종료 문자열로 채움(최대 out_cap-1바이트) */
 void ui_log_get_snapshot(char *out, size_t out_cap);
 
@@ -57,6 +61,15 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_CAPTURE_FAILED       4003  /* CAM이 촬영 실패로 응답 */
 #define UI_ERR_CAPTURE_NORESPONSE   4004  /* 지금촬영 요청 후 CAM 무응답 */
 #define UI_ERR_CONFIG_NORESPONSE    4005  /* 설정(CAM_CONFIG_SET) 적용 요청 후 CAM 무응답 */
+#define UI_ERR_DELETE_ALL_NORESPONSE 4006 /* 전체삭제 요청 후 CAM 접수 확인(RECEIVED) 자체가
+                                             안 옴 — 통신 끊김 또는 CAM이 요청을 못 받음
+                                             (2026-08-21) */
+#define UI_ERR_DELETE_ALL_STOPPED   4007  /* 전체삭제 접수(RECEIVED)는 확인됐지만, 개수 기준
+                                             예산 안에 완료 ACK가 안 옴 — CAM이 삭제 도중
+                                             멈췄거나(크래시/행) 통신이 끊긴 것으로 추정
+                                             (2026-08-21) */
+#define UI_ERR_SET_TIME_NORESPONSE  4008  /* SET_TIME 요청 후 CAM/Sens 무응답(2026-08-21,
+                                             raw send에서 reliable stack 전환하며 추가) */
 
 #define UI_ERR_FONT_FILE_MISSING    5001  /* 폰트 파일 없음(stat 실패) */
 #define UI_ERR_FONT_BUF_ALLOC       5002  /* 폰트 파일 로드용 PSRAM 할당 실패 */

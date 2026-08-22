@@ -27,7 +27,7 @@ static esp_err_t load_ttf_to_psram(void)
     struct stat st;
     if (stat(UI_FONT_TTF_VFS_PATH, &st) != 0) {
         ESP_LOGE(TAG, "stat failed: %s", UI_FONT_TTF_VFS_PATH);
-        ui_log_add_err(UI_ERR_FONT_FILE_MISSING, "폰트 파일 없음: %s", UI_FONT_TTF_VFS_PATH);
+        ui_log_add_err(UI_ERR_FONT_FILE_MISSING, "Font file missing: %s", UI_FONT_TTF_VFS_PATH);
         return ESP_FAIL;
     }
     s_ttf_size = (size_t)st.st_size;
@@ -35,14 +35,14 @@ static esp_err_t load_ttf_to_psram(void)
     s_ttf_buf = heap_caps_malloc(s_ttf_size, MALLOC_CAP_SPIRAM);
     if (!s_ttf_buf) {
         ESP_LOGE(TAG, "PSRAM alloc failed: %u KB", (unsigned)(s_ttf_size / 1024));
-        ui_log_add_err(UI_ERR_FONT_BUF_ALLOC, "폰트 버퍼 할당 실패(%u KB)", (unsigned)(s_ttf_size / 1024));
+        ui_log_add_err(UI_ERR_FONT_BUF_ALLOC, "Font buffer alloc failed (%u KB)", (unsigned)(s_ttf_size / 1024));
         return ESP_FAIL;
     }
 
     FILE *f = fopen(UI_FONT_TTF_VFS_PATH, "rb");
     if (!f) {
         ESP_LOGE(TAG, "fopen failed");
-        ui_log_add_err(UI_ERR_FONT_FILE_OPEN, "폰트 파일 열기 실패");
+        ui_log_add_err(UI_ERR_FONT_FILE_OPEN, "Font file open failed");
         heap_caps_free(s_ttf_buf);
         s_ttf_buf = NULL;
         return ESP_FAIL;
@@ -59,7 +59,7 @@ static lv_font_t *create_font(uint8_t size)
                                            LV_FONT_KERNING_NORMAL, LV_TINY_TTF_CACHE_GLYPH_CNT);
     if (!f) {
         ESP_LOGE(TAG, "Failed: %dpt", size);
-        ui_log_add_err(UI_ERR_FONT_CREATE, "폰트 생성 실패(%dpt)", size);
+        ui_log_add_err(UI_ERR_FONT_CREATE, "Font create failed (%dpt)", size);
     } else {
         ESP_LOGI(TAG, "OK: %dpt", size);
     }

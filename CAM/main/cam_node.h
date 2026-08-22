@@ -35,6 +35,17 @@ uint32_t cam_node_get_capture_interval_sec(void);
 void cam_node_set_response_interval_sec(uint32_t sec);
 uint32_t cam_node_get_response_interval_sec(void);
 
+/** @brief AGC(자동게인)/AEC(자동노출) On/Off — 2026-08-21, 세로줄 노이즈 진단용. 매 촬영
+ *         직전에 sensor_t로 반영됨(cam_node.c의 apply_agc_aec_settings() 참고). 끔(0) 전환
+ *         시엔 그 순간의 자동값에 고정될 뿐, 별도 수동 게인/노출값을 지정하지 않음 */
+void cam_node_set_agc_enable(bool enable);
+void cam_node_set_aec_enable(bool enable);
+
+/** @brief XCLK(MHz) 원격 설정(1~40) — 2026-08-21, 화질/노이즈 진단용. 카메라가 이미
+ *         초기화돼 있으면 즉시 반영(PLL 재계산), 아니면 다음 필요시 초기화 때 적용됨.
+ *         콘솔 xclk 명령(cam_node_set_xclk)과 별개 진입점 — 그쪽은 항상 즉시 적용 시도 */
+void cam_node_set_xclk_target_mhz(uint8_t mhz);
+
 /** @brief 이번 부팅의 Deep Sleep 웨이크 원인(2026-08-10) — app_main 최상단에서 1회
  *         판정(cam_wake_reason_t, esp_now_link.h) */
 uint8_t cam_node_get_wake_reason(void);
@@ -55,3 +66,12 @@ void cam_node_note_activity(void);
  *         사이클 남은 유휴여유를 기다리지 않고 cam_node_wake_window_done()이 즉시 true를
  *         반환하게 함 */
 void cam_node_note_sleep_now_requested(void);
+
+/** @brief 카메라가 이번 웨이크 사이클에 이미 초기화됐는지(2026-08-21, 지금촬영 핸드셰이크
+ *         재설계용) — esp_now_cam.c가 CAPTURE_STATUS(INIT_NEEDED)를 보낼지 판단하는 데 씀 */
+bool cam_node_is_camera_ready(void);
+
+/** @brief 카메라 초기화만 수행(아직 안 됐으면) — ensure_camera_ready(true)의 공개 진입점.
+ *         cam_node_capture_now()도 내부에서 똑같이 부르므로 이미 초기화됐으면 그냥 통과되는
+ *         멱등 호출 — esp_now_cam.c가 INIT_NEEDED/INIT_DONE 사이에 실제 초기화를 수행하는 데 씀 */
+bool cam_node_ensure_camera_ready(void);

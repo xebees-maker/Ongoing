@@ -204,12 +204,18 @@ static void push_cam_config_to(const uint8_t *mac)
         .wb_mode                = CAM_WB_AUTO,
         .capture_interval_sec   = device_config_get_cam_capture_interval_sec(),
         .response_interval_sec  = device_config_get_response_interval_sec(),
+        .agc_enable             = device_config_get_agc_enable() ? 1 : 0,
+        .aec_enable             = device_config_get_aec_enable() ? 1 : 0,
+        .xclk_mhz               = device_config_get_xclk_mhz(),
+        .nack_max_rounds        = device_config_get_nack_max_rounds(),
     };
     static const uint8_t s_config_ack_types[] = { ESP_NOW_MSG_CAM_CONFIG_ACK };
     s_config_apply_stage = HUB_CONFIG_APPLY_SENT;
     esp_now_tx_enqueue(mac, &cfg, sizeof(cfg), s_config_ack_types, 1, 800, 3, "CAM 설정");
-    ESP_LOGI(TAG, "CAM_CONFIG_SET -> 촬영주기=%us 응답성=%us 큐잉됨",
-             (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec);
+    ESP_LOGI(TAG, "CAM_CONFIG_SET -> 촬영주기=%us 응답성=%us AGC=%d AEC=%d XCLK=%uMHz NACK라운드=%u 큐잉됨",
+             (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec,
+             (int)cfg.agc_enable, (int)cfg.aec_enable, (unsigned)cfg.xclk_mhz,
+             (unsigned)cfg.nack_max_rounds);
 }
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
@@ -342,13 +348,19 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             /* CAM/Sens는 자체 RTC가 없어서 페어링될 때마다 Cntl 시각을 알려줌 — 이게
              * 없으면 CAM의 시계가 부팅 시각(1970-01-01 근처)에 멈춰있어서 사진 파일명
              * (촬영시각 유닉스 타임스탬프)이 전부 1월 1일로 찍힘(2026-08-01 실기에서 확인) */
+            /* 2026-08-21 — raw esp_now_send에서 reliable stack으로 전환(나머지 모든
+             * Cntl->노드 요청과 통일 — "CAM/Sens는 지능 없음, Cntl이 상태관리" 원칙 재확인
+             * 과정에서 SET_TIME만 유실 확인/재시도가 없다는 게 드러남). 유실돼도 다음
+             * 페어링 사이클에 자연복구되긴 하지만, 다른 모든 요청처럼 재시도+ACK 확인을
+             * 갖추는 게 일관성 있음 */
             esp_now_set_time_t set_time = {
                 .version   = ESP_NOW_LINK_VERSION,
                 .msg_type  = ESP_NOW_MSG_SET_TIME,
                 .unix_time = rtc_sync_get_unix_time(),
             };
-            esp_err_t err = esp_now_send(info->src_addr, (const uint8_t *)&set_time, sizeof(set_time));
-            ESP_LOGI(TAG, "SET_TIME(%u) 전송: %s", (unsigned)set_time.unix_time, esp_err_to_name(err));
+            static const uint8_t s_set_time_ack_types[] = { ESP_NOW_MSG_SET_TIME_ACK };
+            esp_now_tx_enqueue(info->src_addr, &set_time, sizeof(set_time), s_set_time_ack_types, 1, 500, 3, "시각동기화");
+            ESP_LOGI(TAG, "SET_TIME(%u) 큐잉됨", (unsigned)set_time.unix_time);
 
             /* 2026-08-08 설계 — CAM/SENS는 설정을 로컬에 저장하지 않으므로, 페어링될
              * 때마다 Cntl이 기억하고 있는 현재 설정값을 매번 다시 밀어줌(SET_TIME과 같은
@@ -542,11 +554,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             req_node->sleep_now_request_count++;
             ESP_LOGW(TAG, "SLEEP_NOW_REQUEST 수신 <- %s (%lu번째)",
                      req_node->name, (unsigned long)req_node->sleep_now_request_count);
-            ui_log_add_warn(UI_WARN_SLEEP_NOW_NORESPONSE, "%s: SLEEP_NOW 재요청(%lu번째)",
+            ui_log_add_warn(UI_WARN_SLEEP_NOW_NORESPONSE, "%s: SLEEP_NOW re-request (#%lu)",
                              req_node->name, (unsigned long)req_node->sleep_now_request_count);
 #define SLEEP_NOW_REQUEST_ERROR_THRESHOLD 3
             if (req_node->sleep_now_request_count >= SLEEP_NOW_REQUEST_ERROR_THRESHOLD) {
-                ui_log_add_err(UI_ERR_SLEEP_NOW_FAILED, "%s: SLEEP_NOW %d회 재요청에도 전달 안 됨",
+                ui_log_add_err(UI_ERR_SLEEP_NOW_FAILED, "%s: SLEEP_NOW still not delivered after %d retries",
                                req_node->name, SLEEP_NOW_REQUEST_ERROR_THRESHOLD);
             }
             req_node->sleep_now_sent = false;  /* 재시도 허용 */
@@ -556,6 +568,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     }
 }
 
+/* 2026-08-21 — 상황판 요약 맨 윗줄에 웹 대시보드 URL 표시용(사용자 지시). IP 못 받은
+ * 상태(빈 문자열)면 ui_main.c가 URL 자체를 숨김 */
+static char s_own_ip_str[16] = "";
+
+const char *esp_now_hub_get_own_ip_str(void)
+{
+    return s_own_ip_str;
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg;
@@ -563,11 +584,16 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGW(TAG, "WiFi 연결 끊김 — 재시도");
+        wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
+        ESP_LOGW(TAG, "WiFi 연결 끊김(reason=%d, rssi=%d) — 재시도",
+                 disc ? disc->reason : -1, disc ? disc->rssi : 0);
+        s_own_ip_str[0] = '\0';  /* IP 무효화 — 재연결해서 새 IP 받을 때까지 URL 숨김 */
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "IP 받음: " IPSTR, IP2STR(&evt->ip_info.ip));
+        /* 2026-08-21 — 상황판 요약에 웹 대시보드 접속 URL을 보여주기 위해 저장(사용자 지시) */
+        snprintf(s_own_ip_str, sizeof(s_own_ip_str), IPSTR, IP2STR(&evt->ip_info.ip));
     }
 #else
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
@@ -737,9 +763,15 @@ hub_conn_state_t esp_now_hub_get_conn_state(const uint8_t *mac)
     esp_now_hub_node_t *n = find_node(mac);
     bool ever_paired = n && n->ever_paired;
     bool radio_paired = n && n->paired;
+    bool user_unpaired = n && n->user_unpaired;
     xSemaphoreGive(s_nodes_mutex);
 
-    if (!ever_paired || esp_now_hub_is_reconnect_stuck(mac)) return HUB_CONN_STATE_WAITING;
+    /* 2026-08-21 — user_unpaired(사용자가 명시적으로 "연결해제"를 누른 상태)는
+     * is_reconnect_stuck()의 타임아웃(last_paired_ms 기준, "갑자기 조용해진 비정상 상황"을
+     * 감지하기 위한 값)을 기다릴 필요 없이 곧장 WAITING으로 — 의도적 연결해제와 예기치 못한
+     * 끊김은 성격이 다른데 같은 타임아웃으로 취급하고 있었음(실기에서 확인: 연결해제 버튼을
+     * 눌러도 화면이 몇~수십 초 동안 "연결됨"으로 남아있던 원인) */
+    if (!ever_paired || user_unpaired || esp_now_hub_is_reconnect_stuck(mac)) return HUB_CONN_STATE_WAITING;
     return radio_paired ? HUB_CONN_STATE_ACTIVE : HUB_CONN_STATE_PAIRED;
 }
 
@@ -771,12 +803,22 @@ void esp_now_hub_pair(const uint8_t *mac)
      * 페어링 상태 반영은 지금처럼 recv_cb의 PAIR_ACK 핸들러가 그대로 담당함(esp_now_tx는
      * 상태를 안 건드리는 순수 전송 스케줄러, esp_now_tx.h 참고) */
     static const uint8_t s_pair_ack_types[] = { ESP_NOW_MSG_PAIR_ACK };
-    /* 이 호출은 대부분 CAM Deep Sleep의 ADVERTISE 핸들러가 매 사이클 자동으로 거는 백그라운드
-     * 재연결 시도임(2026-08-10) — CAM이 아직 채널동기화 중이라 첫 시도가 무응답으로 실패하는
-     * 게 실기에서 흔했고(뒤이은 재시도가 곧 성공), 이건 connectionless 프로토콜에서 정상
-     * 범위. esp_now_tx.c가 이제 무응답이어도 UI 에러를 안 띄우므로(진단 로그만) 여기서
-     * 따로 신경 안 써도 됨(사용자 지적으로 esp_now_tx.c 자체를 그렇게 정리함) */
-    esp_now_tx_enqueue(mac, &req, sizeof(req), s_pair_ack_types, 1, 500, 5, "페어링");
+    /* 2026-08-21 나이키스트 재설계(사용자 지시) — 노드(CAM/Sens)는 페어링 전엔 응답성
+     * 설정과 무관하게 "짧게 깨서 시도, 안 되면 짧게 자고 재시도"를 반복함
+     * (ESP_NOW_NODE_UNPAIRED_RETRY_SEC, esp_now_link.h 공용 헤더 — CAM/Sens 둘 다 이 값을
+     * 그대로 씀). 이 켜짐/꺼짐 주기보다 CNTL의 재시도 구간이 짧으면, 사용자가 버튼을 한 번
+     * 누른 시점이 하필 노드가 자고 있는 위상과 겹쳐서 그 판 전체가 허사가 됨(재시도는 매번
+     * 500ms 간격이라 촘촘하지만, 전체 구간이 짧으면 위상을 못 잡음) — 안전한 재시도 구간은
+     * 이 값의 최소 2배여야 위상과 무관하게 반드시 한 번은 깨어있는 구간과 겹침(나이키스트
+     * 원칙과 동일한 이유: 표본 "간격"이 아니라 표본을 "충분히 오래" 걸쳐야 함).
+     * 부팅/WiFi초기화 오버헤드(~1.8초, 이름 붙은 상수 없이 그때그때 걸리는 시간이라
+     * 하드코딩하면 휴리스틱이 됨, 사용자 지적)는 이 공식에 안 넣음 — 6초(3초×2)가 실측
+     * 죽는시간(~4.8초)보다 이미 크므로 별도로 안 넣어도 안전마진 안에 들어옴 */
+    #define PAIR_REQUEST_RETRY_TIMEOUT_MS 500
+    #define PAIR_REQUEST_RETRY_ATTEMPTS   \
+        ((ESP_NOW_NODE_UNPAIRED_RETRY_SEC * 1000 * 2) / PAIR_REQUEST_RETRY_TIMEOUT_MS + 1)
+    esp_now_tx_enqueue(mac, &req, sizeof(req), s_pair_ack_types, 1,
+                        PAIR_REQUEST_RETRY_TIMEOUT_MS, PAIR_REQUEST_RETRY_ATTEMPTS, "페어링");
     ESP_LOGI(TAG, "PAIR_REQUEST -> %s 큐잉됨", name_copy);
 }
 
@@ -815,6 +857,25 @@ void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode)
 void esp_now_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
 {
     device_config_set_cam_capture_interval_sec(sec);
+    push_cam_config_to(mac);
+}
+
+/* 2026-08-21 — AGC/AEC On/Off(세로줄 노이즈 진단용), 촬영주기와 같은 카메라별 설정 패턴 */
+void esp_now_hub_apply_cam_agc_enable(const uint8_t *mac, bool enable)
+{
+    device_config_set_agc_enable(enable);
+    push_cam_config_to(mac);
+}
+
+void esp_now_hub_apply_cam_aec_enable(const uint8_t *mac, bool enable)
+{
+    device_config_set_aec_enable(enable);
+    push_cam_config_to(mac);
+}
+
+void esp_now_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz)
+{
+    device_config_set_xclk_mhz(mhz);
     push_cam_config_to(mac);
 }
 

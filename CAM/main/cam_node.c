@@ -125,6 +125,19 @@ static uint32_t s_capture_interval_sec  = 0;  /* app_main에서 Kconfig 기본�
 static uint32_t s_response_interval_sec = CAM_RESPONSE_INTERVAL_SEC_DEFAULT;
 static esp_timer_handle_t s_capture_timer = NULL;
 
+/* 2026-08-21 — 세로줄(컬럼 고정패턴노이즈) 진단용. 센서 전원인가 기본값이 곧 "켬"(자동)이라
+ * 그대로 초기값도 true — 소프트웨어가 명시적으로 끈 적 없는 지금 상태와 일치시킴 */
+static bool s_agc_enable = true;
+static bool s_aec_enable = true;
+
+/* 2026-08-21 — XCLK도 화질/노이즈 진단용 프리셋으로 원격 조정. 기본값은 기존 컴파일타임
+ * 상수(CAM_VIDEO_XCLK_FREQ_HZ, 센서별로 다름)와 일치시켜서 아무 설정도 안 왔을 때 지금까지
+ * 동작과 같게 함. camera_init() 아래에서 이 값을 씀 — cam_node_set_xclk_target_mhz() 참고 */
+static uint8_t s_xclk_target_mhz = (uint8_t)(CAM_VIDEO_XCLK_FREQ_HZ / 1000000);
+
+void cam_node_set_agc_enable(bool enable) { s_agc_enable = enable; }
+void cam_node_set_aec_enable(bool enable) { s_aec_enable = enable; }
+
 /* 2026-08-08 실기에서 확인된 크래시 안전장치 — capture_interval_sec=10(드롭다운의 "10초")로
  * 설정하고 CAM이 마침 ESP-NOW 채널동기/페어링 활동 중일 때 자동촬영 타이머가 겹쳐 발동하면
  * SD 카드 read(enforce_capacity_and_get_next_seq -> scan_all_files)의 DMA 버퍼 할당 도중
@@ -262,9 +275,12 @@ void cam_node_note_activity(void)
  * 도구가 안정적인 포트 접속 순간을 못 잡는 문제가 실사용 중 발견됨)만 자고 다시 시도 —
  * 재부팅마다 RTC_DATA_ATTR로 마지막 성공 채널을 기억해서 재시도가 빠르므로
  * (esp_now_channelsync) 이 주기로도 충분히 빠르게 재시도됨. app_main()이 이 타임아웃으로
- * 깰 때 페어링 여부를 직접 확인해서, 안 됐으면 CAM_DEEPSLEEP_RETRY_SLEEP_SEC만 잠 */
-#define CAM_DEEPSLEEP_PAIR_WAIT_TIMEOUT_MS 3000
-#define CAM_DEEPSLEEP_RETRY_SLEEP_SEC      3
+ * 깰 때 페어링 여부를 직접 확인해서, 안 됐으면 CAM_DEEPSLEEP_RETRY_SLEEP_SEC만 잠.
+ * 2026-08-21 — 이 두 값을 공용 헤더(esp_now_link.h의 ESP_NOW_NODE_UNPAIRED_RETRY_SEC)
+ * 참조로 교체 — CNTL이 PAIR_REQUEST 재시도 구간을 이 값 기준으로 계산하므로(나이키스트
+ * 원칙, esp_now_hub.c 참고), 여기서 CAM만 따로 값을 바꾸면 CNTL과 어긋남 */
+#define CAM_DEEPSLEEP_PAIR_WAIT_TIMEOUT_MS (ESP_NOW_NODE_UNPAIRED_RETRY_SEC * 1000)
+#define CAM_DEEPSLEEP_RETRY_SLEEP_SEC      ESP_NOW_NODE_UNPAIRED_RETRY_SEC
 
 /* Cntl이 ESP_NOW_MSG_SLEEP_NOW를 보내면 세팅(2026-08-10) — 남은 유휴여유를 기다리지 않고
  * cam_node_wake_window_done()이 즉시 true를 반환하게 함(단, 바쁜 동안은 여전히 안 재움) */
@@ -308,7 +324,14 @@ bool cam_node_wake_window_done(uint32_t awake_start_ms)
 
 static bool s_camera_ready = false;
 
-static esp_err_t camera_init(void)
+/* save_warmup_frames: 워밍업 프레임을 버리지 않고 kind 'A'+i로 SD에 저장(2026-08-21, 적정
+ * CAM_WARMUP_FRAME_COUNT 값을 실기 화질로 판단하기 위한 임시 진단 — cam_storage.c의
+ * s_valid_kinds 주석 참고). **수동 촬영 경로에서만 true로 넘김** — 2026-08-10에 같은 걸
+ * 무조건 켜뒀다가 main 태스크 스택오버플로우로 되돌린 전례가 있어서(그땐 camera_init()이
+ * app_main에서 무조건 호출되던 시절), 지금은 필요시 초기화라 그 경로 자체는 없어졌지만
+ * 혹시 모를 작은 스택(esp_timer 태스크, 자동촬영 경로)에서까지 SD 쓰기를 태우지 않으려고
+ * 여전히 수동(대용량 스택의 photo_tx 태스크/콘솔)에서만 켬 — camera_capture_one() 참고 */
+static esp_err_t camera_init(bool save_warmup_frames)
 {
     camera_config_t config = {
         .pin_pwdn     = BSP_CAM_SENSOR_PWDN_PIN,
@@ -334,7 +357,8 @@ static esp_err_t camera_init(void)
         .pin_vsync    = BSP_CAM_DVP_VSYNC,
         .pin_href     = BSP_CAM_DVP_DE,   /* BSP 주석대로 DE==HREF, 같은 물리 핀(GPIO18) */
         .pin_pclk     = BSP_CAM_DVP_PCLK,
-        .xclk_freq_hz = CAM_VIDEO_XCLK_FREQ_HZ,
+        .xclk_freq_hz = (int)s_xclk_target_mhz * 1000000,  /* 2026-08-21 — 컴파일타임 상수 대신
+                                                               원격 설정값(기본은 그 상수와 동일) */
         .ledc_timer   = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,
         .pixel_format = PIXFORMAT_JPEG,
@@ -354,31 +378,43 @@ static esp_err_t camera_init(void)
         s->set_saturation(s, -2);
     }
 
-    /* 2026-08-10 — SD에 저장해서 육안 확인하는 진단판은 main 태스크 스택오버플로우로
-     * 되돌림(cam_storage_save_capture()가 이 지점의 기본 스택엔 너무 무거웠음) — 버리기만
-     * 하는 원래 방식 유지, 화질 확인은 실제 촬영 경로(camera_capture_one())로 이미 충분히 됨 */
     int64_t warmup_start_us = esp_timer_get_time();
     for (int i = 0; i < CAM_WARMUP_FRAME_COUNT; i++) {
         camera_fb_t *warmup_fb = esp_camera_fb_get();
-        if (warmup_fb) esp_camera_fb_return(warmup_fb);
+        if (warmup_fb) {
+            if (save_warmup_frames && i < 26) {
+                uint32_t warmup_file_id = 0;
+                esp_err_t werr = cam_storage_save_capture(warmup_fb->buf, warmup_fb->len,
+                                                            (cam_capture_kind_t)('A' + i), &warmup_file_id);
+                ESP_LOGI(TAG, "워밍업 프레임 %d(kind=%c) 저장: %s", i, (char)('A' + i), esp_err_to_name(werr));
+            }
+            esp_camera_fb_return(warmup_fb);
+        }
     }
     ESP_LOGI(TAG, "노출 워밍업 %d프레임 소요: %lldms", CAM_WARMUP_FRAME_COUNT,
              (esp_timer_get_time() - warmup_start_us) / 1000);
 
     s_camera_ready = true;
     ESP_LOGI(TAG, "카메라 초기화 완료 (XCLK=%dMHz, fb_count=%d, 해상도 %d, JPEG q=%d)",
-             CAM_VIDEO_XCLK_FREQ_HZ / 1000000, CAM_VIDEO_FB_COUNT, CAM_FRAME_SIZE, CAM_JPEG_QUALITY);
+             (int)s_xclk_target_mhz, CAM_VIDEO_FB_COUNT, CAM_FRAME_SIZE, CAM_JPEG_QUALITY);
     return ESP_OK;
 }
 
 /* 필요시 초기화(2026-08-10) — 촬영이 실제로 필요해진 시점(수동/자동 둘 다)에만 호출.
  * 이미 이번 사이클에 한 번 초기화됐으면(s_camera_ready) 그대로 통과, 재초기화 안 함 */
-static esp_err_t ensure_camera_ready(void)
+static esp_err_t ensure_camera_ready(bool save_warmup_frames)
 {
     if (s_camera_ready) return ESP_OK;
-    esp_err_t err = camera_init();
+    esp_err_t err = camera_init(save_warmup_frames);
     if (err != ESP_OK) ESP_LOGE(TAG, "카메라 초기화 실패(필요시 초기화)");
     return err;
+}
+
+bool cam_node_is_camera_ready(void) { return s_camera_ready; }
+
+bool cam_node_ensure_camera_ready(void)
+{
+    return ensure_camera_ready(true) == ESP_OK;
 }
 
 /* 자동(타이머)/수동(shot) 캡처가 절대 동시에 안 돌게 직렬화 — esp_camera_fb_get()이 최대
@@ -387,9 +423,25 @@ static esp_err_t ensure_camera_ready(void)
  * (2026-07-21) — 이미 진행 중인 캡처가 있으면 새 요청은 그게 끝날 때까지 뮤텍스로 대기 */
 static SemaphoreHandle_t s_capture_mutex = NULL;
 
+/* 2026-08-21 — 매 촬영 직전에 현재 설정을 반영(카메라 초기화 시 1회가 아니라 촬영마다) —
+ * Cntl에서 설정을 바꾼 게 이번 웨이크 사이클 중간(카메라 이미 초기화된 뒤)에 와도 다음
+ * 촬영부터 바로 적용되게 함. sensor_t::set_gain_ctrl/set_exposure_ctrl은 켬(1)->끔(0)
+ * 전환 시 그 순간의 자동값에 고정하는 것뿐이라 별도 수동값 지정은 안 함(단순 On/Off) */
+static void apply_agc_aec_settings(void)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s) return;
+    if (s->set_gain_ctrl)     s->set_gain_ctrl(s, s_agc_enable ? 1 : 0);
+    if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, s_aec_enable ? 1 : 0);
+}
+
 static bool camera_capture_one(cam_capture_kind_t kind)
 {
-    if (ensure_camera_ready() != ESP_OK) return false;
+    /* save_warmup_frames는 수동(MANUAL) 촬영일 때만 true — 자동촬영은 esp_timer 태스크의
+     * 작은 스택에서 도는 데다 무인 반복이라, 진단용 SD 쓰기를 그 경로에 태우지 않음(위
+     * camera_init() 주석 참고) */
+    if (ensure_camera_ready(kind == CAM_CAPTURE_KIND_MANUAL) != ESP_OK) return false;
+    apply_agc_aec_settings();
 
     xSemaphoreTake(s_capture_mutex, portMAX_DELAY);
 
@@ -468,6 +520,22 @@ bool cam_node_set_xclk(int mhz)
     return true;
 }
 
+/* 2026-08-21 — CAM_CONFIG_SET으로 Cntl이 원격 지정. 카메라가 이미 이번 사이클에 초기화된
+ * 상태(s_camera_ready)면 위 cam_node_set_xclk()로 바로 반영(PLL 재계산 포함) — 콘솔 xclk
+ * 명령과 동일 경로. 아직 초기화 전이면 camera_init()이 다음에 이 값으로 esp_camera_init()을
+ * 부르게 저장만 해둠(그 시점엔 sensor 핸들이 없어서 set_xclk 자체를 못 부름) */
+void cam_node_set_xclk_target_mhz(uint8_t mhz)
+{
+    if (mhz < 1 || mhz > 40) {
+        ESP_LOGW(TAG, "XCLK 목표값 범위 밖(1~40MHz), 무시: %u", (unsigned)mhz);
+        return;
+    }
+    s_xclk_target_mhz = mhz;
+    if (s_camera_ready) {
+        cam_node_set_xclk((int)mhz);
+    }
+}
+
 static void capture_timer_cb(void *arg)
 {
     (void)arg;
@@ -490,8 +558,9 @@ bool cam_node_capture_now(void)
 bool cam_node_capture_now_sized(const char *size_name)
 {
     /* 2026-08-10 — 필요시 초기화: 해상도 오버라이드(size_name)는 esp_camera_sensor_get()으로
-     * 센서 핸들이 필요해서 camera_capture_one() 진입 전에 여기서 먼저 준비돼 있어야 함 */
-    if (ensure_camera_ready() != ESP_OK) {
+     * 센서 핸들이 필요해서 camera_capture_one() 진입 전에 여기서 먼저 준비돼 있어야 함.
+     * 이 함수 자체가 수동(콘솔 shot/CAPTURE_NOW) 전용 경로라 save_warmup_frames=true 고정 */
+    if (ensure_camera_ready(true) != ESP_OK) {
         ESP_LOGW(TAG, "수동 촬영 요청 — 카메라 초기화 실패");
         return false;
     }

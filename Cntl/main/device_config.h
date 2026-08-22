@@ -15,6 +15,7 @@
  */
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,6 +38,25 @@ void     device_config_set_response_interval_sec(uint32_t sec);
  * 기준일 뿐) */
 uint32_t device_config_get_adaptive_response_sec(void);
 void     device_config_set_adaptive_response_sec(uint32_t sec);
+
+/* AGC(자동게인)/AEC(자동노출) On/Off(2026-08-21, 세로줄 노이즈 진단용) — 카메라별 설정
+ * (촬영주기와 같은 그룹), 기본값 true(센서 전원인가 기본값과 일치) */
+bool device_config_get_agc_enable(void);
+void device_config_set_agc_enable(bool enable);
+bool device_config_get_aec_enable(void);
+void device_config_set_aec_enable(bool enable);
+
+/* XCLK(MHz) 프리셋(2026-08-21, 화질/노이즈 진단용) — 카메라별 설정, 기본값 24(OV5640 기존
+ * 컴파일타임 상수와 일치) */
+uint8_t device_config_get_xclk_mhz(void);
+void    device_config_set_xclk_mhz(uint8_t mhz);
+
+/* NACK/DONE_ACK 최대 재전송 라운드 수(2026-08-21) — CAM/CNTL 둘 다 "몇 라운드째인가"를
+ * 각자 판단 기준으로 쓰므로 반드시 같은 숫자여야 하는 값(둘 다 하드코딩했다가 off-by-one으로
+ * 어긋난 적 있음, project_cntl_cam_photo_fetch_nack_round_bug 메모리 참고) — CNTL이 유일한
+ * 소유자로서 이 값을 CAM_CONFIG_SET에 실어 보냄. 사용자가 조정할 이유가 없는 순수 프로토콜
+ * 신뢰성 값이라 설정 UI/영구저장 없음 — 상수 하나를 여기 한 곳에서만 관리 */
+uint8_t device_config_get_nack_max_rounds(void);
 
 #ifdef __cplusplus
 }

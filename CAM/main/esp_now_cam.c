@@ -99,7 +99,13 @@ static volatile bool s_list_abort_requested = false;  /* 2026-08-11 — Cntl이 
  * 2026-08-05 — DONE 확인 대기용이었던 s_nack_queue/ESP_NOW_MSG_PHOTO_CHUNK_NACK 수신 경로는
  * esp_now_reliable_request()로 대체되어 제거됨(send_one_photo() 참고) — 이제 DONE_ACK가
  * reliable 레이어의 응답으로 직접 돌아옴 */
-#define MAX_NACK_ROUNDS   3
+/* 2026-08-21 — 예전엔 이 값을 여기 상수로 하드코딩하고 Cntl(esp_now_photo.c)도 똑같은 값을
+ * 따로 하드코딩했었음. 두 쪽 다 "몇 라운드째인가"를 각자 판단 기준으로 쓰는 값이라 반드시
+ * 같아야 하는데, 그 전제가 코드로 강제되지 않아서 실제로 off-by-one이 나서 어긋난 적 있음
+ * (Cntl이 CAM은 이미 포기한 라운드를 계속 기다리는 버그, 3006 오탐으로 나타남) — 이제
+ * CNTL이 유일한 소유자, CAM_CONFIG_SET으로 전달받은 값을 씀(기본값 3은 구버전 CNTL/값
+ * 미수신 시에만 쓰이는 안전값, feedback_cntl_owns_mutually_judged_values 메모리 참고) */
+static uint8_t s_nack_max_rounds = 3;
 /* 청크 버스트 중 CHANNEL_PING이 큐에서 밀리는 문제 완화용(2026-08-05, 위 청크 루프 주석
  * 참고) — 10개마다 50ms 쉬어서 큐를 비움. 10개×(10ms 페이싱)=100ms 주기에 50ms를 더 얹는
  * 셈이라 전송 시간이 그만큼 늘지만(약 1.5배), PING 왕복(현재 500ms 타임아웃) 안에 여유있게
@@ -329,7 +335,7 @@ static bool send_one_photo(uint32_t file_id, uint32_t my_generation)
     static esp_now_photo_chunk_nack_t ack;  /* static — 800B+ 구조체를 스택에 안 둠(2026-08-03
                                                 스택 오버플로우 사고 이후 원칙) */
 
-    for (int round = 0; round < MAX_NACK_ROUNDS; round++) {
+    for (int round = 0; round < s_nack_max_rounds; round++) {
         if (s_request_generation != my_generation) return false;
 
         size_t reply_len = 0;
@@ -347,7 +353,7 @@ static bool send_one_photo(uint32_t file_id, uint32_t my_generation)
             return true;
         }
 
-        ESP_LOGI(TAG, "DONE_ACK: %u개 누락 — 재전송(라운드 %d/%d)", (unsigned)ack.missing_count, round + 1, MAX_NACK_ROUNDS);
+        ESP_LOGI(TAG, "DONE_ACK: %u개 누락 — 재전송(라운드 %d/%d)", (unsigned)ack.missing_count, round + 1, s_nack_max_rounds);
         resend_chunks(file_id, &ack);
         if (s_request_generation != my_generation) return false;
     }
@@ -400,10 +406,22 @@ static bool send_one_photo_sr(uint32_t file_id, uint32_t my_generation)
         .total_chunks = total_chunks,
         .crc32        = crc,
     };
-    for (int i = 0; i < 3; i++) {
-        esp_err_t meta_err = esp_now_send(s_hub_mac, (const uint8_t *)&meta, sizeof(meta));
-        ESP_LOGI(TAG, "CKPT(SR): META 전송[%d] -> %s", i, esp_err_to_name(meta_err));
-        vTaskDelay(pdMS_TO_TICKS(20));
+    /* 2026-08-21 — 예전엔 ACK 없이 그냥 3번 쏘고 바로 청크 전송을 시작했음(META만 reliable
+     * 전환에서 빠져있었음). 이게 실제 버그의 근본원인이었음: 3개의 중복 사본 중 하나가 늦게
+     * 도착하면 CNTL의 handle_meta()가 이미 SR로 받고 있던 진행상황(비트맵)을 그 시점에
+     * 무조건 리셋해버려서, 청크 몇 개가 실제로는 잘 도착했는데도 맨 마지막 DONE 전체스캔에서
+     * 뒤늦게 "누락"으로 잘못 잡히는 현상으로 나타남(실기 재현). ACK을 받을 때까지 청크 전송
+     * 자체를 시작 안 하면 이 경쟁상태가 구조적으로 없어짐(사용자 지적: "SR 자체가 가드니까"
+     * — 별도 중복방어는 불필요, META를 reliable로만 바꾸면 충분) */
+    static const uint8_t s_meta_ack_types[] = { ESP_NOW_MSG_PHOTO_META_ACK };
+    esp_err_t meta_err = esp_now_reliable_request(s_hub_mac, &meta, sizeof(meta),
+                                                   s_meta_ack_types, 1,
+                                                   800, 3,
+                                                   NULL, 0, NULL);
+    ESP_LOGI(TAG, "CKPT(SR): META_ACK: %s", esp_err_to_name(meta_err));
+    if (meta_err != ESP_OK) {
+        ESP_LOGW(TAG, "CKPT(SR): META 무응답 — 전송 포기(file_id=%u)", (unsigned)file_id);
+        return false;
     }
 
     static esp_now_photo_chunk_nack_t range_req;  /* "새로 보낼 인덱스 목록"으로 재사용해
@@ -464,7 +482,7 @@ static bool send_one_photo_sr(uint32_t file_id, uint32_t my_generation)
     static const uint8_t s_sr_done_ack_types[] = { ESP_NOW_MSG_PHOTO_DONE_ACK };
     static esp_now_photo_chunk_nack_t done_ack;
 
-    for (int round = 0; round < MAX_NACK_ROUNDS; round++) {
+    for (int round = 0; round < s_nack_max_rounds; round++) {
         if (s_request_generation != my_generation) return false;
 
         size_t reply_len = 0;
@@ -482,7 +500,7 @@ static bool send_one_photo_sr(uint32_t file_id, uint32_t my_generation)
             return true;
         }
 
-        ESP_LOGI(TAG, "SR DONE_ACK: %u개 누락 — 재전송(라운드 %d/%d)", (unsigned)done_ack.missing_count, round + 1, MAX_NACK_ROUNDS);
+        ESP_LOGI(TAG, "SR DONE_ACK: %u개 누락 — 재전송(라운드 %d/%d)", (unsigned)done_ack.missing_count, round + 1, s_nack_max_rounds);
         resend_chunks(file_id, &done_ack);
         if (s_request_generation != my_generation) return false;
     }
@@ -722,6 +740,25 @@ bool esp_now_cam_is_busy(void)
     return s_transfer_busy || (s_photo_request_queue && uxQueueMessagesWaiting(s_photo_request_queue) > 0);
 }
 
+/* 2026-08-21 — 지금촬영 핸드셰이크 재설계용 공용 헬퍼. cam_capture_status_t의 어떤 값이든
+ * CAPTURE_STATUS_ACK을 기다리는 reliable로 보냄(feedback_default_to_reliable_messaging
+ * 메모리 참고) — RECEIVED만 recv_cb 컨텍스트라 예외(그쪽은 여전히 fire-and-forget) */
+static void send_capture_status(uint8_t status)
+{
+    esp_now_capture_status_t msg = {
+        .version  = ESP_NOW_LINK_VERSION,
+        .msg_type = ESP_NOW_MSG_CAPTURE_STATUS,
+        .status   = status,
+    };
+    static const uint8_t s_capture_ack_types[] = { ESP_NOW_MSG_CAPTURE_STATUS_ACK };
+    esp_err_t err = esp_now_reliable_request(s_hub_mac, &msg, sizeof(msg),
+                                              s_capture_ack_types, 1,
+                                              800, 3,
+                                              NULL, 0, NULL);
+    if (err == ESP_OK) esp_now_channelsync_notify_alive();
+    ESP_LOGI(TAG, "CAPTURE_STATUS(%u) 전송: %s", (unsigned)status, esp_err_to_name(err));
+}
+
 static void photo_transfer_task(void *arg)
 {
     (void)arg;
@@ -759,6 +796,19 @@ static void photo_transfer_task(void *arg)
         }
 
         if (item.kind == CAM_TASK_REQ_DELETE_ALL) {
+            /* 2026-08-21 — 실제 삭제(파일마다 순차 unlink, 개수 많으면 수십 초) 시작 "전"에
+             * 지울 개수를 먼저 알림(지금촬영의 RECEIVED와 동일 원칙) — Cntl이 이걸로 완료
+             * 대기 예산을 계산함. 지능 없이 그냥 사실 보고만 하는 것 — 실패해도(count<0)
+             * 0으로 보내고 그대로 진행(뒤이은 delete_all 결과가 최종 판정) */
+            int to_delete = cam_storage_count_files();
+            esp_now_photo_delete_all_received_t received = {
+                .version  = ESP_NOW_LINK_VERSION,
+                .msg_type = ESP_NOW_MSG_PHOTO_DELETE_ALL_RECEIVED,
+                .count    = (uint16_t)(to_delete >= 0 ? to_delete : 0),
+            };
+            esp_err_t recv_err = esp_now_send(s_hub_mac, (const uint8_t *)&received, sizeof(received));
+            ESP_LOGI(TAG, "PHOTO_DELETE_ALL_RECEIVED(%d개) 전송: %s", to_delete, esp_err_to_name(recv_err));
+
             int deleted = cam_storage_delete_all();
             esp_now_photo_delete_all_ack_t ack = {
                 .version       = ESP_NOW_LINK_VERSION,
@@ -784,23 +834,31 @@ static void photo_transfer_task(void *arg)
          * 진행 팝업으로 따로 다룸) */
         if (req.mode == PHOTO_REQUEST_MODE_CAPTURE_NOW) {
             ESP_LOGI(TAG, "CAPTURE_NOW 요청 — 즉시 촬영 시작");
+
+            /* 2026-08-21 핸드셰이크 재설계(사용자 설계) — RECEIVED 이후 아무 중간신호 없이
+             * 촬영이 끝날 때까지 블로킹 대기하던 걸(4004 오탐의 근본원인) 단계별로 나눔.
+             * 카메라 초기화가 필요 없으면 INIT_NEEDED/INIT_DONE 두 단계는 아예 안 보내고
+             * 건너뜀 — Cntl 팝업도 그 두 단계를 안 보여줌(esp_now_link.h 주석 참고) */
+            bool needs_init = !cam_node_is_camera_ready();
+            if (needs_init) {
+                send_capture_status(CAM_CAPTURE_STATUS_INIT_NEEDED);
+                bool init_ok = cam_node_ensure_camera_ready();
+                ESP_LOGI(TAG, "CAPTURE_NOW: 카메라 초기화 %s", init_ok ? "완료" : "실패");
+                if (!init_ok) {
+                    send_capture_status(CAM_CAPTURE_STATUS_FAILED);
+                    s_transfer_busy = false;
+                    continue;
+                }
+                send_capture_status(CAM_CAPTURE_STATUS_INIT_DONE);
+            }
+
+            send_capture_status(CAM_CAPTURE_STATUS_CAPTURING);
             bool captured = cam_node_capture_now();
             ESP_LOGI(TAG, "CAPTURE_NOW 촬영 결과: %s", captured ? "성공" : "실패");
             /* 2026-08-05 Layer 1 재설계 — CAPTURE_STATUS_ACK를 기다리는 reliable_request로
              * 교체(3번 수동 반복 대신 레이어가 재시도). 이 최종 결과가 안 가면 Cntl은
              * 지금촬영이 끝났는지 몰라서 UI_ERR_CAPTURE_NORESPONSE(4004)로 빠짐(실기 확인) */
-            esp_now_capture_status_t status = {
-                .version  = ESP_NOW_LINK_VERSION,
-                .msg_type = ESP_NOW_MSG_CAPTURE_STATUS,
-                .status   = captured ? CAM_CAPTURE_STATUS_SUCCESS : CAM_CAPTURE_STATUS_FAILED,
-            };
-            static const uint8_t s_capture_ack_types[] = { ESP_NOW_MSG_CAPTURE_STATUS_ACK };
-            esp_err_t err = esp_now_reliable_request(s_hub_mac, &status, sizeof(status),
-                                                      s_capture_ack_types, 1,
-                                                      800, 3,
-                                                      NULL, 0, NULL);
-            if (err == ESP_OK) esp_now_channelsync_notify_alive();  /* 위 헤더 설명 참고 */
-            ESP_LOGI(TAG, "CAPTURE_STATUS(%s) 전송: %s", captured ? "SUCCESS" : "FAILED", esp_err_to_name(err));
+            send_capture_status(captured ? CAM_CAPTURE_STATUS_SUCCESS : CAM_CAPTURE_STATUS_FAILED);
             s_transfer_busy = false;
             continue;
         }
@@ -970,6 +1028,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         memcpy(&cfg, data, sizeof(cfg));
         cam_node_set_capture_interval_sec(cfg.capture_interval_sec);
         cam_node_set_response_interval_sec(cfg.response_interval_sec);
+        cam_node_set_agc_enable(cfg.agc_enable != 0);
+        cam_node_set_aec_enable(cfg.aec_enable != 0);
+        if (cfg.xclk_mhz != 0) cam_node_set_xclk_target_mhz(cfg.xclk_mhz);
+        if (cfg.nack_max_rounds != 0) s_nack_max_rounds = cfg.nack_max_rounds;
         if (cfg.wb_mode < CAM_WB_MODE_COUNT) {
             /* 화이트밸런스는 기존 필드라 그대로 적용 — 센서 API가 cam_node.c에 없어서 여기서
              * 직접 처리(다른 촬영 파라미터 setter들과 달리 이건 esp_camera 센서 핸들을
@@ -1063,6 +1125,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         struct timeval tv = { .tv_sec = (time_t)msg->unix_time, .tv_usec = 0 };
         settimeofday(&tv, NULL);
         ESP_LOGI(TAG, "SET_TIME 수신 — 시각 동기화: %u", (unsigned)msg->unix_time);
+        /* 2026-08-21 — reliable stack 전환(다른 모든 Cntl->노드 요청과 통일). 페이로드 없음,
+         * 응답이 왔다는 사실 자체가 의미의 전부 */
+        esp_now_set_time_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SET_TIME_ACK };
+        esp_err_t ack_err = esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+        ESP_LOGI(TAG, "SET_TIME_ACK 전송: %s", esp_err_to_name(ack_err));
         return;
     }
 

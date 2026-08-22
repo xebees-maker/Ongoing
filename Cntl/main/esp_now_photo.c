@@ -3,6 +3,7 @@
 #include "esp_now_hub.h"
 #include "esp_now_tx.h"
 #include "ui_log.h"
+#include "device_config.h"
 
 #include <string.h>
 #include "esp_now.h"
@@ -47,7 +48,6 @@ static uint8_t    s_photo_cam_mac[6] = { 0 };  /* NACK을 돌려보낼 대상 �
  * 비트맵으로 추적해뒀다가 DONE 도착 시 빠진 것만 콕 집어 CAM에 재전송 요청 */
 #define PHOTO_MAX_CHUNKS ((PHOTO_RECV_BUF_CAP + ESP_NOW_PHOTO_CHUNK_DATA_LEN - 1) / ESP_NOW_PHOTO_CHUNK_DATA_LEN)
 static uint8_t    s_chunk_bitmap[(PHOTO_MAX_CHUNKS + 7) / 8];
-#define PHOTO_NACK_MAX_ROUNDS 3
 static int        s_nack_rounds_used = 0;
 
 static inline void chunk_bitmap_clear(void) { memset(s_chunk_bitmap, 0, sizeof(s_chunk_bitmap)); }
@@ -95,7 +95,7 @@ static void cache_insert_locked(uint32_t file_id, const uint8_t *data, size_t le
     if (len > PHOTO_CACHE_SLOT_CAP) {
         ESP_LOGE(TAG, "cache_insert: 사진이 캐시 슬롯보다 큼(%u > %u) — 버림",
                  (unsigned)len, (unsigned)PHOTO_CACHE_SLOT_CAP);
-        ui_log_add_err(UI_ERR_CACHE_TOO_BIG, "사진 저장 실패(용량초과) file_id=%u len=%u", (unsigned)file_id, (unsigned)len);
+        ui_log_add_err(UI_ERR_CACHE_TOO_BIG, "Photo save failed (too big) file_id=%u len=%u", (unsigned)file_id, (unsigned)len);
         return;
     }
 
@@ -103,18 +103,18 @@ static void cache_insert_locked(uint32_t file_id, const uint8_t *data, size_t le
         if (s_cache[i].used && s_cache[i].file_id == file_id) {
             memcpy(s_cache[i].data, data, len);
             s_cache[i].len = len;
-            ui_log_add("CACHE 슬롯[%d] 갱신 file_id=%u len=%u", i, (unsigned)file_id, (unsigned)len);
+            ui_log_add("CACHE slot[%d] updated file_id=%u len=%u", i, (unsigned)file_id, (unsigned)len);
             return;
         }
     }
     photo_cache_slot_t *slot = &s_cache[s_cache_next];
     if (!slot->data) {
         ESP_LOGE(TAG, "cache_insert: 슬롯 버퍼 없음(초기 할당 실패?) — 버림");
-        ui_log_add_err(UI_ERR_CACHE_NO_BUF, "사진 저장 실패(메모리 부족) file_id=%u", (unsigned)file_id);
+        ui_log_add_err(UI_ERR_CACHE_NO_BUF, "Photo save failed (out of memory) file_id=%u", (unsigned)file_id);
         s_cache_next = (s_cache_next + 1) % PHOTO_CACHE_SLOTS;
         return;
     }
-    ui_log_add("CACHE 슬롯[%d] 신규(이전 file_id=%u) -> file_id=%u len=%u",
+    ui_log_add("CACHE slot[%d] new (prev file_id=%u) -> file_id=%u len=%u",
                s_cache_next, (unsigned)slot->file_id, (unsigned)file_id, (unsigned)len);
     memcpy(slot->data, data, len);
     slot->used    = true;
@@ -131,7 +131,10 @@ static volatile esp_now_capture_stage_t s_capture_stage = ESP_NOW_CAPTURE_STAGE_
 /* ────────────────────────────────────────────────────────────
  * 3. 사진 목록
  * ──────────────────────────────────────────────────────────── */
-static esp_now_photo_list_view_item_t s_list_items[ESP_NOW_PHOTO_LIST_MAX];
+/* 2026-08-21 — 내부(비-PSRAM) DRAM이 httpd_start 실패(5005)를 겪을 만큼 빠듯했던 걸 실기로
+ * 확인 — 화면 표시용 목록이라 빠른 접근이 필수가 아니어서 PSRAM으로 옮김(s_recv_buf/캐시
+ * 슬롯과 동일 원칙, esp_now_photo_init()에서 할당) */
+static esp_now_photo_list_view_item_t *s_list_items = NULL;
 static int                        s_list_count = 0;
 static volatile esp_now_photo_list_state_t s_list_state = ESP_NOW_PHOTO_LIST_STATE_IDLE;
 static uint32_t                   s_sd_total_kb = 0;  /* 최근 목록 응답에 실려온 CAM SD 용량 */
@@ -157,24 +160,30 @@ void esp_now_photo_init(void)
 {
     s_mutex = xSemaphoreCreateMutex();
 
-    ui_log_add("INIT 여유PSRAM(시작)=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    ui_log_add("INIT free PSRAM(start)=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
+    s_list_items = heap_caps_malloc(sizeof(esp_now_photo_list_view_item_t) * ESP_NOW_PHOTO_LIST_MAX,
+                                     MALLOC_CAP_SPIRAM);
+    if (!s_list_items) {
+        ESP_LOGE(TAG, "목록 버퍼 할당 실패 — 목록 표시 불가");
+    }
 
     s_recv_buf = heap_caps_malloc(PHOTO_RECV_BUF_CAP, MALLOC_CAP_SPIRAM);
     if (s_recv_buf) {
         s_recv_cap = PHOTO_RECV_BUF_CAP;
-        ui_log_add("INIT recv_buf=OK 여유PSRAM=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        ui_log_add("INIT recv_buf=OK free PSRAM=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     } else {
         ESP_LOGE(TAG, "수신 버퍼 초기 할당 실패(%u bytes) — 사진 수신 불가", (unsigned)PHOTO_RECV_BUF_CAP);
-        ui_log_add_err(UI_ERR_RECV_BUF_ALLOC, "수신버퍼 할당 실패 — 사진 수신 불가");
+        ui_log_add_err(UI_ERR_RECV_BUF_ALLOC, "Recv buffer alloc failed - cannot receive photos");
     }
 
     for (int i = 0; i < PHOTO_CACHE_SLOTS; i++) {
         s_cache[i].data = heap_caps_malloc(PHOTO_CACHE_SLOT_CAP, MALLOC_CAP_SPIRAM);
         if (s_cache[i].data) {
-            ui_log_add("INIT 캐시슬롯[%d]=OK 여유PSRAM=%u", i, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            ui_log_add("INIT cache slot[%d]=OK free PSRAM=%u", i, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         } else {
             ESP_LOGE(TAG, "캐시 슬롯[%d] 초기 할당 실패(%u bytes)", i, (unsigned)PHOTO_CACHE_SLOT_CAP);
-            ui_log_add_err(UI_ERR_CACHE_SLOT_ALLOC, "캐시 슬롯[%d] 할당 실패 — 여러 장 저장 불가", i);
+            ui_log_add_err(UI_ERR_CACHE_SLOT_ALLOC, "Cache slot[%d] alloc failed - cannot store multiple photos", i);
         }
     }
 }
@@ -209,7 +218,7 @@ static void start_single_receive(const uint8_t *cam_mac, uint8_t mode, uint32_t 
     if (s_state == ESP_NOW_PHOTO_STATE_RECEIVING) {
         xSemaphoreGive(s_mutex);
         ESP_LOGW(TAG, "이미 수신 중 — 새 요청 무시");
-        ui_log_add_err(UI_ERR_REQUEST_BUSY, "요청 무시됨(이미 수신중) param=%u", (unsigned)param);
+        ui_log_add_err(UI_ERR_REQUEST_BUSY, "Request ignored (already receiving) param=%u", (unsigned)param);
         return;
     }
     s_state = ESP_NOW_PHOTO_STATE_RECEIVING;
@@ -241,7 +250,7 @@ static void start_single_receive(const uint8_t *cam_mac, uint8_t mode, uint32_t 
     static const uint8_t s_meta_types[] = { ESP_NOW_MSG_PHOTO_META };
     esp_now_tx_enqueue(cam_mac, &req, sizeof(req), s_meta_types, 1, 500, 3, "사진 요청");
     ESP_LOGI(TAG, "PHOTO_REQUEST(mode=%d, param=%u) 큐잉됨", mode, (unsigned)param);
-    ui_log_add("REQUEST mode=%d param=%u 큐잉됨", mode, (unsigned)param);
+    ui_log_add("REQUEST mode=%d param=%u queued", mode, (unsigned)param);
 }
 
 /* 촬영과 전송은 완전히 분리(2026-08-01) — CAM에 "지금 찍어라"만 보내고 CAPTURE_STATUS로
@@ -308,7 +317,7 @@ static void handle_meta(const uint8_t *src_mac, const uint8_t *data, int len)
         xSemaphoreGive(s_mutex);
         ESP_LOGE(TAG, "사진이 고정 수신 버퍼보다 큼(%u > %u bytes) — 버림",
                  (unsigned)meta->total_size, (unsigned)s_recv_cap);
-        ui_log_add_err(UI_ERR_META_TOO_BIG, "사진 수신 실패(용량초과) %u > %u", (unsigned)meta->total_size, (unsigned)s_recv_cap);
+        ui_log_add_err(UI_ERR_META_TOO_BIG, "Photo receive failed (too big) %u > %u", (unsigned)meta->total_size, (unsigned)s_recv_cap);
         return;
     }
     s_file_id         = meta->file_id;
@@ -328,6 +337,14 @@ static void handle_meta(const uint8_t *src_mac, const uint8_t *data, int len)
      * 여기서 갱신하는 게 요청 경로 여부와 무관하게 맞음 */
     if (src_mac) memcpy(s_photo_cam_mac, src_mac, sizeof(s_photo_cam_mac));
     xSemaphoreGive(s_mutex);
+
+    /* 2026-08-21 — META를 reliable로 전환(esp_now_link.h의 ESP_NOW_MSG_PHOTO_META_ACK 주석
+     * 참고) — CAM은 이 ACK을 받을 때까지 청크 전송을 시작 안 하므로, 여기서 반드시 응답해야
+     * CAM이 다음 단계로 진행함(용량초과로 위에서 이미 ERROR 처리하고 return한 경우는 응답
+     * 안 함 — 어차피 못 받을 전송이라 CAM이 재시도 끝에 스스로 포기하게 두는 게 대역폭
+     * 낭비가 적음) */
+    esp_now_photo_done_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_META_ACK };
+    esp_now_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
 }
 
 static void handle_chunk(const uint8_t *data, int len)
@@ -397,7 +414,7 @@ static void handle_done(const uint8_t *data, int len)
          * 요청 자체를 우리가 모름(META를 못 받은 상태) — 뭘 요청받았는지조차 몰라서 의미
          * 있는 ACK를 만들 방법이 없으므로 응답 안 함. CAM은 reliable_request 타임아웃으로
          * 알아서 포기함 */
-        ui_log_add("DONE 무시(state!=RECEIVING)");
+        ui_log_add("DONE ignored (state!=RECEIVING)");
         return;
     }
 
@@ -424,16 +441,31 @@ static void handle_done(const uint8_t *data, int len)
         }
         send_done_ack(n, missing_idx);
 
-        if (s_nack_rounds_used < PHOTO_NACK_MAX_ROUNDS) {
-            s_nack_rounds_used++;
+        /* 2026-08-21 off-by-one 수정 — CAM(esp_now_cam.c)의 재전송 루프는 정확히
+         * nack_max_rounds번만 DONE을 보내고 그 후엔 조용히 포기함(그 다음 DONE은 절대 안 옴).
+         * 그런데 여기 카운터는 증가 *전*에 검사해서, 마지막 DONE을 받고도 "아직 여유 있다"고
+         * 오판하고 다음 DONE을 기다렸음 — CAM 쪽 마지막 라운드와 Cntl 쪽 "포기 조건"이 하나
+         * 어긋나 있던 것. 실기에서 재현: CAM이 "재전송 라운드 소진"으로 조용히 끝냈는데 Cntl은
+         * 계속 대기하다 stall 타임아웃(3006)으로만 빠짐 — 정작 원인은 청크 누락(3002)인데
+         * 엉뚱한 무응답 에러로 보였음. 먼저 증가시키고 그 값으로 판단해야 CAM의 마지막
+         * 라운드(=이 함수의 마지막 호출)에서 곧바로 실패 처리로 넘어감.
+         *
+         * 이 라운드 수는 CAM/Cntl 둘 다 "몇 라운드째인가"를 각자 판단 기준으로 쓰므로
+         * 반드시 같은 숫자여야 함(둘 다 하드코딩했다가 이 버그로 처음 어긋났던 걸 발견,
+         * feedback_cntl_owns_mutually_judged_values 메모리 참고) — 이제 CNTL이 유일한
+         * 소유자(device_config_get_nack_max_rounds)이고 CAM_CONFIG_SET으로 CAM에도 같은 값을
+         * 전달함(esp_now_hub.c push_cam_config_to 참고) */
+        int nack_max_rounds = (int)device_config_get_nack_max_rounds();
+        s_nack_rounds_used++;
+        if (s_nack_rounds_used < nack_max_rounds) {
             ESP_LOGW(TAG, "청크 누락(%u/%u) — 재전송 요청(%u개, 라운드 %d/%d)",
-                     s_chunks_received, s_total_chunks, n, s_nack_rounds_used, PHOTO_NACK_MAX_ROUNDS);
-            ui_log_add("DONE_ACK 누락 %u개 통보(라운드 %d/%d) file_id=%u", n, s_nack_rounds_used,
-                       PHOTO_NACK_MAX_ROUNDS, (unsigned)s_file_id);
+                     s_chunks_received, s_total_chunks, n, s_nack_rounds_used, nack_max_rounds);
+            ui_log_add("DONE_ACK reporting %u missing (round %d/%d) file_id=%u", n, s_nack_rounds_used,
+                       nack_max_rounds, (unsigned)s_file_id);
             return;
         }
         ESP_LOGW(TAG, "청크 누락(%u/%u) — NACK 라운드 소진, 사진 버림", s_chunks_received, s_total_chunks);
-        ui_log_add_err(UI_ERR_CHUNK_MISSING, "사진 수신 실패(청크 누락 %u/%u, 재전송 후에도)", s_chunks_received, s_total_chunks);
+        ui_log_add_err(UI_ERR_CHUNK_MISSING, "Photo receive failed (chunk missing %u/%u even after resend)", s_chunks_received, s_total_chunks);
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_state = ESP_NOW_PHOTO_STATE_ERROR;
         xSemaphoreGive(s_mutex);
@@ -443,7 +475,7 @@ static void handle_done(const uint8_t *data, int len)
     uint32_t crc = esp_rom_crc32_le(0, s_recv_buf, s_total_size);
     if (crc != s_expected_crc) {
         ESP_LOGW(TAG, "CRC 불일치 — 사진 버림(재조립 실패)");
-        ui_log_add_err(UI_ERR_CRC_MISMATCH, "사진 수신 실패(CRC 불일치) file_id=%u", (unsigned)s_file_id);
+        ui_log_add_err(UI_ERR_CRC_MISMATCH, "Photo receive failed (CRC mismatch) file_id=%u", (unsigned)s_file_id);
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_state = ESP_NOW_PHOTO_STATE_ERROR;
         xSemaphoreGive(s_mutex);
@@ -561,9 +593,11 @@ static void handle_capture_status(const uint8_t *src_mac, const uint8_t *data, i
     const esp_now_capture_status_t *msg = (const esp_now_capture_status_t *)data;
     ESP_LOGI(TAG, "CAPTURE_STATUS 수신: status=%d", msg->status);
 
-    /* 최종 결과(SUCCESS/FAILED)만 ACK — CAM이 esp_now_reliable_request()로 감싸서 기다리는
-     * 건 이 둘뿐(2026-08-05, Layer 1). RECEIVED는 기존처럼 단발성 알림으로 유지 */
-    if (src_mac && (msg->status == CAM_CAPTURE_STATUS_SUCCESS || msg->status == CAM_CAPTURE_STATUS_FAILED)) {
+    /* 2026-08-21 — RECEIVED만 recv_cb 컨텍스트의 fire-and-forget 예외, 나머지(INIT_NEEDED/
+     * INIT_DONE/CAPTURING/SUCCESS/FAILED)는 전부 CAM이 esp_now_reliable_request()로 감싸서
+     * 기다리는 reliable이라 다 ACK 필요(feedback_default_to_reliable_messaging 메모리 참고,
+     * 예전엔 SUCCESS/FAILED만 ACK했음) */
+    if (src_mac && msg->status != CAM_CAPTURE_STATUS_RECEIVED) {
         esp_now_capture_status_ack_t ack = {
             .version  = ESP_NOW_LINK_VERSION,
             .msg_type = ESP_NOW_MSG_CAPTURE_STATUS_ACK,
@@ -576,12 +610,21 @@ static void handle_capture_status(const uint8_t *src_mac, const uint8_t *data, i
         case CAM_CAPTURE_STATUS_RECEIVED:
             s_capture_stage = ESP_NOW_CAPTURE_STAGE_ACKED;
             break;
+        case CAM_CAPTURE_STATUS_INIT_NEEDED:
+            s_capture_stage = ESP_NOW_CAPTURE_STAGE_INIT_NEEDED;
+            break;
+        case CAM_CAPTURE_STATUS_INIT_DONE:
+            s_capture_stage = ESP_NOW_CAPTURE_STAGE_INIT_DONE;
+            break;
+        case CAM_CAPTURE_STATUS_CAPTURING:
+            s_capture_stage = ESP_NOW_CAPTURE_STAGE_CAPTURING;
+            break;
         case CAM_CAPTURE_STATUS_SUCCESS:
             s_capture_stage = ESP_NOW_CAPTURE_STAGE_CAPTURED;
             break;
         case CAM_CAPTURE_STATUS_FAILED:
             s_capture_stage = ESP_NOW_CAPTURE_STAGE_CAPTURE_FAILED;
-            ui_log_add_err(UI_ERR_CAPTURE_FAILED, "촬영 실패(CAM 응답)");
+            ui_log_add_err(UI_ERR_CAPTURE_FAILED, "Capture failed (CAM response)");
             break;
         default:
             break;
@@ -656,11 +699,17 @@ static void handle_list_count(const uint8_t *src_mac, const uint8_t *data, int l
     if (len < (int)sizeof(esp_now_photo_list_count_t)) return;
     const esp_now_photo_list_count_t *msg = (const esp_now_photo_list_count_t *)data;
 
+    /* 2026-08-21 — 예전엔 s_list_state가 REQUESTING이 아니면(예: 이전 목록요청이 이미
+     * 완료/에러로 끝난 뒤 도착한 요청의 재전송) 조용히 버리고 COUNT_ACK도 안 보냈음. CAM은
+     * blocking으로 성실히 재시도할 뿐인데(지능 없음 원칙), Cntl이 자기 상태만 보고 거부하니
+     * CAM 입장에선 영원히 무응답으로 보여서 재진입 루프에 빠졌던 게 실제 원인이었음
+     * (project_cntl_cam_photo_list_first_pair_timeout 계열 버그). CAM이 보내는 COUNT는
+     * 그 자체로 "지금 목록 전송을 시작한다"는 선언이니, Cntl의 예전 상태가 뭐든 그냥 새
+     * 트랜잭션으로 받아들여서 매번 완주시킴 — "CAM은 지능 없이 blocking, Cntl이 상태관리"
+     * 원칙에 따라 Cntl 쪽에서 흡수해야 하는 책임 */
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_list_state != ESP_NOW_PHOTO_LIST_STATE_REQUESTING) {
-        xSemaphoreGive(s_mutex);
-        return;  /* 모르는 거래 — 무응답(CAM은 reliable_request 타임아웃으로 알아서 재시도) */
-    }
+    s_list_state = ESP_NOW_PHOTO_LIST_STATE_REQUESTING;
+    memcpy(s_list_cam_mac, src_mac, sizeof(s_list_cam_mac));
     s_list_expected_count = msg->count;
     s_sd_total_kb          = msg->sd_total_kb;
     s_sd_used_kb           = msg->sd_used_kb;
@@ -686,6 +735,7 @@ static void handle_list_count(const uint8_t *src_mac, const uint8_t *data, int l
  * 오름차순으로 오므로 앞쪽 LIST_MAX개가 곧 파일이 오래된 순 LIST_MAX개) */
 static void handle_list_batch(const uint8_t *src_mac, const uint8_t *data, int len)
 {
+    if (!s_list_items) return;  /* PSRAM 할당 실패 시(극히 드묾) */
     if (len < 3) return;  /* version+msg_type+entry_count 최소 헤더 */
     const esp_now_photo_list_batch_t *batch = (const esp_now_photo_list_batch_t *)data;
     int entry_count = batch->entry_count;
@@ -743,12 +793,11 @@ static void handle_list_done(const uint8_t *src_mac, const uint8_t *data, int le
 {
     if (len < (int)sizeof(esp_now_photo_list_done_t)) return;
 
+    /* 2026-08-21 — handle_list_count()와 동일한 이유로 상태 무관하게 항상 완주(ACK)시킴.
+     * COUNT가 이제 항상 상태를 REQUESTING으로 리셋하므로, 같은 트랜잭션의 DONE이 도착할
+     * 때는 정상적으로 REQUESTING일 것 — 혹시 아니어도(극히 드문 순서뒤바뀜) 응답 자체는
+     * 항상 보내서 CAM이 무응답으로 오인해 재진입하는 일이 없게 함 */
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_list_state != ESP_NOW_PHOTO_LIST_STATE_REQUESTING) {
-        xSemaphoreGive(s_mutex);
-        /* 모르는 거래 — 무응답(CAM은 자기 reliable_request 타임아웃으로 알아서 포기함) */
-        return;
-    }
     uint16_t received = s_list_received_count;
     uint16_t expected = s_list_expected_count;
     bool ok = (received >= expected);
@@ -759,7 +808,7 @@ static void handle_list_done(const uint8_t *src_mac, const uint8_t *data, int le
 
     if (!ok) {
         ESP_LOGW(TAG, "PHOTO_LIST_DONE 조기도착(%u/%u) — 에러 처리", received, expected);
-        ui_log_add_err(UI_ERR_LIST_COUNT_MISMATCH, "목록 수신 실패(조기종료 %u/%u개)", received, expected);
+        ui_log_add_err(UI_ERR_LIST_COUNT_MISMATCH, "List receive failed (stopped early %u/%u)", received, expected);
         send_list_error(src_mac);
 
         xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -773,7 +822,7 @@ static void handle_list_done(const uint8_t *src_mac, const uint8_t *data, int le
     }
 
     ESP_LOGI(TAG, "PHOTO_LIST_DONE 수신: %u개", received);
-    ui_log_add("LIST_DONE %u개", received);
+    ui_log_add("LIST_DONE %u items", received);
 
     esp_now_photo_list_done_t ack = {
         .version  = ESP_NOW_LINK_VERSION,
@@ -793,6 +842,7 @@ esp_now_photo_list_state_t esp_now_photo_list_get_state(void)
 
 int esp_now_photo_list_get_items(esp_now_photo_list_view_item_t *out, int max)
 {
+    if (!s_list_items) return 0;  /* PSRAM 할당 실패 시(극히 드묾) */
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     /* CAM은 오래된 것부터(오름차순) 보내는데, 화면엔 최신이 위로 오는 게 자연스러워서
      * 역순으로 훑음. 2026-08-11 — 배치 자체가 reliable이라 빈틈이 있을 수 없어서(항상
@@ -852,7 +902,7 @@ static void handle_delete_ack(const uint8_t *data, int len)
     if (len < (int)sizeof(esp_now_photo_delete_ack_t)) return;
     const esp_now_photo_delete_ack_t *ack = (const esp_now_photo_delete_ack_t *)data;
     ESP_LOGI(TAG, "PHOTO_DELETE_ACK id=%u: %s", (unsigned)ack->file_id, ack->success ? "성공" : "실패");
-    if (!ack->success) ui_log_add_err(UI_ERR_DELETE_FAILED, "사진 삭제 실패 file_id=%u", (unsigned)ack->file_id);
+    if (!ack->success) ui_log_add_err(UI_ERR_DELETE_FAILED, "Photo delete failed file_id=%u", (unsigned)ack->file_id);
 }
 
 /* ────────────────────────────────────────────────────────────
@@ -861,6 +911,8 @@ static void handle_delete_ack(const uint8_t *data, int len)
 static volatile esp_now_delete_all_state_t s_delete_all_state = ESP_NOW_DELETE_ALL_STATE_NONE;
 static bool     s_delete_all_success = false;
 static uint16_t s_delete_all_count = 0;
+static uint16_t s_delete_all_received_count = 0;  /* 2026-08-21 — CAM이 삭제 시작 전 보고한
+                                                       "지울 개수"(완료 대기 예산용) */
 
 void esp_now_photo_delete_all(const uint8_t *cam_mac)
 {
@@ -874,12 +926,37 @@ void esp_now_photo_delete_all(const uint8_t *cam_mac)
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_PHOTO_DELETE_ALL_REQUEST,
     };
-    /* 2026-08-05 Layer 1 — PHOTO_DELETE_ALL_ACK를 기다림(재시도는 레이어가 대신 함).
-     * 전체삭제는 CAM이 최대 500개 파일을 지워야 해서 시간이 걸릴 수 있음 — 타임아웃을
-     * 넉넉히 잡음 */
-    static const uint8_t s_delete_all_ack_types[] = { ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK };
-    esp_now_tx_enqueue(cam_mac, &req, sizeof(req), s_delete_all_ack_types, 1, 3000, 3, "전체삭제");
+    /* 2026-08-21 — 예전엔 여기서 최종 DELETE_ALL_ACK(삭제 완료)까지 기다렸는데, 그러면
+     * "접수됐는지"와 "다 지웠는지"가 하나의 고정 타임아웃으로 뭉뚱그려져서, 파일 개수가
+     * 많을 때 CAM이 정상 작업 중인데도 먼저 포기하는 오탐이 있었음. 이제 이 reliable
+     * 요청은 빠른 RECEIVED(접수+개수 통보)만 기다리고, 진짜 완료(ACK)는 그 개수 기준
+     * 예산으로 UI(delete_all_tick_fn)가 별도로 폴링함 — 목록 COUNT/BATCH/DONE과 동일하게
+     * recv_cb의 일반 dispatch로 비동기 처리(아래 handle_delete_all_ack) */
+    static const uint8_t s_delete_all_received_types[] = { ESP_NOW_MSG_PHOTO_DELETE_ALL_RECEIVED };
+    esp_now_tx_enqueue(cam_mac, &req, sizeof(req), s_delete_all_received_types, 1, 800, 3, "전체삭제");
     ESP_LOGI(TAG, "PHOTO_DELETE_ALL_REQUEST 큐잉됨");
+}
+
+static void handle_delete_all_received(const uint8_t *data, int len)
+{
+    if (len < (int)sizeof(esp_now_photo_delete_all_received_t)) return;
+    const esp_now_photo_delete_all_received_t *msg = (const esp_now_photo_delete_all_received_t *)data;
+    ESP_LOGI(TAG, "PHOTO_DELETE_ALL_RECEIVED 수신: %u개 삭제 예정", (unsigned)msg->count);
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_delete_all_state == ESP_NOW_DELETE_ALL_STATE_REQUESTED) {
+        s_delete_all_received_count = msg->count;
+        s_delete_all_state          = ESP_NOW_DELETE_ALL_STATE_RECEIVED;
+    }
+    xSemaphoreGive(s_mutex);
+}
+
+uint16_t esp_now_photo_delete_all_get_received_count(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    uint16_t count = s_delete_all_received_count;
+    xSemaphoreGive(s_mutex);
+    return count;
 }
 
 static void handle_delete_all_ack(const uint8_t *data, int len)
@@ -887,10 +964,13 @@ static void handle_delete_all_ack(const uint8_t *data, int len)
     if (len < (int)sizeof(esp_now_photo_delete_all_ack_t)) return;
     const esp_now_photo_delete_all_ack_t *ack = (const esp_now_photo_delete_all_ack_t *)data;
     ESP_LOGI(TAG, "PHOTO_DELETE_ALL_ACK 수신: 성공=%d, %u개", ack->success, (unsigned)ack->deleted_count);
-    if (!ack->success) ui_log_add_err(UI_ERR_DELETE_ALL_FAILED, "전체삭제 실패");
+    if (!ack->success) ui_log_add_err(UI_ERR_DELETE_ALL_FAILED, "Delete-all failed");
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    if (s_delete_all_state == ESP_NOW_DELETE_ALL_STATE_REQUESTED) {
+    /* REQUESTED에서도 받아줌(RECEIVED가 유실됐어도 최종 ACK가 그 자체로 완료 확인이라 정상
+     * 처리) — RECEIVED/REQUESTED 둘 다 "아직 최종 완료 아님" 상태라 동일하게 취급 */
+    if (s_delete_all_state == ESP_NOW_DELETE_ALL_STATE_REQUESTED ||
+        s_delete_all_state == ESP_NOW_DELETE_ALL_STATE_RECEIVED) {
         s_delete_all_success = ack->success;
         s_delete_all_count   = ack->deleted_count;
         s_delete_all_state   = ESP_NOW_DELETE_ALL_STATE_ACKED;
@@ -925,7 +1005,8 @@ uint16_t esp_now_photo_delete_all_get_count(void)
 void esp_now_photo_delete_all_clear(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_delete_all_state = ESP_NOW_DELETE_ALL_STATE_NONE;
+    s_delete_all_state          = ESP_NOW_DELETE_ALL_STATE_NONE;
+    s_delete_all_received_count = 0;
     xSemaphoreGive(s_mutex);
 }
 
@@ -944,6 +1025,7 @@ void esp_now_photo_on_recv(uint8_t msg_type, const uint8_t *src_mac, const uint8
         case ESP_NOW_MSG_PHOTO_LIST_DONE:  handle_list_done(src_mac, data, len);  break;
         case ESP_NOW_MSG_PHOTO_DELETE_ACK: handle_delete_ack(data, len);     break;
         case ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK: handle_delete_all_ack(data, len); break;
+        case ESP_NOW_MSG_PHOTO_DELETE_ALL_RECEIVED: handle_delete_all_received(data, len); break;
         case ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST: handle_window_status_request(data, len); break;
         default: break;
     }
