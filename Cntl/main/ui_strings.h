@@ -133,6 +133,7 @@ typedef enum {
     /* 요약판넬 1~2번째줄(2026-08-21, 사용자 지시) — 웹 대시보드 URL / 여유메모리 상시표시 */
     STR_LABEL_WEB,
     STR_LABEL_MEMORY,
+    STR_LABEL_BATTERY,
     STR_COUNT,
 } ui_str_id_t;
 

@@ -652,7 +652,7 @@ static void fill_rgb565_dsc(lv_image_dsc_t *dsc, uint8_t *pixel_buf, uint16_t w,
 static void cb_pair_confirm(lv_event_t *e)
 {
     esp_now_hub_node_t *node = (esp_now_hub_node_t *)lv_event_get_user_data(e);
-    esp_now_hub_pair(node->mac);
+    esp_now_hub_request_pair(node->mac);
     cb_modal_close(e);
 }
 
@@ -1945,6 +1945,15 @@ static void format_bytes_human(uint32_t bytes, char *buf, size_t buf_size)
     snprintf(buf, buf_size, "%.*f%s", decimals, v, units[u]);
 }
 
+/* 배터리 표시 공용 포맷 함수(2026-08-22, 사용자 지시) — "{배터리/Battery}: x.xx V (yy%)".
+ * CAM에 이어 나중에 Sens 요약행에도 그대로 재사용할 목적으로 여기 분리해둠 — 보드마다
+ * mV/%%를 얻는 방식(CAM=I2C 익스팬더, Sens=직접 GPIO ADC)은 다르지만 표시 포맷은 공통 */
+static void format_battery_display(char *buf, size_t buf_size, uint16_t battery_mv, uint8_t battery_pct)
+{
+    snprintf(buf, buf_size, "%s: %d.%02d V (%u%%)", ui_str(STR_LABEL_BATTERY),
+             battery_mv / 1000, (battery_mv % 1000) / 10, (unsigned)battery_pct);
+}
+
 static void refresh_dashboard(lv_timer_t *t)
 {
     (void)t;
@@ -2014,9 +2023,22 @@ static void refresh_dashboard(lv_timer_t *t)
      * (위 node_display_equal 참고), 문구만 따로 살아있게 갱신함(2026-08-10) */
     for (int i = 0; i < s_summary_row_count; i++) {
         hub_conn_state_t st = esp_now_hub_get_conn_state(s_summary_row_macs[i]);
-        char buf[48];
-        snprintf(buf, sizeof(buf), "%s (%s)", s_summary_row_names[i],
+        char buf[96];
+        int n = snprintf(buf, sizeof(buf), "%s (%s)", s_summary_row_names[i],
                  ui_str(st == HUB_CONN_STATE_ACTIVE ? STR_STATUS_ACTIVE : STR_STATUS_PAIRED));
+
+        /* 2026-08-22 — 배터리 잔량(사용자 지시: 이 행 옆에 표시). 반응형 주기 리포트를
+         * 아직 한 번도 못 받았으면(has_deepsleep_stats==false, 막 페어링된 직후 등) 표시
+         * 안 함 — SENS는 아직 배터리 보고를 안 보내므로 이 조건이 자연스럽게 걸러줌 */
+        for (int j = 0; j < total; j++) {
+            if (memcmp(s_dash_nodes[j].mac, s_summary_row_macs[i], 6) != 0) continue;
+            if (s_dash_nodes[j].has_deepsleep_stats && n > 0 && (size_t)n < sizeof(buf)) {
+                char batt[32];
+                format_battery_display(batt, sizeof(batt), s_dash_nodes[j].battery_mv, s_dash_nodes[j].battery_pct);
+                snprintf(buf + n, sizeof(buf) - (size_t)n, " - %s", batt);
+            }
+            break;
+        }
         lv_label_set_text(s_summary_row_objs[i], buf);
     }
 
@@ -2179,7 +2201,7 @@ static void refresh_log_box(lv_timer_t *t)
     last_len = len;
 
     int32_t max_w = lv_obj_get_content_width(s_log_container);
-    trim_multiline_to_width(snapshot, trimmed, LOG_BOX_SNAPSHOT_CAP, &lv_font_montserrat_20, max_w);
+    trim_multiline_to_width(snapshot, trimmed, LOG_BOX_SNAPSHOT_CAP, &lv_font_montserrat_18, max_w);
 
     lv_label_set_text(s_log_label, trimmed);
     lv_obj_scroll_to_y(s_log_container, LV_COORD_MAX, LV_ANIM_OFF);
@@ -2287,7 +2309,7 @@ static void refresh_power_panel(lv_timer_t *t)
          * 실제 간격을 육안으로 바로 잴 수 있게 함(사용자 지시 — "20초마다 뜬다" 같은 관찰을
          * 스톱워치 없이 확인하기 위함). 2026-08-11 — 줄 끝(-mm:ss)에서 줄 맨 앞([mm:ss] )으로
          * 이동(사용자 지시) */
-        char line[144];
+        char line[176];  /* 2026-08-22 — 배터리 진단정보 추가로 여유 늘림(원래 144) */
         int prefix_len = 0;
         ui_log_format_timestamp(line, sizeof(line));
         prefix_len = (int)strlen(line);
@@ -2296,7 +2318,9 @@ static void refresh_power_panel(lv_timer_t *t)
                     (unsigned long)nodes[i].ds_last_awake_uptime_ms,
                     (unsigned long)nodes[i].ds_last_sleep_interval_sec,
                     (unsigned long)nodes[i].ds_last_actual_sleep_sec,
-                    (unsigned long)nodes[i].ds_rwdt_catch_count);
+                    (unsigned long)nodes[i].ds_rwdt_catch_count,
+                    (unsigned)nodes[i].battery_mv, (unsigned)nodes[i].battery_pct,
+                    (unsigned)nodes[i].battery_adc_raw);
 
         size_t cur_len  = strlen(s_power_log_buf);
         size_t line_len = strlen(line);
@@ -2315,7 +2339,7 @@ static void refresh_power_panel(lv_timer_t *t)
         if (!trimmed) trimmed = heap_caps_malloc(POWER_LOG_BUF_CAP, MALLOC_CAP_SPIRAM);
         if (trimmed) {
             int32_t max_w = lv_obj_get_content_width(s_power_list);
-            trim_multiline_to_width(s_power_log_buf, trimmed, POWER_LOG_BUF_CAP, &lv_font_montserrat_20, max_w);
+            trim_multiline_to_width(s_power_log_buf, trimmed, POWER_LOG_BUF_CAP, &lv_font_montserrat_18, max_w);
             lv_label_set_text(s_power_log_label, trimmed);
         } else {
             lv_label_set_text(s_power_log_label, s_power_log_buf);
@@ -2518,6 +2542,13 @@ static int                   s_config_apply_pending_idx;
 static uint32_t              s_config_apply_start_ms;
 static lv_obj_t              *s_config_apply_label;
 
+/* 2026-08-23(사용자 지적) — 응답성을 "30초 -> Live(0초)"처럼 짧은 쪽으로 바꿀 때, CAM은
+ * 아직 옛 값(30초)대로 자고 있는데 cam_response_timeout_ms()는 새로 저장된 값(0초, 3초
+ * 예산)으로 계산돼서 CAM이 실제로 깨기도 전에 4005(무응답)로 오탐됨 — 결국 30초 근방에
+ * 정상 적용되긴 하지만 그 사이 가짜 에러가 뜸. 0이면 기존 cam_response_timeout_ms() 그대로
+ * 사용, 응답성 변경 시에만 old/new 중 큰 쪽으로 계산해서 여기 채움(cb_apply_response_interval) */
+static uint32_t s_config_apply_timeout_ms_override = 0;
+
 static void update_capture_apply_enabled(void)
 {
     bool changed = (lv_dropdown_get_selected(s_capture_interval_dd) != (uint16_t)s_capture_interval_applied_idx);
@@ -2606,7 +2637,9 @@ static bool config_apply_tick_fn(lv_obj_t *box)
         esp_now_hub_config_apply_stage_clear();
         return true;
     }
-    if (lv_tick_elaps(s_config_apply_start_ms) > cam_response_timeout_ms()) {
+    uint32_t timeout_ms = s_config_apply_timeout_ms_override ? s_config_apply_timeout_ms_override
+                                                              : cam_response_timeout_ms();
+    if (lv_tick_elaps(s_config_apply_start_ms) > timeout_ms) {
         lv_label_set_text(s_config_apply_label, ui_str(STR_CONFIG_APPLY_STALLED));
         lv_obj_set_style_text_color(s_config_apply_label, lv_palette_main(LV_PALETTE_RED), 0);
         ui_log_add_err(UI_ERR_CONFIG_NORESPONSE, "Config apply request: no CAM response (timeout)");
@@ -2645,6 +2678,7 @@ static void cb_apply_capture_interval(lv_event_t *e)
                    ? s_capture_interval_values[idx] : 0;
     s_config_apply_target = CONFIG_APPLY_TARGET_CAPTURE;
     s_config_apply_pending_idx = idx;
+    s_config_apply_timeout_ms_override = 0;  /* 응답성 전용 보정값 — 이 요청엔 안 씀 */
     /* device_config에는 항상 저장되고, CAM은 매 웨이크(=매 접속)마다 무조건 최신값을
      * 다시 받아가므로(push_cam_config_to()가 PAIR_ACK 시점에도 자동 호출됨) WAITING이어도
      * "진짜 실패"가 아니라 "다음 접속에 반영될 정상 대기 상태"임 — 2026-08-10, 사용자
@@ -2670,6 +2704,7 @@ static void cb_apply_xclk(lv_event_t *e)
                   ? s_xclk_values[idx] : s_xclk_values[0];
     s_config_apply_target = CONFIG_APPLY_TARGET_XCLK;
     s_config_apply_pending_idx = idx;
+    s_config_apply_timeout_ms_override = 0;  /* 응답성 전용 보정값 — 이 요청엔 안 씀 */
     esp_now_hub_apply_cam_xclk_mhz(s_selected_cam_mac, mhz);
     if (esp_now_hub_get_conn_state(s_selected_cam_mac) == HUB_CONN_STATE_WAITING) {
         ui_log_add("XCLK saved - applied automatically on CAM reconnect");
@@ -2686,6 +2721,14 @@ static void cb_apply_response_interval(lv_event_t *e)
                    ? s_response_interval_values[idx] : 0;
     s_config_apply_target = CONFIG_APPLY_TARGET_RESPONSE;
     s_config_apply_pending_idx = idx;
+    /* 2026-08-23 — CAM은 새 값이 아니라 옛 값(지금 이 순간 저장돼있는 값)만큼 자고 있을 수
+     * 있으므로(예: 30초->Live), old/new 중 큰 쪽 기준으로 이번 팝업만 타임아웃을 늘림 —
+     * esp_now_hub_apply_response_interval_sec()가 저장값을 새 값으로 바로 덮어쓰기 전에
+     * 옛 값을 먼저 읽어둬야 함 */
+    uint32_t old_sec = device_config_get_response_interval_sec();
+    uint32_t wait_sec = (old_sec > sec) ? old_sec : sec;
+    if (wait_sec > 30U) wait_sec = 30U;
+    s_config_apply_timeout_ms_override = wait_sec * 1000U + 3000U;
     /* 반환값으로 판단(2026-08-10) — 이 설정은 특정 CAM 하나가 아니라 "지금 ACTIVE한 CAM
      * 전부"가 대상이라 require_active_or_report()의 mac 하나 기준 검사가 안 맞음. 대상이
      * 하나도 없으면(전부 WAITING) 값은 저장됐지만 응답 대기 팝업은 안 띄움 — 다른 4개
@@ -3071,10 +3114,11 @@ void ui_init(void)
     /* 2026-08-22, 사용자 지시 — 로그를 전부 영문으로 바꾸고 폭 넘는 줄은 우리가 직접
      * "..."로 잘라서 넣으므로(trim_multiline_to_width) WRAP의 비싼 매 렌더 재계산이
      * 필요 없음 → CLIP(단순 커팅, 실제로 걸릴 일은 없음). 폰트도 커스텀 TTF 대신
-     * 빠른 내장 비트맵 폰트(Montserrat 20pt, 전력로그와 통일)로 교체 */
+     * 빠른 내장 비트맵 폰트(Montserrat 18pt, 전력로그와 통일 — 20pt는 한 줄에 너무 적게
+     * 들어가 트림 "..."이 자주 남아서 18pt로 축소, 2026-08-22 사용자 지시)로 교체 */
     lv_label_set_long_mode(s_log_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(s_log_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_log_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(s_log_label, &lv_font_montserrat_18, 0);
     lv_label_set_text(s_log_label, "");
 
     lv_timer_create(refresh_log_box, 500, NULL);
@@ -3117,10 +3161,10 @@ void ui_init(void)
     lv_obj_set_style_pad_all(s_power_list, 6, 0);
 
     s_power_log_label = lv_label_create(s_power_list);
-    /* 2026-08-22 — 일반로그와 동일 이유로 CLIP + 20pt 비트맵 폰트로 통일(사용자 지시) */
+    /* 2026-08-22 — 일반로그와 동일 이유로 CLIP + 18pt 비트맵 폰트로 통일(사용자 지시) */
     lv_label_set_long_mode(s_power_log_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_width(s_power_log_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_power_log_label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(s_power_log_label, &lv_font_montserrat_18, 0);
     /* 2026-08-10 — C/S 줄을 구분하려고 recolor(#RRGGBB text#) 켰었으나, 2026-08-11에 3가지
      * 형태 다 실기에서 깨지는 걸 확인하고 recolor 자체를 포기(순수 텍스트 ">>> " 마커로
      * 대체, refresh_power_panel 참고) — 더 이상 안 쓰므로 켜두지 않음 */

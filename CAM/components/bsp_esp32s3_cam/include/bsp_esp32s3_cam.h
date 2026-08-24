@@ -71,6 +71,12 @@ extern "C" {
 #define BSP_CAM_IO_EXPANDER_SD_ENABLE_PIN_A  2  /* CH32V003_IO_2 */
 #define BSP_CAM_IO_EXPANDER_SD_ENABLE_PIN_B  6  /* CH32V003_IO_6 */
 
+/* 2026-08-23 — 스키매틱 핀아웃표 확인값: EXIO5 = BAT_EN. PWR 버튼은 배터리를 레귤레이터에
+ * 일시적으로만 연결하고, 소프트웨어가 부팅 초기에 이 핀을 켜야 버튼을 놔도 전원이
+ * 자체유지(래치)됨 — 이게 없어서 버튼 누르고 있을 때만 켜져 있던 버그, CAML에서 발견+수정
+ * 후 실기 검증 완료(project_caml_bat_en_latch_missing_resolved 메모리 참고) */
+#define BSP_CAM_IO_EXPANDER_BAT_EN_PIN        5  /* CH32V003_IO_5 */
+
 /**
  * @brief 보드 레벨 초기화 — 공유 I2C 버스 생성 + IO 익스팬더 초기화 + SD 인에이블 핀
  *        HIGH 출력까지 수행. 카메라(esp_video_init)와 SD 마운트(esp_vfs_fat_sdmmc_mount)는

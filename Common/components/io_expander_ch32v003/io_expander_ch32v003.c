@@ -60,3 +60,17 @@ bool ch32v003_get_input(uint8_t pin)
     }
     return (value >> pin) & 0x01;
 }
+
+esp_err_t ch32v003_get_adc(uint16_t *out_raw)
+{
+    uint8_t buf[2] = { 0 };
+    esp_err_t err = i2c_master_transmit_receive(s_dev, (uint8_t[]) { CH32V003_REG_ADC }, 1,
+                                                 buf, sizeof(buf), 0xffff);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "get_adc: %s", esp_err_to_name(err));
+        return err;
+    }
+    /* 리틀엔디안(저바이트 먼저) — Waveshare DEV_I2C_Read_Word() 확인값 */
+    *out_raw = (uint16_t)(buf[0] | (buf[1] << 8));
+    return ESP_OK;
+}

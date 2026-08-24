@@ -2,6 +2,7 @@
 #include "cam_node.h"
 #include "cam_storage.h"
 #include "esp_now_link.h"
+#include "cam_speaker.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,6 +88,58 @@ static int cmd_clear(int argc, char **argv)
         return 1;
     }
     printf("CLEARED %d\n", deleted);
+    return 0;
+}
+
+static int cmd_soundlog(int argc, char **argv)
+{
+    if (argc < 2) {
+        printf("사용법: soundlog <on|off|solo <1-7[,1-7...]>|solo off>\n");
+        return 1;
+    }
+    if (strcmp(argv[1], "off") == 0) {
+        cam_speaker_set_enabled(false);
+        printf("SOUNDLOG_OFF\n");
+    } else if (strcmp(argv[1], "on") == 0) {
+        cam_speaker_set_enabled(true);
+        printf("SOUNDLOG_ON\n");
+    } else if (strcmp(argv[1], "solo") == 0) {
+        /* 1=PowerOn(배터리) 2=PowerOn(USB) 3=채널스캔 4=스윕완료 5=광고전송 6=핑 7=퐁수신 */
+        if (argc < 3) {
+            printf("사용법: soundlog solo <1-7[,1-7...]|off>\n");
+            return 1;
+        }
+        if (strcmp(argv[2], "off") == 0) {
+            cam_speaker_set_solo_mask(0);
+            printf("SOUNDLOG_SOLO_OFF\n");
+        } else {
+            /* 콤마로 여러 개(예: "3,4,5") — 콘솔이 공백 기준으로 토큰을 나누므로 argv[2]는
+             * 콤마 포함 통짜 문자열 하나로 들어옴 */
+            char buf[64];
+            strncpy(buf, argv[2], sizeof(buf) - 1);
+            buf[sizeof(buf) - 1] = '\0';
+            uint32_t mask = 0;
+            bool bad = false;
+            char *save = NULL;
+            for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+                int n = atoi(tok);
+                if (n < 1 || n > 7) {
+                    bad = true;
+                    break;
+                }
+                mask |= (1u << (uint32_t)(n - 1));
+            }
+            if (bad || mask == 0) {
+                printf("사용법: soundlog solo <1-7[,1-7...]|off>\n");
+                return 1;
+            }
+            cam_speaker_set_solo_mask(mask);
+            printf("SOUNDLOG_SOLO_%s\n", argv[2]);
+        }
+    } else {
+        printf("사용법: soundlog <on|off|solo <1-7[,1-7...]>|solo off>\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -290,6 +343,14 @@ void dev_console_start(void)
         .func    = cmd_auto,
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&auto_cmd));
+
+    const esp_console_cmd_t soundlog_cmd = {
+        .command = "soundlog",
+        .help    = "스피커 소리 로그 on/off, solo <1-7[,1-7...]>으로 이벤트 골라 재생(기본 꺼짐)",
+        .hint    = "<on|off|solo N[,N...]|solo off>",
+        .func    = cmd_soundlog,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&soundlog_cmd));
 
     const esp_console_cmd_t q_cmd = {
         .command = "q",

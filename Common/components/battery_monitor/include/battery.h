@@ -45,6 +45,13 @@ bool battery_is_usb_connected(void);
  *  (배터리마다 충전 IC가 종료시키는 실제 완충 전압이 달라서 호출측에서 추정한 값을 반영) */
 void battery_set_full_mv(float full_mv);
 
+/** @brief full_mv/empty_mv만 설정 — ADC/GPIO는 전혀 안 건드림(2026-08-22). battery_init()을
+ *  부를 하드웨어(로컬 ADC 채널)가 없는 쪽(예: Cntl이 CAM/Sens가 무선으로 보고해온 mV값을
+ *  battery_mv_to_pct()로 변환만 하고 싶을 때)이 커브 상수만 세팅하는 용도 — battery_init()을
+ *  안 부르면 s_cfg가 전부 0이라 battery_mv_to_pct()가 0으로 나누게 되므로, 이 경우 반드시
+ *  먼저 호출해야 함 */
+void battery_set_curve(float full_mv, float empty_mv);
+
 /** @brief battery_init()이 만든 ADC 유닛 핸들 — 같은 유닛의 다른 채널(예: VBUS 분압)을
  *  추가로 설정해 쓰고 싶을 때 재사용. battery_init() 호출 후에만 유효 */
 adc_oneshot_unit_handle_t battery_get_adc_handle(void);

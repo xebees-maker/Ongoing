@@ -222,6 +222,11 @@ typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
     uint8_t hub_mac[6];
+    uint32_t hub_boot_id;  /* 2026-08-22 — Cntl이 부팅마다 새로 생성하는 랜덤값(esp_now_hub.c
+                               s_boot_id). 노드는 이 값을 기억해뒀다가 이후 PONG에서 계속
+                               비교 — 값이 바뀌면 "Cntl이 나를 잊었다(리붓됨)"를 능동적으로
+                               알아채는 용도(HUB_RESET 브로드캐스트의 수신 불확실성을 노드가
+                               스스로 매 PING마다 확인하는 걸로 대체) */
 } esp_now_advertise_ack_t;
 
 typedef struct __attribute__((packed)) {
@@ -244,6 +249,8 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
+    uint32_t hub_boot_id;  /* 2026-08-22 — esp_now_advertise_ack_t.hub_boot_id 참고. 매 PONG마다
+                               실어 보내서, 노드가 이미 알던 값과 계속 대조할 수 있게 함 */
 } esp_now_channel_pong_t;
 
 /* Cntl -> 노드(유니캐스트): 사용자가 Cntl에서 연결 해제함. 받은 노드는 다시 페어링 전
@@ -643,4 +650,11 @@ typedef struct __attribute__((packed)) {
                                         TIMER가 아니면(RWDT/POWERON) 0 — 실제로 안 잤으므로.
                                         Cntl은 이 값을 누적하지 않고 사이클마다 그대로 보여줌
                                         (사용자 지시 — "이번 회차에 얼마 잤는지만 알면 됨") */
+    /* 2026-08-22 — 배터리 잔량 보고(사용자 지시: 반응형 주기에 실어서 보고). CAM은 mV까지만
+     * 계산해서 보내고, mV->%% 변환(공용 배터리 커브)과 화면표시는 Cntl 쪽 공통함수가 담당 —
+     * 보드마다 실제 ADC 획득 경로(CAM=I2C 익스팬더, Sens=직접 GPIO)가 달라서 여기 이 필드는
+     * "결과 mV값"까지만 공통, 그 이전 단계는 안 건드림. battery_adc_raw는 진단/보정용(실측
+     * 대조) — CH32V003 ADC 비트폭/기준전압이 미확인이라 당분간 화면 로그에도 같이 남김. */
+    uint16_t battery_adc_raw;
+    uint16_t battery_mv;
 } esp_now_deep_sleep_stats_t;

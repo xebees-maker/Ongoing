@@ -22,12 +22,17 @@ esp_err_t bsp_esp32s3_cam_init(void)
 
     ESP_RETURN_ON_ERROR(ch32v003_init(s_i2c_bus), TAG, "ch32v003_init failed");
 
+    /* 2026-08-23 — 배터리 전원 자체유지(래치). PWR 버튼은 배터리를 레귤레이터에 일시
+     * 연결만 해주고, 이 핀을 소프트웨어가 켜야 버튼을 놔도 계속 켜져 있음. 가장 먼저 켬 —
+     * 늦으면 그 사이에 버튼을 놓았을 때 전원이 나갈 수 있음 */
+    ch32v003_set_output(BSP_CAM_IO_EXPANDER_BAT_EN_PIN, true);
+
     /* Waveshare 예제(04_SDMMC_Test.ino)가 SD_MMC.begin() 전에 이 두 핀을 켜지 않으면
      * SD카드가 안 잡힘 — 정확한 이유는 불확실하지만 그대로 재현 */
     ch32v003_set_output(BSP_CAM_IO_EXPANDER_SD_ENABLE_PIN_A, true);
     ch32v003_set_output(BSP_CAM_IO_EXPANDER_SD_ENABLE_PIN_B, true);
 
-    ESP_LOGI(TAG, "보드 초기화 완료 (I2C SDA=%d SCL=%d, IO 익스팬더 SD 인에이블 핀 ON)",
+    ESP_LOGI(TAG, "보드 초기화 완료 (I2C SDA=%d SCL=%d, BAT_EN/SD 인에이블 핀 ON)",
              BSP_CAM_I2C_SDA, BSP_CAM_I2C_SCL);
     return ESP_OK;
 }

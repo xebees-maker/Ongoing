@@ -59,6 +59,17 @@ void ch32v003_set_output(uint8_t pin, bool level);
  */
 bool ch32v003_get_input(uint8_t pin);
 
+/**
+ * @brief ADC 레지스터(0x06) 원시값 읽기(16bit, 리틀엔디안 — Waveshare 공식 Arduino 예제
+ *        DEV_I2C_Read_Word()로 확인) — 이 보드에서 배터리 전압 감지(BAT_ADC)에 쓰임.
+ *        CH32V003 자체 ADC는 통상 10bit/자체 VDD(3.3V) 기준으로 추정(WCH 데이터시트 기준 —
+ *        Waveshare 쪽 문서/예제 어디에도 비트폭·기준전압이 명시돼있지 않아 확정은 아님,
+ *        2026-08-22). 호출측에서 실측 대조 권장.
+ * @param out_raw 읽은 원시값(0 실패 시 미정의)
+ * @return ESP_OK 성공
+ */
+esp_err_t ch32v003_get_adc(uint16_t *out_raw);
+
 #ifdef __cplusplus
 }
 #endif

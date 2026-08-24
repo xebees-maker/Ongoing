@@ -25,6 +25,7 @@ idf_component_register(
         esp_now_reliable
         esp_timer
         waveshare__pcf85063a
+        battery_monitor
     PRIV_REQUIRES
         esp_new_jpeg)
 

@@ -113,12 +113,18 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
      * 라벨-숫자 사이 공백 추가(가독성), interval->I, "RWDT n회"/"RWDT xn"->"R n" */
     /* awake만 ms 단위(2026-08-10) — 필요시 초기화+채널기억 최적화 이후 1초 미만이 흔해져서
      * 초 단위로는 대부분 0으로 뭉개짐(정보 없음) */
-    [STR_DEEPSLEEP_LINE_FMT]         = { "%s: 사이클#%lu [%s] awake %lums/I %lu초, slept %lu초, R %lu",
-                                          "%s: cycle#%lu [%s] awake %lums/I %lus, slept %lus, R %lu" },
-    [STR_WAKE_REASON_TIMER]          = { "정상",                       "normal" },
+    /* 2026-08-22 — 끝에 배터리 진단정보(mV/%%/raw) 추가. USB 없이 배터리만으로 테스트할 때
+     * 이 화면(전력로그판넬)이 유일한 확인 수단이라 raw ADC값까지 남김(실측 대조/보정용,
+     * CH32V003 ADC 비트폭·기준전압 미확정 상태) */
+    [STR_DEEPSLEEP_LINE_FMT]         = { "%s: C#%lu [%s] Aw %lums/I %lu초, SL %lu초, R %lu, bat %umV(%u%%) raw=%u",
+                                          "%s: C#%lu [%s] Aw %lums/I %lus, SL %lus, R %lu, bat %umV(%u%%) raw=%u" },
+    /* 2026-08-22 — 전력로그 한 줄이 배터리 진단정보 추가로 길어져서 화면폭을 넘기고 "..."로
+     * 잘리는 문제(사용자 지적) — 줄여서 여유 확보. RWDT는 그대로 둠(카운터 R과 별개, 그
+     * 자체로 이미 짧음) */
+    [STR_WAKE_REASON_TIMER]          = { "NM",                         "NM" },
     [STR_WAKE_REASON_RWDT]           = { "RWDT복구",                   "RWDT-caught" },
-    [STR_WAKE_REASON_POWERON]        = { "전원인가",                   "power-on" },
-    [STR_WAKE_REASON_OTHER]          = { "기타",                       "other" },
+    [STR_WAKE_REASON_POWERON]        = { "PO",                         "PO" },
+    [STR_WAKE_REASON_OTHER]          = { "OT",                         "OT" },
     [STR_RESPONSE_HELP_0] = { "성능모드 — 즉시 반응(사실상 상시 동작)",
                                "Performance mode - responds instantly (effectively always on)" },
     [STR_RESPONSE_HELP_1] = { "동작확인 모드 — Sleep이 실제로 도는지 테스트용",
@@ -138,6 +144,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_PANEL_GENERAL_LOG]           = { "일반 로그",                 "General Log" },
     [STR_LABEL_WEB]                   = { "웹",                       "Web" },
     [STR_LABEL_MEMORY]                = { "메모리",                   "Memory" },
+    [STR_LABEL_BATTERY]               = { "배터리",                   "Battery" },
 };
 
 void ui_lang_load(void)

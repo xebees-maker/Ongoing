@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS
+        "cam_speaker.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        esp_driver_i2s
+        esp_driver_i2c
+        bsp_esp32s3_cam
+        io_expander_ch32v003
+        es8311
+        freertos
+)

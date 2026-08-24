@@ -61,7 +61,7 @@ menu "CAM Node"
     endchoice
 
     config CAM_NODE_NAME
-        string "노드 이름 (비우면 MAC 뒤 4자리로 자동 생성 — Cam-XXXX)"
+        string "노드 이름 (비우면 MAC 뒤 3바이트로 자동 생성 — CXXXXXX)"
         default ""
 
     config CAM_DEEPSLEEP_ENABLE

@@ -82,6 +82,49 @@ void esp_now_channelsync_set_ping_interval_ms(uint32_t interval_ms);
  * 불러야 함) — SYNCED 상태가 아니면 조용히 무시 */
 void esp_now_channelsync_notify_alive(void);
 
+/* 2026-08-23(사용자 지시) — 실제 페어링(PAIR_REQUEST/PAIR_ACK)이 완료된 순간 호출. 그 전까지는
+ * 채널 동기화(ADVERTISE_ACK)만으로는 PING/PONG을 시작하지 않음 — PING은 "이미 페어링된 연결의
+ * 생존 확인" 용도인데, 페어링 전에 시작하면 아직 계속 돌고 있는 채널 스캔(scan_timer)이 라디오를
+ * 다른 채널로 계속 옮겨버려서 PING이 구조적으로 매번 실패 -> 동기화 끊김 판정 -> 재스캔 ->
+ * 재동기화 -> 다시 PING 실패의 무한루프에 빠짐(실기로 발견). 이 함수가 스캔을 멈추고(그제서야
+ * 채널에 눌러앉음) PING을 시작함 */
+void esp_now_channelsync_notify_paired(void);
+
+/* 2026-08-23(사용자 지시) — "상태머신이면 상태에 따라 출력이 달라져야지": 지금까지는 광고
+ * 전송이 scan_timer가 도는지에만 의존했음(간접적 — notify_paired가 타이머를 꺼주는 걸
+ * 믿을 뿐, 광고 전송 코드 자체는 페어링 상태를 전혀 안 봄). 이 콜백을 등록하면
+ * send_advertise_on_current_channel()이 실제로 보내기 직전에 물어봐서, false면 안 보냄 —
+ * 타이머가 무슨 이유로든 다시 돌더라도 광고 자체가 상태에 따라 확실히 막힘(방어적 이중
+ * 게이트). NULL이면(등록 안 하면) 항상 보냄 — 기존 동작 그대로(CNTL/Sens는 이 개념 자체가
+ * 없으니 등록 안 함) */
+typedef bool (*esp_now_channelsync_should_advertise_cb_t)(void);
+void esp_now_channelsync_set_should_advertise_cb(esp_now_channelsync_should_advertise_cb_t cb);
+
+/* 2026-08-23 — 부가 기능(스피커 소리 알림 등)용 선택적 이벤트 훅. 이 컴포넌트는 Common/
+ * 공유라 CNTL/Sens처럼 카메라/스피커가 없는 프로젝트도 스캔하므로, cam_speaker 같은
+ * 하드웨어 전용 컴포넌트를 직접 include/REQUIRES 하면 안 됨(실기로 CNTL 빌드가 깨지는 걸
+ * 확인) — 대신 인자 없는 함수 포인터로 느슨하게 연결. 전부 NULL 허용(등록 안 하면 그냥
+ * 아무 일도 안 함) */
+typedef void (*esp_now_channelsync_event_cb_t)(void);
+
+/* 2026-08-23 — on_channel_scanned: 채널을 옮길 때마다(광고 전송 직전) 호출 — on_advertise_sent와
+ * 거의 같은 시점이지만 개념상 별개 이벤트로 분리(사용자 지시: "채널 스캔"과 "광고 전송"을
+ * 소리로 구분해서 듣고 싶음) */
+void esp_now_channelsync_set_event_hooks(esp_now_channelsync_event_cb_t on_channel_scanned,
+                                          esp_now_channelsync_event_cb_t on_advertise_sent,
+                                          esp_now_channelsync_event_cb_t on_scan_sweep_done,
+                                          esp_now_channelsync_event_cb_t on_ping_sent,
+                                          esp_now_channelsync_event_cb_t on_pong_received);
+
+/* 2026-08-24(사용자 지시: "실제 송출될 때만 소리가 나도록") — esp_now_send()의 동기 리턴값은
+ * "로컬 송신큐에 접수됐다"는 뜻일 뿐, 무선으로 진짜 나갔다는 확인이 아니다(그건
+ * esp_now_send_cb_t로 나중에 비동기로 옴). 이 컴포넌트는 전역 send_cb를 직접 등록하지
+ * 않으므로(호출부가 이미 자신의 send_cb를 등록해 씀), 호출부가 자기 send_cb 안에서 목적지가
+ * 브로드캐스트(FF:FF:FF:FF:FF:FF)이고 status==성공이면 이 함수를 불러줘야 함 — 그래야
+ * "ADVERTISE 전송됨" 로그/소리가 진짜 송출 완료 시점에만 나감(광고는 이 컴포넌트에서 유일하게
+ * 브로드캐스트로 나가는 메시지라 목적지만으로 구분 가능) */
+void esp_now_channelsync_notify_advertise_send_done(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -19,7 +19,8 @@
 #define ESP_NOW_HUB_NODE_TIMEOUT_MS 50000U
 
 /* CAM/SENS는 ADVERTISE 메시지에 장치 종류를 안 실어보내서(name/mac만 있음), 이름 접두사로
- * 구분함 — CAM은 기본 이름이 "Cam-XXXX"(esp_now_cam.c), SENS는 "Sens-XXXX"(esp_now_node.c).
+ * 구분함 — CAM은 기본 이름이 "CXXXXXX"(esp_now_cam.c, 2026-08-22부터 "Cam-"에서 축약),
+ * SENS는 "Sens-XXXX"(esp_now_node.c).
  * 사용자가 CONFIG_*_NODE_NAME으로 이름을 커스텀하면 이 구분이 깨질 수 있음(알려진 한계). */
 typedef enum {
     HUB_NODE_KIND_UNKNOWN = 0,
@@ -27,15 +28,33 @@ typedef enum {
     HUB_NODE_KIND_SENS,
 } hub_node_kind_t;
 
+/* 2026-08-23(사용자 지시) — 노드 연결 상태를 하나의 변수로만 관리(캠 쪽 s_conn_state와
+ * 같은 원칙). 예전엔 paired(bool) + pair_request_pending_until_ms(암묵적 "대기 중" 상태)가
+ * 따로 놀아서, 페어링 성사 직전/직후에 도착한 낡은 ADVERTISE가 paired를 다시 false로
+ * 되돌리는 레이스가 났었음(실기로 확인). user_unpaired/ever_paired는 "현재 상태"가 아니라
+ * 상태 전이를 좌우하는 별도의 정책/이력 플래그라 그대로 둠 */
+typedef enum {
+    NODE_CONN_ORPHAN = 0,      /* 모르거나, 광고만 들리고 아직 페어링 시도 전/끊긴 상태 */
+    NODE_CONN_PAIR_PENDING,    /* PAIR_REQUEST 보내고 PAIR_ACK 대기 중 */
+    NODE_CONN_PAIRED,          /* PAIR_ACK 받음 */
+} node_conn_state_t;
+
 typedef struct {
-    char            name[ESP_NOW_LINK_NAME_LEN];
-    uint8_t         mac[6];
-    hub_node_kind_t kind;
-    bool            paired;
+    char              name[ESP_NOW_LINK_NAME_LEN];
+    uint8_t           mac[6];
+    hub_node_kind_t   kind;
+    node_conn_state_t conn_state;
     /* CAM/SENS는 살아있음을 알리려고 PAIR_ACK를 주기적으로 재전송함(keepalive) — 사용자가
-     * 명시적으로 연결 해제한 뒤에도 이 keepalive가 도착하면 다시 paired=true가 될 수 있어서,
+     * 명시적으로 연결 해제한 뒤에도 이 keepalive가 도착하면 다시 paired가 될 수 있어서,
      * 이 플래그로 막음(esp_now_hub_pair()가 다시 호출되기 전까진 PAIR_ACK를 무시) */
     bool            user_unpaired;
+    /* 2026-08-24(사용자 지시) — "연결" 버튼을 눌러도 그 즉시 독립 재시도 버스트를 쏘지 않고,
+     * 이 플래그만 세워둠. 실제 PAIR_REQUEST 전송은 ADVERTISE 핸들러가 이 노드의 광고를 실제로
+     * 받는 순간(=그 순간 Cntl과 채널이 같다는 게 이미 증명된 시점)에 함 — 원론: CNTL의 고정
+     * 채널과 캠의 스캔 채널이 우연히 겹치길 "일정 시간 재시도해서" 바라는 대신, 이미 겹친 게
+     * 확인된 순간에만 보내면 타이밍 문제 자체가 구조적으로 사라짐(자동 재페어링, ever_paired
+     * 경로와 동일한 원리를 수동 연결에도 통일 적용) */
+    bool            user_pair_wanted;
     /* CAM Deep Sleep 자동 재페어링용(2026-08-10) — CAM은 매 웨이크마다 완전 재부팅되어
      * ADVERTISE부터 다시 보내므로, "방금 막 페어링이 풀린 순간"(paired: true->false 전환)
      * 에만 재연결을 시도하면 그 시도 자체가 실패했을 때(무선 유실 등, 실기에서 실제로 발생
@@ -49,6 +68,14 @@ typedef struct {
      * esp_now_hub_is_reconnect_stuck()이 "마지막으로 페어링 성공한 지 얼마나 됐는가"를
      * 판단하는 기준 */
     uint32_t        last_paired_ms;
+    /* 2026-08-24(사용자 지시로 시간 기반 방식 폐기) — 예전엔 "이 시각까지"(시간 기반) 방식으로
+     * 낡은 광고를 걸러냈는데, 이건 캠 쪽 실제 원인(오늘 별도로 고침: 캠의 광고 송신 함수가
+     * 실제 전송 직전에 상태를 매번 새로 확인하도록 고쳐서, 페어링된 뒤엔 이미 예약된 스캔
+     * 틱이 와도 절대 광고를 안 보냄)을 시간으로 우회하던 임시방편이었음 — 그 근본 원인이
+     * 해결됐으므로 이 필드 자체가 불필요해짐. user_pair_wanted(수동 연결) 시퀀스에서만
+     * "광고 수신으로 트리거된 PAIR_REQUEST 전송을 몇 번까지 더 허용할지" 세는 용도로 남김
+     * (0=대기 중 아님, esp_now_hub_request_pair()가 3으로 세팅) */
+    uint8_t         pair_req_attempts_left;
     /* 이번 페어링에서 이미 SLEEP_NOW를 보냈는가(2026-08-10) — PAIR_ACK 수신 시 false로
      * 리셋, try_send_sleep_now()가 보낸 뒤 true로 세팅. 없으면 CAM이 실제로는 첫 신호
      * 받고 바로 잠들었어도(확인 응답이 없는 fire-and-forget이라 Cntl은 모름) 다음
@@ -86,6 +113,14 @@ typedef struct {
     uint32_t        last_sleep_now_elapsed_ms;
     uint32_t        last_sleep_now_threshold_ms;
     uint32_t        sleep_now_send_count;
+    /* 2026-08-22 — 배터리 잔량(반응형 주기에 실려 옴, DEEP_SLEEP_STATS 재사용). CAM은 mV까지만
+     * 보내고, %%는 Cntl이 받는 즉시 battery_mv_to_pct()로 계산해서 채움(공용 배터리 커브) —
+     * has_deepsleep_stats로 유효여부 판단(별도 플래그 없음, 같은 리포트에 실려오므로).
+     * battery_adc_raw는 CH32V003 ADC 비트폭/기준전압 미확인 상태의 진단/실측대조용
+     * (cam_node.h 주석 참고) — 정착되면 화면 표시에선 안 쓰고 로그에만 남을 수 있음 */
+    uint16_t        battery_adc_raw;
+    uint16_t        battery_mv;
+    uint8_t         battery_pct;
 } esp_now_hub_node_t;
 
 void esp_now_hub_init(void);
@@ -103,8 +138,13 @@ const char *esp_now_hub_get_own_ip_str(void);
  * kind=HUB_NODE_KIND_UNKNOWN이면 전체(필터 없음) */
 int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max);
 
-/* 리스트 아이템 탭 시 사용 — mac은 esp_now_hub_get_nodes()로 얻은 노드의 mac[6] */
-void esp_now_hub_pair(const uint8_t *mac);
+/* 리스트 아이템 탭 시 사용 — mac은 esp_now_hub_get_nodes()로 얻은 노드의 mac[6].
+ * 2026-08-24(사용자 지시) — 이제 여기서 바로 PAIR_REQUEST를 쏘지 않음(예전엔 독립 재시도
+ * 버스트를 즉시 시작 — Cntl 고정채널과 캠 스캔채널이 우연히 겹치길 바라는 방식이라 구조적
+ * 도박이었음). user_pair_wanted 플래그만 세우고, 실제 전송은 이 노드의 ADVERTISE를 실제로
+ * 받는 시점(esp_now_hub.c의 ADVERTISE 핸들러)에서 함 — 그 순간은 채널이 같다는 게 이미
+ * 증명된 시점이라 타이밍 문제 자체가 없음 */
+void esp_now_hub_request_pair(const uint8_t *mac);
 void esp_now_hub_unpair(const uint8_t *mac);
 
 /* 2026-08-10, CAM Deep Sleep 전환 — 딥슬립 사이클마다 순간적으로 언페어 상태를 스치는 건

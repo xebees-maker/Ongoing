@@ -5,6 +5,7 @@
 #include "rtc_sync.h"
 #include "ui_log.h"
 #include "device_config.h"
+#include "battery.h"
 
 #include <string.h>
 #include <assert.h>
@@ -15,6 +16,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -47,6 +49,13 @@ static const char *TAG = "esp_now_hub";
 #endif
 
 static const uint8_t s_broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+/* 2026-08-23 — 부팅마다 새로 생성되는 랜덤값(esp_now_hub_init에서 1회). ADVERTISE_ACK/
+ * CHANNEL_PONG에 매번 실어 보내서, 노드가 "Cntl이 리붓해서 날 잊었는지"를 HUB_RESET
+ * 브로드캐스트(수신 불확실) 대신 이미 신뢰성 있는 주기적 PING/PONG 왕복으로 능동적으로
+ * 확인할 수 있게 함(esp_now_link.h의 hub_boot_id 필드 주석 참고, CAML/CNTLL에서 검증 후
+ * 이식 — project_caml_bat_en_latch_missing_resolved 메모리 참고) */
+static uint32_t s_boot_id = 0;
 
 static esp_now_hub_node_t s_nodes[ESP_NOW_HUB_MAX_NODES];
 static int                s_node_count = 0;
@@ -110,7 +119,7 @@ void esp_now_hub_note_user_action(void)
  * CAM에게 계속 허공에 재전송하게 됨(2026-08-10 실사용 중 발견) */
 static void try_send_sleep_now(esp_now_hub_node_t *n)
 {
-    if (n->kind != HUB_NODE_KIND_CAM || !n->paired) return;
+    if (n->kind != HUB_NODE_KIND_CAM || n->conn_state != NODE_CONN_PAIRED) return;
     /* 2026-08-11, 사용자 지시 — 응답성 0("즉시"/Live)이면 애초에 안 재움. "즉시"는 짧은
      * 주기로 반복 취침한다는 뜻이 아니라 딥슬립 자체를 안 한다는 뜻(사용자: "1초=0초=즉시
      * 인거라 캠을 안재우겠다는 건데") */
@@ -141,7 +150,9 @@ static void try_send_sleep_now(esp_now_hub_node_t *n)
 
 static hub_node_kind_t classify_name(const char *name)
 {
-    if (strncmp(name, "Cam-", 4) == 0)  return HUB_NODE_KIND_CAM;
+    /* 2026-08-22 — CAM 기본 이름 "Cam-XXXXXX" -> "CXXXXXX"로 축약(전력로그 폭 문제,
+     * esp_now_cam.c:resolve_name 참고) — Sens는 "Sens-"라 'C'로 시작 안 해서 안전 */
+    if (strncmp(name, "C", 1) == 0)      return HUB_NODE_KIND_CAM;
     if (strncmp(name, "Sens-", 5) == 0) return HUB_NODE_KIND_SENS;
     return HUB_NODE_KIND_UNKNOWN;
 }
@@ -218,6 +229,10 @@ static void push_cam_config_to(const uint8_t *mac)
              (unsigned)cfg.nack_max_rounds);
 }
 
+/* recv_cb(ADVERTISE 핸들러)가 먼저 쓰고 실제 정의는 파일 뒤쪽(esp_now_hub_request_pair
+ * 근처)에 있음 — 전방 선언 */
+static void esp_now_hub_pair(const uint8_t *mac);
+
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
     if (len < 2) return;
@@ -233,6 +248,13 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (len < (int)sizeof(esp_now_advertise_t)) return;
         const esp_now_advertise_t *msg = (const esp_now_advertise_t *)data;
         if (msg->version != ESP_NOW_LINK_VERSION) return;
+
+        /* 2026-08-24(사용자 지시, 임시 검증 코드) — 조건 없이 무조건 찍음: CNTL이 광고를
+         * 실제로 받고 있는지 자체를 확인하기 위함. 확인 끝나면 제거할 것 */
+        ESP_LOGI(TAG, "[검증] ADVERTISE 수신: %s (MAC %02x:%02x:%02x:%02x:%02x:%02x, CH%d)",
+                 msg->name, info->src_addr[0], info->src_addr[1], info->src_addr[2],
+                 info->src_addr[3], info->src_addr[4], info->src_addr[5],
+                 (info && info->rx_ctrl) ? info->rx_ctrl->channel : -1);
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
         esp_now_hub_node_t *n = find_or_add_node(info->src_addr);
@@ -250,14 +272,28 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * (사용자가 화면과 실제 통신 상태가 다르다고 지적, "페어링 확인 공통모듈"을
          * 만들라고 지시). ADVERTISE 수신 자체가 "이 노드는 지금 언페어링 상태"라는
          * 확실한 증거이므로, 여기서 바로 paired를 내림 */
-        bool was_paired = n->paired;
+        /* 2026-08-24(사용자 지시로 시간기반 폐기) — 예전엔 "낡은 광고" 레이스를 시간창으로
+         * 걸렀는데, 그 근본원인(캠의 scan_timer가 페어링 완료 후에도 미처 못 멈추고 광고를
+         * 내보내는 것)을 오늘 캠 쪽에서 직접 고쳤음(광고 송신 함수가 실제 전송 직전에 상태를
+         * 매번 새로 확인 — esp_now_channelsync.c의 send_advertise_on_current_channel() 참고).
+         * 그래서 이제 여기서 낡은 광고를 걸러낼 필요 자체가 없어짐 — 매 ADVERTISE를 그대로
+         * 신뢰하고 처리함 */
+        bool was_paired = (n->conn_state == NODE_CONN_PAIRED);
         bool was_user_unpaired = n->user_unpaired;
         bool ever_paired = n->ever_paired;
-        n->paired = false;
+        /* 2026-08-24 — 사용자가 "연결"을 눌러 대기 중이면, 지금 이 광고를 실제로 받은 이
+         * 순간(채널이 같다는 게 방금 증명됨)에 소비 — esp_now_hub_request_pair() 참고.
+         * 시간 대신 "광고 수신으로 트리거된 시도 횟수"로 3번까지만 허용 */
+        bool user_pair_wanted = n->user_pair_wanted;
+        if (user_pair_wanted) {
+            if (n->pair_req_attempts_left > 0) n->pair_req_attempts_left--;
+            if (n->pair_req_attempts_left == 0) n->user_pair_wanted = false;  /* 이번이 마지막 시도 */
+        }
         memcpy(n->name, msg->name, sizeof(n->name));
         n->name[ESP_NOW_LINK_NAME_LEN - 1] = '\0';
         n->kind = classify_name(n->name);
         n->last_seen_ms = now_ms;
+        n->conn_state = NODE_CONN_ORPHAN;
         char name_copy[ESP_NOW_LINK_NAME_LEN];
         strncpy(name_copy, n->name, sizeof(name_copy) - 1);
         name_copy[sizeof(name_copy) - 1] = '\0';
@@ -277,19 +313,32 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 재연결을 계속 재시도함. 사용자가 명시적으로 연결 해제한 노드(user_unpaired)는
          * 그대로 안 건드림 — 다음에 사용자가 직접 다시 붙여야 함(esp_now_hub_unpair의
          * 원래 의도 유지) */
-        if (ever_paired && !was_user_unpaired) {
+        /* 2026-08-24(사용자 지시) — was_paired(Cntl 자신이 방금까지 PAIRED로 알고 있었음)는
+         * user_unpaired 이력과 무관하게 무조건 재페어링을 트리거함. Cntl이 스스로 PAIRED로
+         * 인지 중이었다는 사실 자체가 "지금 이 노드와 연결 상태를 유지하고 싶다"는 가장 강한
+         * 증거인데, 과거 언젠가의 user_unpaired 이력(예: 다른 세션/재시작 이전)이 이걸 막아
+         * 캠은 계속 미페어링으로 광고만 반복하고 Cntl은 재요청을 안 보내는 교착이 실기로
+         * 발생했음(사용자 지적) */
+        if (was_paired || (ever_paired && !was_user_unpaired) || user_pair_wanted) {
             esp_now_hub_pair(mac_copy);
         }
 
-        /* 사람이 페어링을 누르기 전이라도 즉시 응답 — 채널 스캔 중인 노드가 Cntl을
-         * 찾았다는 걸 알고 이 채널에 고정하기 위한 용도(정식 페어링과 별개) */
-        add_peer_if_needed(info->src_addr);
-        esp_now_advertise_ack_t ack = {
-            .version  = ESP_NOW_LINK_VERSION,
-            .msg_type = ESP_NOW_MSG_ADVERTISE_ACK,
-        };
-        esp_wifi_get_mac(CNTL_WIFI_IF, ack.hub_mac);
-        esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+        /* 2026-08-24(사용자 지시) — user_pair_wanted로 인해 이번에 PAIR_REQUEST를 보냈으면
+         * ADVERTISE_ACK는 안 보냄(같은 광고에 두 메시지를 겹쳐 보낼 이유가 없음 — PAIR_REQUEST가
+         * 채널스캔 확인 목적까지 포함함). 그 외의 경우(사람이 아직 연결 안 누른, 순수 발견
+         * 단계)에만 채널 확인용 ACK를 보냄 */
+        if (!user_pair_wanted) {
+            /* 사람이 페어링을 누르기 전이라도 즉시 응답 — 채널 스캔 중인 노드가 Cntl을
+             * 찾았다는 걸 알고 이 채널에 고정하기 위한 용도(정식 페어링과 별개) */
+            add_peer_if_needed(info->src_addr);
+            esp_now_advertise_ack_t ack = {
+                .version      = ESP_NOW_LINK_VERSION,
+                .msg_type     = ESP_NOW_MSG_ADVERTISE_ACK,
+                .hub_boot_id  = s_boot_id,
+            };
+            esp_wifi_get_mac(CNTL_WIFI_IF, ack.hub_mac);
+            esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+        }
 
     } else if (msg_type == ESP_NOW_MSG_PAIR_ACK) {
         if (len < (int)sizeof(esp_now_pair_ack_t)) return;
@@ -316,10 +365,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * 예전엔 n->paired가 이미 true였어도 PAIR_ACK(1초 keepalive)가 올 때마다 매번
              * true로 잡혀서, 페어링된 CAM/Sens에 SET_TIME을 1초마다 무한정 계속 보내고
              * 있었음(2026-08-03, CAM 시리얼 로그로 발견 — 8초 사이에 SET_TIME이 9번 옴) */
-            bool was_paired = n->paired;
+            bool was_paired = (n->conn_state == NODE_CONN_PAIRED);
             bool was_ever_paired = n->ever_paired;
+            n->pair_req_attempts_left = 0;  /* 성사됐으니 남은 시도 카운트 해제 */
+            n->user_pair_wanted = false;
             if (!n->user_unpaired) {
-                n->paired = true;
+                n->conn_state = NODE_CONN_PAIRED;
                 n->ever_paired = true;  /* 2026-08-10 — 한 번 세팅되면 이번 부팅 세션 내내
                                             유지, ADVERTISE 핸들러의 자동 재페어링 판단에 씀 */
                 n->last_paired_ms = now_ms;  /* esp_now_hub_is_reconnect_stuck()의 기준시각 */
@@ -384,9 +435,16 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (n) n->last_seen_ms = now_ms;
         xSemaphoreGive(s_nodes_mutex);
 
+        /* 2026-08-23 — 원래 여기 이 호출이 빠져있었음(CAML/CNTLL 조사 중 발견된 버그):
+         * 등록 안 된 피어로는 esp_now_send()가 실패함 — Cntl 리붓 직후처럼 이 노드가 아직
+         * 피어로 없는 상태에서 PING이 오면 PONG 자체가 못 나갈 수 있었음. ADVERTISE
+         * 핸들러와 동일하게 맞춤 */
+        add_peer_if_needed(info->src_addr);
+
         esp_now_channel_pong_t pong = {
-            .version  = ESP_NOW_LINK_VERSION,
-            .msg_type = ESP_NOW_MSG_CHANNEL_PONG,
+            .version      = ESP_NOW_LINK_VERSION,
+            .msg_type     = ESP_NOW_MSG_CHANNEL_PONG,
+            .hub_boot_id  = s_boot_id,
         };
         esp_now_send(info->src_addr, (const uint8_t *)&pong, sizeof(pong));
 
@@ -519,12 +577,19 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             n->ds_last_wake_reason        = stats->wake_reason;
             n->ds_last_awake_uptime_ms    = stats->awake_uptime_ms;
             n->ds_last_sleep_interval_sec = stats->sleep_interval_sec;
+            /* 2026-08-22 — 배터리 잔량, 반응형 주기(이 리포트)에 실어 옴. %%는 여기서 공용
+             * 커브(battery_mv_to_pct(), Sens와 동일 상수)로 계산 — CAM은 mV까지만 보냄 */
+            n->battery_adc_raw            = stats->battery_adc_raw;
+            n->battery_mv                 = stats->battery_mv;
+            n->battery_pct                = (uint8_t)battery_mv_to_pct(stats->battery_mv);
             /* 2026-08-11 — 예전엔 이 수신 지점에 로그가 없어서 화면 전력판넬에서만 보이던
              * 정보(연속으로 두 번 보고/두 번 SLEEP_NOW 같은 순서 이상 현상)를 시리얼로는
              * 확인할 수 없었음 — CONFIG_ACK/SLEEP_NOW와 같은 스타일로 여기도 로그 추가 */
-            ESP_LOGI(TAG, "DEEP_SLEEP_STATS 수신 <- %s: 사이클#%lu wake=%u config_acked=%d sleep_now_sent=%d",
+            ESP_LOGI(TAG, "DEEP_SLEEP_STATS 수신 <- %s: 사이클#%lu wake=%u config_acked=%d sleep_now_sent=%d "
+                     "batt_raw=%u batt_mv=%u batt_pct=%u",
                      n->name, (unsigned long)n->ds_cycle_count, (unsigned)stats->wake_reason,
-                     (int)n->config_acked_this_cycle, (int)n->sleep_now_sent);
+                     (int)n->config_acked_this_cycle, (int)n->sleep_now_sent,
+                     (unsigned)n->battery_adc_raw, (unsigned)n->battery_mv, (unsigned)n->battery_pct);
             /* 2026-08-11 — 캠의 웨이크(보고) 도착 그 자체가 SLEEP_NOW 조건을 다시 확인해볼
              * 계기 중 하나(사용자 지시: "캠이 웨이크를 보냈을 때 같은 조건이라면 또 즉시
              * 슬립을 보내"). 적응형 타이머가 이미 만료돼있었으면(오래 조용한 뒤 뒤늦게
@@ -654,10 +719,21 @@ static void wifi_bringup(void)
 
 void esp_now_hub_init(void)
 {
+    /* 2026-08-23 — 이번 부팅의 boot_id 생성(위 s_boot_id 주석 참고). ADVERTISE_ACK/PONG
+     * 전송보다 먼저 준비돼있어야 함 */
+    s_boot_id = esp_random();
+    ESP_LOGI(TAG, "boot_id 생성: 0x%08lx", (unsigned long)s_boot_id);
+
     /* recv_cb가 등록되기 전에 먼저 만들어둬야 함 — 등록 직후부터 다른 태스크에서
      * s_nodes[]를 건드릴 수 있음 */
     s_nodes_mutex = xSemaphoreCreateMutex();
     assert(s_nodes_mutex != NULL);
+
+    /* 2026-08-22 — Cntl 자신은 배터리가 없지만, CAM/Sens가 보고해오는 mV값을 %%로 바꾸려면
+     * battery_mv_to_pct()의 커브 상수(full/empty_mv)가 세팅돼있어야 함(battery_init()을 안
+     * 부르면 0으로 나누기가 됨) — Sens의 기본값(sensor_node.c/sensor-c6.c의
+     * BATT_FULL_MV_DEFAULT/empty_mv)과 동일하게 맞춤. 실제 ADC는 안 건드림(battery_set_curve) */
+    battery_set_curve(4020.0f, 3300.0f);
 
     wifi_bringup();
 
@@ -750,7 +826,7 @@ bool esp_now_hub_is_reconnect_stuck(const uint8_t *mac)
     bool stuck = false;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     esp_now_hub_node_t *n = find_node(mac);
-    if (n && n->ever_paired && !n->paired && (now_ms - n->last_paired_ms) > timeout_ms) {
+    if (n && n->ever_paired && n->conn_state != NODE_CONN_PAIRED && (now_ms - n->last_paired_ms) > timeout_ms) {
         stuck = true;
     }
     xSemaphoreGive(s_nodes_mutex);
@@ -762,7 +838,7 @@ hub_conn_state_t esp_now_hub_get_conn_state(const uint8_t *mac)
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     esp_now_hub_node_t *n = find_node(mac);
     bool ever_paired = n && n->ever_paired;
-    bool radio_paired = n && n->paired;
+    bool radio_paired = n && (n->conn_state == NODE_CONN_PAIRED);
     bool user_unpaired = n && n->user_unpaired;
     xSemaphoreGive(s_nodes_mutex);
 
@@ -775,15 +851,28 @@ hub_conn_state_t esp_now_hub_get_conn_state(const uint8_t *mac)
     return radio_paired ? HUB_CONN_STATE_ACTIVE : HUB_CONN_STATE_PAIRED;
 }
 
-void esp_now_hub_pair(const uint8_t *mac)
+#define PAIR_REQUEST_RETRY_TIMEOUT_MS 500
+#define PAIR_REQUEST_RETRY_ATTEMPTS   \
+    ((ESP_NOW_NODE_UNPAIRED_RETRY_SEC * 1000 * 2) / PAIR_REQUEST_RETRY_TIMEOUT_MS + 1)
+
+/* 2026-08-24 — 실제 PAIR_REQUEST 전송(내부 전용, static). 예전엔 이게 공개 API였고 UI가
+ * 직접 불렀는데, 그러면 Cntl의 고정채널과 캠의 스캔채널이 우연히 겹치길 바라며 독립 재시도
+ * 버스트를 쏘는 구조적 도박이었음(사용자 지적: "원론적으로 해결"). 이제 이 함수는 채널이
+ * 이미 맞다고 증명된 순간(=이 노드의 ADVERTISE를 방금 수신한 시점)에만 호출됨 —
+ * esp_now_hub_request_pair()(사용자 버튼)와 자동 재페어링 둘 다 여기로 수렴 */
+static void esp_now_hub_pair(const uint8_t *mac)
 {
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     esp_now_hub_node_t *n = find_node(mac);
-    bool ok = (n && !n->paired);
+    bool ok = (n && n->conn_state != NODE_CONN_PAIRED);
     char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
     if (ok) {
         n->user_unpaired = false;  /* 사용자가 다시 연결을 시도하는 것 — keepalive 무시 플래그 해제 */
         strncpy(name_copy, n->name, sizeof(name_copy) - 1);
+        /* 2026-08-24 — 시간 기반 대기창 폐기. PAIR_PENDING 표시는 UI 상태 문구용으로만 남김
+         * (esp_now_hub_get_conn_state() 등). "몇 번 더 시도할지"는 이제 호출부(ADVERTISE
+         * 핸들러)의 pair_req_attempts_left가 담당함 */
+        n->conn_state = NODE_CONN_PAIR_PENDING;
     }
     xSemaphoreGive(s_nodes_mutex);
     if (!ok) return;
@@ -814,12 +903,30 @@ void esp_now_hub_pair(const uint8_t *mac)
      * 부팅/WiFi초기화 오버헤드(~1.8초, 이름 붙은 상수 없이 그때그때 걸리는 시간이라
      * 하드코딩하면 휴리스틱이 됨, 사용자 지적)는 이 공식에 안 넣음 — 6초(3초×2)가 실측
      * 죽는시간(~4.8초)보다 이미 크므로 별도로 안 넣어도 안전마진 안에 들어옴 */
-    #define PAIR_REQUEST_RETRY_TIMEOUT_MS 500
-    #define PAIR_REQUEST_RETRY_ATTEMPTS   \
-        ((ESP_NOW_NODE_UNPAIRED_RETRY_SEC * 1000 * 2) / PAIR_REQUEST_RETRY_TIMEOUT_MS + 1)
     esp_now_tx_enqueue(mac, &req, sizeof(req), s_pair_ack_types, 1,
                         PAIR_REQUEST_RETRY_TIMEOUT_MS, PAIR_REQUEST_RETRY_ATTEMPTS, "페어링");
     ESP_LOGI(TAG, "PAIR_REQUEST -> %s 큐잉됨", name_copy);
+}
+
+/* 2026-08-24(사용자 지시) — "연결" 버튼의 새 진입점. 여기선 아무것도 안 보내고 플래그만
+ * 세움 — 실제 전송은 ADVERTISE 핸들러가 이 노드의 광고를 실제로 받는 순간에 esp_now_hub_pair()
+ * 를 부르면서 함(그 순간 채널이 같다는 게 이미 증명됨) */
+void esp_now_hub_request_pair(const uint8_t *mac)
+{
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    esp_now_hub_node_t *n = find_node(mac);
+    char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
+    bool ok = (n && n->conn_state != NODE_CONN_PAIRED);
+    if (ok) {
+        n->user_unpaired = false;
+        n->user_pair_wanted = true;
+        n->pair_req_attempts_left = 3;  /* 2026-08-24 — 광고 수신 트리거 3회까지 */
+        strncpy(name_copy, n->name, sizeof(name_copy) - 1);
+    }
+    xSemaphoreGive(s_nodes_mutex);
+    if (ok) {
+        ESP_LOGI(TAG, "%s 연결 요청 — 다음 ADVERTISE 수신 시 PAIR_REQUEST 전송 예정", name_copy);
+    }
 }
 
 void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode)
@@ -830,7 +937,7 @@ void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode)
 
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count; i++) {
-        if (s_nodes[i].kind == HUB_NODE_KIND_CAM && s_nodes[i].paired) {
+        if (s_nodes[i].kind == HUB_NODE_KIND_CAM && s_nodes[i].conn_state == NODE_CONN_PAIRED) {
             memcpy(target_mac, s_nodes[i].mac, sizeof(target_mac));
             strncpy(name_copy, s_nodes[i].name, sizeof(name_copy) - 1);
             found = true;
@@ -889,7 +996,7 @@ bool esp_now_hub_apply_response_interval_sec(uint32_t sec)
     int target_count = 0;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count; i++) {
-        if (s_nodes[i].kind == HUB_NODE_KIND_CAM && s_nodes[i].paired) {
+        if (s_nodes[i].kind == HUB_NODE_KIND_CAM && s_nodes[i].conn_state == NODE_CONN_PAIRED) {
             memcpy(targets[target_count++], s_nodes[i].mac, 6);
         }
     }
@@ -908,7 +1015,7 @@ void esp_now_hub_unpair(const uint8_t *mac)
     char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
     if (n) {
         strncpy(name_copy, n->name, sizeof(name_copy) - 1);
-        n->paired = false;
+        n->conn_state = NODE_CONN_ORPHAN;
         n->user_unpaired = true;  /* CAM/SENS의 keepalive(PAIR_ACK 재전송)로 조용히 재연결되는 것 방지 */
     }
     xSemaphoreGive(s_nodes_mutex);

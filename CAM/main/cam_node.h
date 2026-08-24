@@ -67,6 +67,22 @@ void cam_node_note_activity(void);
  *         반환하게 함 */
 void cam_node_note_sleep_now_requested(void);
 
+/** @brief 2026-08-23 — 이벤트드리븐 재확인 신호(CAML에서 검증 후 이식). 페어링 상태 변화
+ *         (on_channel_synced/on_channel_lost_sync), busy->idle 전환(mark_transfer_idle),
+ *         SLEEP_NOW 수신 등 cam_node_wake_window_done()의 판정에 영향을 주는 이벤트가
+ *         생길 때마다 호출 — app_main의 대기 루프가 세마포어로 이걸 기다리다가 즉시 깨서
+ *         재판정함(50ms 고정 폴링 대신) */
+void cam_node_signal_recheck(void);
+
+/** @brief 2026-08-23 — 채널 동기화가 끊겨 재스캔이 시작될 때 esp_now_cam.c의
+ *         on_channel_lost_sync()가 호출 — 이전 스윕 완료 기록을 무효화(cam_node_wake_window_done()
+ *         참고, 안 그러면 재스캔을 한 바퀴도 안 돌고 바로 자버림) */
+void cam_node_note_scan_restarted(void);
+
+/* 2026-08-23(폐기됨) — cam_node_note_channel_synced()는 "동기화=이번 웨이크 완료"라는 잘못된
+ * 전제로 만들어졌다가, "ACK 받아도 스캔/광고는 페어링될 때까지 계속"으로 설계가 바뀌면서
+ * 제거됨(사용자 지시). s_sweep_completed는 다시 원래대로 "랩어라운드 완료"만 뜻함 */
+
 /** @brief 카메라가 이번 웨이크 사이클에 이미 초기화됐는지(2026-08-21, 지금촬영 핸드셰이크
  *         재설계용) — esp_now_cam.c가 CAPTURE_STATUS(INIT_NEEDED)를 보낼지 판단하는 데 씀 */
 bool cam_node_is_camera_ready(void);
@@ -75,3 +91,12 @@ bool cam_node_is_camera_ready(void);
  *         cam_node_capture_now()도 내부에서 똑같이 부르므로 이미 초기화됐으면 그냥 통과되는
  *         멱등 호출 — esp_now_cam.c가 INIT_NEEDED/INIT_DONE 사이에 실제 초기화를 수행하는 데 씀 */
 bool cam_node_ensure_camera_ready(void);
+
+/** @brief 배터리 전압 읽기(2026-08-22) — CH32V003 IO익스팬더 ADC(0x06) 원시값을 읽어
+ *         스키매틱 분배비(R39=200K/R42=100K, ×3)와 CH32V003 ADC 추정 기준(10bit/3.3V)으로
+ *         mV 환산. 실패 시 false(out_raw/out_mv 미정의) — mV->%% 변환은 Cntl 쪽 공통함수가
+ *         담당(esp_now_hub.c), CAM은 mV까지만 계산해서 DEEP_SLEEP_STATS에 실어 보냄.
+ * @param out_raw CH32V003 ADC 원시값(진단/실측대조용, 그대로 같이 보고됨)
+ * @param out_mv  환산된 배터리 전압(mV)
+ */
+bool cam_node_read_battery_mv(uint16_t *out_raw, uint16_t *out_mv);

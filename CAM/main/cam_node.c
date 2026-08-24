@@ -33,6 +33,8 @@
 #include "esp_camera.h"
 
 #include "bsp_esp32s3_cam.h"
+#include "cam_speaker.h"
+#include "io_expander_ch32v003.h"
 #include "cam_storage.h"
 #include "esp_now_cam.h"
 #include "esp_now_channelsync.h"
@@ -267,28 +269,53 @@ void cam_node_note_activity(void)
  * 받았을 때만(s_sleep_now_requested) 잠. Cntl이 정말 영영 안 돌아오면 RWDT 워치독
  * (rwdt_guard.c, response_interval_sec+AWAKE_MARGIN_SEC)이 최종 안전망 */
 #define CAM_DEEPSLEEP_NUDGE_INTERVAL_MS   5000
-/* 2026-08-11 재설계(사용자 지시) — 예전엔 15초 동안 계속 깨서 시도하다 못 찾으면
- * 포기하고 응답성 간격(예: 10초)만큼 통째로 자버렸는데, 이러면 타이밍이 안 좋을 때
- * 영원히 못 붙을 위험이 있고 그 15초 내내 전력도 씀. 대신 짧게(채널스캔+광고 한 번
- * 왕복할 정도) 시도하고, 못 찾으면 잠깐(3초, 2026-08-11 — 1초에서 상향. 사용자 지시:
- * USB-Serial-JTAG가 재부팅마다 재열거되는데 1초 간격이면 너무 자주 재부팅돼서 플래시
- * 도구가 안정적인 포트 접속 순간을 못 잡는 문제가 실사용 중 발견됨)만 자고 다시 시도 —
- * 재부팅마다 RTC_DATA_ATTR로 마지막 성공 채널을 기억해서 재시도가 빠르므로
- * (esp_now_channelsync) 이 주기로도 충분히 빠르게 재시도됨. app_main()이 이 타임아웃으로
- * 깰 때 페어링 여부를 직접 확인해서, 안 됐으면 CAM_DEEPSLEEP_RETRY_SLEEP_SEC만 잠.
- * 2026-08-21 — 이 두 값을 공용 헤더(esp_now_link.h의 ESP_NOW_NODE_UNPAIRED_RETRY_SEC)
- * 참조로 교체 — CNTL이 PAIR_REQUEST 재시도 구간을 이 값 기준으로 계산하므로(나이키스트
- * 원칙, esp_now_hub.c 참고), 여기서 CAM만 따로 값을 바꾸면 CNTL과 어긋남 */
-#define CAM_DEEPSLEEP_PAIR_WAIT_TIMEOUT_MS (ESP_NOW_NODE_UNPAIRED_RETRY_SEC * 1000)
+/* 2026-08-23(사용자 설계) — 미페어링 중 깨어있는 시간을 고정 예산(3초)으로 두지 않고,
+ * "채널 스윕(1~13) 한 바퀴를 실제로 끝낼 때까지"로 바꿈 — 예전 3초 예산은 300ms×13=3.9초
+ * 걸리는 스윕 하나도 못 끝내서, 매번 채널 1~10 근방만 반복하고 그 이후 채널(11~13)은
+ * 구조적으로 영원히 스캔 대상이 안 되는 버그가 있었음(실사용 중 발견). 스윕 완료는
+ * esp_now_channelsync의 on_scan_sweep_done 훅(cam_node.c의 spk_on_scan_sweep_done 참고)으로
+ * 감지. 못 찾으면 짧게(3초)만 자고 다시 시도 — RTC_DATA_ATTR로 마지막 성공 채널을
+ * 기억해서(esp_now_channelsync) 재시도가 빠름 */
 #define CAM_DEEPSLEEP_RETRY_SLEEP_SEC      ESP_NOW_NODE_UNPAIRED_RETRY_SEC
+
+/* 2026-08-23 — 미페어링 재시도 백오프(딥슬립 경계 넘어 유지, s_last_synced_channel과 같은
+ * RTC_DATA_ATTR 패턴). CNTL을 못 찾는 상태가 길어질수록 재시도 간격을 늘려서 배터리 소모와
+ * 끝없는 광고음을 줄임 — esp_now_channelsync.c의 라이트슬립용 스윕 백오프와 같은 문턱값(1분/
+ * 11분, 10초/30초)을 재사용해 두 절전 정책이 일관되게 함. 페어링에 성공하면 0으로 리셋 —
+ * 다음에 다시 못 찾게 되면 처음부터(3초)로 다시 시작 */
+static RTC_DATA_ATTR uint32_t s_unpaired_backoff_elapsed_sec = 0;
+
+#define UNPAIRED_BACKOFF_SHORT_UNTIL_SEC   60          /* 1분까지: 짧게(3초) */
+#define UNPAIRED_BACKOFF_MID_SEC           10          /* 1~11분: 10초 */
+#define UNPAIRED_BACKOFF_MID_UNTIL_SEC     (60 + 600)
+#define UNPAIRED_BACKOFF_LONG_SEC          30          /* 11분 이후: 30초 */
+
+static uint32_t next_unpaired_retry_sleep_sec(void)
+{
+    if (s_unpaired_backoff_elapsed_sec < UNPAIRED_BACKOFF_SHORT_UNTIL_SEC) return CAM_DEEPSLEEP_RETRY_SLEEP_SEC;
+    if (s_unpaired_backoff_elapsed_sec < UNPAIRED_BACKOFF_MID_UNTIL_SEC) return UNPAIRED_BACKOFF_MID_SEC;
+    return UNPAIRED_BACKOFF_LONG_SEC;
+}
 
 /* Cntl이 ESP_NOW_MSG_SLEEP_NOW를 보내면 세팅(2026-08-10) — 남은 유휴여유를 기다리지 않고
  * cam_node_wake_window_done()이 즉시 true를 반환하게 함(단, 바쁜 동안은 여전히 안 재움) */
 static volatile bool s_sleep_now_requested = false;
 
+/* 2026-08-23 — 이벤트드리븐 재확인 신호(CAML에서 검증 후 이식, cam_node.h 참고). 바이너리
+ * 세마포어: 이벤트 발생 지점(핸들러)들이 Give만 하고, 대기 루프는 Take로 기다리다가 즉시
+ * 깨서 cam_node_wake_window_done()을 다시 부름 — 그 안의 개별 판정(페어링/busy/sleep_now/
+ * 재요청 타이밍)은 그대로 재사용, 루프의 구동 방식만 50ms 고정폴링에서 신호 기반으로 바뀜 */
+static SemaphoreHandle_t s_wake_recheck_sem = NULL;
+
+void cam_node_signal_recheck(void)
+{
+    if (s_wake_recheck_sem) xSemaphoreGive(s_wake_recheck_sem);
+}
+
 void cam_node_note_sleep_now_requested(void)
 {
     s_sleep_now_requested = true;
+    cam_node_signal_recheck();
 }
 
 /* 페어링 상태가 막 true가 된 순간을 감지해서 재요청 타이머를 그때부터 세기 시작함(2026-08-11)
@@ -297,12 +324,23 @@ void cam_node_note_sleep_now_requested(void)
 static bool s_was_paired_this_wake = false;
 static uint32_t s_last_nudge_ms = 0;
 
+/* 2026-08-23 — 미페어링 중 깨어있는 시간을 "스윕 한 바퀴 완료"로 게이트하는 데 씀(아래
+ * cam_node_wake_window_done() 참고) — spk_on_scan_sweep_done()이 세팅, on_channel_lost_sync()가
+ * 부르는 cam_node_note_scan_restarted()가 리셋 */
+static volatile bool s_sweep_completed = false;
+
+void cam_node_note_scan_restarted(void)
+{
+    s_sweep_completed = false;
+}
+
 bool cam_node_wake_window_done(uint32_t awake_start_ms)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    (void)awake_start_ms;
     if (!esp_now_cam_is_paired()) {
         s_was_paired_this_wake = false;
-        return (now_ms - awake_start_ms) > CAM_DEEPSLEEP_PAIR_WAIT_TIMEOUT_MS;
+        return s_sweep_completed;
     }
     if (!s_was_paired_this_wake) {
         s_was_paired_this_wake = true;
@@ -415,6 +453,24 @@ bool cam_node_is_camera_ready(void) { return s_camera_ready; }
 bool cam_node_ensure_camera_ready(void)
 {
     return ensure_camera_ready(true) == ESP_OK;
+}
+
+/* 2026-08-22 — 배터리 전압(mV) 환산 상수. 스키매틱(ESP32-S3-CAM-XXXX-schematic.pdf) 확인값:
+ * VBAT --R39(200K)-- BAT_ADC노드 --R42(100K)-- GND, 분배비 = R42/(R39+R42) = 1/3 이므로
+ * Vbat = Vadc * 3. CH32V003 자체 ADC 비트폭/기준전압은 Waveshare 공식 문서/예제 어디에도
+ * 없어서(cam_node.h 주석 참고) 10bit/3.3V로 추정 — 실측 대조 전까지는 근사치임 */
+#define CH32V003_ADC_MAX_COUNT   1023.0f  /* 10bit 추정 */
+#define CH32V003_ADC_VREF_MV     3300.0f  /* 자체 VDD 추정 */
+#define CAM_BAT_DIVIDER_RATIO    3.0f     /* (R39+R42)/R42 = 300K/100K */
+
+bool cam_node_read_battery_mv(uint16_t *out_raw, uint16_t *out_mv)
+{
+    uint16_t raw = 0;
+    if (ch32v003_get_adc(&raw) != ESP_OK) return false;
+    float adc_mv = (raw / CH32V003_ADC_MAX_COUNT) * CH32V003_ADC_VREF_MV;
+    *out_raw = raw;
+    *out_mv  = (uint16_t)(adc_mv * CAM_BAT_DIVIDER_RATIO);
+    return true;
 }
 
 /* 자동(타이머)/수동(shot) 캡처가 절대 동시에 안 돌게 직렬화 — esp_camera_fb_get()이 최대
@@ -589,6 +645,24 @@ bool cam_node_capture_now_sized(const char *size_name)
     return camera_capture_one(CAM_CAPTURE_KIND_MANUAL);
 }
 
+/* 2026-08-23 — esp_now_channelsync_set_event_hooks()에 넘길 무인자 래퍼(위 cam_speaker_init
+ * 호출부 참고, esp_now_channelsync.h의 컴포넌트 결합 회피 주석 참고). 소리는 실제 동작을
+ * 그대로 반영해야 함(사용자 지적: "소리를 소거하는 게 아니라 스캔이 안 돌게 하려는 거잖아") —
+ * 그래서 여기서 조건부로 죽이지 않음. 페어링 후 스캔이 다시 안 도는 게 진짜 목표이고, 그게
+ * 지켜지면 이 소리들도 자연히 다시 안 남(esp_now_channelsync.c의 s_scan_locked 참고) */
+static void spk_on_channel_scanned(void) { cam_speaker_notify(SPK_EVT_SCAN_CHANNEL); }
+static void spk_on_advertise_sent(void)  { cam_speaker_notify(SPK_EVT_ADVERTISE_SENT); }
+static void spk_on_ping_sent(void)       { cam_speaker_notify(SPK_EVT_PING); }
+static void spk_on_pong_received(void)   { cam_speaker_notify(SPK_EVT_PONG); }
+
+/* 스윕 완료 훅 — cam_node_wake_window_done() 위쪽의 s_sweep_completed 참고 */
+static void spk_on_scan_sweep_done(void)
+{
+    cam_speaker_notify(SPK_EVT_SWEEP_DONE);
+    s_sweep_completed = true;
+    cam_node_signal_recheck();
+}
+
 void app_main(void)
 {
     /* Deep Sleep 주기적 웨이크로 전환(2026-08-10) — Light Sleep 3차 시도(2026-08-09)까지
@@ -620,6 +694,24 @@ void app_main(void)
 
     if (cam_storage_init() != ESP_OK) {
         ESP_LOGW(TAG, "SD 초기화 실패 — 계속 재시도하지 않고 그대로 진행");
+    }
+
+    /* 2026-08-23 — 스피커로 6가지 이벤트만 소리로 구분(CAML에서 검증, 기본 꺼짐 —
+     * dev_console의 soundlog on/off로 켬). 실패해도 계속 진행 */
+    if (cam_speaker_init() != ESP_OK) {
+        ESP_LOGW(TAG, "스피커 초기화 실패 — 소리 알림 없이 계속 진행");
+    } else {
+        esp_reset_reason_t spk_rr = esp_reset_reason();
+        if (spk_rr == ESP_RST_USB) {
+            cam_speaker_notify(SPK_EVT_POWERON_USB);
+        } else if (spk_rr == ESP_RST_POWERON) {
+            cam_speaker_notify(SPK_EVT_POWERON_BATTERY);
+        }
+        /* esp_now_channelsync는 Common 공유 컴포넌트라 cam_speaker를 직접 모름(CNTL/Sens
+         * 빌드가 깨지지 않도록) — 대신 이 느슨한 훅으로 연결 */
+        esp_now_channelsync_set_event_hooks(spk_on_channel_scanned, spk_on_advertise_sent,
+                                             spk_on_scan_sweep_done, spk_on_ping_sent,
+                                             spk_on_pong_received);
     }
 
     /* Kconfig 기본값으로 시작 — 로컬 저장 없음(위 설정 관련 주석 참고), 페어링되면 Cntl이
@@ -674,8 +766,11 @@ void app_main(void)
     dev_console_start();  /* 유지 — 딥슬립 사이클마다 USB 재열거됨(개발 시 감안) */
 
     uint32_t awake_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    s_wake_recheck_sem = xSemaphoreCreateBinary();
     while (!cam_node_wake_window_done(awake_start_ms)) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+        /* 1초 상한: 신호가 오면 즉시 깨서 재판정하고, 안 와도 나지드/타임아웃 시간 판정을
+         * 위해 최소 1초마다는 재확인(cam_node_wake_window_done() 내부의 시간 기반 판정 참고) */
+        xSemaphoreTake(s_wake_recheck_sem, pdMS_TO_TICKS(1000));
     }
 
     /* 2026-08-11 재설계(사용자 지시) — 페어링 못 한 채로 깨는 거면(Cntl을 못 찾음) 응답성
@@ -687,6 +782,10 @@ void app_main(void)
     ESP_LOGI(TAG, "딥슬립 진입: %us 후 웨이크 (paired=%d)", (unsigned)sleep_sec, (int)paired_now);
     s_last_actual_sleep_sec = sleep_sec;  /* 다음 부팅 때 "직전에 실제로 잔 시간"으로 보고 */
     esp_sleep_enable_timer_wakeup((uint64_t)sleep_sec * 1000000ULL);
+    /* 2026-08-23 — soundlog 켜져있으면 큐에 예약된 소리가 실제로 재생될 시간을 줌(최대 2초).
+     * 안 그러면 스윕완료 등 이벤트 즉시 잠들어서 notify()가 큐에 넣기만 한 채 하드웨어가
+     * 꺼져 소리가 통째로 안 남(실기로 발견) — 꺼져있으면 즉시 리턴이라 평소엔 영향 없음 */
+    cam_speaker_wait_idle(2000);
     esp_deep_sleep_start();  /* RWDT는 이미 무장돼있음, 안 건드림 */
 #else
     dev_console_start();  /* 딥슬립 완전 비활성 — 상시 동작(벤치/콘솔 개발용, Kconfig 이스케이프 해치) */
