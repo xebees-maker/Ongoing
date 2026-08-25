@@ -650,10 +650,11 @@ bool cam_node_capture_now_sized(const char *size_name)
  * 그대로 반영해야 함(사용자 지적: "소리를 소거하는 게 아니라 스캔이 안 돌게 하려는 거잖아") —
  * 그래서 여기서 조건부로 죽이지 않음. 페어링 후 스캔이 다시 안 도는 게 진짜 목표이고, 그게
  * 지켜지면 이 소리들도 자연히 다시 안 남(esp_now_channelsync.c의 s_scan_locked 참고) */
-static void spk_on_channel_scanned(void) { cam_speaker_notify(SPK_EVT_SCAN_CHANNEL); }
-static void spk_on_advertise_sent(void)  { cam_speaker_notify(SPK_EVT_ADVERTISE_SENT); }
-static void spk_on_ping_sent(void)       { cam_speaker_notify(SPK_EVT_PING); }
-static void spk_on_pong_received(void)   { cam_speaker_notify(SPK_EVT_PONG); }
+static void spk_on_channel_scanned(void)      { cam_speaker_notify(SPK_EVT_SCAN_CHANNEL); }
+static void spk_on_advertise_sent(void)       { cam_speaker_notify(SPK_EVT_ADVERTISE_SENT); }
+static void spk_on_advertise_ack_received(void) { cam_speaker_notify(SPK_EVT_ADVERTISE_ACK); }
+static void spk_on_ping_sent(void)            { cam_speaker_notify(SPK_EVT_PING); }
+static void spk_on_pong_received(void)        { cam_speaker_notify(SPK_EVT_PONG); }
 
 /* 스윕 완료 훅 — cam_node_wake_window_done() 위쪽의 s_sweep_completed 참고 */
 static void spk_on_scan_sweep_done(void)
@@ -710,8 +711,8 @@ void app_main(void)
         /* esp_now_channelsync는 Common 공유 컴포넌트라 cam_speaker를 직접 모름(CNTL/Sens
          * 빌드가 깨지지 않도록) — 대신 이 느슨한 훅으로 연결 */
         esp_now_channelsync_set_event_hooks(spk_on_channel_scanned, spk_on_advertise_sent,
-                                             spk_on_scan_sweep_done, spk_on_ping_sent,
-                                             spk_on_pong_received);
+                                             spk_on_advertise_ack_received, spk_on_scan_sweep_done,
+                                             spk_on_ping_sent, spk_on_pong_received);
     }
 
     /* Kconfig 기본값으로 시작 — 로컬 저장 없음(위 설정 관련 주석 참고), 페어링되면 Cntl이

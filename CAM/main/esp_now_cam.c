@@ -1,6 +1,7 @@
 #include "esp_now_cam.h"
 #include "cam_storage.h"
 #include "cam_node.h"  /* cam_node_set_capture_interval_sec/set_response_interval_sec/get_wake_reason/note_activity */
+#include "cam_speaker.h"  /* 2026-08-25 — PAIR_REQUESTED/PAIR_ACK 소리 알림용 */
 
 #include <string.h>
 #include <stdio.h>
@@ -1244,6 +1245,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     s_conn_state = CAM_CONN_PAIRED;
     ESP_LOGI(TAG, "[STATE] -> %s (pair_request)", conn_state_name(s_conn_state));
     esp_now_channelsync_notify_paired();
+    cam_speaker_notify(SPK_EVT_PAIR_REQUESTED);
     set_led(LED_PATTERN_HEARTBEAT);
 
     esp_now_peer_info_t peer = { 0 };
@@ -1270,6 +1272,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     memcpy(ack.node_mac, s_mac, sizeof(ack.node_mac));
     esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
     ESP_LOGI(TAG, "페어링됨: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
+    cam_speaker_notify(SPK_EVT_PAIR_ACK);
 
     /* 딥슬립 통계 전송은 CAM_CONFIG_SET 처리 직후로 옮김(2026-08-10) — 그때가 돼야
      * s_response_interval_sec이 실제 적용될 값으로 갱신돼 있음(recv_cb의

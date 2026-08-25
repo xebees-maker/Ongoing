@@ -23,11 +23,12 @@ static SemaphoreHandle_t s_state_mutex = NULL;
 
 /* 2026-08-23 — 부가 이벤트 훅(esp_now_channelsync.h 참고, 하드웨어 전용 컴포넌트와의
  * 결합을 피하기 위한 느슨한 연결) */
-static esp_now_channelsync_event_cb_t s_on_channel_scanned = NULL;
-static esp_now_channelsync_event_cb_t s_on_advertise_sent  = NULL;
-static esp_now_channelsync_event_cb_t s_on_scan_sweep_done = NULL;
-static esp_now_channelsync_event_cb_t s_on_ping_sent       = NULL;
-static esp_now_channelsync_event_cb_t s_on_pong_received   = NULL;
+static esp_now_channelsync_event_cb_t s_on_channel_scanned    = NULL;
+static esp_now_channelsync_event_cb_t s_on_advertise_sent     = NULL;
+static esp_now_channelsync_event_cb_t s_on_advertise_ack_recv = NULL;
+static esp_now_channelsync_event_cb_t s_on_scan_sweep_done    = NULL;
+static esp_now_channelsync_event_cb_t s_on_ping_sent          = NULL;
+static esp_now_channelsync_event_cb_t s_on_pong_received      = NULL;
 
 /* 2026-08-23 — 광고 전송 직전 게이트(esp_now_channelsync.h 참고, 방어적 이중 확인) */
 static esp_now_channelsync_should_advertise_cb_t s_should_advertise_cb = NULL;
@@ -39,15 +40,17 @@ void esp_now_channelsync_set_should_advertise_cb(esp_now_channelsync_should_adve
 
 void esp_now_channelsync_set_event_hooks(esp_now_channelsync_event_cb_t on_channel_scanned,
                                           esp_now_channelsync_event_cb_t on_advertise_sent,
+                                          esp_now_channelsync_event_cb_t on_advertise_ack_received,
                                           esp_now_channelsync_event_cb_t on_scan_sweep_done,
                                           esp_now_channelsync_event_cb_t on_ping_sent,
                                           esp_now_channelsync_event_cb_t on_pong_received)
 {
-    s_on_channel_scanned = on_channel_scanned;
-    s_on_advertise_sent  = on_advertise_sent;
-    s_on_scan_sweep_done = on_scan_sweep_done;
-    s_on_ping_sent       = on_ping_sent;
-    s_on_pong_received   = on_pong_received;
+    s_on_channel_scanned    = on_channel_scanned;
+    s_on_advertise_sent     = on_advertise_sent;
+    s_on_advertise_ack_recv = on_advertise_ack_received;
+    s_on_scan_sweep_done    = on_scan_sweep_done;
+    s_on_ping_sent          = on_ping_sent;
+    s_on_pong_received      = on_pong_received;
 }
 
 #define SCAN_DWELL_US        (300 * 1000)
@@ -304,9 +307,10 @@ static void ping_timer_cb(void *arg)
     if (s_pong_pending) {
         s_ping_fail_count++;
         ESP_LOGW(TAG, "PING 무응답(연속 %d회)", s_ping_fail_count);
-#if 0  /* 2026-08-24(사용자 지시, 임시 테스트) — PING 실패로 인한 재스캔 트리거만 잠깐
-        * 막아서, "페어링 후 무한 광고"가 이 경로 때문인지 격리 확인. 실패 로그(위)는
-        * 그대로 남김 — 진짜로 실패하는지는 계속 관찰 가능. 확인 끝나면 원복해야 함 */
+        /* 2026-08-24 임시로 막아뒀던 재스캔 트리거, 2026-08-25 원복(사용자 지시) — PONG이
+         * 왜 안 오는지는 아직 원인 불명이지만, 반응을 계속 꺼두면 CAM이 영원히 죽은 링크를
+         * PAIRED로 오인한 채 갇혀버리는 게 실기로 확인됨(CNTL을 껐다 켜도 회복 안 됨) —
+         * 원인 조사와 별개로 이 자가복구 자체는 먼저 살려야 하는 별개의 버그로 판단 */
         if (s_ping_fail_count >= PING_FAIL_THRESHOLD) {
             ESP_LOGW(TAG, "채널 동기화 끊김 — 재스캔 시작");
             enter_unsynced();
@@ -314,7 +318,6 @@ static void ping_timer_cb(void *arg)
             xSemaphoreGive(s_state_mutex);
             return;  /* enter_unsynced()가 이미 ping_timer를 멈춤 */
         }
-#endif
     }
     esp_now_channel_ping_t ping = {
         .version  = ESP_NOW_LINK_VERSION,
@@ -419,6 +422,7 @@ void esp_now_channelsync_on_recv(const esp_now_recv_info_t *info, uint8_t msg_ty
 
         ESP_LOGI(TAG, "채널 동기화됨(CH%d)", s_scan_channel);
         if (s_on_synced) s_on_synced(s_scan_channel, s_hub_mac);
+        if (s_on_advertise_ack_recv) s_on_advertise_ack_recv();
         goto done;
     }
 

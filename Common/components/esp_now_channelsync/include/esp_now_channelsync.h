@@ -109,9 +109,12 @@ typedef void (*esp_now_channelsync_event_cb_t)(void);
 
 /* 2026-08-23 — on_channel_scanned: 채널을 옮길 때마다(광고 전송 직전) 호출 — on_advertise_sent와
  * 거의 같은 시점이지만 개념상 별개 이벤트로 분리(사용자 지시: "채널 스캔"과 "광고 전송"을
- * 소리로 구분해서 듣고 싶음) */
+ * 소리로 구분해서 듣고 싶음).
+ * 2026-08-25 — on_advertise_ack_received 추가: ADVERTISE_ACK를 실제로 받아 채널 동기화가
+ * 확정된 순간(esp_now_channelsync_on_recv 내부, s_on_synced 직후) 호출 */
 void esp_now_channelsync_set_event_hooks(esp_now_channelsync_event_cb_t on_channel_scanned,
                                           esp_now_channelsync_event_cb_t on_advertise_sent,
+                                          esp_now_channelsync_event_cb_t on_advertise_ack_received,
                                           esp_now_channelsync_event_cb_t on_scan_sweep_done,
                                           esp_now_channelsync_event_cb_t on_ping_sent,
                                           esp_now_channelsync_event_cb_t on_pong_received);
