@@ -39,8 +39,11 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_REQUEST_BUSY         2006  /* 이미 수신 중이라 새 요청 무시됨 */
 #define UI_ERR_NOT_PAIRED           2007  /* 요청 시점에 이미 언페어링 상태(desync 포함) —
                                              전송 자체를 안 하고 재연결을 시도함 */
-#define UI_ERR_SLEEP_NOW_FAILED     2008  /* CAM이 SLEEP_NOW_REQUEST(재요청)를 임계치 이상
-                                             반복해도 CNTL이 SLEEP_NOW를 못 전달함(2026-08-11) */
+/* 2008: 예전 UI_ERR_SLEEP_NOW_FAILED — 2026-08-25 CASK 재설계로 SLEEP_NOW_REQUEST
+ * 메커니즘 자체가 제거되어 함께 삭제. 번호는 재사용하지 않고 비워둠 */
+#define UI_ERR_TX_QUEUE_FULL        2009  /* esp_now_tx 전송 큐가 가득 차서 요청이 시도조차
+                                             못 해보고 버려짐(2026-08-26) — 예전엔 ESP_LOGW만
+                                             남기고 화면엔 안 보였음(esp_now_tx.c 참고) */
 
 #define UI_ERR_META_TOO_BIG         3001  /* CAM이 보낸 사진이 고정 수신 버퍼보다 큼 */
 #define UI_ERR_CHUNK_MISSING        3002  /* 청크 누락 — 재조립 실패 */
@@ -100,10 +103,9 @@ const char *ui_log_err_desc(int code);
 /* 2026-08-11 — 워닝 레벨(사용자 지시). 에러(UI_ERR_*)와 별개 체계: 에러는 아이콘이
  * 재부팅 전까지 계속 남지만, 워닝은 사용자가 팝업으로 확인하면 그 즉시 이력이 지워지고
  * 로고 아이콘도 정상으로 돌아옴 — "잠깐 있었지만 지금은 괜찮을 수도 있는" 신호라는
- * 성격 차이를 반영. 코드 네임스페이스는 에러와 안 겹치게 6xxx대(현재 유일한 용도:
- * SLEEP_NOW 재요청) */
-#define UI_WARN_SLEEP_NOW_NORESPONSE 6001  /* CAM이 SLEEP_NOW 재요청(SLEEP_NOW_REQUEST)을
-                                              보냄 — 이전에 보낸 SLEEP_NOW가 유실됐을 가능성 */
+ * 성격 차이를 반영. 코드 네임스페이스는 에러와 안 겹치게 6xxx대.
+ * 2026-08-25 — 유일했던 용도(SLEEP_NOW 재요청, 6001)가 CASK 재설계로 제거되어 지금은
+ * 등록된 코드가 없음 — 체계 자체는 다음에 쓸 일이 생기면 그대로 재사용 */
 
 void ui_log_add_warn(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 bool ui_log_get_pending_warn(char *out, size_t out_cap);

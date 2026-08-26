@@ -235,8 +235,8 @@ static lv_obj_t *s_log_label     = NULL;
 static lv_obj_t *s_log_panel_title = NULL;  /* 2026-08-11 — 스크롤 안 되는 고정 제목 행, 페이지
                                                 스크롤을 잡기 위한 영역. refresh_lang_texts에서 갱신 */
 
-/* 통계 탭 좌측 절전상태 판넬 — CAM의 Deep Sleep 사이클 통계(ESP_NOW_MSG_DEEP_SLEEP_STATS,
- * 2026-08-10 Light Sleep 폐기 후 개편)를 로그처럼 한 줄씩 누적(사용자 지시: 최신값으로
+/* 통계 탭 좌측 절전상태 판넬 — CAM의 Deep Sleep 사이클 통계(2026-08-10 Light Sleep 폐기 후
+ * 개편, 2026-08-25부터 ESP_NOW_MSG_WAKE_HELLO에 실려 옴)를 로그처럼 한 줄씩 누적(사용자 지시: 최신값으로
  * 덮어쓰는 대신 매번 새 줄로, 2026-08-09) — s_log_container/s_log_label과 같은 구조.
  * s_power_panel_title은 refresh_lang_texts에서 갱신 */
 static lv_obj_t *s_power_panel_title = NULL;
@@ -253,7 +253,6 @@ typedef struct {
     uint8_t  mac[6];
     bool     used;
     uint32_t last_cycle_count;
-    uint32_t last_sleep_now_send_count;  /* 2026-08-10 — SLEEP_NOW 발신도 별도 줄로(사용자 지시) */
 } power_log_track_t;
 static power_log_track_t s_power_log_track[ESP_NOW_HUB_MAX_NODES];
 /* 2026-08-21 — 내부(비-PSRAM) DRAM이 httpd_start 실패(5005)를 겪을 만큼 빠듯했던 걸 실기로
@@ -2251,45 +2250,17 @@ static void refresh_power_panel(lv_timer_t *t)
                     tr->used = true;
                     memcpy(tr->mac, nodes[i].mac, 6);
                     tr->last_cycle_count = UINT32_MAX;  /* 이 장치의 첫 값은 무조건 한 줄 찍히게 */
-                    tr->last_sleep_now_send_count = nodes[i].sleep_now_send_count;  /* 첫 값은
-                                                                                        과거분이라 안 찍음 */
                     break;
                 }
             }
         }
         if (!tr) continue;  /* 자리 없음 — MAX_NODES 이상은 원래 못 옴 */
 
-        /* 2026-08-10 — SLEEP_NOW 발신도 자체 줄로(사용자 지시, -mm:ss 포함) — ds_cycle_count
-         * 게이트와 독립적으로 검사해야 "보낸 바로 그 순간"에 줄이 찍힘(다음 사이클 리포트까지
-         * 안 기다림) */
-        if (tr->last_sleep_now_send_count != nodes[i].sleep_now_send_count) {
-            tr->last_sleep_now_send_count = nodes[i].sleep_now_send_count;
-            char sn_line[96];
-            char sn_ts[16];
-            ui_log_format_timestamp(sn_ts, sizeof(sn_ts));
-            /* 2026-08-10, 사용자 지시 — "조용"->"Idle"로, 임계값 표시는 제거(더 이상 판단
-             * 근거로 안 씀 — 최초 페어링만 리셋하는 걸로 바뀌어서 매번 다른 임계값 비교가
-             * 큰 의미가 없어짐).
-             * 2026-08-11, 최종 결론 — #RRGGBB 인라인 recolor 마크업 시도 3회(단어 하나로
-             * 좁힘 → 밑줄 제거 → 줄 전체를 경계 없이 통째로 감싸기까지) 전부 실기에서
-             * 똑같이 깨짐(여는 태그 "#ff0000 "가 줄 맨 앞에 리터럴로 그대로 노출) — 마지막
-             * 시도는 줄 안에 attribute 경계가 아예 없는 가장 단순한 형태였는데도 동일하게
-             * 깨졌으므로, wrap이나 인자 밀림 같은 부분적 원인이 아니라 recolor 자체가 이
-             * 라벨에서 작동하지 않는다고 결론(사용자 확인). 파싱이 아예 필요 없는 순수
-             * 텍스트 마커(">>> ")로 최종 확정 — CAM 리포트 줄과 SLEEP_NOW 줄은 색이 아니라
-             * 이 마커 유무로 구분 */
-            lv_snprintf(sn_line, sizeof(sn_line), "%s>>> %s: SLEEPNOW Idle%ums",
-                        sn_ts, nodes[i].name, (unsigned)nodes[i].last_sleep_now_elapsed_ms);
-            size_t sn_cur_len  = strlen(s_power_log_buf);
-            size_t sn_line_len = strlen(sn_line);
-            if (sn_cur_len + sn_line_len + 2 > POWER_LOG_BUF_CAP) {
-                size_t keep_from = POWER_LOG_BUF_CAP / 2;
-                memmove(s_power_log_buf, s_power_log_buf + keep_from, sn_cur_len - keep_from + 1);
-            }
-            strcat(s_power_log_buf, sn_line);
-            strcat(s_power_log_buf, "\n");
-            appended = true;
-        }
+        /* 2026-08-25(CASK 재설계) — 예전엔 여기서 SLEEP_NOW 발신 시점을 별도 줄로 찍었는데
+         * (sleep_now_send_count 기반), CNTL이 능동적으로 "언제 보낼지" 미리 판단해서 먼저
+         * 쏘던 구조 자체가 없어짐 — SLEEP_NOW는 이제 매 WAKE_HELLO의 CASK 마지막 단계로
+         * 결정적으로(항상) 나가므로, "보냈다"는 사실 자체가 더 이상 별도로 기록할 만한
+         * 이벤트가 아님(항상 일어나는 일이라서) */
 
         /* ds_cycle_count는 Cntl이 리포트를 받을 때마다 직접 증가시키는 단조증가 카운터라
          * (esp_now_hub.c) 이것 하나만 비교하면 "새 보고서가 왔는가"를 정확히 알 수 있음

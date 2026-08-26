@@ -1,7 +1,6 @@
 #include "esp_now_tx.h"
 #include "esp_now_reliable.h"
 #include "ui_log.h"
-#include "device_config.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -11,31 +10,22 @@
 
 static const char *TAG = "esp_now_tx";
 
-/* 2026-08-10 — "응답성"(response_interval_sec)은 CAM의 딥슬립 사이클 길이이자, 사용자
- * 온디맨드 명령의 최악 대기시간으로 문서화된 값(계획서 참고)인데, 정작 재시도 로직은
- * 호출부가 넘긴 고정 timeout_ms*max_attempts(예: 500ms*3=1.5초)만 기다리고 포기해서,
- * CAM이 정상적으로(버그 아님) 자고 있을 때 도착한 명령은 그 약속과 무관하게 거의 항상
- * 실패했음(실사용 중 3006 반복으로 발견 — 사용자 지적: "잠들었어도 반응성 시간 내에
- * 명령을 주고 결과를 받아왔어야 하는데"). 여기서 호출부의 max_attempts를 "최소값"으로
- * 남겨두고, 실제 시도 횟수는 response_interval_sec 기준으로 늘려서 CAM의 다음 자연스러운
- * 웨이크까지는 기다리게 함. 최대절전(30분) 티어는 블로킹 재시도 대상에서 제외 — 계획서가
- * 이미 그 티어는 인터랙티브 조작 자체를 포기하는 별도 시나리오/UI가 필요하다고 명시해뒀고,
- * 30분을 그대로 재시도 예산으로 쓰면 명령 하나가 UI에서 30분간 "진행 중"으로 보이게 됨 */
-#define TX_RESPONSE_BUDGET_CAP_SEC 30U
-#define TX_WAKE_MARGIN_MS 3000U  /* CAM 웨이크 후 페어링 핸드셰이크(SET_TIME/CONFIG_SET) 여유 */
-
-static int effective_max_attempts(uint32_t timeout_ms, int caller_min_attempts)
-{
-    uint32_t sec = device_config_get_response_interval_sec();
-    if (sec > TX_RESPONSE_BUDGET_CAP_SEC) sec = TX_RESPONSE_BUDGET_CAP_SEC;
-    uint32_t budget_ms = sec * 1000U + TX_WAKE_MARGIN_MS;
-    int attempts = (int)((budget_ms + timeout_ms - 1) / timeout_ms);
-    return attempts > caller_min_attempts ? attempts : caller_min_attempts;
-}
+/* 2026-08-10 도입 -> 2026-08-26 삭제(사용자 지시) — 원래는 "CAM이 자고 있을 때 도착한 명령도
+ * CAM의 다음 자연스러운 웨이크까지는 재시도해서 언젠가 닿게 하자"는 취지로, 응답성 설정
+ * 기준으로 재시도 횟수를 시간 단위로 부풀렸었음(effective_max_attempts, 최대 30초+3초
+ * 마진까지 — 즉 메시지 하나가 최대 33초까지 걸릴 수 있었음). 그런데 CASK 재설계 이후
+ * esp_now_tx_enqueue()를 부르는 모든 경우(CONFIG/할일/SLEEP_NOW/PAIR_REQUEST 등)가 전부
+ * 캠이 방금 먼저 연락해왔을 때(WAKE_HELLO/ADVERTISE)의 응답으로만 나가서, 부르는 그 순간
+ * 캠이 깨어있다는 게 이미 보장됨 — "자고 있을지 모르니 시간을 두고 재시도"할 이유 자체가
+ * 없어짐. 이 시간 기반 부풀리기가 오히려 SLEEP_NOW 하나가 못 가면 캠이 CASK_SILENCE_TIMEOUT_MS
+ * 없이 무한정 기다리게 되는 버그의 실제 원인 중 하나로 드러남(실기에서 확인) — 이제 호출부가
+ * 넘긴 고정 횟수를 그대로 씀(count 기반) */
 
 #define TX_REQ_MAX_LEN 32   /* PAIR_REQUEST/PHOTO_REQUEST/LIST_REQUEST/DELETE_*_REQUEST 모두
                               * 20바이트 이하 — 여유있게 32 */
-#define TX_QUEUE_LEN   8
+/* 2026-08-26(사용자 지시) — CASK 재설계로 WAKE_HELLO 하나당 항상 3개(CONFIG/할일/SLEEP_NOW)가
+ * 들어오는데, 옛 8은 노드 3대만 겹쳐도 꽉 참. 30개 이상으로 늘림(사용자 지정) */
+#define TX_QUEUE_LEN   32
 
 typedef struct {
     uint8_t  mac[6];
@@ -57,10 +47,9 @@ static void tx_task(void *arg)
     for (;;) {
         if (xQueueReceive(s_tx_queue, &item, portMAX_DELAY) != pdTRUE) continue;
 
-        int attempts = effective_max_attempts(item.timeout_ms, item.max_attempts);
         esp_err_t err = esp_now_reliable_request(item.mac, item.req, item.req_len,
                                                   item.accept_reply_types, item.accept_reply_types_count,
-                                                  item.timeout_ms, attempts,
+                                                  item.timeout_ms, item.max_attempts,
                                                   NULL, 0, NULL);
         if (err != ESP_OK) {
             /* 2026-08-10 — 예전엔 여기서 무조건 UI_ERR_NOT_PAIRED(2007, "페어링 끊김")를
@@ -72,7 +61,7 @@ static void tx_task(void *arg)
              * 폴링에서 이미 처리)가 있으므로 여기서는 진단용 로그만 남기고 UI 에러는 안 띄움.
              * 자동 재연결(esp_now_hub_pair)처럼 애초에 사용자에게 알릴 필요 없는 백그라운드
              * 요청도 있어서, 범용 계층에서 일괄 판단하는 게 애초에 무리였음 */
-            ESP_LOGW(TAG, "%s 무응답(%d회 시도, 응답성예산 반영)", item.what, attempts);
+            ESP_LOGW(TAG, "%s 무응답(%d회 시도)", item.what, item.max_attempts);
         } else {
             ESP_LOGI(TAG, "%s 완료", item.what);
         }
@@ -104,6 +93,11 @@ void esp_now_tx_enqueue(const uint8_t *mac, const void *req, size_t req_len,
     memcpy(item.mac, mac, sizeof(item.mac));
     memcpy(item.req, req, req_len);
     if (xQueueSend(s_tx_queue, &item, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "%s: 큐 가득 — 무시", what);
+        /* 2026-08-26(사용자 지시) — "큐 풀이면 최소한 에러라도 냈어야" — 예전엔 시리얼
+         * 로그(ESP_LOGW)만 남기고 화면엔 아무 표시가 없어서 시리얼 안 보고 있으면 통째로
+         * 놓쳤음. 이건 재시도 여지없이 그 자리에서 완전히 버려지는 거라 워닝이 아니라
+         * 에러 — ui_log_add_err()로 화면 토스트까지 뜨게 함(2xxx 통신 전송 대역) */
+        ESP_LOGE(TAG, "%s: 큐 가득 — 버림", what);
+        ui_log_add_err(UI_ERR_TX_QUEUE_FULL, "TX queue full, dropped: %s", what);
     }
 }

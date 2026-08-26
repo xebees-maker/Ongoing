@@ -54,29 +54,25 @@ uint8_t cam_node_get_wake_reason(void);
  *         wake_reason이 TIMER가 아니면(RWDT/POWERON) 0 — 실제로 안 잤으므로 */
 uint32_t cam_node_get_last_actual_sleep_sec(void);
 
-/** @brief 지금 자도 되는가 판정(2026-08-10, Deep Sleep 제어흐름) — 페어링 완료 + 유휴
- *         + 최소 유예시간 경과, 또는 Cntl 못 찾은 채 상한시간 초과 */
-bool cam_node_wake_window_done(uint32_t awake_start_ms);
+/** @brief Cntl의 ESP_NOW_MSG_SLEEP_NOW 수신 시 호출 — CASK 종료 신호. sleep_sec은 그
+ *         메시지가 실어온 값 그대로(0=안 자고 곧장 재연결 루프, 그 외=실제 딥슬립 시간) */
+void cam_node_note_sleep_now_requested(uint32_t sleep_sec);
 
-/** @brief recv_cb가 의미있는 메시지(사용자 명령)를 처리할 때마다 호출 — 유휴 판정용
- *         타임스탬프 갱신(2026-08-10, cam_node_wake_window_done()이 참고) */
-void cam_node_note_activity(void);
-
-/** @brief Cntl의 ESP_NOW_MSG_SLEEP_NOW 수신 시 호출(2026-08-10, 적응형 반응시간) — 이번
- *         사이클 남은 유휴여유를 기다리지 않고 cam_node_wake_window_done()이 즉시 true를
- *         반환하게 함 */
-void cam_node_note_sleep_now_requested(void);
+/** @brief 2026-08-26 — WAKE_HELLO/PAIR_ACK를 "보내기 직전"에 호출해서 SLEEP_NOW 대기 상태를
+ *         미리 깨끗하게 함(esp_now_cam.c 참고) — 순서 버그 수정: 이걸 전송 "후"에 하면 그
+ *         사이 도착한 진짜 SLEEP_NOW가 덮어써져 사라짐 */
+void cam_node_reset_sleep_now_state(void);
 
 /** @brief 2026-08-23 — 이벤트드리븐 재확인 신호(CAML에서 검증 후 이식). 페어링 상태 변화
- *         (on_channel_synced/on_channel_lost_sync), busy->idle 전환(mark_transfer_idle),
- *         SLEEP_NOW 수신 등 cam_node_wake_window_done()의 판정에 영향을 주는 이벤트가
- *         생길 때마다 호출 — app_main의 대기 루프가 세마포어로 이걸 기다리다가 즉시 깨서
- *         재판정함(50ms 고정 폴링 대신) */
+ *         (on_channel_synced), busy->idle 전환(mark_transfer_idle), SLEEP_NOW 수신 등
+ *         app_main의 웨이크 루프 판정에 영향을 주는 이벤트가 생길 때마다 호출 — 대기 루프가
+ *         세마포어로 이걸 기다리다가 즉시 깨서 재판정함(50ms 고정 폴링 대신) */
 void cam_node_signal_recheck(void);
 
-/** @brief 2026-08-23 — 채널 동기화가 끊겨 재스캔이 시작될 때 esp_now_cam.c의
- *         on_channel_lost_sync()가 호출 — 이전 스윕 완료 기록을 무효화(cam_node_wake_window_done()
- *         참고, 안 그러면 재스캔을 한 바퀴도 안 돌고 바로 자버림) */
+/** @brief 2026-08-25(CASK 재설계) — 폴백 채널스캔이 (재)시작될 때 esp_now_cam.c의
+ *         esp_now_cam_reconnect()가 호출 — 이전 스윕 완료 기록을 무효화. 예전엔
+ *         on_channel_lost_sync()가 불렀는데, 그 콜백 자체가 핑퐁과 함께 없어져서 호출부만
+ *         옮겨짐(역할은 동일) */
 void cam_node_note_scan_restarted(void);
 
 /* 2026-08-23(폐기됨) — cam_node_note_channel_synced()는 "동기화=이번 웨이크 완료"라는 잘못된

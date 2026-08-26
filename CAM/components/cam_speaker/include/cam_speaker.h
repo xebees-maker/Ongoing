@@ -11,8 +11,10 @@ extern "C" {
 /**
  * @brief 2026-08-23 — SD 로그 대신 스피커 소리로 캠 상태를 듣기 위한 모듈. 배터리 단독
  *        구동 조사용으로 이벤트를 구분한다(2026-08-23 사용자 지시로 6->7 재설계 —
- *        "채널 스캔"과 "광고 전송"을 별개 소리로 분리; 2026-08-25 사용자 지시로 7->10
- *        재설계 — 페어링 핸드셰이크 단계별 소리 추가). 각 이벤트는 cam_speaker_notify()로
+ *        "채널 스캔"과 "광고 전송"을 별개 소리로 분리; 2026-08-25 CASK 재설계로 7->10 ->
+ *        8로 — 페어링 핸드셰이크 단계별 소리를 추가했다가, 핑퐁 자체가 프로토콜에서
+ *        빠지면서 PING/PONG 이벤트도 같이 제거됨; 2026-08-26 — CASK의 실제 메시지들
+ *        (WAKE_HELLO~SLEEP_NOW_ACK)에도 소리를 붙여 8->13). 각 이벤트는 cam_speaker_notify()로
  *        큐에 넣고, 내부 전용 태스크가 순서대로 재생한다(호출측을 절대 블로킹하지 않음 —
  *        특히 esp_now recv 콜백/타이머 콜백에서 안전하게 부를 수 있어야 해서).
  *
@@ -21,7 +23,9 @@ extern "C" {
  *        3 SCAN_CHANNEL     미 0.1초    4 SWEEP_DONE      미 0.5초
  *        5 ADVERTISE_SENT   솔 0.1초    6 ADVERTISE_ACK   시 0.2초
  *        7 PAIR_REQUESTED   도 0.1초    8 PAIR_ACK        시 0.3초
- *        9 PING             도 0.2초    10 PONG           미 0.2초
+ *        9 WAKE_HELLO       미 0.1초    10 WAKE_HELLO_ACK 솔 0.2초
+ *        11 CAM_CONFIG      레 0.1초    12 SLEEP_NOW      파 0.1초
+ *        13 SLEEP_NOW_ACK   시 0.2초
  */
 typedef enum {
     SPK_EVT_POWERON_BATTERY = 0,  /* 1. Power on (battery) — 도 1s */
@@ -32,8 +36,11 @@ typedef enum {
     SPK_EVT_ADVERTISE_ACK,        /* 6. 광고 응답 수신 — 시 0.2s */
     SPK_EVT_PAIR_REQUESTED,       /* 7. PAIR_REQUEST 수신 — 도 0.1s */
     SPK_EVT_PAIR_ACK,             /* 8. PAIR_ACK 전송 — 시 0.3s */
-    SPK_EVT_PING,                 /* 9. 핑 — 도 0.2s */
-    SPK_EVT_PONG,                 /* 10. 퐁(수신) — 미 0.2s */
+    SPK_EVT_WAKE_HELLO,           /* 9. WAKE_HELLO 전송 — 미 0.1s (2026-08-26) */
+    SPK_EVT_WAKE_HELLO_ACK,       /* 10. WAKE_HELLO_ACK 수신 — 솔 0.2s (2026-08-26) */
+    SPK_EVT_CAM_CONFIG,           /* 11. CAM_CONFIG_SET 수신 — 레 0.1s (2026-08-26) */
+    SPK_EVT_SLEEP_NOW,            /* 12. SLEEP_NOW 수신 — 파 0.1s (2026-08-26) */
+    SPK_EVT_SLEEP_NOW_ACK,        /* 13. SLEEP_NOW_ACK 전송 — 시 0.2s (2026-08-26) */
     SPK_EVT_COUNT,
 } cam_speaker_event_t;
 

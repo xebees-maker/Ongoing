@@ -38,9 +38,11 @@ static QueueHandle_t     s_evt_queue = NULL;
  * 진짜로 초기화되는 경우에만 적용됨 — 그래서 이 기본값이 "리붓해도 항상 솔3,4"라는 요구를
  * 정확히 구현함(콘솔로 다시 켜거나 solo를 바꾸면 그 값이 다음 리셋 전까지 유지) */
 static RTC_DATA_ATTR volatile bool     s_enabled   = true;    /* 기본 켜짐(2026-08-24 변경) */
-/* 2026-08-25(사용자 지시, "따로 지시하기 전까지") — 기본 solo 3~10(POWERON 1,2만 제외) —
- * bit(N-1), N=3..10 -> 0x04|..|0x200 = 0x3FC */
-static RTC_DATA_ATTR volatile uint32_t s_solo_mask = 0x3FC;
+/* 2026-08-25(사용자 지시, "따로 지시하기 전까지") — 기본 solo 3~8(POWERON 1,2만 제외).
+ * CASK 재설계로 9,10(PING/PONG)이 이벤트 자체에서 빠지면서 0x3FC(3~10) -> 0xFC(3~8)로
+ * 자연히 축소. 2026-08-26 — CASK 메시지 소리(9~13) 추가하면서 같은 패턴으로 3~13까지
+ * 확장 — bit(N-1), N=3..13 -> 0xFC | (0x100|0x200|0x400|0x800|0x1000) = 0x1FFC */
+static RTC_DATA_ATTR volatile uint32_t s_solo_mask = 0x1FFC;
 static volatile bool s_playing = false;  /* speaker_task가 play_event() 실행 중인 동안만 true */
 
 static void play_tone_blocking(float freq_hz, uint32_t duration_ms)
@@ -79,7 +81,9 @@ static void play_tone_blocking(float freq_hz, uint32_t duration_ms)
 /* 2026-08-23 — 사용자 지정 매핑(도미솔시 — 도=C4 261.63Hz, 미=E4 329.63Hz, 솔=G4 392.00Hz,
  * 시=B4 493.88Hz) */
 #define NOTE_DO  261.63f
+#define NOTE_RE  293.66f
 #define NOTE_MI  329.63f
+#define NOTE_FA  349.23f
 #define NOTE_SOL 392.00f
 #define NOTE_SI  493.88f
 
@@ -118,11 +122,20 @@ static void play_event(cam_speaker_event_t event)
         case SPK_EVT_PAIR_ACK:             /* 8. 시 0.3초 */
             play_tone_blocking(NOTE_SI, 300);
             break;
-        case SPK_EVT_PING:                 /* 9. 도 0.2초 */
-            play_tone_blocking(NOTE_DO, 200);
+        case SPK_EVT_WAKE_HELLO:           /* 9. 미 0.1초 */
+            play_tone_blocking(NOTE_MI, 100);
             break;
-        case SPK_EVT_PONG:                 /* 10. 미 0.2초 */
-            play_tone_blocking(NOTE_MI, 200);
+        case SPK_EVT_WAKE_HELLO_ACK:       /* 10. 솔 0.2초 */
+            play_tone_blocking(NOTE_SOL, 200);
+            break;
+        case SPK_EVT_CAM_CONFIG:           /* 11. 레 0.1초 */
+            play_tone_blocking(NOTE_RE, 100);
+            break;
+        case SPK_EVT_SLEEP_NOW:            /* 12. 파 0.1초 */
+            play_tone_blocking(NOTE_FA, 100);
+            break;
+        case SPK_EVT_SLEEP_NOW_ACK:        /* 13. 시 0.2초 */
+            play_tone_blocking(NOTE_SI, 200);
             break;
         case SPK_EVT_COUNT:
             break;

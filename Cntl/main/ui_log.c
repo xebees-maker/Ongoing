@@ -50,7 +50,6 @@ static const ui_err_entry_t s_err_table[] = {
     { UI_ERR_SEND_DELETE_ALL_REQ, "전체삭제 요청 전송 실패" },
     { UI_ERR_REQUEST_BUSY,        "요청 무시됨(이미 수신중)" },
     { UI_ERR_NOT_PAIRED,          "페어링 끊김 — 재연결 시도" },
-    { UI_ERR_SLEEP_NOW_FAILED,    "SLEEP_NOW 전달 실패(재요청 반복)" },
     { UI_ERR_META_TOO_BIG,        "사진이 수신 버퍼보다 큼" },
     { UI_ERR_CHUNK_MISSING,       "청크 누락" },
     { UI_ERR_CRC_MISMATCH,        "CRC 불일치" },
@@ -66,6 +65,7 @@ static const ui_err_entry_t s_err_table[] = {
     { UI_ERR_DELETE_ALL_NORESPONSE, "전체삭제 접수 무응답(통신 끊김)" },
     { UI_ERR_DELETE_ALL_STOPPED,  "전체삭제 중단됨(완료 무응답)" },
     { UI_ERR_SET_TIME_NORESPONSE, "시각동기화 무응답" },
+    { UI_ERR_TX_QUEUE_FULL,       "전송 큐 가득 — 요청 버려짐" },
     { UI_ERR_FONT_FILE_MISSING,   "폰트 파일 없음" },
     { UI_ERR_FONT_BUF_ALLOC,      "폰트 버퍼 할당 실패" },
     { UI_ERR_FONT_FILE_OPEN,      "폰트 파일 열기 실패" },
@@ -215,9 +215,11 @@ static bool s_warn_pending = false;
 static int  s_warn_history[UI_WARN_HISTORY_CAP];
 static int  s_warn_history_count = 0;
 
-static const ui_err_entry_t s_warn_table[] = {
-    { UI_WARN_SLEEP_NOW_NORESPONSE, "SLEEP_NOW 재요청(유실 의심)" },
-};
+/* 2026-08-25 — 유일했던 항목(SLEEP_NOW 재요청)이 CASK 재설계로 제거되어 현재 비어있음 —
+ * 빈 배열은 sizeof(arr)/sizeof(arr[0])==0이 되어 아래 조회 루프의 "i < 0"이 컴파일 타임에
+ * 항상 거짓임이 증명돼 -Werror=type-limits로 빌드가 깨짐. 테이블 자체를 지워두고, 다음에
+ * 쓸 워닝 코드가 생기면 이 배열과 아래 ui_log_warn_desc()의 루프를 함께 되살일 것
+ * (ui_log.h의 UI_WARN_* 주석 참고) */
 
 static void push_warn_history_locked(int code)
 {
@@ -288,9 +290,7 @@ int ui_log_get_warn_history(int *out_codes, int max)
 
 const char *ui_log_warn_desc(int code)
 {
-    for (size_t i = 0; i < sizeof(s_warn_table) / sizeof(s_warn_table[0]); i++) {
-        if (s_warn_table[i].code == code) return s_warn_table[i].desc;
-    }
+    (void)code;  /* 2026-08-25 — 위 s_warn_table 삭제 주석 참고, 지금은 조회할 표가 없음 */
     return "알 수 없는 워닝";
 }
 

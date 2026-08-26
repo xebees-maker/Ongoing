@@ -39,6 +39,23 @@ typedef enum {
     NODE_CONN_PAIRED,          /* PAIR_ACK 받음 */
 } node_conn_state_t;
 
+/* 2026-08-26(사용자 지시) — 노드별 사용자 액션 대기 큐 항목 하나. req는 그대로 복사해
+ * 보관(esp_now_photo.c의 요청 구조체 중 가장 큰 것도 몇 바이트뿐이라 여유있게 잡음).
+ * ack_types는 esp_now_tx_enqueue()와 동일 계약(호출부의 static 배열 포인터를 그대로
+ * 보관 — 비동기로 나중에 읽히므로 임시 스택 배열이면 안 됨) */
+#define ESP_NOW_HUB_PENDING_ACTION_MAX_LEN   16
+#define ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH 4
+
+typedef struct {
+    uint8_t        req[ESP_NOW_HUB_PENDING_ACTION_MAX_LEN];
+    size_t         req_len;
+    const uint8_t *ack_types;
+    size_t         ack_types_count;
+    uint32_t       timeout_ms;
+    int            max_attempts;
+    const char    *what;
+} esp_now_hub_pending_action_t;
+
 typedef struct {
     char              name[ESP_NOW_LINK_NAME_LEN];
     uint8_t           mac[6];
@@ -76,26 +93,12 @@ typedef struct {
      * "광고 수신으로 트리거된 PAIR_REQUEST 전송을 몇 번까지 더 허용할지" 세는 용도로 남김
      * (0=대기 중 아님, esp_now_hub_request_pair()가 3으로 세팅) */
     uint8_t         pair_req_attempts_left;
-    /* 이번 페어링에서 이미 SLEEP_NOW를 보냈는가(2026-08-10) — PAIR_ACK 수신 시 false로
-     * 리셋, try_send_sleep_now()가 보낸 뒤 true로 세팅. 없으면 CAM이 실제로는 첫 신호
-     * 받고 바로 잠들었어도(확인 응답이 없는 fire-and-forget이라 Cntl은 모름) 다음
-     * ADVERTISE 올 때까지 계속 허공에 재전송하게 됨(실사용 중 발견, 무해하지만 낭비) */
-    bool            sleep_now_sent;
-    /* 2026-08-11 — 이번 페어링 사이클에서 CAM_CONFIG_ACK를 받았는가. PAIR_ACK 수신 시 false로
-     * 리셋, CAM_CONFIG_ACK 수신 시 true. SLEEP_NOW 전송 조건 중 하나(적응형 반응시간 경과 +
-     * 이 값이 true) — 예전엔 "페어링 후 1초 지났으면 설정 핸드셰이크가 끝났겠지"라고
-     * 추측(ADAPTIVE_SLEEP_PAIR_SETTLE_MS 고정값)했는데, CAM_CONFIG_SET이 이미 reliable
-     * stack(ACK+재시도)이라 실제 완료 이벤트를 그대로 쓸 수 있어서 추측을 없앰 */
-    bool            config_acked_this_cycle;
-    /* 2026-08-11 — CAM이 SLEEP_NOW_REQUEST(재요청)를 보낼 때마다 증가, PAIR_ACK 수신 시
-     * 0으로 리셋. 임계치(SLEEP_NOW_REQUEST_ERROR_THRESHOLD) 넘으면 워닝 대신 에러코드로
-     * 격상(recv_cb의 SLEEP_NOW_REQUEST 핸들러 참고) */
-    uint32_t        sleep_now_request_count;
     uint32_t        last_seen_ms;
-    /* Deep Sleep 사이클 통계(2026-08-10, ESP_NOW_MSG_DEEP_SLEEP_STATS) — 보낼 수 있는
-     * 노드(CAM)만 채워짐, has_deepsleep_stats=false면 아직 한 번도 못 받음(구버전 노드이거나
-     * 막 페어링됨). ds_cycle_count/ds_rwdt_catch_count는 Cntl이 리포트를 받을 때마다 직접
-     * 누적(CAM은 딥슬립마다 완전 재부팅이라 자기 사이클 수를 기억 못 함) */
+    /* Deep Sleep 사이클 통계 — 2026-08-25 CASK 재설계로 예전 ESP_NOW_MSG_DEEP_SLEEP_STATS
+     * 대신 매 웨이크의 ESP_NOW_MSG_WAKE_HELLO에 실려 옴(필드 이름/의미는 그대로 유지, 값의
+     * 출처만 바뀜). 보낼 수 있는 노드(CAM)만 채워짐, has_deepsleep_stats=false면 아직 한
+     * 번도 못 받음(막 페어링됨). ds_cycle_count/ds_rwdt_catch_count는 Cntl이 리포트를 받을
+     * 때마다 직접 누적(CAM은 딥슬립마다 완전 재부팅이라 자기 사이클 수를 기억 못 함) */
     bool            has_deepsleep_stats;
     uint32_t        ds_cycle_count;
     /* 직전에 실제로 잔 시간(초) — 누적 아님, 매 리포트마다 그대로 덮어씀(2026-08-10, 사용자
@@ -106,14 +109,7 @@ typedef struct {
     uint8_t         ds_last_wake_reason;
     uint32_t        ds_last_awake_uptime_ms;
     uint32_t        ds_last_sleep_interval_sec;
-    /* 2026-08-10 — try_send_sleep_now()가 SLEEP_NOW를 보낼 때 판단 근거를 여기 남겨둠 —
-     * 통계탭 판넬에 자체 줄로(사용자 지시, -mm:ss와 함께) 표시하려는 것. sleep_now_send_count는
-     * ds_cycle_count와 같은 방식의 단조증가 세대번호 — refresh_power_panel()이 이게 바뀔 때만
-     * 새 줄을 추가(안 그러면 안 바뀐 값을 매 틱마다 다시 찍게 됨) */
-    uint32_t        last_sleep_now_elapsed_ms;
-    uint32_t        last_sleep_now_threshold_ms;
-    uint32_t        sleep_now_send_count;
-    /* 2026-08-22 — 배터리 잔량(반응형 주기에 실려 옴, DEEP_SLEEP_STATS 재사용). CAM은 mV까지만
+    /* 2026-08-22 — 배터리 잔량(WAKE_HELLO에 실려 옴). CAM은 mV까지만
      * 보내고, %%는 Cntl이 받는 즉시 battery_mv_to_pct()로 계산해서 채움(공용 배터리 커브) —
      * has_deepsleep_stats로 유효여부 판단(별도 플래그 없음, 같은 리포트에 실려오므로).
      * battery_adc_raw는 CH32V003 ADC 비트폭/기준전압 미확인 상태의 진단/실측대조용
@@ -121,6 +117,14 @@ typedef struct {
     uint16_t        battery_adc_raw;
     uint16_t        battery_mv;
     uint8_t         battery_pct;
+
+    /* 2026-08-26(사용자 지시) — 사용자 액션(사진요청/촬영/목록/삭제/전체삭제)을 노드별로
+     * 대기시켜뒀다가, CASK 사이클(WAKE_HELLO 처리)에서 중앙집중으로 하나씩 꺼내 보냄 —
+     * esp_now_photo.c의 각 함수가 "지금 보낼 수 있나"를 따로 확인할 필요가 없어짐(그 판단은
+     * 여기 한 곳, WAKE_HELLO 핸들러로 모임). 링버퍼 — 가득 차면 가장 오래된 것부터 버림 */
+    esp_now_hub_pending_action_t action_queue[ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH];
+    int             action_queue_head;   /* 다음에 꺼낼 위치 */
+    int             action_queue_count;
 } esp_now_hub_node_t;
 
 void esp_now_hub_init(void);
@@ -172,10 +176,22 @@ typedef enum {
 hub_conn_state_t esp_now_hub_get_conn_state(const uint8_t *mac);
 
 /* 적응형 반응시간(2026-08-10) — esp_now_photo.c의 5개 사용자 액션 함수(지금촬영/목록갱신/
- * 삭제/전체삭제/사진선택-fetch)가 호출. 마지막 호출 시각으로부터
- * device_config_get_adaptive_response_sec() 이상 조용하면 esp_now_hub 내부 타이머가 현재
- * 페어링된 CAM에 SLEEP_NOW를 보냄 */
+ * 삭제/전체삭제/사진선택-fetch)가 호출. 그냥 타임스탬프만 갱신함(2026-08-25 CASK 재설계 —
+ * 예전엔 이 호출이 능동적 타이머를 다시 무장해서, 그 타이머가 다 되면 모든 노드를 순회하며
+ * SLEEP_NOW를 "먼저" 보내러 갔음. 이제 그 판단은 CASK를 만드는 바로 그 순간(WAKE_HELLO
+ * 수신 시점, send_cask_sleep_now() 참고)에 이 타임스탬프를 확인하는 걸로 대체됨 — 별도
+ * 타이머 자체가 없어짐, 순수 반응형(pull)) */
 void esp_now_hub_note_user_action(void);
+
+/* 2026-08-26(사용자 지시) — 사용자 액션을 노드별 대기 큐에 넣음(esp_now_photo.c의 5개 액션
+ * 함수가 호출). 지금 이 노드가 붙어있는지 여기서 확인 안 함 — 다음 WAKE_HELLO의 CASK
+ * "할일" 단계에서 esp_now_hub.c가 큐를 확인해 하나씩 꺼내 보냄(중앙집중 판단, 여기저기서
+ * 반복 확인할 필요 없음). req/req_len은 그대로 복사되어 보관됨(ESP_NOW_HUB_PENDING_ACTION_MAX_LEN
+ * 이하만 가능). ack_types는 esp_now_tx_enqueue()와 동일 계약(static 배열 필수 — 나중에
+ * 비동기로 읽힘). 큐가 가득 차면 가장 오래된 항목을 버리고 새로 넣음 */
+void esp_now_hub_queue_action(const uint8_t *mac, const void *req, size_t req_len,
+                               const uint8_t *ack_types, size_t ack_types_count,
+                               uint32_t timeout_ms, int max_attempts, const char *what);
 
 /* 2026-08-08 재설계 — CAM/SENS 원격 설정은 이제 device_config.h가 값의 주인(영구저장),
  * 여기 두 함수는 "값을 바꾸고 + 지금 페어링된 대상에게 즉시 반영"까지 한 번에 처리하는

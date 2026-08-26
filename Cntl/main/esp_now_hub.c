@@ -16,7 +16,6 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_log.h"
-#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -50,13 +49,6 @@ static const char *TAG = "esp_now_hub";
 
 static const uint8_t s_broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
-/* 2026-08-23 — 부팅마다 새로 생성되는 랜덤값(esp_now_hub_init에서 1회). ADVERTISE_ACK/
- * CHANNEL_PONG에 매번 실어 보내서, 노드가 "Cntl이 리붓해서 날 잊었는지"를 HUB_RESET
- * 브로드캐스트(수신 불확실) 대신 이미 신뢰성 있는 주기적 PING/PONG 왕복으로 능동적으로
- * 확인할 수 있게 함(esp_now_link.h의 hub_boot_id 필드 주석 참고, CAML/CNTLL에서 검증 후
- * 이식 — project_caml_bat_en_latch_missing_resolved 메모리 참고) */
-static uint32_t s_boot_id = 0;
-
 static esp_now_hub_node_t s_nodes[ESP_NOW_HUB_MAX_NODES];
 static int                s_node_count = 0;
 
@@ -69,83 +61,69 @@ static SemaphoreHandle_t s_nodes_mutex = NULL;
 /* 적응형 반응시간(2026-08-10) — 마지막 사용자 조작 시각(esp_now_photo.c의 5개 액션 함수가
  * esp_now_hub_note_user_action()으로 갱신). 전역 하나로 충분 — 지금은 CAM이 보통 1대라
  * esp_now_hub_bench_start()/apply_response_interval_sec()이 이미 쓰는 단순화와 동일 원칙.
- * 2026-08-11 재설계 — 예전엔 500ms마다 "지났나?" 폴링했는데, esp_timer_start_once로 원샷
- * 타이머를 걸고 조작이 있을 때마다 esp_timer_restart로 카운트다운을 리셋하는 방식으로
- * 전환(사용자 지시) — 폴링/경과시간 계산 자체가 없어짐. s_last_user_action_ms는 이제 로그
- * 표시용(last_sleep_now_elapsed_ms 계산)으로만 남음 */
+ * 2026-08-25(CASK 재설계) — 예전엔 이 값을 별도 원샷 타이머(adaptive_deadline_timer)가
+ * 소비해서 "타이머가 다 되면 모든 노드에 SLEEP_NOW를 먼저 보내러 가는" 능동적(push) 구조
+ * 였음. 이제 그 판단은 CASK를 만드는 바로 그 순간(WAKE_HELLO 수신, send_cask_sleep_now()
+ * 참고)에 이 타임스탬프를 확인하는 순수 반응형(pull)으로 바뀜 — 별도 타이머 자체가
+ * 없어짐 */
 static uint32_t s_last_user_action_ms = 0;
-static esp_timer_handle_t s_adaptive_deadline_timer = NULL;
-/* true = 마지막 리셋 이후 적응형 반응시간만큼 조용히 흘렀음(원샷 타이머가 끝까지 살아서
- * 콜백이 불림). note_user_action()이 다시 리셋할 때마다 false로 */
-static bool s_adaptive_deadline_elapsed = false;
-
-static void try_send_sleep_now(esp_now_hub_node_t *n);  /* 전방 선언 — CAM_CONFIG_ACK 핸들러에서도 씀 */
-
-static void adaptive_deadline_cb(void *arg)
-{
-    (void)arg;
-    s_adaptive_deadline_elapsed = true;
-    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-    for (int i = 0; i < s_node_count; i++) {
-        try_send_sleep_now(&s_nodes[i]);
-    }
-    xSemaphoreGive(s_nodes_mutex);
-}
 
 void esp_now_hub_note_user_action(void)
 {
     s_last_user_action_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    s_adaptive_deadline_elapsed = false;
-    if (s_adaptive_deadline_timer) {
-        esp_timer_stop(s_adaptive_deadline_timer);  /* 안 돌고 있었으면 ESP_ERR_INVALID_STATE, 무해 */
-        uint32_t threshold_us = device_config_get_adaptive_response_sec() * 1000000U;
-        esp_timer_start_once(s_adaptive_deadline_timer, threshold_us);
-    }
 }
 
-/* SLEEP_NOW 전송 조건 — 오직 적응형 반응시간 경과(s_adaptive_deadline_elapsed) 하나뿐.
- * 2026-08-11 재설계(사용자 지시) — 예전엔 CAM_CONFIG_ACK 수신도 조건에 넣었는데("설정
- * 핸드셰이크가 끝나야 재운다"), 사용자가 이건 원래 의도와 다르다고 지적: "CNTL 슬립용
- * 타이머는 CAM의 config ack나 pairing 유지 통신과는 무관해야 되". 주된 명제는 "할 일 없는
- * 캠을 빠르게 계속 재우는 것" — CONFIG_ACK 자체는 사이클당 1회 통신일 뿐 슬립 여부와는
- * 무관하고, "할 일이 있다"는 신호는 이미 esp_now_hub_note_user_action()을 호출하는 기존
- * 5개 액션 함수(사진가져오기/삭제/지금촬영/목록갱신/전체삭제, 전송 중 청크 수신 포함)와
- * 사용자 터치가 전부 커버하고 있어서 별도 게이트가 필요 없음.
- * 이 함수는 두 시점에서 호출됨 — (1) 적응형 타이머 자체가 만료되는 순간(adaptive_deadline_cb)
- * (2) 캠이 깨서 보고(DEEP_SLEEP_STATS)를 보내온 순간 — 그 둘 중 나중에 와서 조건을 만족시키는
- * 쪽에서 실제로 전송됨. 호출자가 이미 s_nodes_mutex를 들고 있어야 함.
- * sleep_now_sent로 사이클당 1회만 보냄 — n->paired는 CAM이 다음 웨이크에 ADVERTISE를 다시
- * 보내야만 내려가는 필드라 딥슬립 구간 내내 true로 남아있어서, 이 가드가 없으면 이미 잠든
- * CAM에게 계속 허공에 재전송하게 됨(2026-08-10 실사용 중 발견) */
-static void try_send_sleep_now(esp_now_hub_node_t *n)
+/* 2026-08-25(CASK 재설계), 2026-08-26 조건 추가(사용자 지시) — WAKE_HELLO 수신 시 CASK의
+ * 마지막 단계로 호출(recv_cb 참고). sleep_sec을 실제 응답성 값으로(=진짜 딥슬립) 보내는
+ * 조건은 셋 다 동시에 참일 때뿐: (1) 최근 사용자 조작이 없고(적응형 반응시간 밖) (2) 응답성
+ * 자체가 0(Live 모드)이 아니고 (3) 이 노드와 진행 중인 통신(트랜잭션)이 없음. 셋 중 하나라도
+ * 아니면 sleep_sec=0 — "통신 중엔 안 재운다"는 원칙(사진 요청 등 CASK "할일"의 접수 ack와
+ * 진짜 완료가 다른 경우까지 포함, esp_now_photo_is_transacting_with() 참고). (2)는 별도
+ * 분기 없이 else 값 자체가 0이라 자연히 흡수됨 */
+static void send_cask_sleep_now(esp_now_hub_node_t *n)
 {
-    if (n->kind != HUB_NODE_KIND_CAM || n->conn_state != NODE_CONN_PAIRED) return;
-    /* 2026-08-11, 사용자 지시 — 응답성 0("즉시"/Live)이면 애초에 안 재움. "즉시"는 짧은
-     * 주기로 반복 취침한다는 뜻이 아니라 딥슬립 자체를 안 한다는 뜻(사용자: "1초=0초=즉시
-     * 인거라 캠을 안재우겠다는 건데") */
-    if (device_config_get_response_interval_sec() == 0) return;
-    if (n->sleep_now_sent) return;
-    if (!s_adaptive_deadline_elapsed) return;
-
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    /* 2026-08-10 — 판단 근거를 노드에 저장(로그 대신 통계탭 사이클 줄에 같이 표시, 사용자
-     * 지시 — 로그는 스크롤돼서 놓치기 쉬움). refresh_power_panel()이 다음 리포트 때 같이 찍음 */
-    n->last_sleep_now_elapsed_ms   = now_ms - s_last_user_action_ms;
-    n->last_sleep_now_threshold_ms = device_config_get_adaptive_response_sec() * 1000U;
-    ESP_LOGI(TAG, "SLEEP_NOW -> %s: 조용%lums(임계값%lums)",
-             n->name, (unsigned long)n->last_sleep_now_elapsed_ms,
-             (unsigned long)n->last_sleep_now_threshold_ms);
-    n->sleep_now_send_count++;
-    /* 2026-08-10 — reliable stack으로 전환("chunk는 SR, 나머지는 reliable" 원칙). 호출부가
-     * 타이머 콜백이거나 ESP-NOW recv 콜백이라 여기서 블로킹 재시도(esp_now_reliable_request)를
-     * 직접 부르면 안 되고, 기존 관례대로 큐잉만 하고 실제 재시도는 esp_now_tx 태스크가 함 */
+    uint32_t quiet_ms = now_ms - s_last_user_action_ms;
+    uint32_t threshold_ms = device_config_get_adaptive_response_sec() * 1000U;
+    bool transacting = esp_now_photo_is_transacting_with(n->mac);
+    uint32_t sleep_sec = (quiet_ms < threshold_ms || transacting)
+        ? 0 : device_config_get_response_interval_sec();
+
+    ESP_LOGI(TAG, "SLEEP_NOW -> %s: sleep_sec=%u(조용%lums/임계값%lums/통신중=%d)",
+             n->name, (unsigned)sleep_sec, (unsigned long)quiet_ms, (unsigned long)threshold_ms, (int)transacting);
+
     esp_now_sleep_now_t msg = {
-        .version  = ESP_NOW_LINK_VERSION,
-        .msg_type = ESP_NOW_MSG_SLEEP_NOW,
+        .version   = ESP_NOW_LINK_VERSION,
+        .msg_type  = ESP_NOW_MSG_SLEEP_NOW,
+        .sleep_sec = sleep_sec,
     };
     static const uint8_t s_sleep_now_ack_types[] = { ESP_NOW_MSG_SLEEP_NOW_ACK };
     esp_now_tx_enqueue(n->mac, &msg, sizeof(msg), s_sleep_now_ack_types, 1, 300, 3, "SLEEP_NOW");
-    n->sleep_now_sent = true;
+}
+
+/* 2026-08-25(CASK 재설계) — CNTL의 능동적 생존판단. 예전엔 last_seen_ms 타임아웃이
+ * esp_now_hub_get_nodes()(화면 목록 필터)에서만 수동적으로 쓰여서, 실제 conn_state는
+ * 안 바뀐 채 화면에서만 사라지는 어긋남이 있었음 — "CAM이 CNTL 살아있나 확인하던 걸
+ * (핑퐁), CNTL이 CAM 살아있나 확인하는 걸로 뒤집는다"는 설계의 CNTL쪽 절반. 노드 종류
+ * 구분 없이 전부 훑음(사용자 지시: "모든 노드는 같은 구조로 CNTL에 붙을 거라서 CNTL은
+ * 하나의 타이머와 디스패처로 모두 연동") — 1초 주기, 노드 수와 무관하게 타이머 하나 */
+static esp_timer_handle_t s_liveness_sweep_timer = NULL;
+#define LIVENESS_SWEEP_INTERVAL_US (1 * 1000 * 1000)
+
+static void liveness_sweep_cb(void *arg)
+{
+    (void)arg;
+    uint32_t now_ms     = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t timeout_ms = esp_now_hub_node_timeout_ms();
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_node_count; i++) {
+        esp_now_hub_node_t *n = &s_nodes[i];
+        if (n->conn_state == NODE_CONN_PAIRED && now_ms - n->last_seen_ms > timeout_ms) {
+            ESP_LOGW(TAG, "%s 무응답(%us 이상) — PAIRED에서 강등", n->name, (unsigned)(timeout_ms / 1000));
+            n->conn_state = NODE_CONN_ORPHAN;
+        }
+    }
+    xSemaphoreGive(s_nodes_mutex);
 }
 
 static hub_node_kind_t classify_name(const char *name)
@@ -176,6 +154,59 @@ static esp_now_hub_node_t *find_node(const uint8_t *mac)
         if (memcmp(s_nodes[i].mac, mac, 6) == 0) return &s_nodes[i];
     }
     return NULL;
+}
+
+/* 2026-08-26(사용자 지시) — 노드별 사용자 액션 대기 큐. esp_now_photo.c의 5개 액션 함수가
+ * 여기 넣기만 하고, 실제로 언제 내보낼지는 WAKE_HELLO 핸들러(아래)가 CASK의 "할일" 단계로
+ * 중앙집중 판단함 */
+void esp_now_hub_queue_action(const uint8_t *mac, const void *req, size_t req_len,
+                               const uint8_t *ack_types, size_t ack_types_count,
+                               uint32_t timeout_ms, int max_attempts, const char *what)
+{
+    if (req_len > ESP_NOW_HUB_PENDING_ACTION_MAX_LEN) {
+        ESP_LOGE(TAG, "액션 큐잉 실패(%s) — 페이로드 %u > %u", what, (unsigned)req_len,
+                 (unsigned)ESP_NOW_HUB_PENDING_ACTION_MAX_LEN);
+        return;
+    }
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    esp_now_hub_node_t *n = find_or_add_node(mac);
+    if (!n) {
+        xSemaphoreGive(s_nodes_mutex);
+        ESP_LOGW(TAG, "액션 큐잉 실패(%s) — 노드 테이블 가득", what);
+        return;
+    }
+    /* 링버퍼 가득 — 가장 오래된(head) 항목을 밀어내고 새로 넣음(무한 적체 방지, 사용자
+     * 조작이 큐 용량보다 훨씬 빠르게 쌓이는 건 비정상 상황이라 오래된 것부터 버리는 게 맞음) */
+    int idx;
+    if (n->action_queue_count < ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH) {
+        idx = (n->action_queue_head + n->action_queue_count) % ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH;
+        n->action_queue_count++;
+    } else {
+        idx = n->action_queue_head;
+        n->action_queue_head = (n->action_queue_head + 1) % ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH;
+        ESP_LOGW(TAG, "%s 액션 큐 가득 — 가장 오래된 항목 버림", n->name);
+    }
+    esp_now_hub_pending_action_t *slot = &n->action_queue[idx];
+    memcpy(slot->req, req, req_len);
+    slot->req_len         = req_len;
+    slot->ack_types       = ack_types;
+    slot->ack_types_count = ack_types_count;
+    slot->timeout_ms      = timeout_ms;
+    slot->max_attempts    = max_attempts;
+    slot->what            = what;
+    xSemaphoreGive(s_nodes_mutex);
+    ESP_LOGI(TAG, "액션 큐잉됨(%s) — %s 대기열 %d개", what, n->name, n->action_queue_count);
+}
+
+/* CASK "할일" 단계에서 호출(s_nodes_mutex를 이미 쥔 상태로 불림) — 있으면 하나 꺼내고 true,
+ * 없으면 false. 실제 전송은 호출부(WAKE_HELLO 핸들러)가 esp_now_tx_enqueue()로 함 */
+static bool dequeue_pending_action_locked(esp_now_hub_node_t *n, esp_now_hub_pending_action_t *out)
+{
+    if (n->action_queue_count == 0) return false;
+    *out = n->action_queue[n->action_queue_head];
+    n->action_queue_head = (n->action_queue_head + 1) % ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH;
+    n->action_queue_count--;
+    return true;
 }
 
 static void add_peer_if_needed(const uint8_t *mac)
@@ -219,6 +250,10 @@ static void push_cam_config_to(const uint8_t *mac)
         .aec_enable             = device_config_get_aec_enable() ? 1 : 0,
         .xclk_mhz               = device_config_get_xclk_mhz(),
         .nack_max_rounds        = device_config_get_nack_max_rounds(),
+        /* 2026-08-25(CASK 재설계) — 예전 별도 SET_TIME 메시지를 대체. CONFIG가 이미 매
+         * 사이클 무조건 나가니 몇 바이트 더 싣는 게 별도 왕복 하나를 통째로 없애는 것보다
+         * 쌈(esp_now_link.h의 esp_now_cam_config_t.unix_time 주석 참고) */
+        .unix_time              = rtc_sync_get_unix_time(),
     };
     static const uint8_t s_config_ack_types[] = { ESP_NOW_MSG_CAM_CONFIG_ACK };
     s_config_apply_stage = HUB_CONFIG_APPLY_SENT;
@@ -248,13 +283,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (len < (int)sizeof(esp_now_advertise_t)) return;
         const esp_now_advertise_t *msg = (const esp_now_advertise_t *)data;
         if (msg->version != ESP_NOW_LINK_VERSION) return;
-
-        /* 2026-08-24(사용자 지시, 임시 검증 코드) — 조건 없이 무조건 찍음: CNTL이 광고를
-         * 실제로 받고 있는지 자체를 확인하기 위함. 확인 끝나면 제거할 것 */
-        ESP_LOGI(TAG, "[검증] ADVERTISE 수신: %s (MAC %02x:%02x:%02x:%02x:%02x:%02x, CH%d)",
-                 msg->name, info->src_addr[0], info->src_addr[1], info->src_addr[2],
-                 info->src_addr[3], info->src_addr[4], info->src_addr[5],
-                 (info && info->rx_ctrl) ? info->rx_ctrl->channel : -1);
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
         esp_now_hub_node_t *n = find_or_add_node(info->src_addr);
@@ -334,7 +362,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             esp_now_advertise_ack_t ack = {
                 .version      = ESP_NOW_LINK_VERSION,
                 .msg_type     = ESP_NOW_MSG_ADVERTISE_ACK,
-                .hub_boot_id  = s_boot_id,
             };
             esp_wifi_get_mac(CNTL_WIFI_IF, ack.hub_mac);
             esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
@@ -374,11 +401,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 n->ever_paired = true;  /* 2026-08-10 — 한 번 세팅되면 이번 부팅 세션 내내
                                             유지, ADVERTISE 핸들러의 자동 재페어링 판단에 씀 */
                 n->last_paired_ms = now_ms;  /* esp_now_hub_is_reconnect_stuck()의 기준시각 */
-                n->sleep_now_sent = false;  /* 새 웨이크 사이클 시작 — 이번 사이클에 한 번은
-                                                다시 보낼 수 있어야 함 */
-                n->config_acked_this_cycle = false;  /* 2026-08-11 — 이번 사이클 설정
-                                                          핸드셰이크는 아직 안 끝남 */
-                n->sleep_now_request_count = 0;  /* 2026-08-11 — 새 사이클, 재요청 카운트 리셋 */
                 became_paired = !was_paired;
                 first_ever_pairing = became_paired && !was_ever_paired;
                 strncpy(name_copy, n->name, sizeof(name_copy) - 1);
@@ -396,24 +418,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * 노드와 정말 처음 붙는 순간)에만 리셋해서 최초 연결 직후엔 반응시간을 주고,
              * 그 이후 순수 생존확인 사이클은 리셋 안 해서 할 일 없으면 곧바로 재울 수 있게 함 */
             if (first_ever_pairing) esp_now_hub_note_user_action();
-            /* CAM/Sens는 자체 RTC가 없어서 페어링될 때마다 Cntl 시각을 알려줌 — 이게
-             * 없으면 CAM의 시계가 부팅 시각(1970-01-01 근처)에 멈춰있어서 사진 파일명
-             * (촬영시각 유닉스 타임스탬프)이 전부 1월 1일로 찍힘(2026-08-01 실기에서 확인) */
-            /* 2026-08-21 — raw esp_now_send에서 reliable stack으로 전환(나머지 모든
-             * Cntl->노드 요청과 통일 — "CAM/Sens는 지능 없음, Cntl이 상태관리" 원칙 재확인
-             * 과정에서 SET_TIME만 유실 확인/재시도가 없다는 게 드러남). 유실돼도 다음
-             * 페어링 사이클에 자연복구되긴 하지만, 다른 모든 요청처럼 재시도+ACK 확인을
-             * 갖추는 게 일관성 있음 */
-            esp_now_set_time_t set_time = {
-                .version   = ESP_NOW_LINK_VERSION,
-                .msg_type  = ESP_NOW_MSG_SET_TIME,
-                .unix_time = rtc_sync_get_unix_time(),
-            };
-            static const uint8_t s_set_time_ack_types[] = { ESP_NOW_MSG_SET_TIME_ACK };
-            esp_now_tx_enqueue(info->src_addr, &set_time, sizeof(set_time), s_set_time_ack_types, 1, 500, 3, "시각동기화");
-            ESP_LOGI(TAG, "SET_TIME(%u) 큐잉됨", (unsigned)set_time.unix_time);
-
-            /* 2026-08-08 설계 — CAM/SENS는 설정을 로컬에 저장하지 않으므로, 페어링될
+            /* 2026-08-25(CASK 재설계) — 예전엔 여기서 SET_TIME을 별도 reliable 요청으로
+             * 보냈는데, 그 unix_time을 이제 push_cam_config_to()의 CAM_CONFIG_SET에 실어
+             * 보냄(esp_now_link.h의 esp_now_cam_config_t.unix_time 참고) — CAM/Sens는 자체
+             * RTC가 없어서 이게 없으면 시계가 부팅 시각(1970-01-01 근처)에 멈춰있음.
+             * 2026-08-08 설계 — CAM/SENS는 설정을 로컬에 저장하지 않으므로, 페어링될
              * 때마다 Cntl이 기억하고 있는 현재 설정값을 매번 다시 밀어줌(SET_TIME과 같은
              * 타이밍) — 그래야 재부팅한 CAM이 Kconfig 기본값이 아니라 사용자가 마지막으로
              * Apply한 값으로 곧바로 동작함 */
@@ -422,31 +431,67 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             }
         }
 
-    } else if (msg_type == ESP_NOW_MSG_CHANNEL_PING) {
-        /* 채널 추적(Layer 0) 생존확인(2026-08-04) — esp_now_channelsync.h 설계 참고. 페어링
-         * 여부와 무관하게 항상 즉시 응답함(생존확인은 페어링 승인과 별개 개념) — 노드가 아직
-         * 모르는 상대여도(테이블에 없어도) PONG은 보내야 노드 쪽 채널 동기화가 유지됨.
-         * 아는 노드면 last_seen_ms도 갱신 — 예전엔 PAIR_ACK(keepalive)가 이 역할을 했는데
-         * 이제 그건 진짜 페어링 확인 전용으로 되돌아갔으므로 이 PING이 그 자리를 대신함 */
-        if (len < (int)sizeof(esp_now_channel_ping_t)) return;
+    } else if (msg_type == ESP_NOW_MSG_WAKE_HELLO) {
+        /* 2026-08-25(CASK 재설계) — 알려진 CNTL로 곧장 체크인하는 캠의 "저 왔어요". 이걸
+         * 페어드로 인지하지 않으면(모르거나, 사용자가 언페어했거나, 이번 부팅 세션에
+         * 아직 한 번도 안 붙어봤으면) 조용히 무시 — 새 메시지 타입 없이, 캠 쪽 자기
+         * 재시도(3회)+폴백(전체 스캔)이 알아서 처리하게 둠(사용자 설계: "CNTL이 씹으면,
+         * 캠은 반응없음과 동일한 경로로 초기화") */
+        if (len < (int)sizeof(esp_now_wake_hello_t)) return;
+        const esp_now_wake_hello_t *hello = (const esp_now_wake_hello_t *)data;
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
         esp_now_hub_node_t *n = find_node(info->src_addr);
-        if (n) n->last_seen_ms = now_ms;
-        xSemaphoreGive(s_nodes_mutex);
+        if (!n || !n->ever_paired || n->user_unpaired) {
+            xSemaphoreGive(s_nodes_mutex);
+            return;
+        }
+        n->last_seen_ms    = now_ms;
+        n->conn_state      = NODE_CONN_PAIRED;
+        n->last_paired_ms  = now_ms;
+        n->has_deepsleep_stats        = true;
+        n->ds_cycle_count++;
+        if (hello->wake_reason == CAM_WAKE_REASON_RWDT) n->ds_rwdt_catch_count++;
+        n->ds_last_wake_reason         = hello->wake_reason;
+        n->ds_last_awake_uptime_ms     = hello->awake_uptime_ms;
+        n->ds_last_sleep_interval_sec  = hello->sleep_interval_sec;
+        n->ds_last_actual_sleep_sec    = hello->actual_last_sleep_sec;
+        /* 2026-08-22 — 배터리 잔량. %%는 여기서 공용 커브(battery_mv_to_pct(), Sens와 동일
+         * 상수)로 계산 — CAM은 mV까지만 보냄 */
+        n->battery_adc_raw = hello->battery_adc_raw;
+        n->battery_mv      = hello->battery_mv;
+        n->battery_pct     = (uint8_t)battery_mv_to_pct(hello->battery_mv);
+        ESP_LOGI(TAG, "WAKE_HELLO <- %s: 사이클#%lu wake=%u batt_raw=%u batt_mv=%u batt_pct=%u",
+                 n->name, (unsigned long)n->ds_cycle_count, (unsigned)hello->wake_reason,
+                 (unsigned)n->battery_adc_raw, (unsigned)n->battery_mv, (unsigned)n->battery_pct);
 
-        /* 2026-08-23 — 원래 여기 이 호출이 빠져있었음(CAML/CNTLL 조사 중 발견된 버그):
-         * 등록 안 된 피어로는 esp_now_send()가 실패함 — Cntl 리붓 직후처럼 이 노드가 아직
-         * 피어로 없는 상태에서 PING이 오면 PONG 자체가 못 나갈 수 있었음. ADVERTISE
-         * 핸들러와 동일하게 맞춤 */
+        /* WAKE_HELLO_ACK — 캠이 보낸 esp_now_reliable_request()의 응답 leg 그 자체(별도로
+         * 또 reliable을 감싸지 않음, SET_TIME_ACK/CAPTURE_STATUS_ACK와 동일 관례) */
         add_peer_if_needed(info->src_addr);
+        esp_now_wake_hello_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_WAKE_HELLO_ACK };
+        esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
 
-        esp_now_channel_pong_t pong = {
-            .version      = ESP_NOW_LINK_VERSION,
-            .msg_type     = ESP_NOW_MSG_CHANNEL_PONG,
-            .hub_boot_id  = s_boot_id,
-        };
-        esp_now_send(info->src_addr, (const uint8_t *)&pong, sizeof(pong));
+        /* CASK — 항상 고정 3단계(2026-08-26, 사용자 지시로 재설계): CONFIG(항상 먼저, 캠이
+         * 설정을 로컬에 저장 안 하므로 매번 필요) -> 할일(대기 큐에 있으면 그것, 없으면
+         * 명시적 CASK_WORK_NONE) -> SLEEP_NOW(항상 마지막). 패킷 수가 매번 똑같아야 캠이
+         * "이번엔 할일 메시지가 오는지 안 오는지" 추측할 필요가 없어짐(esp_now_hub_queue_action
+         * 주석 참고) */
+        if (n->kind == HUB_NODE_KIND_CAM) {
+            push_cam_config_to(info->src_addr);
+        }
+        esp_now_hub_pending_action_t action;
+        if (dequeue_pending_action_locked(n, &action)) {
+            esp_now_tx_enqueue(info->src_addr, action.req, action.req_len,
+                                action.ack_types, action.ack_types_count,
+                                action.timeout_ms, action.max_attempts, action.what);
+            ESP_LOGI(TAG, "CASK 할일 -> %s: %s (대기열 %d개 남음)", n->name, action.what, n->action_queue_count);
+        } else {
+            esp_now_cask_work_none_t none = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE };
+            static const uint8_t s_work_none_ack_types[] = { ESP_NOW_MSG_CASK_WORK_NONE_ACK };
+            esp_now_tx_enqueue(info->src_addr, &none, sizeof(none), s_work_none_ack_types, 1, 500, 3, "할일없음");
+        }
+        send_cask_sleep_now(n);
+        xSemaphoreGive(s_nodes_mutex);
 
     } else if (msg_type == ESP_NOW_MSG_BENCH_BLAST) {
         /* 처리량+유실률 벤치마크 수신(2026-08-04, 1시간 연속 실행 지원으로 재설계) — CAM이
@@ -543,93 +588,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 볼 방법이 없음 — capture_stage와 같은 이유로 여기서 별도 폴링 상태를 갱신 */
         if (len < (int)sizeof(esp_now_cam_config_ack_t)) return;
         s_config_apply_stage = HUB_CONFIG_APPLY_ACKED;
-        /* 2026-08-11 — SLEEP_NOW 조건에서 CONFIG_ACK를 뺐으므로(사용자 지시, try_send_sleep_now
-         * 참고) 여기선 더 이상 슬립을 트리거하지 않음. config_acked_this_cycle은 통계
-         * 로그(DEEP_SLEEP_STATS 수신 핸들러) 표시용으로만 남겨둠 */
-        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-        esp_now_hub_node_t *acked_node = find_node(info->src_addr);
-        if (acked_node) acked_node->config_acked_this_cycle = true;
-        xSemaphoreGive(s_nodes_mutex);
 
-    } else if (msg_type == ESP_NOW_MSG_DEEP_SLEEP_STATS) {
-        /* CHANNEL_PING과 같은 성격 — 노드가 그냥 페어링 완료 직후 1회 보내기만 함(ACK 없음).
-         * 페어링 안 된 노드도 테이블엔 있을 수 있어서(발견됨~페어링 사이) find_node로 없으면
-         * 조용히 버림 — CAM이 아직 안 붙은 CNTL에도 브로드캐스트할 이유가 없어서 이 경우는
-         * 실제로는 거의 안 옴(esp_now_cam.c가 페어링 완료 직후에만 보냄).
-         * ds_cycle_count/ds_rwdt_catch_count는 CAM이 안 보내는 값 — CAM은 매 사이클 완전
-         * 재부팅이라 스스로 누적을 못 하므로, Cntl이 리포트를 받을 때마다 직접 누적함
-         * (2026-08-10). ds_last_actual_sleep_sec은 반대로 누적 안 함(2026-08-10, 사용자
-         * 지시 — "이번 회차에 얼마 잤는지만 알면 됨") — 예전엔 여기서 stats->sleep_interval_sec
-         * (앞으로 잘 예정 시간, 아직 실행 안 됨)을 "이미 잔 시간"인 것처럼 누적하는 버그가
-         * 있었음(실사용 중 "방금 페어링됐는데 벌써 잤다고 나온다"는 지적으로 발견) —
-         * actual_last_sleep_sec(CAM이 RTC로 넘겨준 진짜 직전 수면시간)을 그대로 덮어씀 */
-        if (len < (int)sizeof(esp_now_deep_sleep_stats_t)) return;
-        const esp_now_deep_sleep_stats_t *stats = (const esp_now_deep_sleep_stats_t *)data;
-
-        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-        esp_now_hub_node_t *n = find_node(info->src_addr);
-        if (n) {
-            n->last_seen_ms               = now_ms;
-            n->has_deepsleep_stats        = true;
-            n->ds_cycle_count++;
-            n->ds_last_actual_sleep_sec   = stats->actual_last_sleep_sec;
-            if (stats->wake_reason == CAM_WAKE_REASON_RWDT) n->ds_rwdt_catch_count++;
-            n->ds_last_wake_reason        = stats->wake_reason;
-            n->ds_last_awake_uptime_ms    = stats->awake_uptime_ms;
-            n->ds_last_sleep_interval_sec = stats->sleep_interval_sec;
-            /* 2026-08-22 — 배터리 잔량, 반응형 주기(이 리포트)에 실어 옴. %%는 여기서 공용
-             * 커브(battery_mv_to_pct(), Sens와 동일 상수)로 계산 — CAM은 mV까지만 보냄 */
-            n->battery_adc_raw            = stats->battery_adc_raw;
-            n->battery_mv                 = stats->battery_mv;
-            n->battery_pct                = (uint8_t)battery_mv_to_pct(stats->battery_mv);
-            /* 2026-08-11 — 예전엔 이 수신 지점에 로그가 없어서 화면 전력판넬에서만 보이던
-             * 정보(연속으로 두 번 보고/두 번 SLEEP_NOW 같은 순서 이상 현상)를 시리얼로는
-             * 확인할 수 없었음 — CONFIG_ACK/SLEEP_NOW와 같은 스타일로 여기도 로그 추가 */
-            ESP_LOGI(TAG, "DEEP_SLEEP_STATS 수신 <- %s: 사이클#%lu wake=%u config_acked=%d sleep_now_sent=%d "
-                     "batt_raw=%u batt_mv=%u batt_pct=%u",
-                     n->name, (unsigned long)n->ds_cycle_count, (unsigned)stats->wake_reason,
-                     (int)n->config_acked_this_cycle, (int)n->sleep_now_sent,
-                     (unsigned)n->battery_adc_raw, (unsigned)n->battery_mv, (unsigned)n->battery_pct);
-            /* 2026-08-11 — 캠의 웨이크(보고) 도착 그 자체가 SLEEP_NOW 조건을 다시 확인해볼
-             * 계기 중 하나(사용자 지시: "캠이 웨이크를 보냈을 때 같은 조건이라면 또 즉시
-             * 슬립을 보내"). 적응형 타이머가 이미 만료돼있었으면(오래 조용한 뒤 뒤늦게
-             * 재페어링된 경우 등) 다음 타이머 틱을 기다릴 필요 없이 여기서 바로 보냄 —
-             * 확인만 하는 것이지 이 수신 자체가 타이머를 리셋시키진 않음(사용자 확인) */
-            try_send_sleep_now(n);
-        }
-        xSemaphoreGive(s_nodes_mutex);
-
-    } else if (msg_type == ESP_NOW_MSG_SLEEP_NOW_REQUEST) {
-        /* 2026-08-11 — CAM이 "페어링됐는데 SLEEP_NOW를 못 받았다"고 재요청(사용자 지시:
-         * 70초 자율취침 폴백 대신 이 프로토콜로 대체). 워닝으로 남기고, sleep_now_sent를
-         * 리셋해서 다시 시도 — 이전 시도가 진짜 유실됐다면 이번엔 성공할 수 있음.
-         * SLEEP_NOW_REQUEST_ERROR_THRESHOLD번 넘게 반복되면 재시도로도 안 풀리는
-         * 상태라고 보고 에러코드로 격상(사용자 지시: "CNTL이 이걸 못 보내는 상태면
-         * 에러코드로 표시").
-         * 2026-08-11 추가 — CNTL이 아직 idle 임계값에 도달 못 해서(할 일이 있어서) 정상적으로
-         * 슬립을 못 주는 중이면(s_adaptive_deadline_elapsed==false) 이 재요청은 "유실 의심"이
-         * 아니라 그냥 "아직 때가 안 됐다"는 정상 상황 — 워닝/카운트 없이 조용히 무시(사용자
-         * 지시: "CNTL이 정상적으로 슬립을 못 주는 상태(busy)에서는 그냥 씹어야겠는데" —
-         * 실사용 중 자동목록갱신처럼 CNTL이 바쁠 때 재요청이 계속 오는 게 확인돼서 발견) */
-        if (len < (int)sizeof(esp_now_sleep_now_t)) return;
-        if (!s_adaptive_deadline_elapsed) return;  /* 아직 idle 아님 — 정상, 조용히 무시 */
-        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-        esp_now_hub_node_t *req_node = find_node(info->src_addr);
-        if (req_node) {
-            req_node->sleep_now_request_count++;
-            ESP_LOGW(TAG, "SLEEP_NOW_REQUEST 수신 <- %s (%lu번째)",
-                     req_node->name, (unsigned long)req_node->sleep_now_request_count);
-            ui_log_add_warn(UI_WARN_SLEEP_NOW_NORESPONSE, "%s: SLEEP_NOW re-request (#%lu)",
-                             req_node->name, (unsigned long)req_node->sleep_now_request_count);
-#define SLEEP_NOW_REQUEST_ERROR_THRESHOLD 3
-            if (req_node->sleep_now_request_count >= SLEEP_NOW_REQUEST_ERROR_THRESHOLD) {
-                ui_log_add_err(UI_ERR_SLEEP_NOW_FAILED, "%s: SLEEP_NOW still not delivered after %d retries",
-                               req_node->name, SLEEP_NOW_REQUEST_ERROR_THRESHOLD);
-            }
-            req_node->sleep_now_sent = false;  /* 재시도 허용 */
-            try_send_sleep_now(req_node);
-        }
-        xSemaphoreGive(s_nodes_mutex);
     }
 }
 
@@ -719,11 +678,6 @@ static void wifi_bringup(void)
 
 void esp_now_hub_init(void)
 {
-    /* 2026-08-23 — 이번 부팅의 boot_id 생성(위 s_boot_id 주석 참고). ADVERTISE_ACK/PONG
-     * 전송보다 먼저 준비돼있어야 함 */
-    s_boot_id = esp_random();
-    ESP_LOGI(TAG, "boot_id 생성: 0x%08lx", (unsigned long)s_boot_id);
-
     /* recv_cb가 등록되기 전에 먼저 만들어둬야 함 — 등록 직후부터 다른 태스크에서
      * s_nodes[]를 건드릴 수 있음 */
     s_nodes_mutex = xSemaphoreCreateMutex();
@@ -747,36 +701,18 @@ void esp_now_hub_init(void)
     peer.encrypt = false;
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));
 
-    /* Cntl 재부팅 신호 브로드캐스트(2026-08-02, 타이밍 재수정 2026-08-03) — CAM/Sens가
-     * 소프트리셋 전에 이미 페어링돼 있었다면 Cntl의 노드 테이블은 방금 비워졌는데도 그쪽은
-     * 여전히 자기가 페어링된 줄 알고 ADVERTISE 없이 keepalive만 보냄(esp_now_link.h의
-     * ESP_NOW_MSG_HUB_RESET 주석 참고) — 그 상태론 재광고를 스스로 트리거할 방법이 없어서
-     * Cntl이 먼저 알려줘야 함.
-     * 원래 IP_EVENT_STA_GOT_IP(공유기 완전 연결 시점)에서 보냈는데, 이게 사용자 실제
-     * 워크플로우("항상 소프트리셋 -> 연결 -> 목록 -> 사진")와 충돌하는 레이스가 있었음
-     * (2026-08-03 실기에서 확인): 공유기 재연결이 느릴 때(인증 backoff 등, 실기에서
-     * "Association refused... comeback time" 확인된 적 있음) 사용자가 CAM과 방금 새로
-     * 페어링을 끝낸 뒤에야 이 브로드캐스트가 뒤늦게 나가서, 이번 부팅에서 막 정상적으로
-     * 맺어진 페어링을 "예전 거"로 오인하고 걷어차버림(사용자 지적: "연결됨으로 상태가
-     * 바뀌고... 목록을 가져왔잖아, 연결 됐던 거 아냐?"). 지금은 여기, ESP-NOW 자체가 막
-     * 켜진 시점(공유기 연결 여부와 무관, 부팅 극초반)에 보내서 사람이 화면을 터치해서
-     * 페어링할 수 있는 어떤 시점보다도 반드시 먼저 나가도록 함 — 802.11 채널 고정 자체는
-     * 공유기 인증 절차 초반(esp_wifi_connect 시작 시점)에 이미 이뤄지므로 채널 문제도
-     * 없음 */
-    esp_now_hub_reset_t reset_msg = {
-        .version  = ESP_NOW_LINK_VERSION,
-        .msg_type = ESP_NOW_MSG_HUB_RESET,
-    };
-    esp_err_t reset_err = esp_now_send(s_broadcast_addr, (const uint8_t *)&reset_msg, sizeof(reset_msg));
-    ESP_LOGI(TAG, "HUB_RESET 브로드캐스트: %s", esp_err_to_name(reset_err));
+    /* 2026-08-25(CASK 재설계) — 예전엔 여기서 HUB_RESET을 브로드캐스트해서, Cntl이 재부팅해도
+     * "아직 자기가 페어링된 줄 아는" 노드들을 강제로 재광고시켰음. 이제는 모든 재연결이
+     * 노드(캠) 주도라 이게 불필요해짐 — 재부팅한 Cntl은 다음 WAKE_HELLO를 그냥 "이 캠을
+     * 모르는 CNTL"로 조용히 무시하고, 캠은 자기 재시도+폴백으로 알아서 다시 찾아옴 */
 
-    /* 2026-08-11 — 원샷으로 생성만 해두고 여기선 안 돌림. 실제 시작은
-     * esp_now_hub_note_user_action()이 esp_timer_start_once로 처음 걸 때(최초 페어링 또는
-     * 진짜 사용자 조작 시점) — 그 전엔 조용함을 잴 기준 시각 자체가 없으므로 */
-    const esp_timer_create_args_t adaptive_deadline_args = {
-        .callback = adaptive_deadline_cb, .name = "adaptive_deadline",
+    /* 2026-08-25(CASK 재설계) — CNTL의 능동적 생존판단 스윕(send_cask_sleep_now 위쪽 참고).
+     * 노드 수와 무관하게 1초 주기 타이머 하나 */
+    const esp_timer_create_args_t sweep_args = {
+        .callback = liveness_sweep_cb, .name = "liveness_sweep",
     };
-    esp_timer_create(&adaptive_deadline_args, &s_adaptive_deadline_timer);
+    esp_timer_create(&sweep_args, &s_liveness_sweep_timer);
+    esp_timer_start_periodic(s_liveness_sweep_timer, LIVENESS_SWEEP_INTERVAL_US);
 
     ESP_LOGI(TAG, "ESP-NOW 허브 시작됨 (STA)");
 }
@@ -1021,17 +957,18 @@ void esp_now_hub_unpair(const uint8_t *mac)
     xSemaphoreGive(s_nodes_mutex);
     if (!n) return;
 
-    /* 피어를 지우기 전에 먼저 UNPAIR을 보내야 함(피어 삭제 후엔 유니캐스트가 안 나감) —
-     * 이게 없으면 노드가 자기 상태를 몰라서 계속 keepalive를 보냄(실기로 확인된 문제) */
+    /* 2026-08-25(CASK 재설계, 사용자 지시) — UNPAIR은 사용자의 실시간 조작이라 즉각·확실히
+     * 반영돼야 해서 reliable 스택으로 승격(예전엔 raw esp_now_send라, 유실되면 캠은 영원히
+     * 자기가 여전히 페어드인 줄 알았음 — 알려진 결함이었음). esp_now_tx_enqueue()는
+     * 비동기(큐잉만 하고 바로 리턴)라, 예전처럼 이 자리에서 곧바로 esp_now_del_peer()를
+     * 부르면 실제 전송(및 재시도)이 일어나기도 전에 피어가 사라져서 전송 자체가 실패하는
+     * 레이스가 생김 — 그래서 피어는 이제 안 지움(등록된 채로 남아도 기능상 무해, 최대
+     * ESP_NOW_HUB_MAX_NODES개뿐이라 자리 걱정도 없음) */
     esp_now_unpair_t msg = {
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_UNPAIR,
     };
-    esp_err_t err = esp_now_send(mac, (const uint8_t *)&msg, sizeof(msg));
-    ESP_LOGI(TAG, "UNPAIR -> %s: %s", name_copy, esp_err_to_name(err));
-
-    if (esp_now_is_peer_exist(mac)) {
-        esp_now_del_peer(mac);
-    }
-    ESP_LOGI(TAG, "연결 해제: %s", name_copy);
+    static const uint8_t s_unpair_ack_types[] = { ESP_NOW_MSG_UNPAIR_ACK };
+    esp_now_tx_enqueue(mac, &msg, sizeof(msg), s_unpair_ack_types, 1, 300, 3, "UNPAIR");
+    ESP_LOGI(TAG, "연결 해제: %s (UNPAIR 큐잉됨)", name_copy);
 }

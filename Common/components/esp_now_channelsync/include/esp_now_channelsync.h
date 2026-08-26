@@ -1,39 +1,29 @@
 #pragma once
 
 /**
- * 채널 추적(Channel-Sync) 레이어 — CNTL↔노드(CAM/Sens) 통신 신뢰성의 최하부 기반(2026-08-04).
+ * 채널 추적(Channel-Sync) 레이어 — CNTL↔노드(CAM/Sens) 채널 발견의 최하부 기반(2026-08-04,
+ * 2026-08-25 CASK 재설계로 범위 축소).
  *
  * 배경: hkhome 같은 실제 공유기는 도심 환경에서 CSA(Channel Switch Announcement)로 스스로
  * 채널을 바꿀 수 있다(실기에서 30분 벤치마크 도중 CH6->CH11 전환을 직접 관측함). Cntl은
  * WiFi STA 드라이버가 이 전환을 자동으로 따라가지만, 노드(CAM/Sens)는 Cntl에 실제로 접속한
- * 게 아니라 ESP-NOW로만 옆에 붙어있어서 이 전환을 알 방법이 전혀 없다 — 스스로 "지금도
- * 닿는지"를 계속 확인하는 수밖에 없다.
+ * 게 아니라 ESP-NOW로만 옆에 붙어있어서 이 전환을 알 방법이 전혀 없다 — 그래서 모르는(또는
+ * 잃어버린) CNTL을 찾아야 할 때 브로드캐스트 ADVERTISE로 채널을 스윕하며 다시 발견한다.
  *
- * 기존 keepalive(PAIR_ACK 재사용 + send_cb 물리계층 ACK 기반 실패 카운트)의 구조적 문제:
- *  1. "살아있음"과 "페어링됨"의 의미가 한 메시지(PAIR_ACK)에 섞여 있었음.
- *  2. 생존 판정 기준이 물리계층 ACK — 오늘 세션 초반에 이미 "이건 진짜 도달 확인이 아니다"라고
- *     확정했던 문제를 keepalive 쪽엔 반영 안 했었음.
- *  3. 상위 트래픽(사진 전송 중 플래그)이 하부 생존감지를 통째로 억제할 수 있었음(계층 위반) —
- *     30분 벤치마크 내내 채널 전환 감지가 잠들어 있었던 실제 원인.
+ * 2026-08-25 — 이 컴포넌트는 원래 CHANNEL_PING/PONG 상시 하트비트로 "이미 페어링된 연결이
+ * 계속 살아있는지"까지 감시했는데(2026-08-04/05 설계, CAM Deep Sleep 전환보다도 먼저 만들어짐),
+ * 그 부분은 완전히 제거됐다. 이유: CAM은 딥슬립 사이클마다 완전 재부팅되는 구조라 "세션 도중
+ * 계속 감시"할 필요가 애초에 옅고, 대신 매 웨이크의 WAKE_HELLO(esp_now_cam.c 참고)가 이미
+ * reliable 요청/응답이라 그 자체로 생존 확인을 겸한다 — project_cam_cntl_ping_pong_redesign_proposal
+ * 메모리 참고. 이제 이 컴포넌트는 순수하게 "모르는 CNTL을 채널 스윕으로 찾아서 채널에
+ * 고정시키는 것"까지만 책임진다.
  *
- * 이 컴포넌트는 그 세 가지를 원리적으로 다시 설계한다:
- *  - 생존 확인은 전용 메시지(CHANNEL_PING/PONG)만 근거로 삼는다 — 페어링/전송 상태와 완전히
- *    무관하게, 언제나 독립적으로 돈다.
- *  - 애플리케이션 레벨 왕복(PING 보내고 PONG 옴, 또는 esp_now_channelsync_notify_alive()로
- *    들어오는 다른 진짜 왕복)만 "진짜 도달"로 인정한다.
- *  - 이 루프는 어떤 상위 플래그로도 멈추거나 건너뛸 수 없다 — 그래서 API에 "일시정지" 같은
- *    건 아예 없음. (2026-08-05 — PING이 사진 청크 버스트와 같은 ESP-NOW 송신큐를 공유해서
- *    큐잉 지연으로 타임아웃되는 문제를 실기에서 발견: 사진 전송량이 많을수록 PING이 뒤로
- *    밀려 오탐이 남. 이 루프 자체를 멈추는 대신, 청크 전송이 만들어내는 DONE_ACK 같은
- *    "다른 진짜 왕복"도 생존 증거로 인정하도록 확장 — PING만이 유일한 증거였던 걸
- *    완화하되, "물리 ACK나 로컬 상태만으로 판단하지 않는다"는 원칙은 그대로 유지함 —
- *    notify_alive()로 들어오는 것도 반드시 실제 esp_now_reliable_request() 성공, 즉
- *    진짜 애플리케이션 레벨 왕복이어야 함)
- *
- * 상태: UNSYNCED(광고 브로드캐스트 + 채널 스캔 중) <-> SYNCED(채널 고정 + PING/PONG으로 생존
- * 확인 중). 페어링(PAIR_REQUEST/PAIR_ACK, 사용자 승인)은 이 레이어 위에서 별도로 이뤄지며,
- * on_lost_sync() 콜백을 받으면 호출부가 자신의 페어링 상태를 정리해야 한다(채널이 끊긴 채
- * "페어링됨"으로 남아있는 desync를 구조적으로 방지).
+ * 상태: UNSYNCED(광고 브로드캐스트 + 채널 스캔 중) <-> SYNCED(채널 고정됨). 페어링
+ * (PAIR_REQUEST/PAIR_ACK, 사용자 승인)은 이 레이어 위에서 별도로 이뤄진다. 2026-08-25 —
+ * 예전엔 여기서 "동기화가 끊겼다"를 판단해 on_lost_sync() 콜백으로 알렸는데(PING-fail/
+ * boot_id 불일치 기준), 그 판단 기준 자체가 핑퐁과 함께 없어짐 — 지금은 애초에 "페어링된
+ * 연결이 계속 살아있는가"를 이 레이어가 감시하지 않으므로 alert할 것도 없음. 페어링 이후의
+ * 생존 확인은 전부 상위(esp_now_cam.c의 WAKE_HELLO/CASK 흐름)의 몫이다.
  */
 
 #include <stdint.h>
@@ -49,45 +39,27 @@ extern "C" {
  * 매번 호출됨 */
 typedef void (*esp_now_channelsync_on_synced_cb_t)(uint8_t channel, const uint8_t *hub_mac);
 
-/* 연속 PING 무응답으로 동기화가 끊겼다고 판단한 순간 호출 — 호출부는 여기서 자신의 paired 등
- * 상위 상태를 정리해야 함(이 컴포넌트는 페어링 개념을 모름, 채널 동기화만 앎) */
-typedef void (*esp_now_channelsync_on_lost_sync_cb_t)(void);
-
 /* node_name/node_mac: ADVERTISE 브로드캐스트에 실어보낼 이 노드의 식별 정보(esp_now_link.h의
  * esp_now_advertise_t와 동일한 용도) */
 void esp_now_channelsync_init(const char *node_name, const uint8_t *node_mac,
-                               esp_now_channelsync_on_synced_cb_t on_synced,
-                               esp_now_channelsync_on_lost_sync_cb_t on_lost_sync);
+                               esp_now_channelsync_on_synced_cb_t on_synced);
 
-/* recv_cb(ESP-NOW 드라이버 태스크)에서 매 수신마다 호출 — ADVERTISE_ACK/CHANNEL_PONG만
- * 소비하고 그 외 타입은 조용히 무시하고 리턴하므로, 기존 dispatch 로직 맨 앞(또는 아무 데나)에
- * 한 줄만 추가하면 됨 */
+/* recv_cb(ESP-NOW 드라이버 태스크)에서 매 수신마다 호출 — ADVERTISE_ACK만 소비하고 그 외
+ * 타입은 조용히 무시하고 리턴하므로, 기존 dispatch 로직 맨 앞(또는 아무 데나)에 한 줄만
+ * 추가하면 됨 */
 void esp_now_channelsync_on_recv(const esp_now_recv_info_t *info, uint8_t msg_type,
                                   const uint8_t *data, int len);
 
 bool esp_now_channelsync_is_synced(void);
 
-/* PING 주기를 기본 500ms에서 바꿈(2026-08-08, 배터리 노드 절전 설정 연동용) — interval_ms=0이면
- * 기본값(500ms)으로 리셋. SYNCED 상태면 즉시 새 주기로 재시작, UNSYNCED면 다음 동기화 시
- * 이 값으로 시작함. PING_FAIL_THRESHOLD(3회)는 그대로라 "끊김 판정까지 걸리는 시간"도 이
- * 값에 비례해서 늘어남(의도된 동작 — 노드가 그만큼 뜸하게 확인하기로 한 것이므로) */
-void esp_now_channelsync_set_ping_interval_ms(uint32_t interval_ms);
+/* 2026-08-25 — 이미 init()된 상태에서 스캔을 다시 시작(재시도 등). 노드 이름/mac/콜백은
+ * 그대로 유지, 스캔만 재개(내부적으로 init()의 마지막 단계와 동일) */
+void esp_now_channelsync_resume_scan(void);
 
-/* CHANNEL_PING/PONG이 아닌 다른 경로로 방금 hub와의 실제 애플리케이션 레벨 왕복에 성공했음을
- * 알림(2026-08-05) — 예: esp_now_reliable_request()가 DONE_ACK/LIST_DONE_ACK 등을 실제로
- * 받은 직후. PING과 청크 버스트가 같은 ESP-NOW 송신큐를 공유해서(ESP-IDF에 우선순위 분리
- * API 없음, 확인함) 전송량이 많을 때 PING이 큐에 밀려 오탐(허위 "동기화 끊김")이 나는 문제를
- * 완화함 — "PING만이 유일한 증거"였던 걸 "진짜 왕복이면 뭐든 증거"로 확장. 물리 ACK나
- * "바쁘니까 봐준다"류 로컬 상태는 여전히 증거로 안 씀(호출부가 진짜 성공한 왕복에 대해서만
- * 불러야 함) — SYNCED 상태가 아니면 조용히 무시 */
-void esp_now_channelsync_notify_alive(void);
-
-/* 2026-08-23(사용자 지시) — 실제 페어링(PAIR_REQUEST/PAIR_ACK)이 완료된 순간 호출. 그 전까지는
- * 채널 동기화(ADVERTISE_ACK)만으로는 PING/PONG을 시작하지 않음 — PING은 "이미 페어링된 연결의
- * 생존 확인" 용도인데, 페어링 전에 시작하면 아직 계속 돌고 있는 채널 스캔(scan_timer)이 라디오를
- * 다른 채널로 계속 옮겨버려서 PING이 구조적으로 매번 실패 -> 동기화 끊김 판정 -> 재스캔 ->
- * 재동기화 -> 다시 PING 실패의 무한루프에 빠짐(실기로 발견). 이 함수가 스캔을 멈추고(그제서야
- * 채널에 눌러앉음) PING을 시작함 */
+/* 2026-08-23(사용자 지시) — 실제 페어링(PAIR_REQUEST/PAIR_ACK)이 완료된 순간 호출. 채널
+ * 동기화(ADVERTISE_ACK)만으로는 스캔을 안 멈춤(다른 CNTL도 찾을 기회를 주려고) — 이 함수가
+ * 그제서야 스캔을 멈추고 채널에 눌러앉힘. 2026-08-25 — PING 시작 역할은 CASK 재설계로
+ * 없어짐(핑퐁 자체가 제거됨), 이제 순수하게 "스캔 정지"만 함 */
 void esp_now_channelsync_notify_paired(void);
 
 /* 2026-08-23(사용자 지시) — "상태머신이면 상태에 따라 출력이 달라져야지": 지금까지는 광고
@@ -111,13 +83,12 @@ typedef void (*esp_now_channelsync_event_cb_t)(void);
  * 거의 같은 시점이지만 개념상 별개 이벤트로 분리(사용자 지시: "채널 스캔"과 "광고 전송"을
  * 소리로 구분해서 듣고 싶음).
  * 2026-08-25 — on_advertise_ack_received 추가: ADVERTISE_ACK를 실제로 받아 채널 동기화가
- * 확정된 순간(esp_now_channelsync_on_recv 내부, s_on_synced 직후) 호출 */
+ * 확정된 순간(esp_now_channelsync_on_recv 내부, s_on_synced 직후) 호출. 같은 날 CASK
+ * 재설계로 on_ping_sent/on_pong_received는 제거(핑퐁 자체가 없어짐) */
 void esp_now_channelsync_set_event_hooks(esp_now_channelsync_event_cb_t on_channel_scanned,
                                           esp_now_channelsync_event_cb_t on_advertise_sent,
                                           esp_now_channelsync_event_cb_t on_advertise_ack_received,
-                                          esp_now_channelsync_event_cb_t on_scan_sweep_done,
-                                          esp_now_channelsync_event_cb_t on_ping_sent,
-                                          esp_now_channelsync_event_cb_t on_pong_received);
+                                          esp_now_channelsync_event_cb_t on_scan_sweep_done);
 
 /* 2026-08-24(사용자 지시: "실제 송출될 때만 소리가 나도록") — esp_now_send()의 동기 리턴값은
  * "로컬 송신큐에 접수됐다"는 뜻일 뿐, 무선으로 진짜 나갔다는 확인이 아니다(그건

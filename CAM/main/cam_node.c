@@ -14,6 +14,7 @@
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
+#include <time.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -124,7 +125,15 @@ static const char *TAG = "cam_node";
 #define RWDT_LIVE_MODE_BUDGET_SEC (60 * 60)
 
 static uint32_t s_capture_interval_sec  = 0;  /* app_main에서 Kconfig 기본값으로 초기화 */
-static uint32_t s_response_interval_sec = CAM_RESPONSE_INTERVAL_SEC_DEFAULT;
+/* 2026-08-26 수정(사용자 실기 관찰: "I는 초기 10초인데, 10초 잠들면서는 0초로 보고하네") —
+ * 예전엔 일반 static이라 매 재부팅마다 CAM_RESPONSE_INTERVAL_SEC_DEFAULT(0)로 리셋됐음.
+ * WAKE_HELLO는 이번 사이클의 CONFIG를 받기 "전"에 보내지므로(esp_now_cam.c 참고), 재부팅
+ * 직후 첫 WAKE_HELLO는 늘 이 초기값을 그대로 보고함 — 순서버그가 고쳐져서 캠이 진짜로 매
+ * 사이클 재부팅하기 시작하자 "설정은 10인데 보고는 0"이 매번 반복되는 게 실기에서 드러남.
+ * RTC 메모리로 옮겨서 딥슬립 재부팅 경계 넘어 유지 — 처음 페어링 전(진짜 최초 부팅, RTC도
+ * 아직 0)엔 여전히 0(Live, 안전한 기본값)이고, 한 번이라도 CONFIG를 받은 뒤로는 마지막
+ * 적용값을 그대로 들고 다음 부팅까지 이어감 */
+static RTC_DATA_ATTR uint32_t s_response_interval_sec = CAM_RESPONSE_INTERVAL_SEC_DEFAULT;
 static esp_timer_handle_t s_capture_timer = NULL;
 
 /* 2026-08-21 — 세로줄(컬럼 고정패턴노이즈) 진단용. 센서 전원인가 기본값이 곧 "켬"(자동)이라
@@ -187,14 +196,11 @@ void cam_node_set_response_interval_sec(uint32_t sec)
     /* 2026-08-11 버그수정 — 예전엔 sec==0을 "설정 안 됨"으로 보고 조용히 기본값으로
      * 되돌렸는데(원래 0이 무의미한 값이던 시절 로직), 이제 0은 "즉시/Live"(딥슬립 자체를
      * 안 함)라는 진짜 의미가 있는 값이라 이 되돌림 때문에 CAM이 항상 기본값으로 동작하고
-     * cam_node_wake_window_done()의 0 분기가 절대 안 걸렸음 — SLEEP_NOW도 안 오는데
-     * 재요청 루프만 돌다가 RWDT 워치독에 강제 리셋되는 걸로 실기에서 발견됨. 부팅 시
+     * 응답성=0("즉시") 분기가 절대 안 걸렸음 — RWDT 워치독에 강제 리셋되는 걸로 실기에서
+     * 발견됨. 부팅 시
      * 최초 호출(app_main)은 항상 이미 초기화된 CAM_RESPONSE_INTERVAL_SEC_DEFAULT를 넘기므로
      * 이 코드에 0이 들어오는 건 CNTL이 "즉시" 설정을 보낸 경우뿐 — 그대로 저장 */
     s_response_interval_sec = sec;
-    /* 채널동기 PING 주기를 그대로 연동 — "응답성"이라는 하나의 설정값이 두 군데(CAM 자신의
-     * PING 주기 + Cntl의 무응답 타임아웃 산정)에 그대로 씀(2026-08-08 설계 대화 참고) */
-    esp_now_channelsync_set_ping_interval_ms(s_response_interval_sec * 1000);
     /* RWDT 재무장(2026-08-10) — 이 값이 이번 사이클의 실제 딥슬립 주기가 되므로, 워치독
      * 예산도 그 값 기준으로 다시 잡아야 함(부팅 직후엔 확정 전 추정치로 무장돼 있었음,
      * app_main 참고). 깨어있는 시간(페어링/설정수신/명령처리) 여유분으로 마진을 더함.
@@ -208,7 +214,7 @@ void cam_node_set_response_interval_sec(uint32_t sec)
         ? RWDT_LIVE_MODE_BUDGET_SEC
         : s_response_interval_sec + CONFIG_CAM_DEEPSLEEP_AWAKE_MARGIN_SEC;
     rwdt_guard_arm(rwdt_budget_sec);
-    ESP_LOGI(TAG, "응답성 설정 변경: %us (PING 주기 연동, RWDT 재무장 %us)",
+    ESP_LOGI(TAG, "응답성 설정 변경: %us (RWDT 재무장 %us)",
              (unsigned)s_response_interval_sec, (unsigned)rwdt_budget_sec);
 }
 
@@ -220,17 +226,30 @@ uint32_t cam_node_get_response_interval_sec(void) { return s_response_interval_s
  * send_deep_sleep_stats) 별도 로컬 enum을 안 둠 */
 static cam_wake_reason_t s_wake_reason = CAM_WAKE_REASON_OTHER;
 
-/* 2026-08-10 — "직전에 실제로 잔 시간"을 딥슬립 경계 너머로 전달하는 용도. esp_deep_sleep_start()
- * 직전에 이번에 쓸 응답성 값을 여기 적어두면, 다음 부팅(=이번 사이클이 끝난 뒤) 때 그대로
- * 남아있음(RTC 슬로우메모리는 딥슬립 중에도 전원 유지). CAM은 완전 재부팅이라 "얼마나 잤는지"를
- * 직접 잴 방법이 없는데, 타이머 기반 딥슬립은 설정한 시간만큼 정확히 자므로(RWDT 개입만
- * 없었다면) 이 값을 그대로 "실제 잔 시간"으로 신뢰할 수 있음 — wake_reason이 TIMER일 때만
- * (아래 send_deep_sleep_stats에서 판단) */
-static RTC_DATA_ATTR uint32_t s_last_actual_sleep_sec = 0;
+/* 2026-08-10 도입 -> 2026-08-26 수정(사용자 지시: "SLEPT는 그저 받은 SLEEP 시간 값을 보내고
+ * 있어, 실제로 잔 시간을 측정했어야 해") — 예전엔 esp_deep_sleep_start() 직전에 CNTL이
+ * 명령한 sleep_sec을 그대로 여기 적어뒀다가 다음 부팅 때 "실제로 잔 시간"이라며 그대로
+ * 보고했음. 이건 측정이 아니라 명령값 에코라, 혹시 딥슬립이 명령과 다르게 동작하는 버그가
+ * 생겨도 로그가 절대 그걸 드러낼 수 없는 구조였음(자기 입력을 그대로 돌려주니 항상
+ * "일치"로만 보임). 이제 진짜 벽시계 시간차를 잰다 — 잠들기 직전에 현재 unix time을
+ * s_sleep_entry_unix_time에 남겨두고(RTC 슬로우메모리라 딥슬립 중에도 유지, RTC 클럭
+ * 도메인 자체도 딥슬립 동안 계속 흐름), 다음 부팅 때 그 시각과 지금 시각의 차이를 계산 */
+static RTC_DATA_ATTR uint32_t s_last_actual_sleep_sec  = 0;
+static RTC_DATA_ATTR time_t   s_sleep_entry_unix_time  = 0;
 
+/* 2026-08-26 수정(사용자 지적: "안 자고도 이 전력 로그를 보내게 되는 경우는?") — 이 값은
+ * 부팅 시작 시점에 딱 한 번만 계산되는데(위 capture_wake_reason() 참고), 같은 부팅 안에서
+ * WAKE_HELLO를 여러 번 보내면(재시도 루프 등) 실제로 안 잤는데도 "그 부팅 전 마지막으로
+ * 잔 시간"을 매번 그대로 반복 보고하게 됨 — CNTL 전력 로그에 안 잔 사이클도 SL이 찍히는
+ * 버그. AW(누적치 버그)와 같은 종류라, 같은 해법: 한 번 보고하면 소비(consume)하고 지움 —
+ * 다음 WAKE_HELLO부턴 진짜 새로 잔 게 없으면 0(호출부가 딱 하나뿐이라 안전, esp_now_cam.c
+ * 참고) */
 uint32_t cam_node_get_last_actual_sleep_sec(void)
 {
-    return (s_wake_reason == CAM_WAKE_REASON_TIMER) ? s_last_actual_sleep_sec : 0;
+    if (s_wake_reason != CAM_WAKE_REASON_TIMER) return 0;
+    uint32_t v = s_last_actual_sleep_sec;
+    s_last_actual_sleep_sec = 0;
+    return v;
 }
 
 static void capture_wake_reason(void)
@@ -248,27 +267,23 @@ static void capture_wake_reason(void)
         s_wake_reason = CAM_WAKE_REASON_OTHER;
     }
     ESP_LOGI(TAG, "웨이크 원인 판정: reset_reason=%d -> wake_reason=%d", rr, s_wake_reason);
+
+    /* 실측 — 타이머 웨이크일 때만 의미 있음(POWERON/RWDT는 어차피 getter가 0 반환).
+     * s_sleep_entry_unix_time==0이면 이번이 첫 사이클(재플래시 등으로 RTC가 막 초기화됨)
+     * 이라 비교 기준이 없으므로 건너뜀 */
+    if (s_wake_reason == CAM_WAKE_REASON_TIMER && s_sleep_entry_unix_time != 0) {
+        time_t now = time(NULL);
+        s_last_actual_sleep_sec = (now > s_sleep_entry_unix_time)
+            ? (uint32_t)(now - s_sleep_entry_unix_time) : 0;
+    }
 }
 
 uint8_t cam_node_get_wake_reason(void) { return (uint8_t)s_wake_reason; }
 
-/* "지금 자도 되는가" 판정에 쓰는 유휴 타임스탬프(2026-08-10) — recv_cb가 의미있는 메시지를
- * 처리할 때마다 cam_node_note_activity()로 갱신됨(esp_now_cam.c 참고) */
-static uint32_t s_last_activity_ms = 0;
+/* 2026-08-10 도입 -> 2026-08-26 삭제 — CASK_SILENCE_TIMEOUT_MS(위 참고)가 없어지면서
+ * s_last_activity_ms를 읽던 유일한 곳도 같이 없어짐. recv_cb 쪽 호출부(esp_now_cam.c)도
+ * 전부 같이 제거함 */
 
-void cam_node_note_activity(void)
-{
-    s_last_activity_ms = (uint32_t)(esp_timer_get_time() / 1000);
-}
-
-/* 2026-08-11 재설계(사용자 지시: "이 모든 경우에 캠은 알아서 잘 수 없다고") — 예전엔
- * 페어링됐는데 SLEEP_NOW를 70초(CAM_DEEPSLEEP_IDLE_GRACE_MS, 이제 삭제됨) 못 받으면
- * 그냥 자율적으로 자버렸는데, 이러면 "SLEEP_NOW를 못 받는 상태"(Cntl 죽음/재부팅/설정에서
- * 연결 끊음 등)와 "SLEEP_NOW를 받고 정상적으로 자는 것"을 구분할 수 없게 됨. 대신 일정
- * 간격마다 SLEEP_NOW_REQUEST(재요청)를 Cntl에 계속 보내면서 깨있음 — 오직 진짜 SLEEP_NOW를
- * 받았을 때만(s_sleep_now_requested) 잠. Cntl이 정말 영영 안 돌아오면 RWDT 워치독
- * (rwdt_guard.c, response_interval_sec+AWAKE_MARGIN_SEC)이 최종 안전망 */
-#define CAM_DEEPSLEEP_NUDGE_INTERVAL_MS   5000
 /* 2026-08-23(사용자 설계) — 미페어링 중 깨어있는 시간을 고정 예산(3초)으로 두지 않고,
  * "채널 스윕(1~13) 한 바퀴를 실제로 끝낼 때까지"로 바꿈 — 예전 3초 예산은 300ms×13=3.9초
  * 걸리는 스윕 하나도 못 끝내서, 매번 채널 1~10 근방만 반복하고 그 이후 채널(11~13)은
@@ -277,6 +292,21 @@ void cam_node_note_activity(void)
  * 감지. 못 찾으면 짧게(3초)만 자고 다시 시도 — RTC_DATA_ATTR로 마지막 성공 채널을
  * 기억해서(esp_now_channelsync) 재시도가 빠름 */
 #define CAM_DEEPSLEEP_RETRY_SLEEP_SEC      ESP_NOW_NODE_UNPAIRED_RETRY_SEC
+
+/* 2026-08-25 도입 -> 2026-08-26 삭제 -> 같은 날 재도입(사용자 지시로 실기 검증 후 원칙 정정) —
+ * 한 번 없앴다가, 실기에서 정확히 이 자리의 부재로 캠이 영원히 멈추는 걸 확인함(SLEEP_NOW가
+ * 한 번 유실되면 다음 WAKE_HELLO를 보낼 계기 자체가 없어서, "다음 WAKE_HELLO가 재시도+폴백을
+ * 해줄 것"이라던 원래 삭제 근거가 성립을 못 함). 사용자가 정정한 원칙: WAKE_HELLO 성공 여부
+ * "판정"은 WAKE_HELLO_ACK 하나만으로 끝나는 게 아니라, CASK 전체(CONFIG->할일->SLEEP_NOW)가
+ * 다 와야 비로소 성립한다 — 즉 이건 새 타이머 개념이 아니라, WAKE_HELLO의 100ms×3 재시도
+ * 판정 범위를 CASK 전체로 넓힌 것. 값은 CNTL이 한 사이클에 순차로 보낼 수 있는 전부의 합
+ * (2026-08-26 esp_now_tx.c의 effective_max_attempts 시간기반 부풀리기도 같은 날 삭제되어
+ * 이제 각 메시지가 호출부가 넘긴 고정 횟수만 씀) — CONFIG 800ms×3=2.4s + 할일 중 가장 큰
+ * PHOTO_LIST_REQUEST 3000ms×3=9s + SLEEP_NOW 300ms×3=0.9s = 최소 12.3s, 여유를 더해 15초 */
+#define CASK_TIMEOUT_MS                    15000
+
+/* Live 모드(SLEEP_NOW.sleep_sec==0)에서 재체크인 페이싱 기준(사용자 지정 x=1초) */
+#define CASK_LIVE_PACE_MS                  1000
 
 /* 2026-08-23 — 미페어링 재시도 백오프(딥슬립 경계 넘어 유지, s_last_synced_channel과 같은
  * RTC_DATA_ATTR 패턴). CNTL을 못 찾는 상태가 길어질수록 재시도 간격을 늘려서 배터리 소모와
@@ -297,14 +327,14 @@ static uint32_t next_unpaired_retry_sleep_sec(void)
     return UNPAIRED_BACKOFF_LONG_SEC;
 }
 
-/* Cntl이 ESP_NOW_MSG_SLEEP_NOW를 보내면 세팅(2026-08-10) — 남은 유휴여유를 기다리지 않고
- * cam_node_wake_window_done()이 즉시 true를 반환하게 함(단, 바쁜 동안은 여전히 안 재움) */
-static volatile bool s_sleep_now_requested = false;
+/* Cntl의 ESP_NOW_MSG_SLEEP_NOW 수신 시 세팅 — CASK의 마지막 단계(app_main의 웨이크 루프
+ * 참고). sleep_sec은 메시지가 실어온 값 그대로 보관(0=안 자고 곧장 재연결) */
+static volatile bool     s_sleep_now_requested = false;
+static volatile uint32_t s_sleep_sec_from_cntl = 0;
 
 /* 2026-08-23 — 이벤트드리븐 재확인 신호(CAML에서 검증 후 이식, cam_node.h 참고). 바이너리
- * 세마포어: 이벤트 발생 지점(핸들러)들이 Give만 하고, 대기 루프는 Take로 기다리다가 즉시
- * 깨서 cam_node_wake_window_done()을 다시 부름 — 그 안의 개별 판정(페어링/busy/sleep_now/
- * 재요청 타이밍)은 그대로 재사용, 루프의 구동 방식만 50ms 고정폴링에서 신호 기반으로 바뀜 */
+ * 세마포어: 이벤트 발생 지점(핸들러)들이 Give만 하고, app_main의 대기 루프는 Take로
+ * 기다리다가 즉시 깨서 재판정 — 고정주기 폴링 대신 이벤트 기반 */
 static SemaphoreHandle_t s_wake_recheck_sem = NULL;
 
 void cam_node_signal_recheck(void)
@@ -312,52 +342,34 @@ void cam_node_signal_recheck(void)
     if (s_wake_recheck_sem) xSemaphoreGive(s_wake_recheck_sem);
 }
 
-void cam_node_note_sleep_now_requested(void)
+void cam_node_note_sleep_now_requested(uint32_t sleep_sec)
 {
-    s_sleep_now_requested = true;
+    s_sleep_sec_from_cntl  = sleep_sec;
+    s_sleep_now_requested  = true;
     cam_node_signal_recheck();
 }
 
-/* 페어링 상태가 막 true가 된 순간을 감지해서 재요청 타이머를 그때부터 세기 시작함(2026-08-11)
- * — 안 그러면 s_last_nudge_ms가 0으로 시작해서 페어링되자마자 첫 재요청이 즉시 나가버림
- * (Cntl이 정상 처리할 시간도 안 준 채) */
-static bool s_was_paired_this_wake = false;
-static uint32_t s_last_nudge_ms = 0;
+/* 2026-08-26(사용자 지시) — 순서 버그 수정: 예전엔 이 리셋이 WAKE_HELLO/PAIR_ACK를 "보낸
+ * 후"(app_main 루프 맨 위)에 일어났음. CNTL은 ACK를 받자마자 곧바로 CONFIG+할일+SLEEP_NOW를
+ * 연달아 보내는데, 그게 무선으로는 몇 ms 안에 CAM에 도착해서 recv_cb(별도 태스크)가 먼저
+ * s_sleep_now_requested=true로 세워놔도, 메인 태스크가 뒤늦게 이 함수를 불러 그걸 다시
+ * false로 덮어써버림 — 방금 도착한 진짜 SLEEP_NOW가 조용히 사라짐(실기로 확인, "캠이 안
+ * 잔다" 버그의 원인). 이제 이 함수를 WAKE_HELLO/PAIR_ACK를 "보내기 직전"에 불러서, 응답이
+ * 도착하기 전에 이미 깨끗한 상태를 보장함 — 늦게 도착한 응답이 지워질 시점 자체가 없어짐 */
+void cam_node_reset_sleep_now_state(void)
+{
+    s_sleep_now_requested = false;
+    s_sleep_sec_from_cntl = 0;
+}
 
-/* 2026-08-23 — 미페어링 중 깨어있는 시간을 "스윕 한 바퀴 완료"로 게이트하는 데 씀(아래
- * cam_node_wake_window_done() 참고) — spk_on_scan_sweep_done()이 세팅, on_channel_lost_sync()가
- * 부르는 cam_node_note_scan_restarted()가 리셋 */
+/* 2026-08-23 — 미페어링 중 깨어있는 시간을 "스윕 한 바퀴 완료"로 게이트하는 데 씀(app_main
+ * 참고) — spk_on_scan_sweep_done()이 세팅. 2026-08-25 — 리셋 호출부가 (삭제된)
+ * on_channel_lost_sync()에서 esp_now_cam_reconnect()의 폴백 분기로 옮겨짐(역할은 동일) */
 static volatile bool s_sweep_completed = false;
 
 void cam_node_note_scan_restarted(void)
 {
     s_sweep_completed = false;
-}
-
-bool cam_node_wake_window_done(uint32_t awake_start_ms)
-{
-    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    (void)awake_start_ms;
-    if (!esp_now_cam_is_paired()) {
-        s_was_paired_this_wake = false;
-        return s_sweep_completed;
-    }
-    if (!s_was_paired_this_wake) {
-        s_was_paired_this_wake = true;
-        s_last_nudge_ms = now_ms;
-    }
-    if (esp_now_cam_is_busy()) return false;
-    if (s_sleep_now_requested) return true;
-    /* 2026-08-11, 사용자 지시 — 응답성 0("즉시"/Live)이면 재우지도, 재촉(재요청)하지도
-     * 않음. "즉시"는 짧은 주기로 반복 취침한다는 뜻이 아니라 딥슬립 자체를 안 하겠다는
-     * 뜻(사용자: "1초=0초=즉시인거라 캠을 안재우겠다는 건데... 슬립요청도 안가고,
-     * 슬립재요청도 안오는 상태여야하거든") */
-    if (s_response_interval_sec == 0) return false;
-    if (now_ms - s_last_nudge_ms >= CAM_DEEPSLEEP_NUDGE_INTERVAL_MS) {
-        s_last_nudge_ms = now_ms;
-        esp_now_cam_send_sleep_now_request();
-    }
-    return false;  /* SLEEP_NOW 없이는 절대 자율적으로 자지 않음(사용자 지시) */
 }
 
 static bool s_camera_ready = false;
@@ -653,10 +665,10 @@ bool cam_node_capture_now_sized(const char *size_name)
 static void spk_on_channel_scanned(void)      { cam_speaker_notify(SPK_EVT_SCAN_CHANNEL); }
 static void spk_on_advertise_sent(void)       { cam_speaker_notify(SPK_EVT_ADVERTISE_SENT); }
 static void spk_on_advertise_ack_received(void) { cam_speaker_notify(SPK_EVT_ADVERTISE_ACK); }
-static void spk_on_ping_sent(void)            { cam_speaker_notify(SPK_EVT_PING); }
-static void spk_on_pong_received(void)        { cam_speaker_notify(SPK_EVT_PONG); }
+/* 2026-08-25 — spk_on_ping_sent/spk_on_pong_received 제거(CASK 재설계로 핑퐁 자체가
+ * 없어짐, cam_speaker.h의 SPK_EVT_COUNT 10->8 축소와 짝) */
 
-/* 스윕 완료 훅 — cam_node_wake_window_done() 위쪽의 s_sweep_completed 참고 */
+/* 스윕 완료 훅 — 위 s_sweep_completed 참고 */
 static void spk_on_scan_sweep_done(void)
 {
     cam_speaker_notify(SPK_EVT_SWEEP_DONE);
@@ -711,8 +723,7 @@ void app_main(void)
         /* esp_now_channelsync는 Common 공유 컴포넌트라 cam_speaker를 직접 모름(CNTL/Sens
          * 빌드가 깨지지 않도록) — 대신 이 느슨한 훅으로 연결 */
         esp_now_channelsync_set_event_hooks(spk_on_channel_scanned, spk_on_advertise_sent,
-                                             spk_on_advertise_ack_received, spk_on_scan_sweep_done,
-                                             spk_on_ping_sent, spk_on_pong_received);
+                                             spk_on_advertise_ack_received, spk_on_scan_sweep_done);
     }
 
     /* Kconfig 기본값으로 시작 — 로컬 저장 없음(위 설정 관련 주석 참고), 페어링되면 Cntl이
@@ -748,9 +759,9 @@ void app_main(void)
     ESP_LOGI(TAG, "WiFi 모뎀슬립 설정: %s", esp_err_to_name(ps_err));
 
     esp_now_cam_set_status_led(GPIO_NUM_NC);  /* TODO: 실기 LED GPIO 확정되면 채우기 */
-    esp_now_cam_init();
-    /* esp_now_cam_init() 안에서 esp_now_channelsync_init()이 불려야 피어/타이머가 만들어짐 —
-     * 그 다음에 저장된(또는 기본) 응답성 설정을 반영(RWDT도 여기서 실제값으로 재무장됨) */
+    esp_now_cam_init();  /* fast path 시도(성공하면 이미 PAIRED) 또는 폴백 스캔 시작 */
+    /* esp_now_cam_init() 다음에 저장된(또는 기본) 응답성 설정을 반영(RWDT도 여기서
+     * 실제값으로 재무장됨) */
     cam_node_set_response_interval_sec(s_response_interval_sec);
 
     const esp_timer_create_args_t capture_args = { .callback = capture_timer_cb, .name = "cam_capture" };
@@ -766,28 +777,93 @@ void app_main(void)
 #if CONFIG_CAM_DEEPSLEEP_ENABLE
     dev_console_start();  /* 유지 — 딥슬립 사이클마다 USB 재열거됨(개발 시 감안) */
 
-    uint32_t awake_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
     s_wake_recheck_sem = xSemaphoreCreateBinary();
-    while (!cam_node_wake_window_done(awake_start_ms)) {
-        /* 1초 상한: 신호가 오면 즉시 깨서 재판정하고, 안 와도 나지드/타임아웃 시간 판정을
-         * 위해 최소 1초마다는 재확인(cam_node_wake_window_done() 내부의 시간 기반 판정 참고) */
-        xSemaphoreTake(s_wake_recheck_sem, pdMS_TO_TICKS(1000));
+
+    /* 2026-08-25(CASK 재설계) — "체크인(WAKE_HELLO) -> CASK 수행 -> SLEEP_NOW 대기 ->
+     * (0이면 다시 체크인, 아니면 진짜 딥슬립)" 전체를 이 루프 하나가 담당. 예전의 고정
+     * 유휴여유+재요청 넛지(CAM_DEEPSLEEP_NUDGE_INTERVAL_MS)는 통째로 없어짐 — SLEEP_NOW
+     * 자체가 이미 reliable(ACK+재시도)이라 CNTL이 "깜빡 안 보낼" 방법이 구조적으로 없음.
+     * esp_now_cam_init()이 이미 fast path를 한 번 시도했으므로(성공했으면 이미 PAIRED) 그
+     * 결과부터 시작 */
+    bool     paired_now = esp_now_cam_is_paired();
+    uint32_t sleep_sec  = CAM_DEEPSLEEP_RETRY_SLEEP_SEC;
+
+    for (;;) {
+        if (!paired_now) {
+            /* 알려진 CNTL이 없었거나 fast path가 실패해서 지금 폴백 스캔 중(백그라운드 —
+             * esp_now_cam_reconnect() 참고) — PAIR_REQUEST가 비동기로 도착할 때까지
+             * 이벤트 기반 대기, 스윕 한 바퀴 다 돌 때까지만(그 이상은 무의미 — 이 채널
+             * 범위엔 없다는 뜻) */
+            while (!esp_now_cam_is_paired() && !s_sweep_completed) {
+                xSemaphoreTake(s_wake_recheck_sem, pdMS_TO_TICKS(1000));
+            }
+            if (!esp_now_cam_is_paired()) {
+                /* 못 찾음 — 백오프 간격만큼 짧게 자고 처음부터(광고) 재시도 */
+                sleep_sec = next_unpaired_retry_sleep_sec();
+                s_unpaired_backoff_elapsed_sec += sleep_sec;
+                ESP_LOGW(TAG, "폴백 스윕 완료 — CNTL 못 찾음, %us 후 재시도", (unsigned)sleep_sec);
+                break;
+            }
+        }
+        s_unpaired_backoff_elapsed_sec = 0;  /* 페어링 성공 — 백오프 리셋 */
+
+        /* CASK 대기 — CONFIG부터 SLEEP_NOW까지, 이벤트 기반으로 기다리되 CASK_TIMEOUT_MS
+         * 전체 상한을 둠(위 정의 참고 — "WAKE_HELLO 성공 판정을 CASK 전체로 넓힌 것", 새
+         * 타이머 개념이 아님). SLEEP_NOW 수신 시 cam_node_note_sleep_now_requested()가
+         * s_sleep_now_requested를 세우고 cam_node_signal_recheck()로 이 세마포어를 깨움.
+         * 2026-08-26 — s_sleep_now_requested 리셋은 여기서 안 함(순서 버그 수정) —
+         * esp_now_cam_reconnect()/PAIR_ACK 전송 "직전"에 이미 cam_node_reset_sleep_now_state()로
+         * 끝냈음(esp_now_cam.c 참고) */
+        uint32_t cask_start_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        bool cask_timed_out = false;
+        while (!s_sleep_now_requested) {
+            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            if (now_ms - cask_start_ms >= CASK_TIMEOUT_MS) {
+                ESP_LOGW(TAG, "CASK 미완주(%ums 경과, SLEEP_NOW 못 받음) — WAKE_HELLO부터 재시도",
+                         (unsigned)CASK_TIMEOUT_MS);
+                cask_timed_out = true;
+                break;
+            }
+            xSemaphoreTake(s_wake_recheck_sem, pdMS_TO_TICKS(1000));
+        }
+
+        if (cask_timed_out) {
+            paired_now = esp_now_cam_reconnect();
+            continue;
+        }
+
+        if (s_sleep_sec_from_cntl != 0) {
+            sleep_sec = s_sleep_sec_from_cntl;
+            break;
+        }
+
+        /* Live 루프(SLEEP_NOW(0)) — 이번 CASK가 걸린 시간이 1초보다 짧으면 나머지를 채워
+         * 대기, 길었으면 곧장 재체크인(사용자 설계: "x초보다 짧으면 x초에 통신 재개, x초보다
+         * 길면 바로 나 왔어요") */
+        uint32_t elapsed_ms = (uint32_t)(esp_timer_get_time() / 1000) - cask_start_ms;
+        if (elapsed_ms < CASK_LIVE_PACE_MS) {
+            vTaskDelay(pdMS_TO_TICKS(CASK_LIVE_PACE_MS - elapsed_ms));
+        }
+        paired_now = esp_now_cam_reconnect();
     }
 
-    /* 2026-08-11 재설계(사용자 지시) — 페어링 못 한 채로 깨는 거면(Cntl을 못 찾음) 응답성
-     * 간격을 통째로 자지 않고 짧게(CAM_DEEPSLEEP_RETRY_SLEEP_SEC)만 자고 곧바로 다시 시도 —
-     * CAM_DEEPSLEEP_PAIR_WAIT_TIMEOUT_MS 주석 참고. 페어링됐으면(정상 경로) 기존대로
-     * 응답성 간격만큼 잠 */
-    bool paired_now = esp_now_cam_is_paired();
-    uint32_t sleep_sec = paired_now ? s_response_interval_sec : CAM_DEEPSLEEP_RETRY_SLEEP_SEC;
-    ESP_LOGI(TAG, "딥슬립 진입: %us 후 웨이크 (paired=%d)", (unsigned)sleep_sec, (int)paired_now);
-    s_last_actual_sleep_sec = sleep_sec;  /* 다음 부팅 때 "직전에 실제로 잔 시간"으로 보고 */
+    ESP_LOGI(TAG, "딥슬립 진입: %us 후 웨이크", (unsigned)sleep_sec);
+    /* 2026-08-26 — 명령값(sleep_sec)이 아니라 실제 잠든 시각을 남김(위 capture_wake_reason()의
+     * 실측 계산이 다음 부팅 때 이 값과 비교함) */
+    time(&s_sleep_entry_unix_time);
     esp_sleep_enable_timer_wakeup((uint64_t)sleep_sec * 1000000ULL);
     /* 2026-08-23 — soundlog 켜져있으면 큐에 예약된 소리가 실제로 재생될 시간을 줌(최대 2초).
      * 안 그러면 스윕완료 등 이벤트 즉시 잠들어서 notify()가 큐에 넣기만 한 채 하드웨어가
      * 꺼져 소리가 통째로 안 남(실기로 발견) — 꺼져있으면 즉시 리턴이라 평소엔 영향 없음 */
     cam_speaker_wait_idle(2000);
+    /* 2026-08-26(사용자 지시) — "실제 esp_deep_sleep_start가 되는지, 이 함수 속에서 혹시
+     * 그냥 리턴하는 건 아닌지도 의심스러워서" — esp_deep_sleep_start()는 noreturn이라 내부에
+     * 로그를 넣을 순 없으니, 호출 바로 직전에 명확한 마커를 찍어 여기까지 실제로 도달하는지
+     * (그리고 그 이후 시리얼이 뚝 끊기는지 = 진짜 딥슬립 진입했는지) 눈으로 바로 확인 가능하게 함 */
+    ESP_LOGI(TAG, "esp_deep_sleep_start() 호출 직전 (sleep_sec=%u) — 이 줄 이후 시리얼 끊기면 정상 진입",
+             (unsigned)sleep_sec);
     esp_deep_sleep_start();  /* RWDT는 이미 무장돼있음, 안 건드림 */
+    ESP_LOGE(TAG, "esp_deep_sleep_start()가 리턴함(있어선 안 되는 상황) — sleep_sec=%u", (unsigned)sleep_sec);
 #else
     dev_console_start();  /* 딥슬립 완전 비활성 — 상시 동작(벤치/콘솔 개발용, Kconfig 이스케이프 해치) */
 #endif

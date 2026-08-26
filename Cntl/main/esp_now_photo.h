@@ -31,6 +31,16 @@ extern "C" {
 
 void esp_now_photo_init(void);
 
+/* 2026-08-26(사용자 지시) — "통신 중엔 안 재운다": SLEEP_NOW를 0이 아닌 값으로 보내는 조건
+ * 셋 중 하나(esp_now_hub.c의 send_cask_sleep_now() 참고) — 이 노드 대상으로 진행 중인
+ * 트랜잭션(사진 수신/목록/지금촬영/전체삭제)이 있으면 true. 시작부터 끝까지(사진을 다
+ * 가져오고, 목록을 다 가져오고 등) 하나의 트랜잭션으로 취급 — 접수 ack만 받고 안 끝난 것도
+ * 포함(사진요청/지금촬영/전체삭제는 접수 ack != 진짜 완료). 4개 트랜잭션 전부 대상 mac을
+ * 저장해두고 정확히 매칭함(s_capture_cam_mac/s_delete_all_cam_mac 포함) — 여러 기기가 동시에
+ * 붙어있어도 캠1 트랜잭션 때문에 캠2가 잘못 안 재워지는 일이 없음(2026-08-26, 사용자 지적:
+ * "여러 기기와 물리면 변수를 혼동해서 짤까봐") */
+bool esp_now_photo_is_transacting_with(const uint8_t *mac);
+
 /* esp_now_hub.c의 recv_cb가 PHOTO_ 계열/CAPTURE_STATUS 메시지를 여기로 넘겨줌.
  * src_mac: 보낸 CAM의 MAC(2026-08-05 추가 — CAPTURE_STATUS_ACK을 그 자리에서 돌려보내려면
  * 필요, esp_now_photo.c의 handle_capture_status() 참고) */

@@ -94,7 +94,7 @@ static int cmd_clear(int argc, char **argv)
 static int cmd_soundlog(int argc, char **argv)
 {
     if (argc < 2) {
-        printf("사용법: soundlog <on|off|solo <1-7[,1-7...]>|solo off>\n");
+        printf("사용법: soundlog <on|off|solo <1-%d[,1-%d...]>|solo off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
         return 1;
     }
     if (strcmp(argv[1], "off") == 0) {
@@ -104,9 +104,9 @@ static int cmd_soundlog(int argc, char **argv)
         cam_speaker_set_enabled(true);
         printf("SOUNDLOG_ON\n");
     } else if (strcmp(argv[1], "solo") == 0) {
-        /* 1=PowerOn(배터리) 2=PowerOn(USB) 3=채널스캔 4=스윕완료 5=광고전송 6=핑 7=퐁수신 */
+        /* 이벤트 번호 1..SPK_EVT_COUNT — 정확한 목록은 cam_speaker.h 참고(2026-08-26 기준 13개) */
         if (argc < 3) {
-            printf("사용법: soundlog solo <1-7[,1-7...]|off>\n");
+            printf("사용법: soundlog solo <1-%d[,1-%d...]|off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
             return 1;
         }
         if (strcmp(argv[2], "off") == 0) {
@@ -123,21 +123,24 @@ static int cmd_soundlog(int argc, char **argv)
             char *save = NULL;
             for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
                 int n = atoi(tok);
-                if (n < 1 || n > 7) {
+                /* 2026-08-26 — 이벤트가 7->8->13으로 늘어나는 동안 여기 상한이 그대로 7로
+                 * 박혀있어서 8번(PAIR_ACK)부터는 아예 지정 불가능했던 버그. SPK_EVT_COUNT를
+                 * 직접 참조해 이후 이벤트가 더 늘어도 다시 어긋나지 않게 함 */
+                if (n < 1 || n > (int)SPK_EVT_COUNT) {
                     bad = true;
                     break;
                 }
                 mask |= (1u << (uint32_t)(n - 1));
             }
             if (bad || mask == 0) {
-                printf("사용법: soundlog solo <1-7[,1-7...]|off>\n");
+                printf("사용법: soundlog solo <1-%d[,1-%d...]|off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
                 return 1;
             }
             cam_speaker_set_solo_mask(mask);
             printf("SOUNDLOG_SOLO_%s\n", argv[2]);
         }
     } else {
-        printf("사용법: soundlog <on|off|solo <1-7[,1-7...]>|solo off>\n");
+        printf("사용법: soundlog <on|off|solo <1-%d[,1-%d...]>|solo off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
         return 1;
     }
     return 0;
@@ -346,7 +349,7 @@ void dev_console_start(void)
 
     const esp_console_cmd_t soundlog_cmd = {
         .command = "soundlog",
-        .help    = "스피커 소리 로그 on/off, solo <1-7[,1-7...]>으로 이벤트 골라 재생(기본 꺼짐)",
+        .help    = "스피커 소리 로그 on/off, solo <1-13[,1-13...]>으로 이벤트 골라 재생(기본 꺼짐)",
         .hint    = "<on|off|solo N[,N...]|solo off>",
         .func    = cmd_soundlog,
     };

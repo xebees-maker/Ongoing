@@ -34,10 +34,15 @@ typedef enum {
     ESP_NOW_MSG_PHOTO_META = 7,
     ESP_NOW_MSG_PHOTO_CHUNK = 8,
     ESP_NOW_MSG_PHOTO_DONE = 9,
-    ESP_NOW_MSG_CAM_CONFIG_SET = 10,  /* Cntl -> CAM: 화이트밸런스/자동촬영 주기 설정 푸시 */
+    ESP_NOW_MSG_CAM_CONFIG_SET = 10,  /* Cntl -> CAM: 화이트밸런스/자동촬영 주기 설정 푸시 +
+                                        * (2026-08-25) unix_time — SET_TIME을 별도 메시지로 안
+                                        * 두고 여기 실어보냄, 아래 esp_now_cam_config_t 참고 */
     ESP_NOW_MSG_UNPAIR = 11,          /* Cntl -> 노드: Cntl이 연결 해제했음을 알림(2026-07-31
                                         * 추가 — 이게 없으면 노드는 자기가 여전히 페어링된 줄
-                                        * 알고 keepalive를 계속 보냄, 사용자가 실기로 확인) */
+                                        * 알고 keepalive를 계속 보냄, 사용자가 실기로 확인).
+                                        * (2026-08-25) CASK 재설계에서도 유일하게 유지된 명시적
+                                        * 단발 통보 — 사용자의 실시간 조작이라 즉각 반영돼야
+                                        * 하므로 reliable 스택으로 승격(esp_now_hub.c 참고) */
     ESP_NOW_MSG_CAPTURE_STATUS = 12,       /* CAM -> Cntl: 지금촬영 진행상태(접수/성공/실패) —
                                              * Cntl UI가 진행 팝업에 단계별로 표시하려고 추가 */
     ESP_NOW_MSG_PHOTO_LIST_REQUEST = 13,   /* Cntl -> CAM: 저장된 사진 "목록"만 요청(내용 전송 없음) */
@@ -45,22 +50,14 @@ typedef enum {
     ESP_NOW_MSG_PHOTO_LIST_DONE = 15,      /* CAM -> Cntl: 목록 전송 끝 */
     ESP_NOW_MSG_PHOTO_DELETE_REQUEST = 16, /* Cntl -> CAM: 특정 사진 삭제 요청 */
     ESP_NOW_MSG_PHOTO_DELETE_ACK = 17,     /* CAM -> Cntl: 삭제 결과 */
-    ESP_NOW_MSG_SET_TIME = 18,             /* Cntl -> 노드: 페어링 완료 시각 유닉스 타임스탬프
-                                             * 전달(2026-07-31 추가 — Cntl은 보드 실장 PCF85063A
-                                             * RTC가 있지만 CAM/Sens는 없어서, 페어링될 때마다
-                                             * Cntl이 자기 시각을 상대에게 알려줌) */
+    /* 18: 예전 ESP_NOW_MSG_SET_TIME — 2026-08-25 CASK 재설계에서 제거. unix_time을
+     * CAM_CONFIG_SET에 실어 매 사이클 같이 보내는 걸로 대체(별도 왕복 자체가 불필요해짐 —
+     * 아래 esp_now_cam_config_t 참고). 번호는 재사용하지 않고 비워둠 */
     ESP_NOW_MSG_PHOTO_DELETE_ALL_REQUEST = 19,  /* Cntl -> CAM: 저장된 사진 전체 삭제 요청 */
     ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK = 20,      /* CAM -> Cntl: 삭제 결과(삭제된 개수) */
-    ESP_NOW_MSG_HUB_RESET = 21,             /* Cntl -> 전체 브로드캐스트: Cntl이 방금 부팅함
-                                              * (2026-08-02 추가). 노드가 이미 페어링된 줄 알고
-                                              * ADVERTISE를 멈춘 채 keepalive만 보내는 중이면(=
-                                              * 원래 상대인 Cntl이 소프트리셋 등으로 재부팅해서
-                                              * 노드 테이블이 비어버린 상태) UNPAIR와 마찬가지로
-                                              * 강제로 재광고 모드로 돌아가게 함 — ESP-NOW의
-                                              * send_cb 성공/실패는 물리 계층 ACK 기준이라
-                                              * 애플리케이션이 그 keepalive를 무시하고 있어도
-                                              * 노드 쪽에서는 "성공"으로만 보여서 스스로는 절대
-                                              * 이 상태를 못 벗어남(실기로 확인) */
+    /* 21: 예전 ESP_NOW_MSG_HUB_RESET — 2026-08-25 CASK 재설계에서 제거. 이제 모든 재연결이
+     * 캠 주도(WAKE_HELLO+재시도+폴백)라 Cntl이 능동적으로 "나 리셋됐다"고 알릴 필요 자체가
+     * 없어짐 — 재부팅한 Cntl은 그냥 "이 캠을 모르는 Cntl"이 되어 같은 폴백 경로를 탐 */
     ESP_NOW_MSG_PHOTO_CHUNK_NACK = 22,      /* Cntl -> CAM: 청크 일련번호(chunk_idx) 기준으로
                                               * 못 받은 것만 콕 집어 재전송 요청(2026-08-03 —
                                               * 아래 esp_now_photo_chunk_nack_t 주석 참고).
@@ -76,16 +73,12 @@ typedef enum {
     ESP_NOW_MSG_BENCH_START = 24,           /* Cntl -> CAM: 벤치마크 트리거(N초간 BLAST 최대
                                               * 속도 전송 시작). Cntl 설정화면의 임시 버튼에서
                                               * 보냄 */
-    ESP_NOW_MSG_CHANNEL_PING = 25,           /* 노드 -> 허브: 순수 생존/채널동기 확인 전용
-                                               * (2026-08-04, esp_now_channelsync 설계 — 페어링
-                                               * 여부와 무관하게 "지금 이 채널에서 서로 닿는지"만
-                                               * 확인. PAIR_ACK 재사용 keepalive를 대체함 —
-                                               * 그건 "살아있음"과 "페어링됨"의 의미가 섞여
-                                               * 있었음). */
-    ESP_NOW_MSG_CHANNEL_PONG = 26,           /* 허브 -> 노드: CHANNEL_PING 응답. 허브는 페어링
-                                               * 여부와 무관하게 자기가 지금 있는 채널에서 받은
-                                               * PING엔 항상 응답함 — 생존확인은 페어링 승인과
-                                               * 별개 개념이므로. */
+    /* 25/26: 예전 ESP_NOW_MSG_CHANNEL_PING/_PONG — 2026-08-04/05 설계, CAM Deep Sleep 전환
+     * (2026-08-10)보다도 먼저 만들어진 상시 하트비트였음. 2026-08-25 CASK 재설계로 완전
+     * 제거 — 근본 이유는 (1) CAM이 리부팅마다 사실상 처음부터 재연결하는 구조라 "세션 도중
+     * 계속 감시"할 필요 자체가 옅어졌고 (2) PONG이 실제로는 거의 안 왔던 게 실기로 확인된
+     * 미해결 버그였는데, 애초에 이 감시 자체가 불필요하다는 결론으로 우회함 —
+     * project_cam_cntl_ping_pong_redesign_proposal 메모리 참고 */
     ESP_NOW_MSG_PHOTO_DONE_ACK = 27,        /* Cntl -> CAM: PHOTO_DONE에 대한 응답, "항상" 보냄
                                               * (2026-08-05, esp_now_reliable Layer 1 설계 —
                                               * 예전 NACK은 "문제 있을 때만" 보내서 정상 종료를
@@ -117,18 +110,9 @@ typedef enum {
                                               * 절전/응답성 설정 추가하면서 Cntl이 esp_now_reliable_
                                               * request()로 감쌀 수 있게 응답 메시지 신설 — 예전엔
                                               * CAM_CONFIG_SET을 보내기만 하고 확인이 없었음) */
-    ESP_NOW_MSG_DEEP_SLEEP_STATS = 33,      /* CAM -> Cntl: Deep Sleep 사이클 통계, 매 웨이크의
-                                              * CAM_CONFIG_SET 적용 직후 1회성 전송(반드시 설정
-                                              * 반영 이후여야 sleep_interval_sec이 정확함 —
-                                              * 페어링 직후 바로 보내면 Kconfig 기본값이
-                                              * 찍히는 버그가 있었음, 실사용 중 발견/수정)
-                                              * (2026-08-10, Light
-                                              * Sleep 전면 폐기 후 Deep Sleep 전환 — Light Sleep은
-                                              * 실측 결과 전혀 진입하지 않는 것으로 확인되어
-                                              * 포기함. 이 메시지는 원래 ESP_NOW_MSG_POWER_STATS
-                                              * 자리를 재사용한 제자리 개명). 요청-응답이 아니라
-                                              * 노드가 웨이크마다 자체적으로 그냥 보내기만
-                                              * 함(ACK 없음, CHANNEL_PING과 같은 성격) */
+    /* 33: 예전 ESP_NOW_MSG_DEEP_SLEEP_STATS — 2026-08-25 CASK 재설계로 제거, 내용 전부
+     * WAKE_HELLO(46)로 흡수됨(esp_now_wake_hello_t 참고). ACK 없는 fire-and-forget이었던 게
+     * WAKE_HELLO의 reliable 요청/응답에 자연히 실려서 신뢰성도 개선됨 */
     ESP_NOW_MSG_SLEEP_NOW = 34,              /* Cntl -> CAM: "이번 사이클에 더 할 일 없으니
                                               * 지금 바로 자도 됨"(2026-08-10, 적응형 반응시간
                                               * 설계). Cntl은 사용자의 마지막 조작으로부터
@@ -144,15 +128,11 @@ typedef enum {
                                               * ACK을 기다림 — 유실 시 재시도, 매 사이클 진짜로
                                               * 전달됐는지 확인 가능해짐(격주기로 유실되던 문제
                                               * 진단 목적) */
-    ESP_NOW_MSG_SLEEP_NOW_REQUEST = 36,      /* CAM -> Cntl: "페어링된 채로 대기 중인데 아직
-                                              * SLEEP_NOW를 못 받았음, 다시 보내달라"
-                                              * (2026-08-11, 사용자 지시). CAM은 페어링 후
-                                              * SLEEP_NOW 없이 일정 간격(CAM_DEEPSLEEP_NUDGE_
-                                              * INTERVAL_MS) 이상 대기하면 이걸 반복 전송하며
-                                              * 계속 깨있음 — 예전의 "70초 지나면 그냥 자율적으로
-                                              * 자버림" 폴백을 대체(사용자 지시: "이 모든 경우에
-                                              * 캠은 알아서 잘 수 없다고" — CNTL이 SLEEP_NOW를
-                                              * 명시적으로 줄 때만 잠) */
+    /* 36: 예전 ESP_NOW_MSG_SLEEP_NOW_REQUEST — 2026-08-25 CASK 재설계로 제거. SLEEP_NOW 자체가
+     * 이미 reliable 스택(ACK+재시도)으로 나가는 CASK의 마지막 단계라 Cntl이 "깜빡" 안 보낼
+     * 방법이 구조적으로 없어짐 — 캠이 조를 이유가 사라짐. 대신 캠은 CASK 진행 중 기대하는
+     * 다음 메시지가 그 메시지 자체의 reliable 스택 예산(timeout×attempts, 양쪽이 이미 아는
+     * 고정값)만큼 지나도 안 오면 그 시점에 확정적으로 포기하고 WAKE_HELLO부터 재시도함 */
 
     /* 2026-08-11 재설계 — 목록 프로토콜 전체를 reliable 기반으로 교체(사용자 지시).
      * 예전 ESP_NOW_MSG_PHOTO_LIST_ENTRY(파일당 1개, unreliable)와 missing_count/missing_idx
@@ -180,10 +160,9 @@ typedef enum {
     ESP_NOW_MSG_PHOTO_DELETE_ALL_RECEIVED = 43,  /* CAM -> Cntl: DELETE_ALL_REQUEST 접수,
                                               * 삭제 시작 전 지울 파일개수를 먼저 알림 */
 
-    /* SET_TIME이 예전엔 raw esp_now_send로 보내고 끝(무응답 무보장)이었음 — 나머지 모든
-     * Cntl->노드 요청이 reliable stack(esp_now_tx/esp_now_reliable_request) 위에 있는 것과
-     * 어긋나서 통일(2026-08-21) */
-    ESP_NOW_MSG_SET_TIME_ACK = 44,           /* CAM/Sens -> Cntl: SET_TIME 수신+적용 확인 */
+    /* 44: 예전 ESP_NOW_MSG_SET_TIME_ACK — SET_TIME 메시지 자체가 없어졌으니(CAM_CONFIG_SET에
+     * unix_time으로 흡수, 2026-08-25) 이 확인 응답도 함께 제거. CAM_CONFIG_ACK가 그 자리를
+     * 대신함 */
 
     /* PHOTO_META가 예전엔 "3번 그냥 쏘고 끝"(ACK 없음, 청크 전송도 확인 없이 바로 시작)이라
      * 유일하게 reliable 전환에서 빠져있던 메시지였음(2026-08-21) — 이게 실제 버그의 근본
@@ -193,20 +172,44 @@ typedef enum {
      * 이미 시작된 뒤에 늦은 META 사본이 끼어드는 경쟁 상태가 구조적으로 사라짐(사용자 지적:
      * "SR 자체가 가드니까" — 별도 중복방어 코드 불필요) */
     ESP_NOW_MSG_PHOTO_META_ACK = 45,         /* Cntl -> CAM: PHOTO_META 수신 확인, "항상" 보냄 */
+
+    /* 2026-08-25 — CASK 재설계(핑퐁/DEEP_SLEEP_STATS/SET_TIME 제거의 대체). CAM이 알려진
+     * CNTL(hub_mac+채널을 RTC에 기억)에 대해 광고 없이 곧장 유니캐스트로 보내는 "저 왔어요"
+     * 메시지 — ADVERTISE_ACK->PAIR_REQUEST->PAIR_ACK 3단계를 요청 1번+reliable 응답 1번으로
+     * 대체하고, DEEP_SLEEP_STATS가 싣던 통계도 그대로 흡수함(esp_now_wake_hello_t 참고).
+     * esp_now_reliable_request()로 보냄 — 실패(재시도 소진)하면 캠은 모르는 CNTL 취급하고
+     * 기존 ADVERTISE 브로드캐스트 스캔으로 폴백(채널변경/CNTL다운/CNTL이 이 캠을 모름, 세
+     * 경우 전부 이 폴백 하나로 처리) */
+    ESP_NOW_MSG_WAKE_HELLO = 46,
+    /* CNTL -> CAM: 위 WAKE_HELLO의 응답(reliable_request의 응답 leg 그 자체 — 별도로 또
+     * reliable을 감싸지 않음). 최소 확인 응답이고, 이어서 CNTL이 CAM_CONFIG_SET(항상 먼저) ->
+     * 필요한 명령들 -> SLEEP_NOW(항상 마지막) 순으로 CASK를 쭉 보냄 */
+    ESP_NOW_MSG_WAKE_HELLO_ACK = 47,
+    /* CAM -> Cntl: UNPAIR 수신 확인(2026-08-25) — UNPAIR이 reliable 스택으로 승격되면서
+     * 필요해짐(모든 reliable 요청은 매칭되는 ack 타입이 있어야 함). 페이로드 없음 —
+     * esp_now_unpair_t를 msg_type만 바꿔 재사용(기존 관례) */
+    ESP_NOW_MSG_UNPAIR_ACK = 48,
+    /* Cntl -> CAM(2026-08-26, 사용자 지시) — CASK의 "할일" 단계가 항상 고정된 패킷 수로
+     * 나가게 하는 명시적 "이번엔 대기 중인 사용자 액션 없음" 신호. 노드별 대기 큐
+     * (esp_now_hub_queue_action() 참고)가 비어있으면 실제 액션 메시지(PHOTO_REQUEST 등)
+     * 대신 이걸 보냄 — "할일 단계가 왔는지 안 왔는지"를 캠이 추측할 필요가 없어짐(항상
+     * CONFIG -> 할일-또는-NONE -> SLEEP_NOW 3개 고정) */
+    ESP_NOW_MSG_CASK_WORK_NONE = 49,
+    /* CAM -> Cntl: 위 수신 확인. 페이로드 없음 — esp_now_unpair_t와 동일 관례로
+     * esp_now_cask_work_none_t를 msg_type만 바꿔 재사용 */
+    ESP_NOW_MSG_CASK_WORK_NONE_ACK = 50,
 } esp_now_msg_type_t;
 
-/* ESP_NOW_MSG_SLEEP_NOW 페이로드 — 특별한 정보 없이 신호 자체가 전부.
- * ESP_NOW_MSG_SLEEP_NOW_ACK도 이 구조체를 msg_type만 바꿔 그대로 재사용(2026-08-10, 이
- * 코드베이스의 기존 관례 — PHOTO_DONE_ACK 등과 동일 원칙) */
+/* ESP_NOW_MSG_SLEEP_NOW 페이로드. ESP_NOW_MSG_SLEEP_NOW_ACK도 이 구조체를 msg_type만 바꿔
+ * 그대로 재사용(2026-08-10, 이 코드베이스의 기존 관례 — PHOTO_DONE_ACK 등과 동일 원칙).
+ * sleep_sec(2026-08-25, CASK 재설계) — 0이면 "딥슬립 진입하지 말고 곧장 다음 WAKE_HELLO로
+ * 루프"(Live 모드/사용자가 여전히 CNTL을 조작 중인 유예 상태), 0이 아니면 그만큼 실제로
+ * esp_deep_sleep_start() */
 typedef struct __attribute__((packed)) {
-    uint8_t version;
-    uint8_t msg_type;
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint32_t sleep_sec;
 } esp_now_sleep_now_t;
-
-typedef struct __attribute__((packed)) {
-    uint8_t version;
-    uint8_t msg_type;
-} esp_now_hub_reset_t;
 
 typedef struct __attribute__((packed)) {
     uint8_t version;
@@ -222,11 +225,9 @@ typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
     uint8_t hub_mac[6];
-    uint32_t hub_boot_id;  /* 2026-08-22 — Cntl이 부팅마다 새로 생성하는 랜덤값(esp_now_hub.c
-                               s_boot_id). 노드는 이 값을 기억해뒀다가 이후 PONG에서 계속
-                               비교 — 값이 바뀌면 "Cntl이 나를 잊었다(리붓됨)"를 능동적으로
-                               알아채는 용도(HUB_RESET 브로드캐스트의 수신 불확실성을 노드가
-                               스스로 매 PING마다 확인하는 걸로 대체) */
+    /* hub_boot_id(2026-08-22, CNTL 재부팅 감지용) — 2026-08-25 CASK 재설계로 제거. 이 값을
+     * 실어보내던 CHANNEL_PONG이 없어졌고, 재부팅한 CNTL은 그냥 "이 캠을 모르는 CNTL"로 자연히
+     * 처리되어 결과적으로 같은 폴백 경로를 타므로 별도 감지가 불필요해짐 */
 } esp_now_advertise_ack_t;
 
 typedef struct __attribute__((packed)) {
@@ -241,17 +242,8 @@ typedef struct __attribute__((packed)) {
     uint8_t node_mac[6];
 } esp_now_pair_ack_t;
 
-typedef struct __attribute__((packed)) {
-    uint8_t version;
-    uint8_t msg_type;
-} esp_now_channel_ping_t;
-
-typedef struct __attribute__((packed)) {
-    uint8_t version;
-    uint8_t msg_type;
-    uint32_t hub_boot_id;  /* 2026-08-22 — esp_now_advertise_ack_t.hub_boot_id 참고. 매 PONG마다
-                               실어 보내서, 노드가 이미 알던 값과 계속 대조할 수 있게 함 */
-} esp_now_channel_pong_t;
+/* esp_now_channel_ping_t/esp_now_channel_pong_t(2026-08-04/05) — 2026-08-25 CASK 재설계로
+ * 완전 제거. project_cam_cntl_ping_pong_redesign_proposal 메모리 참고 */
 
 /* Cntl -> 노드(유니캐스트): 사용자가 Cntl에서 연결 해제함. 받은 노드는 다시 페어링 전
  * 상태(광고/채널스캔)로 돌아가고 keepalive를 멈춰야 함 — 그 전엔 노드가 자기 상태를 알 방법이
@@ -260,6 +252,14 @@ typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
 } esp_now_unpair_t;
+
+/* ESP_NOW_MSG_CASK_WORK_NONE / _ACK 공용 페이로드(2026-08-26) — 둘 다 페이로드 없음,
+ * esp_now_unpair_t와 동일한 이유로 별도 타입을 둠(이름이 의미를 드러내는 게 재사용보다
+ * 낫다는 기존 관례) */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_cask_work_none_t;
 
 /* 채널 종류 — 노드가 실제로 붙인 센서가 무엇을 재는지에 대응.
  * 새 센서가 새로운 물리량을 재면 여기에 하나 추가하면 됨(프로토콜 구조 자체는 안 바뀜). */
@@ -506,18 +506,8 @@ typedef struct __attribute__((packed)) {
     uint8_t  success;
 } esp_now_photo_delete_ack_t;
 
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-    uint32_t unix_time;
-} esp_now_set_time_t;
-
-/* ESP_NOW_MSG_SET_TIME_ACK(2026-08-21) — 페이로드 없음, 응답이 왔다는 사실 자체가 의미의
- * 전부(esp_now_capture_status_ack_t와 동일 패턴) */
-typedef struct __attribute__((packed)) {
-    uint8_t version;
-    uint8_t msg_type;
-} esp_now_set_time_ack_t;
+/* esp_now_set_time_t/esp_now_set_time_ack_t — 2026-08-25 CASK 재설계로 제거, unix_time을
+ * esp_now_cam_config_t에 흡수(아래 참고) */
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;
@@ -585,6 +575,13 @@ typedef struct __attribute__((packed)) {
                                         기다리는 버그가 있었음(3006 오탐). CNTL이 유일한
                                         소유자, CAM은 이 값을 그대로 씀(0이면 CAM 쪽 기존
                                         기본값 유지 — 구버전 CNTL과의 호환 여유) */
+    uint32_t unix_time;                /* 2026-08-25 추가(CASK 재설계) — 예전 별도 SET_TIME
+                                        메시지를 대체. CAM_CONFIG_SET이 이미 매 사이클
+                                        무조건 나가니 몇 바이트 실어보내는 게 별도 왕복
+                                        하나를 아예 없애는 것보다 싸다고 판단(딥슬립이 RTC
+                                        시간 도메인은 보존해서 사실 매번 다시 맞출 필요는
+                                        없지만, "필요한지 아닌지 판단하는 로직"을 추가하는
+                                        비용이 그냥 매번 보내는 것보다 더 큼) */
 } esp_now_cam_config_t;
 
 /* CAM -> Cntl: CAM_CONFIG_SET 적용 결과 확인(2026-08-08) */
@@ -634,15 +631,15 @@ typedef enum {
     CAM_WAKE_REASON_OTHER   = 3,
 } cam_wake_reason_t;
 
-/* ESP_NOW_MSG_DEEP_SLEEP_STATS(2026-08-10) — CAM이 매 웨이크마다 페어링 완료 직후 1회
- * 보냄. 사이클 카운트/누적 절전시간은 CAM에 저장하지 않고(설정은 파일 기반, 로컬 저장
- * 최소화 원칙 + RESET_RTC 액션이 RTC 슬로우메모리를 보존하는지 불확실) Cntl이 리포트를
+/* ESP_NOW_MSG_WAKE_HELLO(2026-08-25, CASK 재설계) — CAM이 알려진 CNTL에 매 웨이크마다 보내는
+ * "저 왔어요" 겸 상태 리포트. 예전 esp_now_deep_sleep_stats_t와 완전히 같은 필드 구성(그
+ * 메시지를 흡수한 것) — 사이클 카운트/누적 절전시간은 CAM에 저장하지 않고 Cntl이 리포트를
  * 받을 때마다 자기 쪽에서 누적 계산함. */
 typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
     uint8_t  wake_reason;           /* cam_wake_reason_t */
-    uint32_t awake_uptime_ms;       /* 이번 사이클 기상~페어링 완료까지 경과시간 */
+    uint32_t awake_uptime_ms;       /* 이번 사이클 기상~WAKE_HELLO 전송까지 경과시간 */
     uint32_t sleep_interval_sec;    /* 이번에 적용 중인 딥슬립 주기(=response_interval_sec) —
                                         앞으로 잘 예정 시간(설정값), 실제로 잔 시간이 아님 */
     uint32_t actual_last_sleep_sec; /* 2026-08-10 — 직전에 실제로 잤던 시간(RTC_DATA_ATTR로
@@ -657,4 +654,12 @@ typedef struct __attribute__((packed)) {
      * 대조) — CH32V003 ADC 비트폭/기준전압이 미확인이라 당분간 화면 로그에도 같이 남김. */
     uint16_t battery_adc_raw;
     uint16_t battery_mv;
-} esp_now_deep_sleep_stats_t;
+} esp_now_wake_hello_t;
+
+/* ESP_NOW_MSG_WAKE_HELLO_ACK — 위 WAKE_HELLO의 응답. esp_now_reliable_request()의 응답
+ * leg 그 자체라 별도로 또 reliable을 감싸지 않음(esp_now_capture_status_ack_t와 동일
+ * 관례 — 페이로드 없음, 응답이 왔다는 사실 자체가 의미의 전부) */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_wake_hello_ack_t;

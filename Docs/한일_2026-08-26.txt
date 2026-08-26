@@ -1,0 +1,118 @@
+== 2026-08-26 작업 요약 (CASK 프로토콜: PING/PONG 제거 + WAKE_HELLO 재설계 → 하드웨어 실기 검증 + 버그 다수 수정) ==
+※ 이 문서는 지난 세션(handoff_2026-08-22.md, 커밋 3169d1b/a1343f2/376e3ec) 이후 미커밋 상태로
+   쌓여있던 작업 전체를 다룸 — 어제(2026-08-25) 설계+구현한 CASK 프로토콜을 오늘 실기로
+   검증하고, 검증 과정에서 나온 버그들을 수정한 것.
+
+[ 한 일 ]
+
+1. CASK(CAM+TASK) 프로토콜 설계 및 구현 (2026-08-25)
+   - 배경: CHANNEL_PING/PONG 하트비트가 페어링 이후 사실상 응답이 안 오고, CAM이 죽은
+     링크를 계속 PAIRED로 오인하는 문제를 조사하다가, 더 근본적인 문제를 발견 — CAM은
+     딥슬립마다 완전 리부팅되므로 RTC 메모리의 몇 바이트 힌트 말고는 다 잊고, 매번
+     ADVERTISE 브로드캐스트 스캔부터 다시 하고 있었음. CNTL 쪽도 SLEEP_NOW/설정푸시/
+     사진요청이 각각 따로 흩어진 타이머 기반 로직이었음.
+   - 사용자가 소크라틱 방식으로 프로토콜 전체를 하나씩 설계: 캠이 알고있는 CNTL에게
+     직접 단방향 웨이크 메시지(WAKE_HELLO)를 보내고, CNTL은 CONFIG → (할일 있으면 할일,
+     없으면 명시적 CASK_WORK_NONE) → SLEEP_NOW 순서의 고정 3단 시퀀스로 응답. 실패시
+     원인 구분 없이(채널변경/CNTL사망/CNTL이 나를 모름 전부 동일하게) 브로드캐스트
+     디스커버리로 폴백.
+   - 이 설계로 캠의 핑 타이머, 통계 타이머, CNTL의 adaptive-deadline 타이머가 전부
+     불필요해짐 — 이벤트드리븐으로 대체.
+   - 메시지: ESP_NOW_MSG_WAKE_HELLO(46)/_ACK(47) 신설, SLEEP_NOW에 sleep_sec 필드 추가,
+     CAM_CONFIG_SET에 unix_time 추가(SET_TIME 완전 흡수). CHANNEL_PING/PONG,
+     DEEP_SLEEP_STATS, SET_TIME, SLEEP_NOW_REQUEST, HUB_RESET, hub_boot_id 전부 제거.
+   - 구현 파일: esp_now_link.h, esp_now_channelsync.c/.h, esp_now_cam.c/.h, cam_node.c/.h,
+     cam_speaker.c/.h, esp_now_hub.c/.h, ui_main.c, ui_log.c/.h. 빌드 통과 확인
+     (CAM/CNTL/Sens 전부 클린 빌드).
+
+2. 캠이 실제로 안 자는 핵심 버그 발견+수정 (오늘 실기 검증 중 발견) — "순서 버그"이지
+   레이스 컨디션 아님(사용자가 용어 직접 정정: "네가 레이스라고 해서 내가 오해했잖아")
+   - s_sleep_now_requested/s_sleep_sec_from_cntl 리셋이 WAKE_HELLO/PAIR_ACK 전송 "후"에
+     실행되고 있었음 — 전송 직후 도착한 진짜 SLEEP_NOW가 그 리셋에 덮어써져 사라지던
+     결정론적 순서 결함. 리셋 호출을 전송 "전"으로 이동해서 해결.
+   - cam_node_reset_sleep_now_state() 신설, esp_now_cam.c의 두 전송 지점(패스트패스
+     WAKE_HELLO, 폴백/졸업 경로 PAIR_ACK) 모두에 적용. 이 수정이 "완벽하게 동작한다"
+     확인으로 이어진 핵심 수정.
+
+3. CASK 전체 완주 타임아웃 재설계 — 제거→소크라틱 논의→재도입의 전 과정
+   - 처음 CASK_SILENCE_TIMEOUT_MS=3000으로 도입했으나 크기 계산이 틀림(CNTL이 메시지를
+     순차 전송하므로 단일 메시지 예산이 아니라 합산 예산과 비교했어야 함, 이미
+     3000ms 넘음).
+   - 사용자가 "멈춰"로 중단시키고 소크라틱 문답으로 이 타이머 자체가 필요한지 재검토 →
+     WAKE_HELLO 자체 재시도+폴백, esp_now_reliable의 재시도, RWDT가 이미 모든 실패
+     시나리오를 커버한다는 결론으로 완전 제거.
+   - 실기 검증 중 "SLEEP_NOW가 유실되면 무한정 깨어있는" 진짜 갭 발견 → 재도입, 단
+     사용자의 정정된 프레이밍으로: "WAKE_HELLO 판정을 캐스크 전체로 넓힌다"(새 타이머
+     개념이 아니라 기존 판정의 범위 확장). CASK_TIMEOUT_MS=15000(CONFIG 2.4s + 최대
+     작업항목 PHOTO_LIST_REQUEST 9s + SLEEP_NOW 0.9s + 여유분)으로 재도입. 만료시
+     esp_now_cam_reconnect() 호출.
+
+4. CNTL 중앙집중 pending-action 큐 구현
+   - 사용자 의도: 사용자 입력으로 큐잉된 캠용 명령을 CASK 사이클에서 중앙집중으로 하나씩
+     꺼내 보내도록. 여기저기서 require_paired() 확인하던 걸 제거.
+   - esp_now_hub_pending_action_t 구조체(노드별 링버퍼, 깊이 4) 신설,
+     esp_now_hub_queue_action()/dequeue_pending_action_locked() 추가. WAKE_HELLO
+     핸들러가 큐가 비어있으면 CASK_WORK_NONE(신설 메시지, msg_type 49/50)을 명시적으로
+     보내 항상 CONFIG-할일-SLEEPNOW 3단 패킷 수를 통일.
+   - esp_now_photo.c의 5개 액션 함수(단일수신/지금촬영/목록요청/삭제/전체삭제) 전부
+     esp_now_hub_queue_action() 사용하도록 전환.
+
+5. "통신 중엔 안 재운다" 원칙 구현 + 멀티기기 mac 격리 버그 동시 발견/수정
+   - CNTL이 SLEEPNOW를 sleep_sec=0(안 재움)으로 보내는 조건: 최근 사용자 입력 있음 OR
+     응답성=0(라이브모드) OR 해당 노드와 진행중인 트랜잭션 있음.
+   - esp_now_photo_is_transacting_with(mac) 신설 — 사진수신/목록요청/캡처진행/
+     전체삭제진행 4가지 트랜잭션 타입을 노드별 mac까지 매칭해서 확인.
+   - 이 과정에서 s_capture_stage/s_delete_all_state에 mac 추적이 아예 없어서 한 캠의
+     지금촬영/전체삭제가 다른 모든 페어링된 노드의 슬립까지 막던 버그 발견 →
+     s_capture_cam_mac/s_delete_all_cam_mac 추가로 수정.
+   - (반면 s_last_user_action_ms는 의도적으로 전역 유지 — 한 기기를 조작중이면 다른
+     기기도 곧 조작할 가능성이 높다는 설계, 버그 아님을 재확인)
+
+6. CNTL esp_now_tx.c 기존 버그 2건 발견/수정 (CASK와 무관하게 원래 있던 버그)
+   - "이게 왜 시간 기반이지? 횟수 기반이 아니고?" — effective_max_attempts()가 "캠이
+     자고있을 수도 있다"는 낡은 전제로 시간 기반 재시도 부풀리기를 하고 있었음
+     (응답성 10초 기준 SLEEP_NOW 최대 44회까지). CASK 하에서는 esp_now_tx_enqueue()가
+     항상 캠이 방금 연락한 직후에만 호출되므로(캠이 깨어있음이 보장됨) 이 전제가
+     무의미해짐 → 완전 제거, 호출자가 넘긴 max_attempts 그대로 횟수 기반 사용.
+   - "큐 풀이면 최소한 에러라도 냈어야" — 큐가 가득 차면 조용히 드롭하던 버그.
+     TX_QUEUE_LEN 8→32로 확대, 큐풀 시 ESP_LOGE + ui_log_add_err(신설 에러코드
+     UI_ERR_TX_QUEUE_FULL=2009) 추가.
+
+7. CNTL 전력로그 필드 3건 수정
+   - AW(깨어있던 시간): 부팅 후 누적치를 그대로 보고하던 것 → 직전 보고 이후 델타로
+     수정(s_last_wake_hello_report_ms 추적).
+   - SLEPT(잔 시간): CNTL이 명령한 sleep_sec 값을 그대로 에코하던 것(실측 아님) →
+     실제 경과시간 측정으로 수정(s_sleep_entry_unix_time 신설 RTC_DATA_ATTR time_t,
+     기상시 time(NULL)과 비교). 보고 후 값을 소비(0으로 리셋)해서 한 부팅 내 여러
+     WAKE_HELLO에 걸쳐 같은 값이 반복 보고되지 않도록 함.
+   - I(응답성 자기보고): 사용자가 실기에서 직접 관찰/지목("I는 초기 10초인데 오히려
+     10초 잠들면서는 0초로 보고하네"). 원인은 s_response_interval_sec가 일반
+     static이라 캠 리부팅마다 Kconfig 기본값(0)으로 리셋되고, WAKE_HELLO가 그 사이클의
+     CONFIG 도착 "전"에 먼저 나가서 항상 리셋된 값을 보고했던 것. RTC_DATA_ATTR로
+     변경해서 해결. 빌드→플래시→실기 확인 완료("이제 10으로 잘 나와").
+
+8. 실기 검증 완료 항목들
+   - 핵심 슬립/웨이크 사이클 정상 동작("완벽하게 동작한다")
+   - 전력로그 AW/SLEPT/I 필드 전부 정상("AW/SL도 정상이야")
+   - 캠 단독 리셋(CNTL은 그대로 둔 채) 후에도 정상 재연결("캠만 리셋해도
+     정상동작하는 군")
+   - 보드 발열도 거의 사라짐 — 딥슬립이 실제로 걸리고 있다는 정성적 확인
+     ("보드 발열도 거의 없어졌네.. 정말 절전이 되나보다")
+
+[ 반성할 점 ]
+
+- 결정론적 순서 버그를 "레이스"라고 잘못 표현해서 사용자가 오해하게 만듦. 사용자가
+  강하게 정정("1번을 네가 레이스라고 부르는 거구나... 순서가 잘못된건데",
+  "그러니까 네가 레이스라고 해서 내가 오해했잖아"). 타이밍 의존적 결함과 순서만
+  틀린 결정론적 결함을 구분해서 정확히 표현할 것.
+- CAM/CNTL 중 어느 쪽 얘기인지 주어 없이 설명하다가 지적받음("너 말할 때 주어좀
+  명확히 할래? 캠인지 CNTL인지?"). 이후 모든 설명에 주체를 명시하도록 수정.
+- 검증되지 않은 방어코드를 먼저 추가함 — 캠이 SLEEP_NOW를 최종으로 판단하기 전에
+  esp_now_cam_is_busy()를 기다리게 하는 코드를 근거 확인 없이 추가했다가, 이미
+  존재하는 adaptive grace period가 같은 시나리오를 이미 커버한다는 사용자 지적으로
+  되돌림("아니 추가 처리는 잘못했는데"). 새 방어코드를 추가하기 전에 기존 메커니즘이
+  이미 커버하는지부터 확인할 것.
+- COM5 플래시가 반복 실패해서(캠이 짧은 주기로 딥슬립↔웨이크를 반복하느라 USB가
+  거의 항상 꺼져있는 상태) 원인 파악에 시간을 씀 — 결국 BOOT 버튼 강제 부트로더
+  진입이 필요한 물리적 제약이었음. 짧은 awake window를 가진 배터리 기기를 시리얼
+  플래시할 때는 처음부터 이 가능성을 염두에 둘 것.

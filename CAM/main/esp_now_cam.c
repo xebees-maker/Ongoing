@@ -47,64 +47,17 @@ typedef enum {
 static cam_conn_state_t s_conn_state = CAM_CONN_ORPHAN;
 static uint8_t s_hub_mac[6] = { 0 };
 
+/* 2026-08-25(CASK 재설계) — "알려진 CNTL"을 딥슬립 경계 너머로 기억(RTC 슬로우메모리, 8KB 중
+ * 지금까지 52바이트만 쓰던 여유 확인 후 추가). s_last_synced_channel(esp_now_channelsync.c,
+ * 순수 스캔 힌트)과 달리 이건 "이 CNTL이다"라는 신원까지 기억함 — 웨이크마다 광고부터 다시
+ * 하는 대신 곧장 유니캐스트로 WAKE_HELLO를 시도할 수 있게 해줌(esp_now_cam_try_wake_hello_
+ * fast_path 참고). 실패(3회 재시도 소진)하면 s_wake_hub_known은 그대로 두고(다음 사이클에
+ * 다시 시도할 가치가 있음 — 채널만 잠깐 어긋났을 수도 있으므로) 그냥 폴백 스캔으로 넘어감 */
+static RTC_DATA_ATTR uint8_t s_wake_hub_mac[6]     = { 0 };
+static RTC_DATA_ATTR uint8_t s_wake_hub_channel    = 0;
+static RTC_DATA_ATTR bool    s_wake_hub_known      = false;
+
 static gpio_num_t s_led_pin = GPIO_NUM_NC;
-
-/* Deep Sleep 사이클 통계(2026-08-10) — 요청-응답 아님(ACK 없음), CHANNEL_PING처럼 그냥
- * 보내기만 함. CAM_CONFIG_SET 처리 직후 1회만 보냄(recv_cb의 ESP_NOW_MSG_CAM_CONFIG_SET
- * 핸들러 참고) — 페어링 직후 바로 보내면 아직 Cntl의 실제 설정값을 못 받은 상태라
- * sleep_interval_sec이 Kconfig 기본값으로 잘못 찍히는 문제가 있었음(실사용 중 발견) —
- * 반드시 설정 반영 이후여야 정확함. Light Sleep 시절의 주기 타이머 방식과 달리, 딥슬립
- * 사이클마다 재부팅되는 구조에서는 "깨어있는 동안 1회"가 곧 "사이클마다 1회"와 같음. */
-static void send_deep_sleep_stats(void)
-{
-    esp_now_deep_sleep_stats_t stats = {
-        .version  = ESP_NOW_LINK_VERSION,
-        .msg_type = ESP_NOW_MSG_DEEP_SLEEP_STATS,
-        .wake_reason             = (uint8_t)cam_node_get_wake_reason(),
-        .awake_uptime_ms         = (uint32_t)(esp_timer_get_time() / 1000),
-        .sleep_interval_sec      = cam_node_get_response_interval_sec(),
-        .actual_last_sleep_sec   = cam_node_get_last_actual_sleep_sec(),
-    };
-    /* 2026-08-22 — 배터리 잔량 보고(반응형 주기에 실어 보냄, 사용자 지시). 읽기 실패해도
-     * (raw/mv 0으로 남음) 리포트 자체는 그대로 보냄 — 다른 필드는 유효하므로 */
-    uint16_t batt_raw = 0, batt_mv = 0;
-    cam_node_read_battery_mv(&batt_raw, &batt_mv);
-    stats.battery_adc_raw = batt_raw;
-    stats.battery_mv      = batt_mv;
-
-    esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&stats, sizeof(stats));
-    ESP_LOGI(TAG, "DEEP_SLEEP_STATS 전송: wake_reason=%u awake_ms=%u interval=%us 실제잔시간=%us "
-             "batt_raw=%u batt_mv=%u (%s)",
-             stats.wake_reason, (unsigned)stats.awake_uptime_ms,
-             (unsigned)stats.sleep_interval_sec, (unsigned)stats.actual_last_sleep_sec,
-             (unsigned)batt_raw, (unsigned)batt_mv, esp_err_to_name(err));
-}
-
-/* 2026-08-23(사용자 설계) — 전력 로그를 "웨이크 사이클당 1회"가 아니라 응답성 주기마다
- * 보내도록 확장. 사이클당 1회만 보내면 깨어있는 시간이 (적응형 대기 등으로) 들쭉날쭉할 때
- * 보고 간격도 같이 들쭉날쭉해짐 — 응답성 주기 동안 얼마나 자고 얼마나 깼는지가 더 중요하다는
- * 지적(위 send_deep_sleep_stats 필드 awake_uptime_ms/actual_last_sleep_sec이 그대로 실어감).
- * 응답성=0(즉시/Live)이면 애초에 안 잘 생각이라 "자고 깬 비율" 자체가 의미 없어서 이 주기
- * 리포트는 아예 안 돎(사용자 지시) — 기존의 설정 반영 직후 1회성 리포트는 그대로 유지 */
-static esp_timer_handle_t s_stats_timer = NULL;
-
-static void stats_timer_cb(void *arg)
-{
-    (void)arg;
-    if ((s_conn_state == CAM_CONN_PAIRED)) send_deep_sleep_stats();
-}
-
-static void restart_stats_timer(uint32_t interval_sec)
-{
-    if (!s_stats_timer) {
-        const esp_timer_create_args_t args = { .callback = stats_timer_cb, .name = "cam_stats" };
-        esp_timer_create(&args, &s_stats_timer);
-    }
-    esp_timer_stop(s_stats_timer);  /* 이미 멈춰있어도 안전(ESP_ERR_INVALID_STATE 무시) */
-    if (interval_sec != 0) {
-        esp_timer_start_periodic(s_stats_timer, (uint64_t)interval_sec * 1000000ULL);
-    }
-}
 
 /* --- 사진 전송 --- */
 /* recv_cb(WiFi 태스크)에서 바로 처리하기엔 무거운 요청(촬영/파일 I/O/여러 건 전송)을
@@ -211,21 +164,9 @@ static void on_channel_synced(uint8_t channel, const uint8_t *hub_mac)
     cam_node_signal_recheck();  /* 2026-08-23 — 페어링 상태 변화, 대기 루프 즉시 재판정 */
 }
 
-/* 연속 PING 무응답으로 채널 동기화가 끊겼다고 판단된 순간 호출됨 — 채널이 안 맞는 상태에서
- * "페어링됨"으로 남아있으면 desync이므로 여기서 바로 정리(오늘 실기에서 겪은 문제의 근본
- * 원인이자, 이 재설계의 핵심 목적) */
-static void on_channel_lost_sync(void)
-{
-    s_conn_state = CAM_CONN_ORPHAN;
-    ESP_LOGI(TAG, "[STATE] -> %s (lost_sync)", conn_state_name(s_conn_state));
-    set_led(LED_PATTERN_BLINK_SLOW);
-    cam_node_note_scan_restarted();  /* 2026-08-23 — 재스캔 시작, 이전 스윕완료 기록 무효화 */
-    cam_node_signal_recheck();  /* 2026-08-23 — 페어링 상태 변화, 대기 루프 즉시 재판정 */
-}
-
-/* 순수 로컬 표시(LED)용으로만 남김 — 생존/연결 판정은 전부 esp_now_channelsync의
- * CHANNEL_PING/PONG(애플리케이션 레벨 왕복)이 전담함. 물리계층 ACK(send_cb의 성공/실패)는
- * "진짜 도달 확인"이 아니라는 게 오늘 세션에서 확정된 원칙이라 판정 기준으로 안 씀.
+/* 순수 로컬 표시(LED)용으로만 남김 — 생존/연결 판정은 전부 WAKE_HELLO의 reliable
+ * 요청/응답(esp_now_cam_try_wake_hello_fast_path 참고)이 전담함. 물리계층 ACK(send_cb의
+ * 성공/실패)는 "진짜 도달 확인"이 아니라는 원칙이라 판정 기준으로 안 씀.
  * 2026-08-24 — 다만 "광고가 실제로 무선에 나갔는가"는 이 콜백만이 알 수 있는 정보라(esp_now_send()의
  * 동기 리턴값은 큐잉 확인일 뿐, 위 esp_now_channelsync.h 주석 참고), 목적지가 브로드캐스트면
  * (이 프로젝트에서 광고만 브로드캐스트로 나감) 채널싱크로 완료를 알려줌 — "전송됨" 로그/소리가
@@ -431,7 +372,6 @@ static bool send_one_photo(uint32_t file_id, uint32_t my_generation)
             ESP_LOGW(TAG, "CKPT: DONE_ACK 무응답(라운드 %d) — 판단 보류(Cntl 쪽 타임아웃에 맡김)", round + 1);
             return true;
         }
-        esp_now_channelsync_notify_alive();  /* 방금 진짜 왕복 성공 — PING 큐잉 지연 오탐 완화(위 헤더 참고) */
         if (ack.missing_count == 0) {
             ESP_LOGI(TAG, "CKPT: DONE_ACK 완료 확인(라운드 %d)", round + 1);
             return true;
@@ -545,8 +485,6 @@ static bool send_one_photo_sr(uint32_t file_id, uint32_t my_generation)
                                                   &status_ack, sizeof(status_ack), &reply_len);
         status_requests++;
         if (err == ESP_OK) {
-            esp_now_channelsync_notify_alive();  /* 윈도우마다 자주 왕복 — DONE_ACK보다 더 촘촘한
-                                                      생존 신호(위 헤더 설명 참고) */
             if (status_ack.missing_count > 0) {
                 resend_chunks(file_id, &status_ack);  /* 이 윈도우 안의 누락분만 즉시 메꿈 */
                 total_sent_chunks += status_ack.missing_count;
@@ -578,7 +516,6 @@ static bool send_one_photo_sr(uint32_t file_id, uint32_t my_generation)
             ESP_LOGW(TAG, "CKPT(SR): DONE_ACK 무응답(라운드 %d) — 판단 보류", round + 1);
             return true;
         }
-        esp_now_channelsync_notify_alive();
         if (done_ack.missing_count == 0) {
             ESP_LOGI(TAG, "CKPT(SR): DONE_ACK 완료 확인(라운드 %d)", round + 1);
             return true;
@@ -628,7 +565,6 @@ static void send_photo_list(void)
         ESP_LOGW(TAG, "PHOTO_LIST_COUNT_ACK 무응답 — 목록 전송 포기");
         return;
     }
-    esp_now_channelsync_notify_alive();
 
     /* 2) 항목들을 배치로 나눠서 reliable 전송 */
     static const uint8_t s_batch_ack_types[] = { ESP_NOW_MSG_PHOTO_LIST_BATCH_ACK };
@@ -652,7 +588,6 @@ static void send_photo_list(void)
             return;
         }
         sent += n;
-        esp_now_channelsync_notify_alive();
     }
     if (s_list_abort_requested) {
         ESP_LOGW(TAG, "PHOTO_LIST_ERROR 수신으로 목록 전송 중단(%d/%d)", sent, count);
@@ -813,16 +748,13 @@ static void run_transfer_bench(esp_now_bench_mode_t mode, uint16_t duration_sec)
              (unsigned long long)(xfer_count > 0 ? min_elapsed_ms : 0), (unsigned long long)max_elapsed_ms);
 }
 
-/* 딥슬립 웨이크 윈도우 판정(cam_node.c의 cam_node_wake_window_done())이 "지금 자도 되는지"
- * 확인할 때 이 큐가 처리 중인지 알아야 함(2026-08-10) — Light Sleep 시절의 esp_pm_lock
- * (cam_node_sleep_lock_*)이 하던 "바쁜 구간" 표시를 대체. 처리 종류가 여럿이라 매
- * return/continue 지점마다 짝을 맞추는 대신, 이번 반복 시작에 세우고 끝에 내림 */
+/* 2026-08-10 도입, 처리 종류가 여럿이라 매 return/continue 지점마다 짝을 맞추는 대신 이번
+ * 반복 시작에 세우고 끝에 내림. 2026-08-26 — 이걸 밖으로 노출하던 esp_now_cam_is_busy()는
+ * 삭제됨(CNTL이 통신 중엔 SLEEP_NOW를 0으로 보내도록 고쳐서, 캠이 스스로 busy를 확인할
+ * 필요 자체가 없어짐 — esp_now_hub.c의 send_cask_sleep_now()/esp_now_photo_is_transacting_with
+ * 참고). s_transfer_busy 자체와 아래 mark_transfer_idle()의 재확인 신호는 그대로 유지 —
+ * app_main의 이벤트드리븐 대기 루프가 여전히 이 신호로 깨어남 */
 static volatile bool s_transfer_busy = false;
-
-bool esp_now_cam_is_busy(void)
-{
-    return s_transfer_busy || (s_photo_request_queue && uxQueueMessagesWaiting(s_photo_request_queue) > 0);
-}
 
 /* 2026-08-23 — busy 해제 지점마다 cam_node.c의 이벤트드리븐 대기 루프를 깨움(CAML에서
  * 검증 후 이식). 기존에 여러 return/continue 지점마다 s_transfer_busy=false만 하던 걸
@@ -848,7 +780,6 @@ static void send_capture_status(uint8_t status)
                                               s_capture_ack_types, 1,
                                               800, 3,
                                               NULL, 0, NULL);
-    if (err == ESP_OK) esp_now_channelsync_notify_alive();
     ESP_LOGI(TAG, "CAPTURE_STATUS(%u) 전송: %s", (unsigned)status, esp_err_to_name(err));
 }
 
@@ -1010,7 +941,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     if (msg_type == ESP_NOW_MSG_PHOTO_REQUEST) {
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_photo_request_t)) return;
-        cam_node_note_activity();
         esp_now_photo_request_t req;
         memcpy(&req, data, sizeof(req));
 
@@ -1059,7 +989,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     if (msg_type == ESP_NOW_MSG_BENCH_START) {
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_bench_start_t)) return;
-        cam_node_note_activity();
         esp_now_bench_start_t req;
         memcpy(&req, data, sizeof(req));
         cam_task_request_t item = { .kind = CAM_TASK_REQ_BENCH, .bench_duration_sec = req.duration_sec,
@@ -1080,7 +1009,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             ESP_LOGI(TAG, "PHOTO_LIST_REQUEST 중복 수신 — 무시(이미 처리 중)");
             return;
         }
-        cam_node_note_activity();
         cam_task_request_t item = { .kind = CAM_TASK_REQ_LIST };
         if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
             ESP_LOGW(TAG, "PHOTO_LIST_REQUEST 큐 가득 — 무시");
@@ -1092,7 +1020,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     if (msg_type == ESP_NOW_MSG_PHOTO_DELETE_ALL_REQUEST) {
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_photo_delete_all_request_t)) return;
-        cam_node_note_activity();
         cam_task_request_t item = { .kind = CAM_TASK_REQ_DELETE_ALL };
         if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
             ESP_LOGW(TAG, "PHOTO_DELETE_ALL_REQUEST 큐 가득 — 무시");
@@ -1118,13 +1045,17 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 드라이버 태스크)에서 바로 처리 — SD 파일 쓰기 하나뿐이라 photo_transfer_task
          * 큐로 넘길 만큼 무겁지 않음(다른 핸들러들과 동일 판단, 예: PHOTO_DELETE_REQUEST) */
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_cam_config_t)) return;
-        cam_node_note_activity();  /* 2026-08-10 — 페어링 직후 항상 오는 메시지, 이걸 처리하는
-                                       동안은 곧바로 딥슬립에 들어가지 않게 유휴타이머 갱신 */
+        cam_speaker_notify(SPK_EVT_CAM_CONFIG);
         esp_now_cam_config_t cfg;
         memcpy(&cfg, data, sizeof(cfg));
         cam_node_set_capture_interval_sec(cfg.capture_interval_sec);
         cam_node_set_response_interval_sec(cfg.response_interval_sec);
-        restart_stats_timer(cfg.response_interval_sec);
+        /* 2026-08-25(CASK 재설계) — SET_TIME이 별도 메시지였던 걸 여기로 흡수. 매번 무조건
+         * 적용(딥슬립이 RTC 시간 도메인은 보존해서 사실 매번 다시 맞출 필요는 없지만, "필요한지
+         * 판단하는 로직"을 추가하는 비용이 그냥 매번 적용하는 것보다 큼 — esp_now_link.h의
+         * esp_now_cam_config_t.unix_time 주석 참고) */
+        struct timeval tv = { .tv_sec = (time_t)cfg.unix_time, .tv_usec = 0 };
+        settimeofday(&tv, NULL);
         cam_node_set_agc_enable(cfg.agc_enable != 0);
         cam_node_set_aec_enable(cfg.aec_enable != 0);
         if (cfg.xclk_mhz != 0) cam_node_set_xclk_target_mhz(cfg.xclk_mhz);
@@ -1145,18 +1076,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         };
         esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
         ESP_LOGI(TAG, "CAM_CONFIG_ACK 전송: %s", esp_err_to_name(err));
-        /* 2026-08-10 — 딥슬립 통계는 여기(설정 반영 직후)에서 보내야 정확함. 예전엔 페어링
-         * 직후(recv_cb의 PAIR_REQUEST 핸들러)에 바로 보냈는데, 그 시점엔 아직 CAM_CONFIG_SET을
-         * 못 받아서 s_response_interval_sec이 Kconfig 기본값(3초)인 채로 보고됨 — 실제로는
-         * 딴 값(예: 10초)으로 곧 재설정될 예정인데도 통계탭엔 옛 값이 찍히는 버그가 실사용
-         * 중 발견됨("응답성을 10초로 적용했는데 I=3으로 계속 나옴") */
-        send_deep_sleep_stats();
         return;
     }
 
     if (msg_type == ESP_NOW_MSG_PHOTO_DELETE_REQUEST) {
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_photo_delete_request_t)) return;
-        cam_node_note_activity();
         esp_now_photo_delete_request_t req;
         memcpy(&req, data, sizeof(req));
         esp_err_t err = cam_storage_delete(req.file_id);
@@ -1175,60 +1099,45 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * esp_now_channelsync가 독립적으로 계속 확인 중이라 다시 스캔할 필요 없음. 예전엔
      * enter_advertising()으로 채널 스캔부터 다시 했는데, 채널이 안 바뀐 이상 불필요한
      * 낭비였음) */
+    /* 2026-08-25(CASK 재설계) — UNPAIR은 유일하게 유지된 명시적 단발 통보(사용자의 실시간
+     * 조작이라 즉각 반영돼야 함, reliable로 승격됨 — esp_now_hub.c 참고). 이제 reliable
+     * 요청이라 매칭되는 ACK를 반드시 돌려줘야 CNTL 쪽이 도달을 확인함 */
     if (msg_type == ESP_NOW_MSG_UNPAIR) {
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_unpair_t)) return;
         if (memcmp(info->src_addr, s_hub_mac, sizeof(s_hub_mac)) != 0) return;
         ESP_LOGI(TAG, "Cntl이 연결 해제함");
         s_conn_state = CAM_CONN_ORPHAN;
+        s_wake_hub_known = false;  /* 이 CNTL로의 빠른 재연결 시도 자체를 그만둠 */
         ESP_LOGI(TAG, "[STATE] -> %s (unpair)", conn_state_name(s_conn_state));
         set_led(LED_PATTERN_BLINK_FAST);
+        esp_now_unpair_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_UNPAIR_ACK };
+        esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
         return;
     }
 
-    /* Cntl 소프트리셋 대응(2026-08-02) — Cntl이 재시작하면 노드 테이블이 통째로 비워지는데,
-     * 우리는 이미 페어링됐다고 믿고 있음. 2026-08-04 재설계: 생존확인이 이제 CHANNEL_PING/PONG
-     * 기반이라(esp_now_channelsync) Cntl이 재부팅해도 응답만 하면 되므로 채널 동기화 자체는
-     * 안 끊김 — 여기선 페어링 상태만 정리하면 됨(재스캔 불필요) */
-    if (msg_type == ESP_NOW_MSG_HUB_RESET) {
-        if (len < (int)sizeof(esp_now_hub_reset_t)) return;
-        if (s_conn_state == CAM_CONN_PAIRED) {
-            ESP_LOGI(TAG, "Cntl 재시작 감지(HUB_RESET)");
-            s_conn_state = CAM_CONN_ORPHAN;
-            ESP_LOGI(TAG, "[STATE] -> %s (hub_reset)", conn_state_name(s_conn_state));
-            set_led(LED_PATTERN_BLINK_FAST);
-        }
+    /* CNTL이 "이번 사이클에 더 할 일 없다"고 판단하면 보냄(CASK의 마지막 단계) — sleep_sec이
+     * 곧 다음 딥슬립 시간이거나(2026-08-25) 0이면 안 자고 곧바로 다음 WAKE_HELLO 루프 */
+    if (msg_type == ESP_NOW_MSG_CASK_WORK_NONE) {
+        /* 2026-08-26(사용자 지시) — CASK "할일" 단계가 비어있을 때 오는 명시적 신호. 특별히
+         * 할 일은 없고 ACK만 돌려줌 — 이게 옴으로써 캠은 이번 CASK엔 사진요청 등 큐잉된
+         * 액션이 없었다는 걸 확실히 앎(추측 불필요, esp_now_hub.c의 dequeue_pending_action_locked
+         * 참고) */
+        if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_cask_work_none_t)) return;
+        esp_now_cask_work_none_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE_ACK };
+        esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
         return;
     }
 
-    /* 적응형 반응시간(2026-08-10) — Cntl이 "이번 사이클에 더 할 일 없다"고 판단하면 보냄.
-     * 남은 유휴여유 타이머를 기다리지 않고 곧바로 잘 수 있게 함(cam_node.c 참고) */
     if (msg_type == ESP_NOW_MSG_SLEEP_NOW) {
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_sleep_now_t)) return;
-        ESP_LOGI(TAG, "SLEEP_NOW 수신 — 유휴여유 생략하고 즉시 딥슬립 준비");
-        cam_node_note_sleep_now_requested();
-        /* 2026-08-10 — reliable stack 전환("chunk는 SR, 나머지는 reliable" 원칙 적용).
-         * esp_now_sleep_now_t를 msg_type만 바꿔 그대로 재사용(기존 관례) */
+        const esp_now_sleep_now_t *msg = (const esp_now_sleep_now_t *)data;
+        ESP_LOGI(TAG, "SLEEP_NOW 수신(sleep_sec=%u)", (unsigned)msg->sleep_sec);
+        cam_speaker_notify(SPK_EVT_SLEEP_NOW);
+        cam_node_note_sleep_now_requested(msg->sleep_sec);
         esp_now_sleep_now_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SLEEP_NOW_ACK };
         esp_err_t ack_err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
         ESP_LOGI(TAG, "SLEEP_NOW_ACK 전송: %s", esp_err_to_name(ack_err));
-        return;
-    }
-
-    /* CAM은 자체 RTC가 없어서 부팅하면 시계가 1970-01-01 근처 — Cntl이 페어링될 때마다
-     * 자기 시각을 알려주면 그걸로 시스템 클록을 맞춤(사진 file_id가 이 시각 기준이라
-     * 정확한 촬영시각 표시에 필요, 2026-08-01 추가) */
-    if (msg_type == ESP_NOW_MSG_SET_TIME) {
-        if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_set_time_t)) return;
-        if (memcmp(info->src_addr, s_hub_mac, sizeof(s_hub_mac)) != 0) return;
-        const esp_now_set_time_t *msg = (const esp_now_set_time_t *)data;
-        struct timeval tv = { .tv_sec = (time_t)msg->unix_time, .tv_usec = 0 };
-        settimeofday(&tv, NULL);
-        ESP_LOGI(TAG, "SET_TIME 수신 — 시각 동기화: %u", (unsigned)msg->unix_time);
-        /* 2026-08-21 — reliable stack 전환(다른 모든 Cntl->노드 요청과 통일). 페이로드 없음,
-         * 응답이 왔다는 사실 자체가 의미의 전부 */
-        esp_now_set_time_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SET_TIME_ACK };
-        esp_err_t ack_err = esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
-        ESP_LOGI(TAG, "SET_TIME_ACK 전송: %s", esp_err_to_name(ack_err));
+        cam_speaker_notify(SPK_EVT_SLEEP_NOW_ACK);
         return;
     }
 
@@ -1270,20 +1179,133 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         .msg_type = ESP_NOW_MSG_PAIR_ACK,
     };
     memcpy(ack.node_mac, s_mac, sizeof(ack.node_mac));
+    /* 2026-08-26(순서 버그 수정) — CNTL이 PAIR_ACK 수신 직후 곧바로 CONFIG+SLEEP_NOW를
+     * 보내므로(최초 페어링/졸업 CASK), 전송 직전에 미리 대기 상태를 깨끗하게 함 —
+     * esp_now_cam_try_wake_hello_fast_path()의 동일 조치와 같은 이유 */
+    cam_node_reset_sleep_now_state();
     esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
     ESP_LOGI(TAG, "페어링됨: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
     cam_speaker_notify(SPK_EVT_PAIR_ACK);
 
-    /* 딥슬립 통계 전송은 CAM_CONFIG_SET 처리 직후로 옮김(2026-08-10) — 그때가 돼야
-     * s_response_interval_sec이 실제 적용될 값으로 갱신돼 있음(recv_cb의
-     * ESP_NOW_MSG_CAM_CONFIG_SET 핸들러 참고) */
-    cam_node_note_activity();
+    /* 2026-08-25(CASK 재설계) — "졸업": 지금 막 전체 스캔으로 찾아낸 이 CNTL을 다음 웨이크부터
+     * 곧장 유니캐스트로 시도할 수 있게 기억해둠(esp_now_cam_try_wake_hello_fast_path 참고) */
+    uint8_t current_channel = 0;
+    wifi_second_chan_t second_chan;
+    esp_wifi_get_channel(&current_channel, &second_chan);
+    memcpy(s_wake_hub_mac, s_hub_mac, sizeof(s_wake_hub_mac));
+    s_wake_hub_channel = current_channel;
+    s_wake_hub_known   = true;
 }
 
 void esp_now_cam_set_status_led(gpio_num_t pin)
 {
     s_led_pin = pin;
     status_led_init(pin);
+}
+
+/* 2026-08-25(CASK 재설계) — 알려진 CNTL(s_wake_hub_*)이 있으면 광고 없이 곧장 유니캐스트로
+ * "저 왔어요"를 시도. 성공하면 예전 3단계 핸드셰이크(ADVERTISE_ACK->PAIR_REQUEST->PAIR_ACK)
+ * 전체를 요청 1번+reliable 응답 1번으로 대체함 — esp_now_reliable_request()의 재시도
+ * 파라미터(100ms×3회, "빠른 재시도" 요구사항 그 자체) 하나로 충분, 별도 루프 불필요. 실패하면
+ * (3회 소진) 그 자리에서 아무 것도 안 하고 false만 리턴 — 호출부(esp_now_cam_init)가 기존
+ * 채널스캔 폴백으로 넘어감. 이 실패 하나로 채널변경/CNTL다운/CNTL이 이 캠을 모름, 세 원인을
+ * 전부 동일하게 처리함(사용자 지시: "재연결 시퀀스를 동일하게 타야지" — 원인 구분 없음).
+ * DEEP_SLEEP_STATS가 하던 통계 보고를 이 메시지가 그대로 흡수함 */
+/* 2026-08-10 도입 -> 2026-08-26 수정(사용자 지시: "AW는 누적치를 보내고 있고, 최종 보고
+ * 이후 리셋된 값에서 다시 시작했어야 해") — 예전엔 esp_timer_get_time()(이번 부팅 후 경과
+ * 시간)을 그대로 실어보냈는데, 정상 딥슬립 사이클(매번 완전 재부팅)에선 부팅=깨어난 시점이라
+ * 우연히 맞았지만, Live 모드처럼 한 부팅 안에서 WAKE_HELLO를 여러 번 보내는 경우엔 매번
+ * "부팅 이후 전체" 값이라 보고할수록 계속 커지기만 했음(진짜 "이번 보고 이후 얼마나
+ * 깨어있었는지"가 아니었음). 평범한 static(RTC 아님)이라 매 부팅 0에서 시작 — 그 부팅의
+ * 첫 보고는 자연히 "부팅 이후"가 되고(정상 사이클과 동일), 같은 부팅 안의 다음 보고부터는
+ * 직전 보고 이후의 델타만 잡힘 */
+static uint32_t s_last_wake_hello_report_ms = 0;
+
+static bool esp_now_cam_try_wake_hello_fast_path(void)
+{
+    if (!s_wake_hub_known) return false;
+
+    esp_wifi_set_channel(s_wake_hub_channel, WIFI_SECOND_CHAN_NONE);
+    memcpy(s_hub_mac, s_wake_hub_mac, sizeof(s_hub_mac));
+
+    esp_now_peer_info_t peer = { 0 };
+    memcpy(peer.peer_addr, s_hub_mac, sizeof(peer.peer_addr));
+    peer.ifidx   = WIFI_IF_STA;
+    peer.channel = 0;
+    peer.encrypt = false;
+    if (!esp_now_is_peer_exist(s_hub_mac)) {
+        esp_now_add_peer(&peer);
+    }
+    /* MCS0/HT20 — PAIR_REQUEST 핸들러의 동일 설정과 같은 근거(esp_now_cam.c 위쪽 참고) */
+    esp_now_rate_config_t rate_cfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };
+    esp_now_set_peer_rate_config(s_hub_mac, &rate_cfg);
+
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    esp_now_wake_hello_t hello = {
+        .version             = ESP_NOW_LINK_VERSION,
+        .msg_type            = ESP_NOW_MSG_WAKE_HELLO,
+        .wake_reason          = (uint8_t)cam_node_get_wake_reason(),
+        .awake_uptime_ms      = now_ms - s_last_wake_hello_report_ms,
+        .sleep_interval_sec   = cam_node_get_response_interval_sec(),
+        .actual_last_sleep_sec = cam_node_get_last_actual_sleep_sec(),
+    };
+    s_last_wake_hello_report_ms = now_ms;
+    uint16_t batt_raw = 0, batt_mv = 0;
+    cam_node_read_battery_mv(&batt_raw, &batt_mv);
+    hello.battery_adc_raw = batt_raw;
+    hello.battery_mv      = batt_mv;
+
+    static const uint8_t s_wake_hello_ack_types[] = { ESP_NOW_MSG_WAKE_HELLO_ACK };
+    esp_now_wake_hello_ack_t ack;
+    cam_speaker_notify(SPK_EVT_WAKE_HELLO);
+    /* 2026-08-26(순서 버그 수정) — CNTL이 WAKE_HELLO_ACK 직후 곧바로 CONFIG+SLEEP_NOW를
+     * 보내므로, 그게 도착하기 전에(전송 직전) 미리 대기 상태를 깨끗하게 함 — cam_node.c의
+     * cam_node_reset_sleep_now_state() 주석 참고 */
+    cam_node_reset_sleep_now_state();
+    esp_err_t err = esp_now_reliable_request(s_hub_mac, &hello, sizeof(hello),
+                                              s_wake_hello_ack_types, 1,
+                                              100, 3,
+                                              &ack, sizeof(ack), NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WAKE_HELLO 무응답(3회) — 폴백 스캔으로 전환");
+        s_conn_state = CAM_CONN_ORPHAN;  /* 재시도 중이었다면(이미 PAIRED였을 수 있음) 정리 */
+        return false;
+    }
+    cam_speaker_notify(SPK_EVT_WAKE_HELLO_ACK);
+
+    /* notify_paired()는 channelsync가 이미 초기화돼있을 때만(재시도 케이스) 의미 있음 —
+     * 내부적으로 스캔/휴식 타이머를 null-check하므로 아직 초기화 전(최초 성공)이어도 안전 */
+    esp_now_channelsync_notify_paired();
+    s_conn_state = CAM_CONN_PAIRED;
+    ESP_LOGI(TAG, "[STATE] -> %s (wake_hello)", conn_state_name(s_conn_state));
+    set_led(LED_PATTERN_HEARTBEAT);
+    return true;
+}
+
+/* 2026-08-25(CASK 재설계) — channelsync는 부팅 사이클 중 최초 1회만 init(), 그 뒤로는
+ * resume_scan()만 씀(타이머 중복 생성 방지). fast path가 실패할 때마다(최초 시도든, 이후
+ * 침묵 타임아웃으로 인한 재시도든) 이 함수 하나만 부르면 알아서 처리됨 */
+static bool s_channelsync_initialized = false;
+
+bool esp_now_cam_reconnect(void)
+{
+    if (esp_now_cam_try_wake_hello_fast_path()) {
+        return true;
+    }
+    if (!s_channelsync_initialized) {
+        s_channelsync_initialized = true;
+        /* 광고/채널스캔은 esp_now_channelsync가 전담 — 브로드캐스트 피어 등록도 이
+         * 컴포넌트가 알아서 함 */
+        esp_now_channelsync_init(s_name, s_mac, on_channel_synced);
+        /* 2026-08-23(사용자 지시) — 상태(ORPHAN/FOUND일 때만 보냄, PAIRED면 안 보냄)가 광고
+         * 전송 자체를 직접 결정하게 함(방어적 이중 게이트, 위 should_advertise 정의 참고) */
+        esp_now_channelsync_set_should_advertise_cb(should_advertise);
+    } else {
+        esp_now_channelsync_resume_scan();
+    }
+    cam_node_note_scan_restarted();  /* 이전 스윕완료 기록 무효화(cam_node.h 참고) */
+    set_led(LED_PATTERN_BLINK_FAST);
+    return false;
 }
 
 void esp_now_cam_init(void)
@@ -1307,27 +1329,8 @@ void esp_now_cam_init(void)
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
     ESP_ERROR_CHECK(esp_now_register_send_cb(send_cb));
 
-    /* 광고/채널스캔/생존확인은 전부 esp_now_channelsync가 전담(2026-08-04 재설계) —
-     * 브로드캐스트 피어 등록도 이 컴포넌트가 알아서 함 */
-    esp_now_channelsync_init(s_name, s_mac, on_channel_synced, on_channel_lost_sync);
-    /* 2026-08-23(사용자 지시) — 상태(ORPHAN/FOUND일 때만 보냄, PAIRED면 안 보냄)가 광고
-     * 전송 자체를 직접 결정하게 함(방어적 이중 게이트, 위 should_advertise 정의 참고) */
-    esp_now_channelsync_set_should_advertise_cb(should_advertise);
-    set_led(LED_PATTERN_BLINK_FAST);
-    /* 딥슬립 통계(send_deep_sleep_stats)는 여기서 주기 전송하지 않음 — 페어링 완료 직후
-     * recv_cb의 PAIR_REQUEST 핸들러에서 1회만 보냄(위 함수 정의 주석 참고) */
+    esp_now_cam_reconnect();
 }
 
 const char *esp_now_cam_get_name(void) { return s_name; }
 bool esp_now_cam_is_paired(void) { return s_conn_state == CAM_CONN_PAIRED; }
-
-/* 2026-08-11 — 예전의 70초 자율취침 폴백을 대체(사용자 지시). fire-and-forget으로 충분 —
- * 유실돼도 cam_node_wake_window_done()이 다음 주기에 또 보냄(SLEEP_NOW_ACK 같은 확인
- * 응답 체계는 불필요, 반복 자체가 재시도 역할을 함) */
-void esp_now_cam_send_sleep_now_request(void)
-{
-    if (!(s_conn_state == CAM_CONN_PAIRED)) return;
-    esp_now_sleep_now_t req = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SLEEP_NOW_REQUEST };
-    esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&req, sizeof(req));
-    ESP_LOGI(TAG, "SLEEP_NOW_REQUEST 전송(재요청): %s", esp_err_to_name(err));
-}
