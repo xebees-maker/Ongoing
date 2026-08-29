@@ -237,4 +237,6 @@ void app_main(void)
     /* 웹 대시보드는 실제로 IP를 받은 뒤에 시작(위 ip_event_handler 참고, 5005 버그 수정) */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                          &ip_event_handler, NULL, NULL));
+
+    ui_main_register_wifi_events();  /* 같은 이유로 여기서(esp_now_hub_init() 이후) 등록 */
 }

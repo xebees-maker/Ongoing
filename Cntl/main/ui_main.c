@@ -10,6 +10,8 @@
 #include "esp_jpeg_dec.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_wifi.h"
+#include "esp_lv_adapter.h"
 #include "lvgl.h"
 #include "misc/cache/instance/lv_image_cache.h"
 #include <stdio.h>
@@ -139,6 +141,17 @@ static lv_obj_t *s_xclk_apply_btn   = NULL;
 static lv_obj_t *s_xclk_label       = NULL;
 static lv_obj_t *s_xclk_apply_lbl   = NULL;
 static int       s_xclk_applied_idx = -1;
+
+/* 네트워크 행(2026-08-29) — [라벨][독립/종속 드롭다운][우측: IP 또는 SSID 또는 찾기버튼].
+ * 우측 내용은 부팅 시점이 아니라 실제 연결상태(STA는 IP를 받아야 "연결됨")에 따라 바뀔 수
+ * 있어서, 두 위젯(라벨+버튼) 다 미리 만들어두고 refresh_network_right_zone()에서 매 틱
+ * 보이기/숨기기만 토글(refresh_dashboard 타이머에 얹어서 재사용, ui_main.c 관례) */
+static lv_obj_t *s_network_label      = NULL;
+static lv_obj_t *s_network_mode_dd    = NULL;
+static lv_obj_t *s_network_right_label = NULL;  /* AP모드: IP, STA모드+연결됨: SSID */
+static lv_obj_t *s_network_find_btn   = NULL;   /* STA모드+미연결일 때만 보임 */
+static lv_obj_t *s_network_find_lbl   = NULL;
+static void refresh_network_right_zone(void);  /* fwd — refresh_dashboard(위쪽)와 행 생성부(아래쪽) 둘 다에서 씀 */
 
 /* 적응형 반응시간 행(2026-08-10) — 마지막 사용자 조작 후 이만큼 조용해야 CAM에 SLEEP_NOW.
  * CAM에는 전송 안 되는 Cntl 내부 판단값이라(esp_now_hub.c 참고), Apply해도 네트워크 왕복이
@@ -438,6 +451,10 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
     lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
     lv_label_set_text(s_log_panel_title, ui_str(STR_PANEL_GENERAL_LOG));
+    lv_label_set_text(s_network_label, ui_str(STR_LABEL_NETWORK));
+    /* 2026-08-29 버그수정 — 캡션을 무조건 "찾기"로 덮어쓰면 연결된 상태(캡션=SSID)일 때
+     * 언어 전환 시 SSID가 사라지고 "찾기"로 잘못 바뀜. 현재 상태 기준으로 다시 계산 */
+    refresh_network_right_zone();
 
     /* 드롭다운 옵션 문자열 자체도 언어별이라 다시 채워야 함 — lv_dropdown_set_options는
      * 선택 인덱스를 0으로 리셋시키므로, 지금 선택돼있던 인덱스를 기억했다가 그대로
@@ -454,6 +471,18 @@ static void refresh_lang_texts(void)
     lv_dropdown_set_options(s_response_interval_dd, ui_str(STR_OPT_RESPONSE_INTERVAL_LIST));
     lv_dropdown_set_selected(s_response_interval_dd, response_sel);
     update_response_help_text();  /* 도움말도 언어 전환 시 다시 채움(선택 인덱스는 그대로) */
+
+    {
+        char opts[64];
+        snprintf(opts, sizeof(opts), "%s\n%s", ui_str(STR_NETWORK_MODE_AP), ui_str(STR_NETWORK_MODE_STA));
+        lv_dropdown_set_options(s_network_mode_dd, opts);
+    }
+    /* 2026-08-29 버그수정 — 화면에 떠있던 선택 인덱스를 그대로 되돌리는 대신, 항상 진짜
+     * 저장된 값(device_config)에서 다시 계산 — set_options()가 내부적으로 sel_opt_id/
+     * sel_opt_id_orig를 리셋하는데, 되돌리는 과정에서 화면 표시는 맞아 보여도 내부 비교
+     * 로직이 어긋나 "값 변경 → 재시작 확인 팝업"이 언어 전환 이후엔 안 뜨던 버그의 원인으로
+     * 의심됨(사용자 리포트) */
+    lv_dropdown_set_selected(s_network_mode_dd, device_config_get_wifi_ap_mode() ? 0 : 1);
 
     uint16_t adaptive_sel = lv_dropdown_get_selected(s_adaptive_response_dd);
     lv_dropdown_set_options(s_adaptive_response_dd, ui_str(STR_OPT_ADAPTIVE_RESPONSE_LIST));
@@ -631,6 +660,8 @@ static void show_confirm_popup(const char *message, confirm_yes_fn_t on_yes, voi
 
     lv_obj_t *msg = lv_label_create(box);
     lv_label_set_text(msg, message);
+    lv_obj_set_width(msg, LV_PCT(100));
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);  /* 2026-08-29 — 긴 메시지 워드랩(사용자 지적) */
     lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
@@ -1967,6 +1998,8 @@ static void refresh_dashboard(lv_timer_t *t)
         lv_obj_add_flag(s_web_url_label, LV_OBJ_FLAG_HIDDEN);
     }
 
+    refresh_network_right_zone();  /* 2026-08-29 — 설정탭 네트워크 행의 우측(IP/SSID/찾기) */
+
     /* 2026-08-21 — 요약 둘째줄, 내부/PSRAM 여유메모리 상시 표시(사용자 지시) */
     char mem_i[16], mem_p[16];
     format_bytes_human((uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), mem_i, sizeof(mem_i));
@@ -2503,6 +2536,490 @@ static void cb_restart_btn(lv_event_t *e)
     show_confirm_popup(ui_str(STR_MSG_RESTART_CONFIRM), cb_restart_confirmed, NULL);
 }
 
+/* ════════════════════════════════════════════════════════════
+ * 네트워크(WiFi) 설정 — 독립(AP)/종속(STA) 전환 + "찾기"(STA SSID 스캔/선택/비밀번호입력)
+ * (2026-08-29) 모드 전환도, WiFi 연결정보 변경도 둘 다 부팅 시 한 번만 적용되는 구조
+ * (esp_now_hub.c의 wifi_bringup 참고)라, 저장 후엔 항상 재시작 확인 팝업(show_confirm_popup
+ * 재사용)으로 마무리 — 살아있는 상태에서 esp_wifi 모드를 핫스왑하는 위험/복잡도를 피함
+ * ════════════════════════════════════════════════════════════ */
+static void cb_network_mode_restart_confirmed(void *ctx)
+{
+    bool new_ap_mode = (bool)(uintptr_t)ctx;
+    device_config_set_wifi_ap_mode(new_ap_mode);
+    esp_restart();
+}
+
+/* 2026-08-29 버그수정(사용자 리포트) — 취소를 누르면 드롭다운 표시를 실제 저장된 값으로
+ * 되돌려야 함. 공용 show_confirm_popup()은 취소 버튼에 cb_modal_close만 고정으로 붙어있어서
+ * (다른 여러 확인팝업이 같이 쓰는 함수라 시그니처를 못 바꿈) 이 행만 전용 팝업을 따로 둠 */
+static void cb_network_mode_cancel(lv_event_t *e)
+{
+    lv_dropdown_set_selected(s_network_mode_dd, device_config_get_wifi_ap_mode() ? 0 : 1);
+    cb_modal_close(e);
+}
+
+static void show_network_mode_confirm_popup(bool new_ap_mode)
+{
+    lv_obj_t *box = create_modal();
+
+    lv_obj_t *msg = lv_label_create(box);
+    lv_label_set_text(msg, ui_str(STR_MSG_NETWORK_MODE_RESTART_CONFIRM));
+    lv_obj_set_width(msg, LV_PCT(100));
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_YES, cb_confirm_yes_trampoline, &s_confirm_state);
+    add_modal_button(btn_row, STR_BTN_CANCEL, cb_network_mode_cancel, NULL);
+
+    s_confirm_state.fn  = cb_network_mode_restart_confirmed;
+    s_confirm_state.ctx = (void *)(uintptr_t)new_ap_mode;
+}
+
+static void cb_network_mode_changed(lv_event_t *e)
+{
+    lv_obj_t *dd = lv_event_get_target(e);
+    uint16_t sel = lv_dropdown_get_selected(dd);
+    bool new_ap_mode = (sel == 0);  /* 0=독립(AP), 1=종속(STA) — 드롭다운 옵션 순서와 일치 */
+    bool cur_ap_mode = device_config_get_wifi_ap_mode();
+    ui_log_add("net_mode_dd changed: sel=%u new_ap=%d cur_ap=%d", (unsigned)sel, (int)new_ap_mode, (int)cur_ap_mode);
+    if (new_ap_mode == cur_ap_mode) return;  /* 실제로 바뀐 게 없으면 팝업 안 띄움 */
+    show_network_mode_confirm_popup(new_ap_mode);
+}
+
+/* 2026-08-29 재설계(사용자 지시) — 스캔목록 팝업과 비밀번호입력 팝업을 하나의 박스 안에서
+ * 내용만 바꾸던 방식에서, 목록 위에 비밀번호 팝업이 "추가로" 스택되는 2단 팝업 구조로 변경 */
+static lv_obj_t *s_wifi_status_lbl  = NULL;  /* 스캔 팝업 상단 "연결됨: X" / "아직 없음" */
+static lv_obj_t *s_wifi_list        = NULL;  /* 스캔 결과 리스트(스캔 팝업 소속) */
+static lv_obj_t *s_wifi_keyboard    = NULL;
+static lv_obj_t *s_wifi_password_ta = NULL;
+static lv_obj_t *s_wifi_pw_box         = NULL;  /* 비밀번호 팝업 자체(비동기 콜백에서 닫을 때 필요) */
+static lv_obj_t *s_wifi_connect_btn    = NULL;  /* "연결" 버튼(시도 중엔 비활성화) */
+static char      s_wifi_test_password[65] = "";
+#define WIFI_SCAN_MAX_RESULTS 16
+/* 2026-08-29(사용자 지시: "PSRAM도 몰아 넣어") — 내부 RAM 12K->1.7K 급감 대응. 둘 다
+ * 스캔 팝업이 열릴 때(cb_network_find_btn) 최초 1회 PSRAM에 할당, 이후 재사용 */
+static char (*s_wifi_scan_ssids)[33] = NULL;
+static wifi_ap_record_t *s_wifi_scan_records = NULL;
+static int  s_wifi_scan_count = 0;
+static char s_wifi_selected_ssid[33] = "";
+
+static void update_wifi_status_label(void)
+{
+    if (!s_wifi_status_lbl) return;
+    const char *saved_ssid = device_config_get_sta_ssid();
+    const char *ip = esp_now_hub_get_own_ip_str();
+    if (saved_ssid[0] != '\0' && ip[0] != '\0') {
+        lv_label_set_text_fmt(s_wifi_status_lbl, "%s: %s", ui_str(STR_STATUS_CONNECTED),
+                               esp_now_hub_get_active_sta_ssid());
+    } else {
+        lv_label_set_text(s_wifi_status_lbl, ui_str(STR_STATUS_NOT_CONNECTED));
+    }
+}
+
+static void cb_wifi_scan_popup_close(lv_event_t *e)
+{
+    esp_now_hub_set_sta_reconnect_paused(false);
+    s_wifi_status_lbl = NULL;
+    s_wifi_list = NULL;
+    cb_modal_close(e);
+}
+
+/* 비밀번호 팝업(+ 그 아래 스캔목록 팝업까지) 정리 — 저장하든 취소든 성공/실패든 공통으로
+ * 필요한 부분. s_wifi_pw_box를 직접 참조하므로 버튼/이벤트 없이도(비동기 콜백에서도) 호출
+ * 가능(2026-08-29 — 실시간 접속 시도 결과가 esp_now_hub.c의 이벤트 콜백에서 비동기로
+ * 오는데, 그땐 클릭 이벤트가 없어서 예전처럼 버튼에서 부모를 거슬러 올라갈 수 없었음) */
+static void close_wifi_popups(void)
+{
+    esp_now_hub_set_sta_reconnect_paused(false);
+    if (s_wifi_keyboard) { lv_obj_delete(s_wifi_keyboard); s_wifi_keyboard = NULL; }
+    s_wifi_password_ta = NULL;
+
+    if (s_wifi_pw_box) {
+        lv_obj_delete(lv_obj_get_parent(s_wifi_pw_box));  /* box -> overlay */
+        s_wifi_pw_box = NULL;
+        s_wifi_connect_btn = NULL;
+    }
+
+    /* 그 아래 스캔목록 팝업도 같이 닫기 — 목적을 이뤘으니(연결 성공이든 취소든) 목록까지
+     * 볼 이유가 없음 */
+    if (s_wifi_list) {
+        lv_obj_t *scan_overlay = lv_obj_get_parent(lv_obj_get_parent(s_wifi_list));
+        lv_obj_delete(scan_overlay);
+        s_wifi_list = NULL;
+        s_wifi_status_lbl = NULL;
+    }
+    resume_bg_timers();  /* pause_bg_timers는 idempotent(lv_timer_pause 반복 호출 안전)라 1번이면 충분 */
+}
+
+static void cb_wifi_pw_popup_close(lv_event_t *e)
+{
+    (void)e;
+    close_wifi_popups();
+}
+
+/* 2026-08-29(사용자 설계: "AP 찾고 선택하고 접속하는 과정은 재시작 안 함") — esp_now_hub.c의
+ * esp_now_hub_test_sta_connect() 결과 콜백. WiFi 이벤트 태스크에서 비동기로 불리므로
+ * LVGL 조작 전체를 esp_lv_adapter_lock()으로 감싸야 함(wifi_scan_event_handler와 같은
+ * 이유로 겪었던 화면깨짐 버그를 여기서 처음부터 피함) */
+static void wifi_test_result_async_cb(void *user_data)
+{
+    bool success = (bool)(uintptr_t)user_data;
+    /* 2026-08-29 — lv_async_call()의 콜백은 LVGL 자신의 태스크에서 정상 처리 흐름의
+     * 일부로 실행되므로(esp_lvgl_adapter가 내부적으로 lv_timer_handler()를 도는 그
+     * 태스크) 여기선 esp_lv_adapter_lock() 불필요 — 아래 cb_wifi_test_connect_result의
+     * 주석 참고 */
+    if (success) {
+        /* TEMP TEST 2026-08-29 — 비번 저장 복원, 크래시 재현 시 정확히 뭘 저장하려던
+         * 순간이었는지 캡처에 남기기 위한 직전 로그 */
+        ESP_LOGI(TAG, "비번 저장 시도: SSID=[%s] PW=[%s](len=%d)",
+                 s_wifi_selected_ssid, s_wifi_test_password, (int)strlen(s_wifi_test_password));
+        device_config_set_sta_credentials(s_wifi_selected_ssid, s_wifi_test_password);
+        close_wifi_popups();
+        refresh_network_right_zone();  /* 2026-08-29 버그수정(사용자 리포트: "연결됐는데 상단은
+                                           계속 찾기로 표시") — 언어전환/모드전환/부팅 때만 갱신되고
+                                           연결 성공 직후엔 안 불렸음 */
+        show_toast(ui_str(STR_STATUS_CONNECTED), lv_palette_main(LV_PALETTE_GREEN));
+    } else if (s_wifi_connect_btn) {  /* 팝업이 그새 닫혔으면(사용자가 취소) 무시 */
+        lv_obj_clear_state(s_wifi_connect_btn, LV_STATE_DISABLED);
+        lv_label_set_text(lv_obj_get_child(s_wifi_connect_btn, 0), ui_str(STR_BTN_CONNECT));
+        show_toast(ui_str(STR_MSG_WIFI_CONNECT_FAILED), lv_palette_main(LV_PALETTE_RED));
+    }
+}
+
+/* 2026-08-29(사용자 지시: "토스트로 뭐하는지 단계마다 나오게") — DISCONNECTING/CONNECTING
+ * 단계 전환을 토스트로 보여줌. wifi_test_result_async_cb와 같은 이유로 lv_async_call() 필요 */
+static void wifi_test_stage_async_cb(void *user_data)
+{
+    esp_now_hub_sta_test_stage_t stage = (esp_now_hub_sta_test_stage_t)(uintptr_t)user_data;
+    if (stage == STA_TEST_STAGE_DISCONNECTING) {
+        show_toast(ui_str(STR_MSG_WIFI_STAGE_DISCONNECTING), lv_palette_main(LV_PALETTE_BLUE));
+    } else {
+        show_toast(ui_str(STR_MSG_WIFI_STAGE_AUTHENTICATING), lv_palette_main(LV_PALETTE_BLUE));
+    }
+}
+
+static void cb_wifi_test_connect_stage(esp_now_hub_sta_test_stage_t stage, void *ctx)
+{
+    (void)ctx;
+    lv_async_call(wifi_test_stage_async_cb, (void *)(uintptr_t)stage);
+}
+
+static void cb_wifi_test_connect_result(bool success, void *ctx)
+{
+    (void)ctx;
+    /* 2026-08-29 버그수정(사용자 리포트: 옳은 비번으로 바로 연결 성공 시 크래시+리셋) —
+     * 실기 크래시 로그로 "sys_evt 태스크 스택오버플로우" 확인됨. 원인: 이 콜백이 WiFi
+     * 이벤트 태스크(2304바이트, 좁음) 안에서 곧바로 device_config_save()(784바이트
+     * 구조체를 스택에 만들고 파일 I/O까지 함) + 팝업 삭제(LVGL 오브젝트 트리 정리) +
+     * 토스트 생성을 전부 동기 실행하고 있었음 — 그 좁은 스택엔 너무 많은 일.
+     * lv_async_call()로 실제 작업을 LVGL 자신의 태스크(별도의, 더 넉넉한 스택)로 미루고
+     * 여기선 예약만 하고 바로 리턴 — WiFi 이벤트 태스크 스택 사용량을 최소화함.
+     * (sys_evt 태스크 스택 자체도 2304->6144로 확대했지만, 애초에 이 무거운 작업을
+     * 그 태스크에서 안 하는 게 더 근본적인 수정) */
+    lv_async_call(wifi_test_result_async_cb, (void *)(uintptr_t)success);
+}
+
+static void cb_wifi_connect_btn(lv_event_t *e)
+{
+    (void)e;
+    strncpy(s_wifi_test_password, lv_textarea_get_text(s_wifi_password_ta), sizeof(s_wifi_test_password) - 1);
+    s_wifi_test_password[sizeof(s_wifi_test_password) - 1] = '\0';
+    /* TEMP TEST 2026-08-29 — 키보드로 입력한 값이 실제로 그대로 캡처되는지 비교용. 원복할 것 */
+    ESP_LOGI(TAG, "WiFi 테스트 접속 캡처값: SSID=[%s] PW=[%s](len=%d)",
+             s_wifi_selected_ssid, s_wifi_test_password, (int)strlen(s_wifi_test_password));
+
+    /* 2026-08-29 버그수정(사용자 리포트: "이미 연결된 AP를 선택해도 재시작한다는데") —
+     * 저장된 값과 완전히 동일한 SSID+비밀번호면 실제로 바뀐 게 없으니 접속 시도 없이
+     * 그냥 팝업만 닫음 */
+    if (strcmp(s_wifi_selected_ssid, device_config_get_sta_ssid()) == 0 &&
+        strcmp(s_wifi_test_password, device_config_get_sta_password()) == 0) {
+        close_wifi_popups();
+        refresh_network_right_zone();  /* 2026-08-29 버그수정 — 이 단축 경로도 팝업을 닫으므로
+                                           성공 경로와 동일하게 상단 표시를 갱신해야 함 */
+        return;
+    }
+
+    /* 2026-08-29(사용자 지적: 별도 "text" 상태 레이블 대신 버튼 캡션 자체를 상태로 씀) */
+    lv_obj_add_state(s_wifi_connect_btn, LV_STATE_DISABLED);
+    lv_label_set_text(lv_obj_get_child(s_wifi_connect_btn, 0), ui_str(STR_MSG_WIFI_CONNECTING));
+
+    esp_now_hub_test_sta_connect(s_wifi_selected_ssid, s_wifi_test_password,
+                                  cb_wifi_test_connect_result, cb_wifi_test_connect_stage, NULL);
+}
+
+static void cb_wifi_keyboard_hide(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_add_flag(s_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* 2026-08-29(사용자 지시: "비번 보기 기능이 있으면 좋겠음") */
+static void cb_wifi_toggle_password_visibility(lv_event_t *e)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    bool was_masked = lv_textarea_get_password_mode(s_wifi_password_ta);
+    lv_textarea_set_password_mode(s_wifi_password_ta, !was_masked);
+    lv_label_set_text(lv_obj_get_child(btn, 0), was_masked ? LV_SYMBOL_EYE_OPEN : LV_SYMBOL_EYE_CLOSE);
+}
+
+/* 리스트에서 SSID 선택 시 "추가 팝업"으로 비밀번호 입력(사용자 지시) — 스캔목록 팝업 위에
+ * 새로 스택되는 완전히 별개의 모달 */
+static void cb_wifi_ssid_selected(lv_event_t *e)
+{
+    const char *ssid = (const char *)lv_event_get_user_data(e);
+    strncpy(s_wifi_selected_ssid, ssid, sizeof(s_wifi_selected_ssid) - 1);
+    s_wifi_selected_ssid[sizeof(s_wifi_selected_ssid) - 1] = '\0';
+
+    lv_obj_t *box = create_modal();
+    s_wifi_pw_box = box;
+    /* 2026-08-29(사용자 지시: "화면의 2/3") — LV_PCT는 화면 해상도(1024x600/800x480 등
+     * 보드별로 다름, waveshare_rgb_lcd_port.h 참고) 상관없이 항상 2/3이 되게 함 */
+    lv_obj_set_width(box, LV_PCT(66));
+    /* 2026-08-29 버그수정(사용자 리포트) — create_modal()은 화면 중앙정렬인데, 키보드는
+     * 화면 하단에 도킹돼서 큰 면적을 차지함. 중앙에 있으면 팝업 하단(연결/취소 버튼)이
+     * 키보드에 가려짐 — 위쪽으로 옮겨서 키보드와 안 겹치게 함 */
+    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 20);
+
+    /* 2026-08-29(사용자 지적: "SSID-비번창 한 줄에 배치") — 세로로 4개 쌓이던 걸 한 줄로
+     * 줄여서 키보드가 떠도 아래 연결/취소 버튼이 안 가리게 함 */
+    lv_obj_t *pw_row = lv_obj_create(box);
+    lv_obj_set_size(pw_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(pw_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(pw_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(pw_row, 0, 0);
+    lv_obj_set_style_pad_all(pw_row, 0, 0);
+
+    lv_obj_t *ssid_lbl = lv_label_create(pw_row);
+    lv_label_set_text(ssid_lbl, s_wifi_selected_ssid);
+    lv_obj_set_style_text_font(ssid_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-08-29 버그수정(사용자 리포트: "비번보이기 단추 토글 안됨") — 원래 눈 아이콘
+     * 버튼을 텍스트 입력창의 *자식*으로 넣었었는데, 입력창 자체가 터치를 먼저 가로채서
+     * (커서 이동/포커스 처리) 버튼 클릭이 전달 안 됐던 것으로 보임. 입력창과 버튼을
+     * 같은 부모(pw_ta_wrap)의 *형제*로 분리하고, 버튼은 그 부모 기준으로 절대배치만
+     * 해서 시각적으로만 입력창 안쪽에 겹쳐 보이게 함 — 터치 히트테스트는 서로 안 겹침 */
+    lv_obj_t *pw_ta_wrap = lv_obj_create(pw_row);
+    lv_obj_remove_style_all(pw_ta_wrap);
+    lv_obj_set_flex_grow(pw_ta_wrap, 1);
+    lv_obj_set_height(pw_ta_wrap, LV_SIZE_CONTENT);
+
+    /* 별도 "비밀번호" 레이블 대신 placeholder 텍스트로 대체(사용자 지적: 레이블 제거) */
+    s_wifi_password_ta = lv_textarea_create(pw_ta_wrap);
+    lv_textarea_set_one_line(s_wifi_password_ta, true);
+    lv_textarea_set_password_mode(s_wifi_password_ta, true);
+    lv_textarea_set_placeholder_text(s_wifi_password_ta, ui_str(STR_LABEL_WIFI_PASSWORD));
+    lv_obj_set_width(s_wifi_password_ta, LV_PCT(100));
+    lv_obj_set_style_text_font(s_wifi_password_ta, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_pad_right(s_wifi_password_ta, 36, 0);  /* 안쪽 눈 아이콘과 텍스트 안 겹치게 */
+
+    /* 2026-08-29(사용자 지시: "요즘 유행은 이 단추가... 텍스트 입력창 우측 끝 안쪽에
+     * 조그맣게") — pw_ta_wrap 기준으로 오른쪽에 절대배치, 입력창의 자식이 아니라 형제.
+     * LV_SYMBOL_EYE_OPEN/CLOSE는 이 앱 커스텀 폰트(NanumGothic TTF, ui_font_get)엔 없는
+     * 글리프라 폰트를 명시적으로 안 지정 — LVGL 기본 내장 폰트로 떨어지는데, 그게 이
+     * 심볼들을 갖고 있는 걸 키보드의 Enter/OK 키에서 이미 실측 확인함(사용자 확인) */
+    lv_obj_t *pw_show_btn = lv_button_create(pw_ta_wrap);
+    lv_obj_remove_style_all(pw_show_btn);
+    lv_obj_set_size(pw_show_btn, 28, 28);
+    lv_obj_align(pw_show_btn, LV_ALIGN_RIGHT_MID, -4, 0);
+    lv_obj_add_flag(pw_show_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(pw_show_btn, cb_wifi_toggle_password_visibility, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *pw_show_lbl = lv_label_create(pw_show_btn);
+    lv_label_set_text(pw_show_lbl, LV_SYMBOL_EYE_CLOSE);  /* 기본 상태=마스킹됨=감은눈 */
+    lv_obj_center(pw_show_lbl);
+
+    /* 2026-08-29(사용자 지시: "이미 연결 중인 AP를 선택하면 비번이 미리 채워져 있으면" +
+     * "여러 개 비번 저장 가능하지?") — 활성 슬롯뿐 아니라 예전에 저장했던 어떤 SSID든
+     * 다시 선택하면 비번을 미리 채움(device_config_find_sta_password가 전체 슬롯 탐색) */
+    const char *saved_pw = device_config_find_sta_password(s_wifi_selected_ssid);
+    if (saved_pw) {
+        lv_textarea_set_text(s_wifi_password_ta, saved_pw);
+    }
+
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    s_wifi_connect_btn = add_modal_button(btn_row, STR_BTN_CONNECT, cb_wifi_connect_btn, NULL);
+    add_modal_button(btn_row, STR_BTN_CANCEL, cb_wifi_pw_popup_close, NULL);
+
+    if (!s_wifi_keyboard) {
+        s_wifi_keyboard = lv_keyboard_create(lv_screen_active());
+        /* 2026-08-29 버그수정(사용자 지적: "키보드 어떻게 닫아?") — 키보드 자체의 "✕"
+         * (LV_EVENT_CANCEL)와 체크/Enter(LV_EVENT_READY) 키에 아무 것도 안 붙어있어서
+         * 눌러도 반응이 없었음. 둘 다 그냥 키보드만 숨김(입력값 제출은 아래 "연결" 버튼
+         * 전용 — 눌러서 실수로 바로 연결/재시작되는 걸 방지) */
+        lv_obj_add_event_cb(s_wifi_keyboard, cb_wifi_keyboard_hide, LV_EVENT_READY, NULL);
+        lv_obj_add_event_cb(s_wifi_keyboard, cb_wifi_keyboard_hide, LV_EVENT_CANCEL, NULL);
+    }
+    lv_obj_remove_flag(s_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);  /* 이전에 숨겨졌을 수 있음 */
+    lv_keyboard_set_textarea(s_wifi_keyboard, s_wifi_password_ta);
+}
+
+/* 2026-08-29 — esp_wifi_scan_start(NULL, false)는 비동기라, WIFI_EVENT_SCAN_DONE으로 완료를
+ * 받음. 팝업이 닫힌 뒤 스캔이 뒤늦게 끝나는 경우 s_wifi_list가 NULL이라 그냥 무시(존재하지
+ * 않는 위젯에 그리지 않도록 방어) */
+static void wifi_scan_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg; (void)base; (void)data;
+    if (id != WIFI_EVENT_SCAN_DONE) return;
+    if (!s_wifi_list) return;  /* 팝업이 이미 닫힘 */
+
+    if (!s_wifi_scan_records || !s_wifi_scan_ssids) return;  /* 팝업 열 때 할당 안 됐으면 방어 */
+    uint16_t num = WIFI_SCAN_MAX_RESULTS;
+    esp_wifi_scan_get_ap_records(&num, s_wifi_scan_records);
+
+    /* 2026-08-29 버그수정(사용자 리포트: 스캔 결과 도착 시점에 화면 전체가 깨지고 입력이
+     * 먹통) — 이 핸들러는 esp_event 루프 태스크에서 도는데, LVGL은 스레드 안전하지 않아서
+     * 그 오브젝트 트리를 LVGL 자신의 태스크가 렌더링하는 도중에 다른 태스크에서 동시에
+     * lv_obj_clean/lv_list_add_button 등으로 건드리면 딱 이런 화면 깨짐+먹통이 남.
+     * esp_lv_adapter_lock()으로 LVGL 조작 구간 전체를 감싸야 함 — 이 프로젝트의 다른 크로스
+     * 태스크 LVGL 접근(main.c의 esp_lv_adapter_lock(-1) 사용)과 동일한 패턴 */
+    if (esp_lv_adapter_lock(-1) != ESP_OK) return;
+
+    lv_obj_clean(s_wifi_list);
+    s_wifi_scan_count = 0;
+
+    for (int i = 0; i < num && s_wifi_scan_count < WIFI_SCAN_MAX_RESULTS; i++) {
+        const char *ssid = (const char *)s_wifi_scan_records[i].ssid;
+        if (ssid[0] == '\0') continue;
+        bool dup = false;
+        for (int j = 0; j < s_wifi_scan_count; j++) {
+            if (strcmp(s_wifi_scan_ssids[j], ssid) == 0) { dup = true; break; }
+        }
+        if (dup) continue;
+        strncpy(s_wifi_scan_ssids[s_wifi_scan_count], ssid, sizeof(s_wifi_scan_ssids[0]) - 1);
+        /* 2026-08-29 버그수정(사용자 리포트: "연결된 SSID가 별 표시도 없이 그대로") — 현재
+         * 연결된 SSID를 리스트에서 구분 가능하게 표시. LV_SYMBOL_OK 같은 심볼은 이 프로젝트
+         * 커스텀 TTF에 없는 글리프라(다른 곳에서 이미 겪은 문제) 일반 텍스트 표식으로 대체 */
+        const char *active_ssid = device_config_get_sta_ssid();
+        const char *own_ip = esp_now_hub_get_own_ip_str();
+        bool is_connected = (active_ssid[0] != '\0' && own_ip[0] != '\0' &&
+                              strcmp(active_ssid, ssid) == 0);
+        char label_buf[64];
+        snprintf(label_buf, sizeof(label_buf), "%s%s (%d dBm)",
+                 is_connected ? ui_str(STR_TAG_WIFI_CONNECTED) : "", ssid, (int)s_wifi_scan_records[i].rssi);
+        lv_obj_t *btn = lv_list_add_button(s_wifi_list, NULL, label_buf);
+        lv_obj_set_style_text_font(btn, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_add_event_cb(btn, cb_wifi_ssid_selected, LV_EVENT_CLICKED,
+                             s_wifi_scan_ssids[s_wifi_scan_count]);
+        s_wifi_scan_count++;
+    }
+
+    if (s_wifi_scan_count == 0) {
+        lv_obj_t *lbl = lv_label_create(s_wifi_list);
+        lv_label_set_text(lbl, ui_str(STR_MSG_WIFI_SCAN_EMPTY));
+        lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    }
+
+    esp_lv_adapter_unlock();
+}
+
+/* 2026-08-29 — cb_network_find_btn(최초 진입)과 cb_wifi_rescan_btn(팝업 안 "다시 찾기")이
+ * 공유하는 실제 스캔 트리거. s_wifi_list가 이미 만들어져 있어야 함(팝업이 열린 상태) */
+static void trigger_wifi_scan(void)
+{
+    lv_obj_clean(s_wifi_list);
+    lv_obj_t *scanning_lbl = lv_label_create(s_wifi_list);
+    lv_label_set_text(scanning_lbl, ui_str(STR_MSG_WIFI_SCANNING));
+    lv_obj_set_style_text_font(scanning_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-08-29 버그수정(사용자 리포트: "팝업 뜨면서 찾는 기능은 안됨, 다시찾기 눌러야
+     * 시작") — esp_now_hub_set_sta_reconnect_paused(true)는 향후 재연결만 막지, 팝업이
+     * 뜨는 바로 그 순간 이미 진행 중이던 연결 시도까지 취소하진 않음. 그 시도가 아직 안
+     * 끝난 채로 esp_wifi_scan_start()를 부르면 ESP_ERR_WIFI_STATE로 실패(IDF 특성:
+     * 연결 시도 중엔 스캔 거부) — 그래서 최초 1회만 실패하고 "다시 찾기"(그땐 이미 그
+     * 시도가 끝나있음)부터 되는 증상이었음. 스캔 직전에 확실히 disconnect()로 정리 */
+    /* 2026-08-29 버그수정(사용자 지시: "찾기 팝업 열 때 먼저 끊지 마, 비번창에서 연결 누를
+     * 때 끊어야 돼") — 여기서 미리 disconnect()하면 스캔만 열어봐도 실제 WiFi 연결이
+     * 끊어져버리고, "이미 같은 AP" 단축 경로는 재연결을 안 시켜서 그대로 끊긴 채 남는 문제가
+     * 있었음. 실제 접속 전환은 esp_now_hub_test_sta_connect()가 접속 시도 시점에 자체적으로
+     * disconnect-then-connect를 이미 처리하므로, 여기서는 더 이상 선제적으로 끊지 않음 */
+    if (esp_wifi_scan_start(NULL, false) != ESP_OK) {
+        lv_obj_clean(s_wifi_list);
+        lv_obj_t *lbl = lv_label_create(s_wifi_list);
+        lv_label_set_text(lbl, ui_str(STR_MSG_WIFI_SCAN_EMPTY));
+        lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    }
+}
+
+static void cb_wifi_rescan_btn(lv_event_t *e)
+{
+    (void)e;
+    trigger_wifi_scan();
+}
+
+static void cb_network_find_btn(lv_event_t *e)
+{
+    (void)e;
+    /* 2026-08-29 버그수정 — 스캔이 되려면 STA 재연결 루프가 잠깐 쉬어야 함(위
+     * esp_now_hub_set_sta_reconnect_paused 주석 참고). 팝업 닫힐 때(cb_wifi_scan_popup_close/
+     * close_wifi_popups) 반드시 해제됨 */
+    esp_now_hub_set_sta_reconnect_paused(true);
+
+    /* 2026-08-29(사용자 지시: "PSRAM도 몰아 넣어") — 최초 1회만 할당, 이후 재사용(찾기 팝업
+     * 열 때마다 다시 만들 필요 없음) */
+    if (!s_wifi_scan_ssids) {
+        s_wifi_scan_ssids = heap_caps_calloc(WIFI_SCAN_MAX_RESULTS, sizeof(s_wifi_scan_ssids[0]), MALLOC_CAP_SPIRAM);
+    }
+    if (!s_wifi_scan_records) {
+        s_wifi_scan_records = heap_caps_calloc(WIFI_SCAN_MAX_RESULTS, sizeof(wifi_ap_record_t), MALLOC_CAP_SPIRAM);
+    }
+
+    lv_obj_t *box = create_modal();
+    lv_obj_set_width(box, 700);  /* 2026-08-29 — 기본 420px는 너무 작다는 사용자 지적 */
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, ui_str(STR_TITLE_WIFI_SCAN));
+    lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-08-29 사용자 지시 — 이미 연결된 네트워크가 있으면 표기, 없으면 "아직 없음" */
+    s_wifi_status_lbl = lv_label_create(box);
+    lv_obj_set_style_text_font(s_wifi_status_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_style(s_wifi_status_lbl, &style_text_muted, 0);
+    update_wifi_status_label();
+
+    s_wifi_list = lv_list_create(box);
+    lv_obj_set_size(s_wifi_list, LV_PCT(100), 320);
+
+    /* 2026-08-29 사용자 지시 — "다시 찾기"가 닫기 단추 왼쪽에 오도록 먼저 추가
+     * (create_modal_btn_row는 오른쪽 정렬이라 추가 순서 = 왼→오른). 이 팝업은 뭔가를
+     * "취소"하는 게 아니라 그냥 닫는 거라 공용 STR_BTN_CANCEL 대신 전용 STR_BTN_CLOSE 사용 */
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_RESCAN, cb_wifi_rescan_btn, NULL);
+    add_modal_button(btn_row, STR_BTN_CLOSE, cb_wifi_scan_popup_close, NULL);
+
+    trigger_wifi_scan();
+}
+
+static void refresh_network_right_zone(void)
+{
+    if (!s_network_right_label || !s_network_find_btn) return;  /* 행이 아직 안 만들어짐 */
+
+    bool ap_mode = device_config_get_wifi_ap_mode();
+    const char *ip = esp_now_hub_get_own_ip_str();
+
+    if (ap_mode) {
+        /* IP는 사용자가 바꿀 수 있는 값이 아니라 정보 표시일 뿐이라 평범한 라벨 */
+        lv_label_set_text(s_network_right_label, ip);
+        lv_obj_remove_flag(s_network_right_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_network_find_btn, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        /* STA 모드는 항상 버튼 하나 — 연결 안 됐으면 캡션 "찾기", 연결됐으면 캡션이 SSID로
+         * 바뀔 뿐 여전히 같은 버튼(눌러서 다른 AP로 재검색 가능, 2026-08-29 사용자 지적:
+         * "연결된 AP가 있을 때 바꿀 방법이 없다" + "레이블이 단추 캡션이어야").
+         * 2026-08-29 추가수정(사용자 지시) — "찾기"로 저장한 SSID가 없으면 실제로는
+         * 하드코딩 폴백(esp_now_hub.c의 WIFI_SSID)에 연결돼있어도 무조건 "찾기"로 표시.
+         * 이 행은 사용자가 "찾기"로 직접 고른 네트워크만 보여줘야 하고, 하드코딩 값은
+         * 이 기능 관점에서 존재하지 않는 것처럼 취급 */
+        const char *saved_ssid = device_config_get_sta_ssid();
+        lv_obj_add_flag(s_network_right_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_network_find_btn, LV_OBJ_FLAG_HIDDEN);
+        if (saved_ssid[0] != '\0' && ip[0] != '\0') {
+            lv_label_set_text(s_network_find_lbl, esp_now_hub_get_active_sta_ssid());
+        } else {
+            lv_label_set_text(s_network_find_lbl, ui_str(STR_BTN_FIND));
+        }
+    }
+}
+
 /* 설정탭 Apply 5단계 플로우(2026-08-08, 사용자 설계) — 공용 진행팝업(show_progress_popup)
  * 재사용, capture/response 둘 다 이 하나의 tick 함수로 처리(어느 쪽인지는
  * s_config_apply_target로 구분). 촬영주기/응답성 각각 독립된 Apply 버튼이라 동시에 둘 다
@@ -2745,6 +3262,17 @@ static void cb_aec_switch_changed(lv_event_t *e)
 
 /* 페이지콘트롤 — 페이지탭 3개(상황판/통계/설정). 로고 + 상황판/통계 탭 내용(원래 데모의
  * Profile/Analytics 위젯)은 고치기 전 상태 그대로 활용 — 설정 탭만 새로 만든 그룹박스로 교체 */
+/* 2026-08-29 버그수정(사용자 리포트: "찾기" 팝업이 30초 넘게 "검색 중..."에 멈춤) — 원래
+ * ui_init()이 이 등록을 직접 했는데, ui_init()은 esp_now_hub_init()보다 먼저 호출되고
+ * (main.c app_main 참고) esp_event_loop_create_default()는 esp_now_hub_init() 내부에서
+ * 호출됨 — 즉 등록 시점에 기본 이벤트루프가 아직 없어서 esp_event_handler_register()가
+ * 조용히 실패하고 있었음(반환값 확인 안 해서 못 잡음). main.c의 ip_event_handler 등록과
+ * 똑같은 이유로, main.c가 esp_now_hub_init() 호출 *이후*에 이 함수를 불러줘야 함 */
+void ui_main_register_wifi_events(void)
+{
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, &wifi_scan_event_handler, NULL));
+}
+
 void ui_init(void)
 {
     lv_demo_widgets_components_init();  /* profile/analytics가 쓰는 공용 스타일/폰트 초기화 */
@@ -3214,6 +3742,75 @@ void ui_init(void)
     lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
     lv_obj_set_style_text_font(s_restart_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
+    /* 네트워크 행(2026-08-29, 사용자 설계 — "설정-제어기 판넬") — [라벨:좌][독립/종속
+     * 드롭다운:중앙][IP 또는 SSID 또는 찾기버튼:우]. 좌/우 컨테이너에 동일 flex_grow(1)를
+     * 줘서 가운데 드롭다운이 자연스럽게 중앙에 오도록 함(그 사이 여백을 균등하게 나눠 가짐)
+     * — SPACE_BETWEEN 대신 이 방식을 쓴 이유는 3분할 좌/중앙/우 정렬을 각각 다르게 하기 위함 */
+    lv_obj_t *network_row = lv_obj_create(cntl_box);
+    lv_obj_set_size(network_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(network_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(network_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(network_row, 0, 0);
+    lv_obj_set_style_pad_hor(network_row, 12, 0);
+    lv_obj_set_style_pad_ver(network_row, 0, 0);
+
+    s_network_label = lv_label_create(network_row);
+    lv_label_set_text(s_network_label, ui_str(STR_LABEL_NETWORK));
+    lv_obj_set_style_text_font(s_network_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_flex_grow(s_network_label, 1);
+
+    s_network_mode_dd = lv_dropdown_create(network_row);
+    {
+        char opts[64];
+        snprintf(opts, sizeof(opts), "%s\n%s", ui_str(STR_NETWORK_MODE_AP), ui_str(STR_NETWORK_MODE_STA));
+        lv_dropdown_set_options(s_network_mode_dd, opts);
+    }
+    lv_dropdown_set_selected(s_network_mode_dd, device_config_get_wifi_ap_mode() ? 0 : 1);
+    lv_obj_set_style_text_font(s_network_mode_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_network_mode_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_network_mode_dd, cb_network_mode_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *network_right = lv_obj_create(network_row);
+    lv_obj_set_flex_grow(network_right, 1);
+    lv_obj_set_height(network_right, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(network_right, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(network_right, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(network_right, 0, 0);
+    lv_obj_set_style_pad_all(network_right, 0, 0);
+
+    s_network_right_label = lv_label_create(network_right);
+    lv_obj_set_style_text_font(s_network_right_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-08-29(사용자 지시) — 이 행만 특수해서(값 표시 겸 변경 진입점) 다른 화면의
+     * 꽉 찬 버튼과 다르게, 아이폰 설정 스타일(값 라벨 + 옆에 눌리는 화살표)로 만듦. 순수
+     * lv_obj 컨테이너를 클릭 가능하게 만들어서 "버튼처럼 안 보이지만 눌리는" 형태 —
+     * Sens 대시보드의 리스트타일+화살표 전례와 같은 계열이지만 그건 너무 작았다고 해서
+     * 폭은 표준 액션버튼의 2배(아래 s_action_btn_width*2), 폰트도 본문과 동일 18pt로 키움 */
+    s_network_find_btn = lv_obj_create(network_right);
+    lv_obj_remove_style_all(s_network_find_btn);
+    lv_obj_set_height(s_network_find_btn, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_network_find_btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_network_find_btn, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(s_network_find_btn, 6, 0);  /* 터치 타겟 여유 */
+    lv_obj_add_flag(s_network_find_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_network_find_btn, cb_network_find_btn, LV_EVENT_CLICKED, NULL);
+
+    s_network_find_lbl = lv_label_create(s_network_find_btn);
+    lv_label_set_text(s_network_find_lbl, ui_str(STR_BTN_FIND));
+    lv_obj_set_style_text_font(s_network_find_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_style(s_network_find_lbl, &style_text_muted, 0);  /* 아이폰 설정처럼 값은 톤 낮춤 */
+    lv_obj_set_flex_grow(s_network_find_lbl, 1);
+    lv_label_set_long_mode(s_network_find_lbl, LV_LABEL_LONG_DOT);  /* 긴 SSID는 말줄임 */
+
+    lv_obj_t *network_chevron = lv_label_create(s_network_find_btn);
+    lv_label_set_text(network_chevron, ">");  /* 유니코드 화살표(›) 대신 순수 ASCII —
+                                                  글씨체 글리프 누락 위험 회피(RS485 프로젝트
+                                                  한글 미지원 폰트로 겪은 것과 같은 함정) */
+    lv_obj_set_style_text_font(network_chevron, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_style(network_chevron, &style_text_muted, 0);
+
+    refresh_network_right_zone();  /* 부팅 직후 현재 상태 즉시 반영(빈 채로 안 보이게) */
+
     create_group_box(option_page, STR_GROUP_SENSOR);
 
     /* 영상(Camera) 그룹박스 — 발견된 CAM 리스트(연결중/연결됨), 1초마다 갱신.
@@ -3468,4 +4065,8 @@ void ui_init(void)
         lv_obj_set_width(action_buttons[i], s_action_btn_width);
         lv_obj_center(lv_obj_get_child(action_buttons[i], 0));  /* 레이블 중앙정렬(2026-08-09) */
     }
+
+    /* 네트워크 행의 값+화살표 셀렉터(2026-08-29, 사용자 지시) — 다른 버튼들과 폭 통일
+     * 대상이 아니라 위 루프에서 제외했지만, 그 표준폭의 2배로 이제 계산 가능 */
+    lv_obj_set_width(s_network_find_btn, s_action_btn_width * 2);
 }

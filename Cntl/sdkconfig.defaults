@@ -44,3 +44,8 @@ CONFIG_LV_FONT_MONTSERRAT_24=y
 # CONFIG_LV_USE_DEMO_STRESS is not set
 # CONFIG_LV_USE_DEMO_MUSIC is not set
 # CONFIG_LV_DEMO_MUSIC_AUTO_PLAY is not set
+
+# 2026-08-29 -- WiFi 이벤트 콜백 체인(찾기 팝업의 실시간 접속 테스트)이 sys_evt
+# 태스크 스택에서 스택오버플로우를 일으켜서 확대(기본 2304 -> 6144). 실측
+# 크래시 로그로 확인됨: "A stack overflow in task sys_evt has been detected"
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144

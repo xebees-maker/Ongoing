@@ -30,6 +30,7 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_RECV_BUF_ALLOC       1003  /* 수신 버퍼 초기 할당 실패 */
 #define UI_ERR_CACHE_SLOT_ALLOC     1004  /* 캐시 슬롯 초기 할당 실패 */
 #define UI_ERR_PANEL_BUF_ALLOC      1005  /* 판넬 디코드 버퍼 초기 할당 실패 */
+#define UI_ERR_STA_CRED_ALLOC       1006  /* STA 자격증명 슬롯 배열 PSRAM 할당 실패 */
 
 #define UI_ERR_SEND_PHOTO_REQ       2001  /* 사진 요청(PHOTO_REQUEST) 전송 실패 */
 #define UI_ERR_SEND_CAPTURE_REQ     2002  /* 지금촬영 요청 전송 실패 */

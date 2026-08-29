@@ -3,15 +3,29 @@
 #include "ui_log.h"
 
 #include <stdio.h>
+#include <string.h>
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "device_config";
 
 #define DEVICE_CONFIG_PATH    FS_MOUNT_POINT "/device_config.bin"
-#define DEVICE_CONFIG_VERSION 4  /* 2026-08-21: xclk_mhz 필드 추가로 3->4
+#define DEVICE_CONFIG_VERSION 6  /* 2026-08-29: sta_ssid/sta_password 단일필드 -> sta_credentials[]
+                                    배열(여러 네트워크 저장, 사용자 지시)로 재구성해서 5->6
                                     (구버전 파일은 버전 불일치로 기본값으로 자연 폴백 —
                                     UI_ERR_CONFIG_FILE_MISMATCH로 화면에도 보임, device_config_load
                                     참고) */
+
+/* 2026-08-29(사용자 지시: "여러 개 비번 저장 가능하지?") — SSID별로 비밀번호를 기억. 슬롯[0]이
+ * 항상 "가장 최근에 set된(=활성)" 자격증명 — set할 때마다 해당 항목을 맨 앞으로 옮기는
+ * LRU 방식이라 device_config_get_sta_ssid/password()의 기존 "활성 값 하나" 의미가 그대로
+ * 유지됨(esp_now_hub.c 등 기존 호출부 변경 불필요) */
+#define STA_CREDENTIAL_SLOTS 8
+
+typedef struct __attribute__((packed)) {
+    char ssid[33];
+    char password[65];
+} sta_credential_t;
 
 #define CAM_CAPTURE_INTERVAL_SEC_DEFAULT 1800  /* CAM Kconfig 기본(30분)과 동일 */
 #define RESPONSE_INTERVAL_SEC_DEFAULT    2
@@ -32,6 +46,8 @@ typedef struct __attribute__((packed)) {
     uint8_t  agc_enable;
     uint8_t  aec_enable;
     uint8_t  xclk_mhz;
+    uint8_t  wifi_ap_mode;
+    sta_credential_t sta_credentials[STA_CREDENTIAL_SLOTS];
 } device_config_file_t;
 
 static uint32_t s_cam_capture_interval_sec = CAM_CAPTURE_INTERVAL_SEC_DEFAULT;
@@ -40,6 +56,12 @@ static uint32_t s_adaptive_response_sec    = ADAPTIVE_RESPONSE_SEC_DEFAULT;
 static bool     s_agc_enable               = AGC_ENABLE_DEFAULT;
 static bool     s_aec_enable               = AEC_ENABLE_DEFAULT;
 static uint8_t  s_xclk_mhz                 = XCLK_MHZ_DEFAULT;
+static bool     s_wifi_ap_mode             = false;
+
+/* 2026-08-29(사용자 지시: "PSRAM도 133KB밖에 안남았지만, 최대한 몰아 넣어") — 내부 RAM이
+ * 오늘 12K->1.7K로 급감한 것 때문에, 새로 늘어나는 저장공간(8슬롯 x 98B=784B)은 처음부터
+ * 내부 .bss가 아니라 PSRAM에 할당. device_config_load()에서 최초 1회 할당 */
+static sta_credential_t *s_sta_credentials = NULL;
 
 static void device_config_save(void)
 {
@@ -56,13 +78,24 @@ static void device_config_save(void)
         .agc_enable              = s_agc_enable ? 1 : 0,
         .aec_enable              = s_aec_enable ? 1 : 0,
         .xclk_mhz                = s_xclk_mhz,
+        .wifi_ap_mode            = s_wifi_ap_mode ? 1 : 0,
     };
+    memcpy(s.sta_credentials, s_sta_credentials, sizeof(s.sta_credentials));
     fwrite(&s, sizeof(s), 1, f);
     fclose(f);
 }
 
 void device_config_load(void)
 {
+    if (!s_sta_credentials) {
+        s_sta_credentials = heap_caps_calloc(STA_CREDENTIAL_SLOTS, sizeof(sta_credential_t), MALLOC_CAP_SPIRAM);
+        if (!s_sta_credentials) {
+            ESP_LOGE(TAG, "STA 자격증명 PSRAM 할당 실패");
+            ui_log_add_err(UI_ERR_STA_CRED_ALLOC, "STA credential PSRAM alloc failed");
+            return;
+        }
+    }
+
     FILE *f = fopen(DEVICE_CONFIG_PATH, "rb");
     if (!f) return;
     device_config_file_t s = { 0 };
@@ -91,10 +124,17 @@ void device_config_load(void)
     s_agc_enable                = s.agc_enable != 0;
     s_aec_enable                = s.aec_enable != 0;
     s_xclk_mhz                  = s.xclk_mhz ? s.xclk_mhz : XCLK_MHZ_DEFAULT;
-    ESP_LOGI(TAG, "설정 복원: CAM촬영주기=%us 응답성=%us 적응형반응=%us AGC=%d AEC=%d XCLK=%uMHz",
+    s_wifi_ap_mode               = s.wifi_ap_mode != 0;
+    for (int i = 0; i < STA_CREDENTIAL_SLOTS; i++) {
+        s.sta_credentials[i].ssid[sizeof(s.sta_credentials[i].ssid) - 1]         = '\0';
+        s.sta_credentials[i].password[sizeof(s.sta_credentials[i].password) - 1] = '\0';
+    }
+    memcpy(s_sta_credentials, s.sta_credentials, sizeof(s.sta_credentials));
+    ESP_LOGI(TAG, "설정 복원: CAM촬영주기=%us 응답성=%us 적응형반응=%us AGC=%d AEC=%d XCLK=%uMHz "
+             "WiFi=%s SSID=%s",
              (unsigned)s_cam_capture_interval_sec, (unsigned)s_response_interval_sec,
              (unsigned)s_adaptive_response_sec, (int)s_agc_enable, (int)s_aec_enable,
-             (unsigned)s_xclk_mhz);
+             (unsigned)s_xclk_mhz, s_wifi_ap_mode ? "AP" : "STA", s_sta_credentials[0].ssid);
 }
 
 uint32_t device_config_get_cam_capture_interval_sec(void) { return s_cam_capture_interval_sec; }
@@ -144,6 +184,51 @@ void device_config_set_xclk_mhz(uint8_t mhz)
 {
     s_xclk_mhz = mhz ? mhz : XCLK_MHZ_DEFAULT;
     device_config_save();
+}
+
+bool device_config_get_wifi_ap_mode(void) { return s_wifi_ap_mode; }
+
+void device_config_set_wifi_ap_mode(bool ap_mode)
+{
+    s_wifi_ap_mode = ap_mode;
+    device_config_save();
+}
+
+/* s_sta_credentials는 device_config_load()에서 PSRAM 할당됨(app_main()이 항상 그걸 먼저
+ * 부름) — 방어적으로 NULL 체크만 유지(할당 실패/호출순서 사고 시 크래시 대신 빈 값) */
+const char *device_config_get_sta_ssid(void)     { return s_sta_credentials ? s_sta_credentials[0].ssid : ""; }
+const char *device_config_get_sta_password(void) { return s_sta_credentials ? s_sta_credentials[0].password : ""; }
+
+/* 2026-08-29(사용자 지시: 여러 SSID/비번 저장) — 이미 있는 SSID면 그 슬롯을 갱신하며 맨
+ * 앞으로, 없으면 맨 앞에 새로 삽입(제일 오래된 슬롯이 뒤로 밀려나서 사라짐). 슬롯[0]이
+ * 항상 "가장 최근에 set된" 것이라 위 get_sta_ssid/password()가 계속 "활성 값"을 가리킴 */
+void device_config_set_sta_credentials(const char *ssid, const char *password)
+{
+    if (!s_sta_credentials) return;
+    int found = -1;
+    for (int i = 0; i < STA_CREDENTIAL_SLOTS; i++) {
+        if (strcmp(s_sta_credentials[i].ssid, ssid ? ssid : "") == 0) { found = i; break; }
+    }
+    int src = (found >= 0) ? found : (STA_CREDENTIAL_SLOTS - 1);
+    for (int i = src; i > 0; i--) {
+        s_sta_credentials[i] = s_sta_credentials[i - 1];
+    }
+    strncpy(s_sta_credentials[0].ssid, ssid ? ssid : "", sizeof(s_sta_credentials[0].ssid) - 1);
+    s_sta_credentials[0].ssid[sizeof(s_sta_credentials[0].ssid) - 1] = '\0';
+    strncpy(s_sta_credentials[0].password, password ? password : "", sizeof(s_sta_credentials[0].password) - 1);
+    s_sta_credentials[0].password[sizeof(s_sta_credentials[0].password) - 1] = '\0';
+    device_config_save();
+}
+
+const char *device_config_find_sta_password(const char *ssid)
+{
+    if (!ssid || !s_sta_credentials) return NULL;
+    for (int i = 0; i < STA_CREDENTIAL_SLOTS; i++) {
+        if (s_sta_credentials[i].ssid[0] != '\0' && strcmp(s_sta_credentials[i].ssid, ssid) == 0) {
+            return s_sta_credentials[i].password;
+        }
+    }
+    return NULL;
 }
 
 #define NACK_MAX_ROUNDS_DEFAULT 3  /* esp_now_photo.c 기존 PHOTO_NACK_MAX_ROUNDS/esp_now_cam.c

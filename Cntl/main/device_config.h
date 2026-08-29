@@ -51,6 +51,26 @@ void device_config_set_aec_enable(bool enable);
 uint8_t device_config_get_xclk_mhz(void);
 void    device_config_set_xclk_mhz(uint8_t mhz);
 
+/* WiFi 모드(2026-08-29) — false=종속(STA, 기존 WIFI_SSID/PASSWORD 또는 아래 sta_ssid로 접속),
+ * true=독립(AP, esp_now_hub.c의 CNTL_AP_SSID/PASSWORD/CHANNEL로 자체 AP). 기본값 false(STA) —
+ * 기존 동작과 동일하게 유지. esp_now_hub.c가 부팅 시 이 값을 읽어 런타임에 분기(예전
+ * CNTL_WIFI_STANDALONE_AP_TEST 컴파일타임 스위치를 대체) */
+bool device_config_get_wifi_ap_mode(void);
+void device_config_set_wifi_ap_mode(bool ap_mode);
+
+/* STA 자격증명(2026-08-29, 여러 개 저장 가능하도록 재설계 — 사용자 지시) — 내부적으로
+ * PSRAM에 할당된 슬롯 배열(device_config.c의 STA_CREDENTIAL_SLOTS)로 저장, set할 때마다
+ * 그 SSID를 맨 앞(=활성)으로 옮김. get_sta_ssid/get_sta_password는 항상 "가장 최근에
+ * set된(=활성)" 슬롯을 가리켜서 기존 호출부(esp_now_hub.c 등)는 그대로 씀. 빈 문자열이면
+ * 미설정 상태 — 이땐 esp_now_hub.c가 기존 하드코딩 WIFI_SSID/WIFI_PASSWORD로 폴백 */
+const char *device_config_get_sta_ssid(void);
+const char *device_config_get_sta_password(void);
+void        device_config_set_sta_credentials(const char *ssid, const char *password);
+
+/* 저장된 슬롯 중 ssid가 일치하는 게 있으면 그 비밀번호를, 없으면 NULL을 반환 — "찾기"
+ * 팝업에서 예전에 접속했던 네트워크를 다시 선택하면 비번을 미리 채우는 용도 */
+const char *device_config_find_sta_password(const char *ssid);
+
 /* NACK/DONE_ACK 최대 재전송 라운드 수(2026-08-21) — CAM/CNTL 둘 다 "몇 라운드째인가"를
  * 각자 판단 기준으로 쓰므로 반드시 같은 숫자여야 하는 값(둘 다 하드코딩했다가 off-by-one으로
  * 어긋난 적 있음, project_cntl_cam_photo_fetch_nack_round_bug 메모리 참고) — CNTL이 유일한
