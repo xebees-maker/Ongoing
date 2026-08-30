@@ -6,6 +6,7 @@
 #include "ui_log.h"
 #include "device_config.h"
 #include "battery.h"
+#include "main.h"
 
 #include <string.h>
 #include <assert.h>
@@ -629,6 +630,30 @@ void esp_now_hub_set_sta_reconnect_paused(bool paused)
     s_sta_reconnect_paused = paused;
 }
 
+/* 2026-08-30(사용자 지시: 부팅 후 아직 한 번도 연결된 적 없는 상태에서만 — "찾기"로 이미
+ * 붙어있다가 일시적으로 끊긴 경우는 대상 아님, 명시적으로 범위 확인함) — 부팅 후 25초(찾기의
+ * 접속시도 타임아웃과 동일 근거값, 사용자 지시: "같은 값으로 하자") 동안 한 번도 못 붙으면
+ * 자동 재연결을 멈추고 화면에 "AP 없음" 표시. "찾기"로 수동 연결하면(진짜 GOT_IP) 정상
+ * 상태로 복귀 — "찾기" 자체는 이 플래그와 무관하게 항상 그대로 동작(자체 disconnect/connect를
+ * 직접 관리하므로 아래 일반 재연결 분기를 안 탐, s_sta_test_active 가드 참고) */
+static bool               s_sta_ever_connected     = false;
+static bool               s_sta_boot_giveup         = false;
+static esp_timer_handle_t s_sta_boot_giveup_timer   = NULL;
+
+static void sta_boot_giveup_timer_cb(void *arg)
+{
+    (void)arg;
+    if (!s_sta_ever_connected) {
+        ESP_LOGW(TAG, "부팅 후 25초간 저장된 AP를 못 찾음 — 자동 재연결 중단, AP 없음 표시");
+        s_sta_boot_giveup = true;
+    }
+}
+
+bool esp_now_hub_sta_boot_giveup(void)
+{
+    return s_sta_boot_giveup;
+}
+
 /* 2026-08-29 버그수정(사용자 리포트: "비번 입력하느라 시간이 걸리면 연결이 반복 실패") —
  * esp_wifi_sta_get_ap_info()는 "완전히 연결됨" 여부만 알려줘서, "지금 한창 인증/연결
  * 시도 중(아직 연결은 안 됐지만 idle도 아님)"인 상태를 "연결 안 됨"으로 오판함. 이 상태에서
@@ -756,6 +781,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     (void)arg;
     if (s_wifi_if == WIFI_IF_STA) {
         if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+            if (!s_sta_ever_connected && !s_sta_boot_giveup_timer) {
+                const esp_timer_create_args_t args = { .callback = sta_boot_giveup_timer_cb,
+                                                          .name = "sta_boot_giveup" };
+                esp_timer_create(&args, &s_sta_boot_giveup_timer);
+                esp_timer_start_once(s_sta_boot_giveup_timer, 25000000);
+            }
             if (!s_sta_reconnect_paused) sta_do_connect();
         } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
             wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
@@ -784,13 +815,18 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
              * esp_wifi_scan_start()는 STA가 연결 시도 중이면 실패한다. 이 재연결 루프가
              * 끊길 때마다 바로 다시 connect()를 걸어서 스캔이 낄 조용한 틈이 없었음 —
              * 스캔 팝업이 열려있는 동안은(esp_now_hub_set_sta_reconnect_paused) 재연결을
-             * 안 걸고 그냥 끊긴 채로 둠 */
-            if (!s_sta_reconnect_paused) sta_do_connect();
+             * 안 걸고 그냥 끊긴 채로 둠. s_sta_boot_giveup — 부팅 후 25초간 한 번도 못
+             * 붙었으면(2026-08-30) 더 이상 자동 재시도 안 함(화면엔 "AP 없음") — "찾기"로
+             * 수동 연결하면 GOT_IP 핸들러에서 이 플래그가 풀림 */
+            if (!s_sta_reconnect_paused && !s_sta_boot_giveup) sta_do_connect();
         } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
             ip_event_got_ip_t *evt = (ip_event_got_ip_t *)event_data;
             ESP_LOGI(TAG, "IP 받음: " IPSTR, IP2STR(&evt->ip_info.ip));
             /* 2026-08-21 — 상황판 요약에 웹 대시보드 접속 URL을 보여주기 위해 저장(사용자 지시) */
             snprintf(s_own_ip_str, sizeof(s_own_ip_str), IPSTR, IP2STR(&evt->ip_info.ip));
+            s_sta_ever_connected = true;
+            s_sta_boot_giveup = false;
+            if (s_sta_boot_giveup_timer) esp_timer_stop(s_sta_boot_giveup_timer);
             if (s_sta_test_active) sta_test_finish(true);
         }
     } else {
@@ -856,6 +892,11 @@ static void wifi_bringup(void)
         if (esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK) {
             snprintf(s_own_ip_str, sizeof(s_own_ip_str), IPSTR, IP2STR(&ip_info.ip));
         }
+
+        /* 2026-08-30 버그수정(사용자 리포트: AP모드에서 웹페이지 접속 안 됨) — 웹서버 시작이
+         * IP_EVENT_STA_GOT_IP 하나에만 걸려있었는데, AP 모드는 그 이벤트가 아예 안 옴(위
+         * 주석처럼 IP를 이벤트가 아니라 시작 즉시 동기적으로 얻음) — 여기서 직접 호출 */
+        web_dashboard_start();
     }
 
     /* WiFi 절전(모뎀 슬립) 끔(2026-08-02) — 부팅 로그에 "wifi:pm start, type: 1"이 찍혀서

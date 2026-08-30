@@ -130,8 +130,16 @@ typedef enum {
                                         실패 시점 값 그대로 남아있어 팝업이 사유를 표시할 수 있음 */
 } esp_now_photo_list_state_t;
 
-void esp_now_photo_list_request(const uint8_t *cam_mac);
+/* 반환값: 이 요청의 세대번호 — esp_now_photo_list_get_result()에 그대로 넘기면 ack로 소비되지
+ * 않는 결과 확인이 가능(2026-08-30, "웹기생" 설계 — main.c의 웹 API 참고) */
+uint32_t esp_now_photo_list_request(const uint8_t *cam_mac);
 esp_now_photo_list_state_t esp_now_photo_list_get_state(void);
+
+/* 2026-08-30 — esp_now_photo_list_ack()로 소비되지 않는, generation 기준 결과 확인. generation은
+ * esp_now_photo_list_request()가 돌려준 값. true면 그 요청이 끝났다는 뜻(성공/실패는 *out_ok),
+ * false면 아직 진행 중이거나 그 뒤로 새 요청이 없었음. 결과가 나왔으면 esp_now_photo_list_get_items()로
+ * 그대로 목록을 읽으면 됨(버퍼 자체는 ack와 무관하게 안 지워짐) */
+bool esp_now_photo_list_get_result(uint32_t generation, bool *out_ok);
 
 /* PHOTO_LIST_COUNT 응답을 받았는지(=CAM이 요청을 실제로 받아 처리를 시작했는지) — 진행팝업의
  * "명령 전송" 단계 완료 판정용(2026-08-11). get_progress()의 total>0을 대신 쓰면 CAM의 실제

@@ -134,6 +134,11 @@ void esp_now_hub_init(void);
  * 상시 표시하는 용도로 추가 */
 uint8_t esp_now_hub_get_wifi_channel(void);
 
+/* 2026-08-30 — 부팅 후(STA 모드) 25초간 저장된 AP를 한 번도 못 찾았을 때 true. 로고부제
+ * 자리(refresh_clock)가 이걸 보고 시계 대신 "AP 없음" 표시. "찾기"로 수동 연결 성공하면
+ * 자동으로 풀림(esp_now_hub.c의 GOT_IP 핸들러 참고) */
+bool esp_now_hub_sta_boot_giveup(void);
+
 /* 2026-08-21 — CNTL 자신의 STA IP 문자열("192.168.0.17" 형식) — 상황판 요약의 웹 대시보드
  * URL 표시용. 아직 IP를 못 받았으면 빈 문자열("") 반환 */
 const char *esp_now_hub_get_own_ip_str(void);

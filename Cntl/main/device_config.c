@@ -63,6 +63,11 @@ static bool     s_wifi_ap_mode             = false;
  * 내부 .bss가 아니라 PSRAM에 할당. device_config_load()에서 최초 1회 할당 */
 static sta_credential_t *s_sta_credentials = NULL;
 
+/* 2026-08-30 — device_config.bin 암호화(assets 파일 업로드/다운로드 엔드포인트로 평문 WiFi
+ * 비번이 노출되는 문제 대비) 시도했으나, 이 ESP-IDF의 mbedtls가 aes.h를 공개 API에서 제거하고
+ * PSA Crypto로 옮겨서 구현이 복잡해짐 — 사용자 판단: 지금 급한 요구사항 아니므로 다음 버전으로
+ * 보류(사용자: "암호화는 나중에(다음 버전 정도) 하는 걸로 기억하고") */
+
 static void device_config_save(void)
 {
     FILE *f = fopen(DEVICE_CONFIG_PATH, "wb");

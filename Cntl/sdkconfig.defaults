@@ -49,3 +49,6 @@ CONFIG_LV_FONT_MONTSERRAT_24=y
 # 태스크 스택에서 스택오버플로우를 일으켜서 확대(기본 2304 -> 6144). 실측
 # 크래시 로그로 확인됨: "A stack overflow in task sys_evt has been detected"
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144
+
+# 2026-08-30 -- 로고문자 탭 시 대시보드 URL QR코드 팝업 표시용
+CONFIG_LV_USE_QRCODE=y

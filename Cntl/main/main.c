@@ -22,6 +22,10 @@
 #include "device_config.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "lvgl9_demo";
 
@@ -35,33 +39,77 @@ static void touch_activity_event_cb(lv_event_t *e)
     esp_now_hub_note_user_action();
 }
 
-/* Cntl 통합 테스트 5단계: HTTP 서버만 최소로(esp_now_hub 노드 데이터 없이 더미 페이지) —
- * "esp_http_server 자체가 RGB 패널을 깨는지"만 격리해서 확인 */
+/* 2026-08-30(사용자 지시: "첫 페이지가, 장치목록/사진목록 보여주는 페이지가 의도한 거지?") —
+ * IP만 입력해도 바로 SPA(/app)로 가도록 리다이렉트. 예전엔 여기가 더미 테스트 페이지+레거시
+ * /photos 링크였음(Cntl 통합 테스트 5단계 때 흔적, "esp_http_server 자체가 RGB 패널을
+ * 깨는지"만 격리 확인하려던 용도 — 이제 그 역할 끝남) */
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
-    static const char page[] = "<html><body><h2>Cntl web test</h2></body></html>";
-    httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/app");
+    return httpd_resp_send(req, NULL, 0);
+}
+
+/* 2026-08-30(사용자 지시: "웹페이지에 사진 목록 보기(목록 가져오기 포함) 기능만 넣어볼래?",
+ * 이후 "목록 다 가져와서 브라우저가 다 보여줄 수 있을 때 연결이 완료되는 거야" — 요청 즉시
+ * placeholder를 리턴하지 않고, 핸들러 안에서 READY/ERROR가 되거나 타임아웃될 때까지
+ * 붙잡고 있다가 최종 결과 하나만 리턴. httpd 기본 워커가 하나뿐이라 그동안 다른 요청은
+ * 대기하지만, 개인용 대시보드라 수용 가능한 트레이드오프로 판단(사용자 설계 확인)) —
+ * 페어링된 첫 CAM 대상. esp_now_photo.c가 뮤텍스로 보호돼있어 httpd 워커 태스크에서
+ * 직접 불러도 안전(esp_now_photo_list_request 구현 확인함). 큰 지역버퍼는 오늘 하루종일
+ * 겪은 스택오버플로우 패턴을 피하려고 PSRAM에서 할당 */
+/* 2026-08-30(사용자 지시: "대기중인 장치 목록(CNTL과 동일한 형태)을 보여주고, 여기서 장치
+ * 연결을 할 수 있게 해") — "AA11BB22CC33" 형식(콜론 없는 12자리 hex, URL 파라미터용)을
+ * mac[6]으로 디코딩. 실패 시 false */
+static bool decode_mac_hex(const char *hex, uint8_t mac[6])
+{
+    if (strlen(hex) != 12) return false;
+    for (int i = 0; i < 6; i++) {
+        unsigned byte;
+        if (sscanf(hex + i * 2, "%2x", &byte) != 1) return false;
+        mac[i] = (uint8_t)byte;
+    }
+    return true;
+}
+
+/* 2026-08-30 — ui_main.c의 encode_file_seq_base36()과 동일 인코딩(CAM 실제 파일명 표기)을
+ * 웹 목록에도 그대로 미러링 — 웹이 file_id를 화면에 별도 번호로 보여주면서 겪은 혼선(카운트
+ * 기반 표시 vs 실제 file_id) 재발 방지, 사용자 지시로 CNTL과 동일한 표기로 통일 */
+static void format_file_tag(char kind, uint32_t file_id, char *out, size_t out_size)
+{
+    static const char digits[37] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    uint32_t seq = file_id % 1679616u;  /* 36^4 */
+    char seq_str[5];
+    for (int i = 3; i >= 0; i--) {
+        seq_str[i] = digits[seq % 36];
+        seq /= 36;
+    }
+    seq_str[4] = '\0';
+    snprintf(out, out_size, "%c%s", kind, seq_str);
 }
 
 /* 원본 해상도 그대로 원격에서 보기 — Cntl은 캐시된 압축 JPEG 바이트를 그대로 던져줄 뿐,
  * 디코드는 요청한 브라우저가 함(PC/폰은 메모리 여유가 있어서 원본을 그대로 풀 수 있음,
- * Cntl 자체 화면은 PSRAM이 부족해서 못 함 — 2026-08-01). 기기에서 한 번도 안 열어본
- * (캐시에 없는) 사진은 404 — 웹 요청으로 새로 CAM에서 받아오는 건 이번 범위 밖 */
+ * Cntl 자체 화면은 PSRAM이 부족해서 못 함 — 2026-08-01). 캐시 전용, 캐시에 없으면 404 */
 static esp_err_t photo_get_handler(httpd_req_t *req)
 {
     char query[32] = { 0 };
     char id_str[16] = { 0 };
     uint32_t file_id = 0;
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        httpd_query_key_value(query, "id", id_str, sizeof(id_str));
+    bool has_id = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "id", id_str, sizeof(id_str)) == ESP_OK) {
         file_id = (uint32_t)strtoul(id_str, NULL, 10);
+        has_id = true;
     }
 
+    /* 2026-08-30 — file_id==0은 실제 유효한 사진 ID(가장 오래된 파일)일 수 있어서, "쿼리에
+     * id가 아예 없었는지"는 값이 아니라 has_id로 따로 판단해야 함(버그: 예전엔 file_id==0을
+     * "id 없음"으로 오판해 그 사진만 항상 즉시 실패) */
     const uint8_t *data = NULL;
     size_t len = 0;
-    if (file_id == 0 || !esp_now_photo_cache_get(file_id, &data, &len)) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "photo not cached — open it on the device first");
+    if (!has_id || !esp_now_photo_cache_get(file_id, &data, &len)) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "photo not cached");
         return ESP_FAIL;
     }
 
@@ -69,9 +117,358 @@ static esp_err_t photo_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, (const char *)data, len);
 }
 
-static void web_dashboard_start_stub(void)
+/* 2026-08-30(사용자 지시: "콘은 순수 JSON API만 제공하고... 정적 프론트엔드가 이 API를
+ * 호출") — assets에 업로드될 정적 HTML/JS(app.html)가 이 API들을 fetch()로 호출해서 화면을 그림 */
+static esp_err_t api_devices_get_handler(httpd_req_t *req)
 {
-    ui_log_add("Web: entered web_dashboard_start_stub()");
+    esp_now_hub_node_t cams[ESP_NOW_HUB_MAX_NODES];
+    int n = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, cams, ESP_NOW_HUB_MAX_NODES);
+
+    char *body = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM);
+    if (!body) { httpd_resp_send_500(req); return ESP_FAIL; }
+    int len = snprintf(body, 2048, "[");
+    for (int i = 0; i < n && len < 2048 - 150; i++) {
+        hub_conn_state_t cs = esp_now_hub_get_conn_state(cams[i].mac);
+        const char *status = (cs == HUB_CONN_STATE_WAITING) ? "waiting"
+                            : (cs == HUB_CONN_STATE_ACTIVE)  ? "active" : "paired";
+        len += snprintf(body + len, 2048 - len,
+                         "%s{\"mac\":\"%02x%02x%02x%02x%02x%02x\",\"name\":\"%s\",\"status\":\"%s\",\"paired\":%s}",
+                         i == 0 ? "" : ",",
+                         cams[i].mac[0], cams[i].mac[1], cams[i].mac[2],
+                         cams[i].mac[3], cams[i].mac[4], cams[i].mac[5],
+                         cams[i].name, status,
+                         cams[i].conn_state == NODE_CONN_PAIRED ? "true" : "false");
+    }
+    len += snprintf(body + len, 2048 - len, "]");
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_send(req, body, len);
+    heap_caps_free(body);
+    return ret;
+}
+
+static esp_err_t api_connect_get_handler(httpd_req_t *req)
+{
+    char query[32] = { 0 };
+    char mac_hex[16] = { 0 };
+    uint8_t mac[6];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "mac", mac_hex, sizeof(mac_hex)) != ESP_OK ||
+        !decode_mac_hex(mac_hex, mac)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid mac");
+        return ESP_FAIL;
+    }
+
+    esp_now_hub_request_pair(mac);
+    const int timeout_ms = 25000;
+    int waited_ms = 0;
+    bool paired = false;
+    while (waited_ms < timeout_ms) {
+        esp_now_hub_node_t tmp[ESP_NOW_HUB_MAX_NODES];
+        int tn = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, tmp, ESP_NOW_HUB_MAX_NODES);
+        for (int i = 0; i < tn; i++) {
+            if (memcmp(tmp[i].mac, mac, 6) == 0 && tmp[i].conn_state == NODE_CONN_PAIRED) { paired = true; break; }
+        }
+        if (paired) break;
+        vTaskDelay(pdMS_TO_TICKS(200));
+        waited_ms += 200;
+    }
+
+    char body[32];
+    int len = snprintf(body, sizeof(body), "{\"ok\":%s}", paired ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body, len);
+}
+
+static esp_err_t api_disconnect_get_handler(httpd_req_t *req)
+{
+    char query[32] = { 0 };
+    char mac_hex[16] = { 0 };
+    uint8_t mac[6];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "mac", mac_hex, sizeof(mac_hex)) != ESP_OK ||
+        !decode_mac_hex(mac_hex, mac)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid mac");
+        return ESP_FAIL;
+    }
+    esp_now_hub_unpair(mac);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t api_photos_get_handler(httpd_req_t *req)
+{
+    char query[32] = { 0 };
+    bool force_refresh = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK && strstr(query, "refresh=1")) {
+        force_refresh = true;
+    }
+
+    esp_now_hub_node_t cams[ESP_NOW_HUB_MAX_NODES];
+    int n = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, cams, ESP_NOW_HUB_MAX_NODES);
+    int cam_idx = -1;
+    for (int i = 0; i < n; i++) {
+        if (cams[i].conn_state == NODE_CONN_PAIRED) { cam_idx = i; break; }
+    }
+
+    char *body = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    if (!body) { httpd_resp_send_500(req); return ESP_FAIL; }
+
+    if (cam_idx < 0) {
+        int len = snprintf(body, 4096, "{\"cam\":false,\"state\":\"no_cam\",\"items\":[]}");
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t ret = httpd_resp_send(req, body, len);
+        heap_caps_free(body);
+        return ret;
+    }
+
+    /* 2026-08-30("웹기생" 설계) — 이미 결과가 있으면(다른 리더가 먼저 ack해도 버퍼는
+     * 안 지워짐) 그대로 읽고, 없으면 새로 요청해서 세대번호로 ack와 무관하게 완료를 확인 */
+    esp_now_photo_list_state_t cur_state = esp_now_photo_list_get_state();
+    bool have_result = false;
+    bool result_ok = false;
+    if (!force_refresh && (cur_state == ESP_NOW_PHOTO_LIST_STATE_READY || cur_state == ESP_NOW_PHOTO_LIST_STATE_ERROR)) {
+        have_result = true;
+        result_ok = (cur_state == ESP_NOW_PHOTO_LIST_STATE_READY);
+    } else {
+        const int timeout_ms = 25000;
+        int waited_ms = 0;
+        if (force_refresh || cur_state == ESP_NOW_PHOTO_LIST_STATE_IDLE) {
+            /* 2026-08-30 버그수정 — REQUESTING 중에도 무조건 새로 esp_now_photo_list_request()를
+             * 부르던 걸 원래대로(IDLE이거나 강제 새로고침일 때만) 되돌림. REQUESTING 중에 또
+             * 요청을 걸면 캠에 중복 PHOTO_LIST_REQUEST가 나가고, ESP-NOW 전송 큐가 밀려서
+             * WAKE_HELLO_ACK 등 다른 전송까지 ESP_ERR_ESPNOW_NO_MEM으로 실패 — 캠이 응답
+             * 없음으로 보고 재광고하는 현상으로 실기에서 확인됨 */
+            uint32_t generation = esp_now_photo_list_request(cams[cam_idx].mac);
+            while (waited_ms < timeout_ms) {
+                if (esp_now_photo_list_get_result(generation, &result_ok)) { have_result = true; break; }
+                vTaskDelay(pdMS_TO_TICKS(200));
+                waited_ms += 200;
+            }
+        } else {
+            /* 이미 REQUESTING 중(다른 곳에서 시작된 요청) — 새로 걸지 않고 완료만 기다림 */
+            while (waited_ms < timeout_ms) {
+                esp_now_photo_list_state_t st = esp_now_photo_list_get_state();
+                if (st == ESP_NOW_PHOTO_LIST_STATE_READY || st == ESP_NOW_PHOTO_LIST_STATE_ERROR) {
+                    have_result = true;
+                    result_ok = (st == ESP_NOW_PHOTO_LIST_STATE_READY);
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(200));
+                waited_ms += 200;
+            }
+        }
+    }
+
+    const char *state_str = !have_result ? "timeout" : (result_ok ? "ready" : "error");
+    int len = snprintf(body, 4096, "{\"cam\":true,\"state\":\"%s\",\"items\":[", state_str);
+    if (have_result && result_ok) {
+        esp_now_photo_list_view_item_t items[ESP_NOW_PHOTO_LIST_MAX];
+        int cnt = esp_now_photo_list_get_items(items, ESP_NOW_PHOTO_LIST_MAX);
+        for (int i = 0; i < cnt && len < 4096 - 150; i++) {
+            char tag[8];
+            format_file_tag(items[i].kind, items[i].file_id, tag, sizeof(tag));
+            len += snprintf(body + len, 4096 - len,
+                             "%s{\"file_id\":%u,\"tag\":\"%s\",\"capture_time\":%u,\"file_size\":%u}",
+                             i == 0 ? "" : ",",
+                             (unsigned)items[i].file_id, tag,
+                             (unsigned)items[i].capture_time, (unsigned)items[i].file_size);
+        }
+    }
+    len += snprintf(body + len, 4096 - len, "]}");
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_send(req, body, len);
+    heap_caps_free(body);
+    return ret;
+}
+
+static esp_err_t api_photo_fetch_get_handler(httpd_req_t *req)
+{
+    char query[32] = { 0 };
+    char id_str[16] = { 0 };
+    uint32_t file_id = 0;
+    bool has_id = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "id", id_str, sizeof(id_str)) == ESP_OK) {
+        file_id = (uint32_t)strtoul(id_str, NULL, 10);
+        has_id = true;
+    }
+    bool ok = false;
+    if (has_id) {
+        const uint8_t *data = NULL;
+        size_t len0 = 0;
+        if (esp_now_photo_cache_get(file_id, &data, &len0)) {
+            ok = true;
+        } else {
+            esp_now_hub_node_t cams[ESP_NOW_HUB_MAX_NODES];
+            int n = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, cams, ESP_NOW_HUB_MAX_NODES);
+            int cam_idx = -1;
+            for (int i = 0; i < n; i++) {
+                if (cams[i].conn_state == NODE_CONN_PAIRED) { cam_idx = i; break; }
+            }
+            if (cam_idx >= 0) {
+                /* 2026-08-30("웹기생" 설계) — 온디바이스 탭과 완전히 같은 경로: 여기선 모델만
+                 * 세팅하고, 실제 요청은 CNTL의 기존 배경 리컨실러(sync_selected_photo_if_needed,
+                 * 1초 주기)가 함(직접 esp_now_photo_fetch_by_id()를 부르면 리컨실러와 겹쳐서
+                 * 이중 요청이 나감 — 실사용 중 확인). 결과 확인도 상태플래그(콘이 매틱
+                 * ack로 소비함) 대신 캐시(비파괴적, ack와 무관하게 안 지워짐)를 직접 폴링 */
+                ui_main_set_selected_photo(file_id);
+                const int timeout_ms = 25000;
+                int waited_ms = 0;
+                while (waited_ms < timeout_ms) {
+                    if (esp_now_photo_cache_get(file_id, &data, &len0)) { ok = true; break; }
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    waited_ms += 200;
+                }
+            }
+        }
+    }
+    char body[32];
+    int len = snprintf(body, sizeof(body), "{\"ok\":%s}", ok ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, body, len);
+}
+
+/* 2026-08-30 — 정적 프론트엔드(assets에 업로드된 app.html)를 깔끔한 URL로 서빙. 파일이
+ * 아직 없으면(최초 배포 전) 404 — /admin/upload?file=app.html로 올리면 그때부터 동작 */
+static esp_err_t app_get_handler(httpd_req_t *req)
+{
+    FILE *f = fopen(FS_MOUNT_POINT "/app.html", "rb");
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "app.html not uploaded yet");
+        return ESP_FAIL;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = heap_caps_malloc((size_t)size, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        fclose(f);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    size_t rd = fread(buf, 1, (size_t)size, f);
+    fclose(f);
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    esp_err_t ret = httpd_resp_send(req, buf, rd);
+    heap_caps_free(buf);
+    return ret;
+}
+
+/* 2026-08-30(사용자 지시: "PC쪽에 파일을 나누고, 각 파일을 복사하는 개념으로 콘의 assets
+ * 파티션에 저장" — assets 파티션 전체를 재빌드/재플래시하지 않고 파일 하나만 개별적으로
+ * 갱신/조회하기 위한 범용 엔드포인트. device_config.bin처럼 assets에 이미 있는 파일도
+ * 이걸로 백업/복원 가능. 인증 없음(같은 네트워크 내 신뢰 전제, 사용자 확인:
+ * "복사해 가도 상관 없어") — 경로 조작만 방어 */
+static bool is_safe_asset_filename(const char *name)
+{
+    if (name[0] == '\0') return false;
+    if (strstr(name, "..") != NULL) return false;
+    if (strchr(name, '/') != NULL) return false;
+    return true;
+}
+
+static esp_err_t admin_upload_post_handler(httpd_req_t *req)
+{
+    char query[64] = { 0 };
+    char filename[64] = { 0 };
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "file", filename, sizeof(filename)) != ESP_OK ||
+        !is_safe_asset_filename(filename)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid file param");
+        return ESP_FAIL;
+    }
+    if (req->content_len <= 0 || req->content_len > 200 * 1024) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid content length");
+        return ESP_FAIL;
+    }
+
+    /* 2026-08-30(사용자 지시: "메모리 특히 신경써야") — 업로드 버퍼는 PSRAM, 요청 끝나면 즉시 해제 */
+    char *buf = heap_caps_malloc(req->content_len, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    size_t received = 0;
+    while (received < req->content_len) {
+        int r = httpd_req_recv(req, buf + received, req->content_len - received);
+        if (r <= 0) {
+            heap_caps_free(buf);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
+            return ESP_FAIL;
+        }
+        received += (size_t)r;
+    }
+
+    char path[80];
+    snprintf(path, sizeof(path), "%s/%s", FS_MOUNT_POINT, filename);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        heap_caps_free(buf);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    fwrite(buf, 1, received, f);
+    fclose(f);
+    heap_caps_free(buf);
+
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
+static esp_err_t admin_download_get_handler(httpd_req_t *req)
+{
+    char query[64] = { 0 };
+    char filename[64] = { 0 };
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "file", filename, sizeof(filename)) != ESP_OK ||
+        !is_safe_asset_filename(filename)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid file param");
+        return ESP_FAIL;
+    }
+
+    char path[80];
+    snprintf(path, sizeof(path), "%s/%s", FS_MOUNT_POINT, filename);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "file not found");
+        return ESP_FAIL;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size <= 0 || size > 300 * 1024) {
+        fclose(f);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "bad file size");
+        return ESP_FAIL;
+    }
+
+    char *buf = heap_caps_malloc((size_t)size, MALLOC_CAP_SPIRAM);
+    if (!buf) {
+        fclose(f);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    size_t rd = fread(buf, 1, (size_t)size, f);
+    fclose(f);
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    esp_err_t ret = httpd_resp_send(req, buf, rd);
+    heap_caps_free(buf);
+    return ret;
+}
+
+void web_dashboard_start(void)
+{
+    /* 2026-08-30 — STA(IP_EVENT_STA_GOT_IP, 재연결로 여러 번 올 수 있음)와 AP(부팅 시 1회
+     * 직접 호출) 두 경로에서 부를 수 있게 돼서, 호출부별 로컬 플래그 대신 여기서 직접 방어 */
+    static bool s_started = false;
+    if (s_started) return;
+    s_started = true;
+
+    ui_log_add("Web: entered web_dashboard_start()");
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     /* 2026-08-21 — 5005(httpd_start 실패) 원인 확인됨: 부팅 이 시점엔 내부(비-PSRAM) DRAM이
      * 거의 바닥남(실기 확인: free internal=1419B) — HTTPD_DEFAULT_CONFIG()의 task_caps
@@ -79,6 +476,12 @@ static void web_dashboard_start_stub(void)
      * 넉넉하니(같은 시점 free heap=263660B) 여기로 돌림(esp_lv_adapter의 stack_in_psram,
      * 폰트 버퍼의 font_buf_malloc과 동일 원칙) */
     config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    /* 2026-08-30 — 핸들러들이 지역 노드 배열(esp_now_hub_node_t[8])을 스택에 두는데,
+     * 기본 스택 크기가 빠듯할 수 있어 확대(PSRAM이라 비용 낮음) */
+    config.stack_size = 8192;
+    /* 2026-08-30 — URI 핸들러가 계속 늘어나서(root/photo/admin 2개 + API) 기본
+     * max_uri_handlers(8)를 넘을 수 있어 여유있게 확대 */
+    config.max_uri_handlers = 16;
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -99,6 +502,32 @@ static void web_dashboard_start_stub(void)
     static const httpd_uri_t photo_uri = { .uri = "/photo", .method = HTTP_GET, .handler = photo_get_handler };
     esp_err_t photo_err = httpd_register_uri_handler(server, &photo_uri);
     ui_log_add("Web: '/photo' register %s", photo_err == ESP_OK ? "SUCC" : "FAIL");
+    static const httpd_uri_t admin_upload_uri = { .uri = "/admin/upload", .method = HTTP_POST,
+                                                    .handler = admin_upload_post_handler };
+    esp_err_t admin_upload_err = httpd_register_uri_handler(server, &admin_upload_uri);
+    ui_log_add("Web: '/admin/upload' register %s", admin_upload_err == ESP_OK ? "SUCC" : "FAIL");
+    static const httpd_uri_t admin_download_uri = { .uri = "/admin/download", .method = HTTP_GET,
+                                                      .handler = admin_download_get_handler };
+    esp_err_t admin_download_err = httpd_register_uri_handler(server, &admin_download_uri);
+    ui_log_add("Web: '/admin/download' register %s", admin_download_err == ESP_OK ? "SUCC" : "FAIL");
+    static const httpd_uri_t api_devices_uri = { .uri = "/api/devices", .method = HTTP_GET,
+                                                   .handler = api_devices_get_handler };
+    httpd_register_uri_handler(server, &api_devices_uri);
+    static const httpd_uri_t api_connect_uri = { .uri = "/api/connect", .method = HTTP_GET,
+                                                   .handler = api_connect_get_handler };
+    httpd_register_uri_handler(server, &api_connect_uri);
+    static const httpd_uri_t api_disconnect_uri = { .uri = "/api/disconnect", .method = HTTP_GET,
+                                                      .handler = api_disconnect_get_handler };
+    httpd_register_uri_handler(server, &api_disconnect_uri);
+    static const httpd_uri_t api_photos_uri = { .uri = "/api/photos", .method = HTTP_GET,
+                                                  .handler = api_photos_get_handler };
+    httpd_register_uri_handler(server, &api_photos_uri);
+    static const httpd_uri_t api_photo_fetch_uri = { .uri = "/api/photo_fetch", .method = HTTP_GET,
+                                                       .handler = api_photo_fetch_get_handler };
+    httpd_register_uri_handler(server, &api_photo_fetch_uri);
+    ui_log_add("Web: API endpoints registered");
+    static const httpd_uri_t app_uri = { .uri = "/app", .method = HTTP_GET, .handler = app_get_handler };
+    httpd_register_uri_handler(server, &app_uri);
     /* 2026-08-21 — 성공할 때도 같은 여유메모리를 남김(사용자 지시) — 실패할 때만 찍으면
      * "언제부터 빠듯해지기 시작했는지" 추세를 못 봄. 5005는 이 시점 내부RAM이 간당간당할
      * 때만 뜨는 경계선 증상이라, 성공한 부팅들의 수치도 같이 쌓여야 나중에 진짜 임계점을
@@ -113,16 +542,14 @@ static void web_dashboard_start_stub(void)
  * 시점엔 WiFi가 아직 인증/연결 단계라 IP를 받기도 전이었음(실기 로그로 확인: httpd_start가
  * IP_EVENT_STA_GOT_IP보다 1초 이상 먼저 실행됨) — 이게 5005(httpd_start 실패)가 항상 뜨던
  * 원인. IP를 실제로 받은 뒤에 시작하도록 이벤트로 미룸. 재연결로 GOT_IP가 여러 번 올 수
- * 있어서 한 번만 시작하게 플래그로 막음(두 번째부터는 이미 떠있는 서버라 재호출해도 무해하지만
- * 깔끔하게) */
+ * 있는데, 그 중복 방어는 web_dashboard_start() 내부로 옮김(AP 모드 직접 호출 경로와
+ * 공유해야 해서, 2026-08-30) */
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg; (void)event_base; (void)event_data;
-    static bool s_started = false;
-    ui_log_add("IP_EVENT(id=%ld) received, s_started=%d", (long)event_id, (int)s_started);
-    if (event_id == IP_EVENT_STA_GOT_IP && !s_started) {
-        s_started = true;
-        web_dashboard_start_stub();
+    ui_log_add("IP_EVENT(id=%ld) received", (long)event_id);
+    if (event_id == IP_EVENT_STA_GOT_IP) {
+        web_dashboard_start();
     }
 }
 

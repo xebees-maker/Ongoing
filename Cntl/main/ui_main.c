@@ -627,6 +627,44 @@ static void cb_logo_warning_tap(lv_event_t *e)
     add_modal_button(btn_row, STR_BTN_CONFIRM, cb_error_warn_list_close, NULL);
 }
 
+/* 2026-08-30(사용자 지시: "상단 로고(플렉스팜)을 눌렀을 때 URL QR 팝업 띄워줘", "아이콘 말고,
+ * 로고문자에" — s_logo_icon은 이미 cb_logo_warning_tap에 쓰이므로 겹치지 않게 s_logo_title
+ * (텍스트)에만 새로 바인딩) 대시보드 웹 URL을 QR코드로 보여줌 — 폰으로 IP 직접 입력할
+ * 필요 없이 카메라로 스캔해서 바로 접속 */
+static void cb_logo_title_tap(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_t *box = create_modal();
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, ui_str(STR_TITLE_WEB_QR));
+    lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    const char *ip = esp_now_hub_get_own_ip_str();
+    if (ip[0] == '\0') {
+        lv_obj_t *lbl = lv_label_create(box);
+        lv_label_set_text(lbl, ui_str(STR_MSG_WEB_QR_NO_IP));
+        lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    } else {
+        char url[40];
+        snprintf(url, sizeof(url), "http://%s:80", ip);
+
+        lv_obj_t *qr = lv_qrcode_create(box);
+        lv_qrcode_set_size(qr, 220);
+        lv_qrcode_set_dark_color(qr, lv_color_black());
+        lv_qrcode_set_light_color(qr, lv_color_white());
+        lv_qrcode_update(qr, url, strlen(url));
+        lv_obj_center(qr);
+
+        lv_obj_t *url_lbl = lv_label_create(box);
+        lv_label_set_text(url_lbl, url);
+        lv_obj_set_style_text_font(url_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    }
+
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_modal_close, NULL);
+}
+
 /* ════════════════════════════════════════════════════════════
  * 예취소(Yes/Cancel) 공용 확인 팝업 — 연결해제/사진삭제/전체삭제 등 "예/취소로 묻고 예를
  * 누르면 콜백 실행" 패턴이 반복돼서 공통화(2026-08-01). LVGL 이벤트 콜백은 시그니처가
@@ -858,6 +896,8 @@ static void refresh_photo_list_ui(int select_index);  /* capture 팝업이 완�
 static void show_fetch_progress_popup(void);  /* 아래 공용 진행팝업 모듈 정의 뒤에 구현 */
 static void display_photo(uint32_t file_id);  /* 아래 정의 — 캐시 히트 시 여기서 바로 씀 */
 static void consume_ready_photo_if_current(void);  /* 아래 정의 — display_photo() 직후 */
+static void cb_async_sync_selected_photo(void *user_data);  /* 아래 정의 — lv_async_call 트램폴린,
+                                                                 ui_main_set_selected_photo()가 씀 */
 
 /* CAM의 실제 파일명 표기(base36 4자리, 0-9A-Z, CAM/main/cam_storage.c의 encode_seq()와
  * 동일 인코딩)를 그대로 미러링 — 예전엔 file_id를 %u로 그냥 10진수로 찍어서 CAM SD카드의
@@ -875,12 +915,32 @@ static void encode_file_seq_base36(uint32_t seq, char *out /* 5바이트: 4자�
 }
 
 /* Model: 선택 상태 그 자체(s_selected_file_id) 하나만 바꿈 — View/Action은 절대 안 건드림.
- * OnTap(cb_photo_row_select)/목록 재구성(refresh_photo_list_ui) 둘 다 "선택이 바뀌었다"는
- * 사실만 여기로 알림 */
+ * OnTap(cb_photo_row_select)/목록 재구성(refresh_photo_list_ui)/웹(ui_main_set_selected_photo)
+ * 전부 "선택이 바뀌었다"는 사실만 여기로 알림.
+ * 2026-08-30 버그수정 — esp_now_hub_note_user_action()이 예전엔 start_single_receive()
+ * 안에서만(=실제 요청이 lv_async_call을 거쳐 시작될 때) 불려서, 탭/선택 시점과 그 사이에
+ * 간극이 있었음. 이 간극에 WAKE_HELLO가 걸리면 적응형 판단(send_cask_sleep_now)이 아직
+ * "방금 조작 있었음"을 못 보고 진짜 sleep_sec을 내보내는 레이스가 있었음(사용자 실기 확인:
+ * 사진 전송 중에도 캠이 잠듦). 모델이 바뀌는 이 지점에서 바로(동기) 기록해서 간극을 없앰 */
 static void set_selected_file_id(uint32_t file_id)
 {
     s_selected_file_id = file_id;
     s_has_selected_file_id = true;
+    esp_now_hub_note_user_action();
+}
+
+/* 2026-08-30("웹기생" 설계, 사용자 지시: "웹이 이 이벤트를 발생시키는 걸로 작성해야되") —
+ * ui_main.h 참고. main.c의 웹 API(httpd 태스크)가 온디바이스 탭과 완전히 같은 경로를 타는
+ * 진입점. 처음엔 모델만 세팅하고 실제 요청은 main.c가 직접 esp_now_photo_fetch_by_id()로
+ * 불렀는데, 그 직접호출을 없애면서 sync_selected_photo_if_needed()를 여기서 직접 부르려던
+ * 시도는 위험했음 — 그 함수는 display_photo()(LVGL 위젯 조작)까지 이어질 수 있어서 LVGL
+ * 태스크가 아닌 httpd 태스크에서 직접 부르면 안 됨. 대신 목록 자동선택이 쓰는 것과 같은
+ * lv_async_call() 트램폴린으로 "이벤트만 발생"시켜서 LVGL 태스크에서 안전하게 실행되게 함 —
+ * 그래야 다른 영향 없이 끼어들 수 있음(탭 이벤트와 완전히 동일한 진입 지점) */
+void ui_main_set_selected_photo(uint32_t file_id)
+{
+    set_selected_file_id(file_id);
+    lv_async_call(cb_async_sync_selected_photo, NULL);
 }
 
 /* reconcile_selection — "View/Action은 Model의 그림자일 뿐"(2026-08-02, 사용자 지적)을
@@ -945,8 +1005,8 @@ static void sync_selected_photo_if_needed(bool show_popup)
     if (show_popup) show_fetch_progress_popup();
 }
 
-/* lv_async_call() 트램폴린 — refresh_photo_list_ui()의 자동선택 분기에서 씀(위 참고).
- * lv_async_cb_t 시그니처(void*만 받음)에 맞추기 위함, show_popup은 이 경로에선 항상 true */
+/* lv_async_call() 트램폴린 — refresh_photo_list_ui()의 자동선택 분기/웹(ui_main_set_selected_photo)이
+ * 씀. lv_async_cb_t 시그니처(void*만 받음)에 맞추기 위함, show_popup은 이 경로에선 항상 true */
 static void cb_async_sync_selected_photo(void *user_data)
 {
     (void)user_data;
@@ -2385,12 +2445,19 @@ static void refresh_clock(lv_timer_t *t)
     char time_buf[12];
     strftime(time_buf, sizeof(time_buf), "%H:%M:%S", &tm_buf);
 
-    /* 시간 옆에 WiFi 채널을 항상 같이 표기(2026-08-02, 사용자 지시) — 공유기
-     * 자동채널선택으로 세션 중간에 채널이 바뀌는 걸 실기에서 확인했는데, 그동안은
-     * 시리얼 없이 확인할 방법이 없어서 헤맸음. 통계탭 로그처럼 찾아봐야 하는 곳이
-     * 아니라 항상 보이는 자리에 둠 */
-    char buf[20];
-    snprintf(buf, sizeof(buf), "%s - CH%u", time_buf, (unsigned)esp_now_hub_get_wifi_channel());
+    char buf[32];  /* "HH:MM:SS - AP 없음" 등 한글 포함 시 UTF-8로 20바이트를 넘을 수 있어 확대 */
+    /* 2026-08-30(사용자 지시) — STA 모드에서 부팅 후 25초간 저장된 AP를 한 번도 못 찾았으면,
+     * 계속 재시도 중임을 시간/채널로 위장하지 말고 "AP 없음"을 명시. "찾기"로 수동 연결하면
+     * esp_now_hub_sta_boot_giveup()이 자동으로 false가 되어 원래 표시로 복귀 */
+    if (!device_config_get_wifi_ap_mode() && esp_now_hub_sta_boot_giveup()) {
+        snprintf(buf, sizeof(buf), "%s - %s", time_buf, ui_str(STR_STATUS_NO_AP));
+    } else {
+        /* 시간 옆에 WiFi 채널을 항상 같이 표기(2026-08-02, 사용자 지시) — 공유기
+         * 자동채널선택으로 세션 중간에 채널이 바뀌는 걸 실기에서 확인했는데, 그동안은
+         * 시리얼 없이 확인할 방법이 없어서 헤맸음. 통계탭 로그처럼 찾아봐야 하는 곳이
+         * 아니라 항상 보이는 자리에 둠 */
+        snprintf(buf, sizeof(buf), "%s - CH%u", time_buf, (unsigned)esp_now_hub_get_wifi_channel());
+    }
     lv_label_set_text(s_clock_label, buf);
 
     /* 설정탭 시각설정 행의 현재값 표시 — 이 타이머가 만들어지는 시점(1786행)엔 아직
@@ -3357,6 +3424,8 @@ void ui_init(void)
     lv_label_set_text(s_logo_title, ui_str(STR_LOGO_TITLE));
     lv_obj_set_style_text_font(s_logo_title, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_align_to(s_logo_title, s_logo_icon, LV_ALIGN_OUT_RIGHT_TOP, 10, 0);
+    lv_obj_add_flag(s_logo_title, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_logo_title, cb_logo_title_tap, LV_EVENT_CLICKED, NULL);
 
     /* 로고부제 자리 — 보드 실장 RTC(rtc_sync_init, main.c에서 UI보다 먼저 호출)로 세팅된
      * 시스템 클록을 1초마다 hh:mm:ss로 보여줌 */

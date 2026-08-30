@@ -160,6 +160,15 @@ static uint16_t s_list_received_count = 0;  /* 지금까지 BATCH로 실제 받�
 static bool     s_list_count_received = false;  /* PHOTO_LIST_COUNT 수신 여부(2026-08-11) —
                                                     진행팝업 "명령 전송" 단계 완료 판정용 */
 
+/* 2026-08-30(사용자 설계: "웹기생") — s_list_state는 온디바이스 컨슈머(sync_photo_list_tick)가
+ * 매틱 소비(ack)해서 IDLE로 되돌리므로, 웹처럼 늦게 폴링하는 리더는 그 사이 놓칠 수 있음.
+ * s_list_items/s_list_count 버퍼 자체는 ack와 무관하게 안 지워지지만, "이 버퍼가 지금 내
+ * 요청에 대한 결과가 맞는지" 구분할 수단이 없었음 — 요청마다 세대번호를 매겨서, 그 결과가
+ * 어느 세대에 대한 것인지를 ack와 별개로(소비되지 않게) 남겨둠 */
+static uint32_t s_list_generation      = 0;  /* esp_now_photo_list_request() 호출마다 증가 */
+static uint32_t s_list_done_generation = 0;  /* 마지막으로 완료(성공/실패)된 세대 */
+static bool     s_list_done_ok         = false;
+
 void esp_now_photo_init(void)
 {
     s_mutex = xSemaphoreCreateMutex();
@@ -664,7 +673,7 @@ static void send_list_request_raw(const uint8_t *cam_mac)
     ESP_LOGI(TAG, "PHOTO_LIST_REQUEST 큐잉됨");
 }
 
-void esp_now_photo_list_request(const uint8_t *cam_mac)
+uint32_t esp_now_photo_list_request(const uint8_t *cam_mac)
 {
     esp_now_hub_note_user_action();
 
@@ -675,9 +684,24 @@ void esp_now_photo_list_request(const uint8_t *cam_mac)
     s_list_received_count = 0;
     s_list_count_received = false;
     memcpy(s_list_cam_mac, cam_mac, sizeof(s_list_cam_mac));
+    uint32_t generation = ++s_list_generation;
     xSemaphoreGive(s_mutex);
 
     send_list_request_raw(cam_mac);
+    return generation;
+}
+
+/* 2026-08-30 — ack(esp_now_photo_list_ack)로 소비되지 않는 결과 확인 수단. generation이
+ * esp_now_photo_list_request()가 돌려준 값과 같으면, 그 요청이 성공/실패 여부와 무관하게
+ * "이미 결과가 나왔다"는 뜻(성공 여부는 *out_ok) — s_list_items/s_list_count는 그대로 두고
+ * 읽으면 됨(esp_now_photo_list_get_items() 그대로 사용 가능) */
+bool esp_now_photo_list_get_result(uint32_t generation, bool *out_ok)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool done = (s_list_done_generation == generation);
+    if (done) *out_ok = s_list_done_ok;
+    xSemaphoreGive(s_mutex);
+    return done;
 }
 
 bool esp_now_photo_list_count_received(void)
@@ -802,6 +826,8 @@ static void handle_list_done(const uint8_t *src_mac, const uint8_t *data, int le
     if (ok) {
         s_list_state = ESP_NOW_PHOTO_LIST_STATE_READY;
     }
+    s_list_done_generation = s_list_generation;  /* ack 여부와 무관하게 남는 결과 표시 */
+    s_list_done_ok = ok;
     xSemaphoreGive(s_mutex);
 
     if (!ok) {
