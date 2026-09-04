@@ -90,6 +90,9 @@ static lv_obj_t *s_summary_row_objs[ESP_NOW_HUB_MAX_NODES];
 static uint8_t   s_summary_row_macs[ESP_NOW_HUB_MAX_NODES][6];
 static char      s_summary_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
 static int       s_summary_row_count = 0;
+/* 2026-09-04(사용자 지시 — 요약판넬 우측에 신호세기, 숫자 대신 막대) — 위 s_summary_row_objs와
+ * 같은 인덱스로 짝지어지는 신호막대 위젯(각 행의 우측 자식) */
+static lv_obj_t *s_summary_row_signal[ESP_NOW_HUB_MAX_NODES];
 static uint8_t            s_selected_cam_mac[6];
 static bool               s_has_selected_cam = false;  /* 지금촬영/목록/삭제 등이 쏠 대상 —
                                                             이제 "자동으로 찾은 유일한 CAM"이
@@ -2044,6 +2047,54 @@ static void format_battery_display(char *buf, size_t buf_size, uint16_t battery_
              battery_mv / 1000, (battery_mv % 1000) / 10, (unsigned)battery_pct);
 }
 
+/* 2026-09-04(사용자 지시 — 요약판넬 우측에 신호세기, 숫자보다 막대/흔한 와이파이 표시형태로,
+ * 이후 "5개로 해") — 높이가 다른 막대 5개, RSSI 임계값에 따라 왼쪽부터 채움(폰 상태바와
+ * 동일한 관례) */
+#define SIGNAL_BAR_COUNT 5
+
+static lv_obj_t *create_signal_widget(lv_obj_t *parent)
+{
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_set_size(box, 28, 16);
+    lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_pad_all(box, 0, 0);
+    lv_obj_set_style_pad_column(box, 1, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    static const uint8_t bar_h[SIGNAL_BAR_COUNT] = { 4, 7, 10, 13, 16 };
+    for (int i = 0; i < SIGNAL_BAR_COUNT; i++) {
+        lv_obj_t *bar = lv_obj_create(box);
+        lv_obj_set_size(bar, 3, bar_h[i]);
+        lv_obj_set_style_radius(bar, 0, 0);
+        lv_obj_set_style_border_width(bar, 0, 0);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(bar, lv_palette_main(LV_PALETTE_GREY), 0);
+        lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+    }
+    return box;
+}
+
+static void update_signal_widget(lv_obj_t *box, bool has_rssi, int8_t rssi)
+{
+    int filled;
+    if      (!has_rssi)   filled = 0;
+    else if (rssi >= -45) filled = 5;
+    else if (rssi >= -55) filled = 4;
+    else if (rssi >= -65) filled = 3;
+    else if (rssi >= -75) filled = 2;
+    else if (rssi >= -85) filled = 1;
+    else                  filled = 0;
+
+    for (int i = 0; i < SIGNAL_BAR_COUNT; i++) {
+        lv_obj_t *bar = lv_obj_get_child(box, i);
+        lv_obj_set_style_bg_color(bar, (i < filled) ? lv_palette_main(LV_PALETTE_BLUE)
+                                                     : lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+}
+
 static void refresh_dashboard(lv_timer_t *t)
 {
     (void)t;
@@ -2084,13 +2135,29 @@ static void refresh_dashboard(lv_timer_t *t)
         lv_obj_clean(s_summary_list);
         for (int i = 0; i < total; i++) {
             if (esp_now_hub_get_conn_state(s_dash_nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
-            lv_obj_t *row = lv_label_create(s_summary_list);
-            lv_obj_set_style_text_font(row, ui_font_get(UI_FONT_SIZE_18), 0);
-            /* 상태문구(페어됨/통신 중)는 매 틱 아래에서 따로 갱신 — 여기선 자리만 만듦.
-             * 행 객체+mac+이름을 기억해뒀다가 구조 재생성 없이 텍스트만 갱신(2026-08-10,
-             * 사용자 지시 — 이 자리만 페어됨/통신 중을 세분화해서 보여줌) */
+            /* 2026-09-04(사용자 지시 — 우측에 신호세기 막대) — 라벨 하나였던 행을
+             * [라벨(이름+상태) + 신호막대] 가로 컨테이너로 바꿈, 막대는 SPACE_BETWEEN으로
+             * 우측 정렬 */
+            lv_obj_t *row = lv_obj_create(s_summary_list);
+            lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+            lv_obj_set_style_border_width(row, 0, 0);
+            lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_pad_all(row, 0, 0);
+            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+            lv_obj_t *label = lv_label_create(row);
+            lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+            lv_obj_t *signal = create_signal_widget(row);
+
+            /* 상태문구(페어됨/통신 중)/신호세기는 매 틱 아래에서 따로 갱신 — 여기선 자리만
+             * 만듦. 행 객체+mac+이름을 기억해뒀다가 구조 재생성 없이 텍스트/막대만 갱신
+             * (2026-08-10, 사용자 지시 — 이 자리만 페어됨/통신 중을 세분화해서 보여줌) */
             if (paired_count < ESP_NOW_HUB_MAX_NODES) {
-                s_summary_row_objs[paired_count] = row;
+                s_summary_row_objs[paired_count] = label;
+                s_summary_row_signal[paired_count] = signal;
                 memcpy(s_summary_row_macs[paired_count], s_dash_nodes[i].mac, 6);
                 strncpy(s_summary_row_names[paired_count], s_dash_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
                 s_summary_row_names[paired_count][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
@@ -2129,6 +2196,7 @@ static void refresh_dashboard(lv_timer_t *t)
                 format_battery_display(batt, sizeof(batt), s_dash_nodes[j].battery_mv, s_dash_nodes[j].battery_pct);
                 snprintf(buf + n, sizeof(buf) - (size_t)n, " - %s", batt);
             }
+            update_signal_widget(s_summary_row_signal[i], s_dash_nodes[j].has_rssi, s_dash_nodes[j].rssi);
             break;
         }
         lv_label_set_text(s_summary_row_objs[i], buf);

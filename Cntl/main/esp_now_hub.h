@@ -118,6 +118,12 @@ typedef struct {
     uint16_t        battery_mv;
     uint8_t         battery_pct;
 
+    /* 2026-09-04(사용자 지시 — 요약판넬 우측 신호세기 표시) — 이 노드에서 온 가장 최근
+     * ESP-NOW 수신의 rx_ctrl.rssi(dBm). 메시지 종류 무관하게 recv_cb 공통 지점에서 매번
+     * 덮어씀 — 아직 한 번도 수신 못했으면 0(has_rssi로 유효여부 판단) */
+    int8_t          rssi;
+    bool            has_rssi;
+
     /* 2026-08-26(사용자 지시) — 사용자 액션(사진요청/촬영/목록/삭제/전체삭제)을 노드별로
      * 대기시켜뒀다가, CASK 사이클(WAKE_HELLO 처리)에서 중앙집중으로 하나씩 꺼내 보냄 —
      * esp_now_photo.c의 각 함수가 "지금 보낼 수 있나"를 따로 확인할 필요가 없어짐(그 판단은

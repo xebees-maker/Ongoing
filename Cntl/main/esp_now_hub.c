@@ -275,6 +275,19 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * 기존 dispatch와 안전하게 병행됨(esp_now_channelsync_on_recv()와 동일 패턴, 2026-08-05) */
     esp_now_reliable_on_recv(msg_type, info ? info->src_addr : NULL, data, len);
 
+    /* 2026-09-04(사용자 지시 — 요약판넬 우측 신호세기 표시) — 메시지 종류 무관하게 매번
+     * 최신 RSSI로 덮어씀. 아직 테이블에 없는 노드(첫 ADVERTISE 전)면 조용히 건너뜀 — 노드가
+     * find_or_add_node()로 생긴 다음 수신부터 채워짐 */
+    if (info && info->rx_ctrl) {
+        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        esp_now_hub_node_t *rssi_node = find_node(info->src_addr);
+        if (rssi_node) {
+            rssi_node->rssi = (int8_t)info->rx_ctrl->rssi;
+            rssi_node->has_rssi = true;
+        }
+        xSemaphoreGive(s_nodes_mutex);
+    }
+
     if (msg_type == ESP_NOW_MSG_ADVERTISE) {
         if (len < (int)sizeof(esp_now_advertise_t)) return;
         const esp_now_advertise_t *msg = (const esp_now_advertise_t *)data;
