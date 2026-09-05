@@ -34,6 +34,27 @@ menu "Sens Sensor Node"
             bool "SHT40 (temp + humi)"
     endchoice
 
+    # 2026-09-05(사용자 지시: "딥슬립도 캠과 동일한 구조로 가야되") — CAM의
+    # CAM_DEEPSLEEP_ENABLE/CAM_DEEPSLEEP_AWAKE_MARGIN_SEC 그대로 이식, SCD41 헤드리스
+    # 빌드에만 적용(다른 센서 빌드는 이번 범위 밖 — esp_now_node_cask.c/rwdt_guard 참고)
+    config SENS_DEEPSLEEP_ENABLE
+        bool "Deep Sleep 주기적 웨이크 사용"
+        default y
+        depends on SENS_SENSOR_SCD41
+        help
+            꺼면 상시 동작 상태로 남음(콘솔/벤치 작업 시 매 사이클 USB 재열거를 안 겪기 위한
+            개발용 이스케이프 해치, CAM의 CAM_DEEPSLEEP_ENABLE과 동일 이유). 켜면 CNTL이
+            정해준 샘플 주기로 딥슬립↔웨이크를 반복함(sensor_node.c app_main 참고).
+
+    config SENS_DEEPSLEEP_AWAKE_MARGIN_SEC
+        int "RWDT 깨어있는 시간 마진(초)"
+        default 30
+        depends on SENS_SENSOR_SCD41 && SENS_DEEPSLEEP_ENABLE
+        help
+            RWDT 예산 = 샘플 주기(딥슬립 주기) + 이 마진. Sens는 사진전송 등 무거운 작업이
+            없어 CAM(기본 90)보다 깨어있는 시간이 훨씬 짧아서 기본값을 30으로 낮춤 — 페어링/
+            SCD41 측정/CASK 왕복 정도만 덮으면 됨, 실기 측정 후 튜닝 대상.
+
 endmenu
 
 menu "Sens WiFi Dashboard"

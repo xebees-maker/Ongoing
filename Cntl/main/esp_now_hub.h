@@ -131,6 +131,25 @@ typedef struct {
     esp_now_hub_pending_action_t action_queue[ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH];
     int             action_queue_head;   /* 다음에 꺼낼 위치 */
     int             action_queue_count;
+
+    /* 2026-09-05(사용자 지시: "캠에서 구현된 걸 가져다 써야되") — Sens 센서 채널값
+     * (WAKE_HELLO_SENS로 옴, esp_now_wake_hello_sens_t와 동일 필드). has_sensor_data=false면
+     * 아직 한 번도 못 받음(막 페어링됨, has_deepsleep_stats와 별개 플래그 — Sens는 배터리와
+     * 센서값이 같은 메시지에 실려오지만 개념상 분리해둠) */
+    bool            has_sensor_data;
+    uint8_t         sensor_kind;                      /* sensor_kind_t */
+    uint8_t         chan_count;
+    uint8_t         chan_type[ESP_NOW_MAX_CHANNELS];
+    uint8_t         chan_ok[ESP_NOW_MAX_CHANNELS];
+    float           chan_val[ESP_NOW_MAX_CHANNELS];
+    /* 2026-09-05 — 센스는 콘 개입 없이 자기 주기대로 자율적으로 측정해서 캐스크마다 캐시값을
+     * 실어보내므로(사용자 설계), 여러 사이클에 걸쳐 같은 값이 반복 도착할 수 있음. 이 값이
+     * 직전과 같으면 위 chan_* 필드 갱신을 건너뜀(esp_now_hub.c의 WAKE_HELLO_SENS 분기 참고) —
+     * 배터리/사이클수 등 다른 통계는 매번 갱신 */
+    uint32_t        sensor_measurement_id;
+    /* 2026-09-05(사용자 지시) — 상황판 표시용 "Time: HH:MM:SS"의 기준 — 콘이 이 측정ID를
+     * 처음 받은 시점의 콘 자체 벽시계 시각(그 순간의 rtc_sync_get_unix_time()) */
+    uint32_t        sensor_last_update_unix_time;
 } esp_now_hub_node_t;
 
 void esp_now_hub_init(void);
@@ -253,6 +272,10 @@ void esp_now_hub_queue_action(const uint8_t *mac, const void *req, size_t req_le
  * 그때 같이 확장 필요).
  * 응답성: 시스템 전체 공통 설정이라 현재 페어링된 모든 CAM에 한 번에 반영. */
 void esp_now_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec);
+
+/* 2026-09-05 — 촬영주기와 동일 패턴(센스별 설정, device_config의 mac 키 슬롯에 저장 후
+ * 그 mac에만 SENS_CONFIG_SET 재전송). 설정-측정기 목록에서 선택된 센서 하나에 적용 */
+void esp_now_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec);
 /* 반환값(2026-08-10) — 지금 라디오레벨로 살아있는(paired==true) CAM이 하나라도 있어서 실제로
  * push_cam_config_to()를 시도했으면 true. false면 대상이 하나도 없어 아무 것도 안 보냈다는
  * 뜻 — 호출부(ui_main.c)가 이 경우 응답 대기 팝업을 띄우지 않고 "저장만 됨" 안내로 대체함
@@ -282,8 +305,11 @@ void esp_now_hub_config_apply_stage_clear(void);
 
 /* 노드별 실제 무응답 타임아웃(ms) — device_config의 시스템 응답성 설정값 배수(여유마진).
  * esp_now_hub_get_nodes()/is_paired()가 내부적으로 이걸 씀 — UI가 "몇 초 뒤에 끊김으로
- * 판단하는지" 표시하고 싶을 때도 그대로 재사용 가능하게 공개 */
-uint32_t esp_now_hub_node_timeout_ms(void);
+ * 판단하는지" 표시하고 싶을 때도 그대로 재사용 가능하게 공개.
+ * 2026-09-05 — Sens는 자기 샘플주기(ds_last_sleep_interval_sec)가 있으면 그걸 기준으로
+ * 계산(캠 전용 응답성 설정으로 재면 정상 수면 중에도 무응답 오판이 남) — n=NULL이면 기존
+ * 전역 응답성 설정 기준(호환용) */
+uint32_t esp_now_hub_node_timeout_ms(const esp_now_hub_node_t *n);
 
 /* 처리량 벤치마크 트리거(2026-08-04, 임시 개발용) — 페어링된 CAM 중 첫 번째에게
  * duration_sec 동안 벤치마크를 시작하라고 요청. 결과는 양쪽 시리얼 로그로만

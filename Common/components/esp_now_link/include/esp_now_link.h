@@ -198,6 +198,17 @@ typedef enum {
     /* CAM -> Cntl: 위 수신 확인. 페이로드 없음 — esp_now_unpair_t와 동일 관례로
      * esp_now_cask_work_none_t를 msg_type만 바꿔 재사용 */
     ESP_NOW_MSG_CASK_WORK_NONE_ACK = 50,
+    /* 2026-09-05 — Sens(SCD41 등 센서 노드)를 CAM과 같은 CASK 구조로 올리면서 추가.
+     * WAKE_HELLO와 별도 왕복을 안 만들고 센서값을 웨익헬로 자체에 합침(사용자 지시 —
+     * 아래 esp_now_wake_hello_sens_t 참고, CAM의 DEEP_SLEEP_STATS->WAKE_HELLO 흡수와
+     * 동일 원칙: 매 사이클 어차피 보내는 메시지에 몇 바이트 더 싣는 게 별도 왕복보다 쌈) */
+    ESP_NOW_MSG_WAKE_HELLO_SENS = 51,
+    ESP_NOW_MSG_WAKE_HELLO_SENS_ACK = 52,
+    /* Cntl -> Sens: 샘플링 주기 설정 푸시(CAM_CONFIG_SET과 동일 위치, CASK의 "항상 먼저"
+     * 단계). 노드별로 다르게 설정 가능(사용자 지시) — Cntl이 그 mac에 저장된 값을 그때
+     * 골라서 보냄 */
+    ESP_NOW_MSG_SENS_CONFIG_SET = 53,
+    ESP_NOW_MSG_SENS_CONFIG_ACK = 54,
 } esp_now_msg_type_t;
 
 /* ESP_NOW_MSG_SLEEP_NOW 페이로드. ESP_NOW_MSG_SLEEP_NOW_ACK도 이 구조체를 msg_type만 바꿔
@@ -236,10 +247,19 @@ typedef struct __attribute__((packed)) {
     uint8_t hub_mac[6];
 } esp_now_pair_request_t;
 
+/* 2026-09-05(사용자 지시) — 노드가 뭘 재는지(센서 종류/채널구성)는 자주 안 바뀌는 값이라
+ * 매 캐스크 사이클(WAKE_HELLO_SENS)이 아니라 페어링 완료 이 순간에 1회만 실어보냄 — 이후
+ * 패스트패스 재연결 사이클들은 콘이 여기서 받아둔 값을 계속 재사용(콘이 리부팅해서 다시
+ * 페어링해야 할 때만 또 옴). 캠/센스 공용 구조체라 캠 쪽은 지금은 0으로 채워 보내지만,
+ * 캠도 나중에 카메라 기종(OV5640/OV3006 등)을 이 자리에 실어보낼 계획이라 낭비가 아님 —
+ * 사용자 지시: "캠은 지금 카메라 기종을 안 보내고 있어... 나중에 이런 값을 실어서 보내려고 해" */
 typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
     uint8_t node_mac[6];
+    uint8_t sensor_kind;                      /* sensor_kind_t — 캠은 0(SENSOR_KIND_UNKNOWN) */
+    uint8_t chan_count;
+    uint8_t chan_type[ESP_NOW_MAX_CHANNELS];  /* sensor_channel_type_t, [0..chan_count) 유효 */
 } esp_now_pair_ack_t;
 
 /* esp_now_channel_ping_t/esp_now_channel_pong_t(2026-08-04/05) — 2026-08-25 CASK 재설계로
@@ -663,3 +683,52 @@ typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
 } esp_now_wake_hello_ack_t;
+
+/* ESP_NOW_MSG_WAKE_HELLO_SENS(2026-09-05) — esp_now_wake_hello_t와 동일한 CASK 상태 필드 +
+ * esp_now_sensor_data_t의 센서 채널 필드를 한 메시지로 합침(사용자 지시 — 별도 왕복 없이
+ * 웨익헬로 자체에 센서값까지 실어보냄). mac 필드는 안 둠 — ESP-NOW recv_info의 src_addr로
+ * 이미 알 수 있음(esp_now_sensor_data_t가 mac을 실었던 건 그 메시지가 원래 CASK 이전
+ * 설계라 별도 근거였음, 여기선 불필요). */
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint8_t  wake_reason;           /* cam_wake_reason_t 재사용(웨이크 원인 분류는 노드 종류와
+                                        무관) */
+    uint32_t awake_uptime_ms;
+    uint32_t sleep_interval_sec;
+    uint32_t actual_last_sleep_sec;
+    uint16_t battery_adc_raw;
+    uint16_t battery_mv;
+    /* 2026-09-05(사용자 지시로 정정) — sensor_kind/chan_count/chan_type는 여기서 뺌. "캐스크
+     * 주기엔 값만, 무슨 채널인지는 페어링 때 1회"(esp_now_pair_ack_t 참고) — 콘은 그 노드의
+     * mac으로 이미 알고 있는 chan_count/chan_type을 그대로 써서 아래 배열을 해석함 */
+    uint8_t  chan_ok[ESP_NOW_MAX_CHANNELS];
+    float    chan_val[ESP_NOW_MAX_CHANNELS];
+    /* 센스는 콘 개입 없이 자기 샘플주기마다 자율적으로 측정해서 RTC 메모리에 들고 있다가
+     * 매 캐스크(웨헬)마다 그 캐시값을 실어보냄 — 그래서 같은 측정값이 여러 캐스크 사이클에
+     * 걸쳐 반복 전송될 수 있음(딥슬립 넘어 값 유지 + 측정 실패/미도달 시 마지막 값 재사용).
+     * 새로 측정할 때마다 1씩 증가하는 카운터 — 콘이 이 값이 직전과 같으면 센서값 갱신
+     * 처리를 건너뛸 수 있게(중복 처리 방지) */
+    uint32_t measurement_id;
+} esp_now_wake_hello_sens_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_wake_hello_sens_ack_t;
+
+/* Sens 원격 설정 — CAM_CONFIG_SET과 동일 위치(CASK "항상 먼저" 단계)에서 매 사이클
+ * 보냄(Sens는 로컬에 설정을 저장 안 함, CAM과 동일 원칙). sample_interval_sec은 노드별로
+ * 다를 수 있음(사용자 지시) — Cntl이 이 mac에 저장된 값을 그때그때 채워 보냄. */
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint32_t sample_interval_sec;
+    uint32_t unix_time;
+} esp_now_sens_config_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+    uint8_t success;
+} esp_now_sens_config_ack_t;

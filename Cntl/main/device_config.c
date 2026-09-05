@@ -10,11 +10,10 @@
 static const char *TAG = "device_config";
 
 #define DEVICE_CONFIG_PATH    FS_MOUNT_POINT "/device_config.bin"
-#define DEVICE_CONFIG_VERSION 6  /* 2026-08-29: sta_ssid/sta_password 단일필드 -> sta_credentials[]
-                                    배열(여러 네트워크 저장, 사용자 지시)로 재구성해서 5->6
-                                    (구버전 파일은 버전 불일치로 기본값으로 자연 폴백 —
-                                    UI_ERR_CONFIG_FILE_MISMATCH로 화면에도 보임, device_config_load
-                                    참고) */
+#define DEVICE_CONFIG_VERSION 7  /* 2026-09-05: sens_intervals[] 슬롯 배열 추가(노드별 샘플주기,
+                                    사용자 지시)로 6->7 (구버전 파일은 버전 불일치로 기본값으로
+                                    자연 폴백 — UI_ERR_CONFIG_FILE_MISMATCH로 화면에도 보임,
+                                    device_config_load 참고) */
 
 /* 2026-08-29(사용자 지시: "여러 개 비번 저장 가능하지?") — SSID별로 비밀번호를 기억. 슬롯[0]이
  * 항상 "가장 최근에 set된(=활성)" 자격증명 — set할 때마다 해당 항목을 맨 앞으로 옮기는
@@ -26,6 +25,17 @@ typedef struct __attribute__((packed)) {
     char ssid[33];
     char password[65];
 } sta_credential_t;
+
+/* 2026-09-05(사용자 지시: "센스마다 만들 필요도 있겠는데") — Sens 노드별 샘플링 주기.
+ * STA_CREDENTIAL_SLOTS와 같은 mac 키 슬롯 배열이지만, "가장 최근이 활성"이라는 LRU 개념은
+ * 필요 없음(여러 노드가 동시에 각자 유효) — 그냥 mac으로 찾아서 없으면 빈 슬롯에 새로 삽입 */
+#define SENS_INTERVAL_SLOTS 8
+
+typedef struct __attribute__((packed)) {
+    uint8_t  mac[6];
+    uint8_t  in_use;
+    uint32_t sample_interval_sec;
+} sens_interval_entry_t;
 
 #define CAM_CAPTURE_INTERVAL_SEC_DEFAULT 1800  /* CAM Kconfig 기본(30분)과 동일 */
 #define RESPONSE_INTERVAL_SEC_DEFAULT    2
@@ -48,6 +58,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  xclk_mhz;
     uint8_t  wifi_ap_mode;
     sta_credential_t sta_credentials[STA_CREDENTIAL_SLOTS];
+    sens_interval_entry_t sens_intervals[SENS_INTERVAL_SLOTS];
 } device_config_file_t;
 
 static uint32_t s_cam_capture_interval_sec = CAM_CAPTURE_INTERVAL_SEC_DEFAULT;
@@ -62,6 +73,7 @@ static bool     s_wifi_ap_mode             = false;
  * 오늘 12K->1.7K로 급감한 것 때문에, 새로 늘어나는 저장공간(8슬롯 x 98B=784B)은 처음부터
  * 내부 .bss가 아니라 PSRAM에 할당. device_config_load()에서 최초 1회 할당 */
 static sta_credential_t *s_sta_credentials = NULL;
+static sens_interval_entry_t *s_sens_intervals = NULL;
 
 /* 2026-08-30 — device_config.bin 암호화(assets 파일 업로드/다운로드 엔드포인트로 평문 WiFi
  * 비번이 노출되는 문제 대비) 시도했으나, 이 ESP-IDF의 mbedtls가 aes.h를 공개 API에서 제거하고
@@ -86,6 +98,7 @@ static void device_config_save(void)
         .wifi_ap_mode            = s_wifi_ap_mode ? 1 : 0,
     };
     memcpy(s.sta_credentials, s_sta_credentials, sizeof(s.sta_credentials));
+    memcpy(s.sens_intervals, s_sens_intervals, sizeof(s.sens_intervals));
     fwrite(&s, sizeof(s), 1, f);
     fclose(f);
 }
@@ -97,6 +110,13 @@ void device_config_load(void)
         if (!s_sta_credentials) {
             ESP_LOGE(TAG, "STA 자격증명 PSRAM 할당 실패");
             ui_log_add_err(UI_ERR_STA_CRED_ALLOC, "STA credential PSRAM alloc failed");
+            return;
+        }
+    }
+    if (!s_sens_intervals) {
+        s_sens_intervals = heap_caps_calloc(SENS_INTERVAL_SLOTS, sizeof(sens_interval_entry_t), MALLOC_CAP_SPIRAM);
+        if (!s_sens_intervals) {
+            ESP_LOGE(TAG, "Sens 주기 슬롯 PSRAM 할당 실패");
             return;
         }
     }
@@ -135,6 +155,7 @@ void device_config_load(void)
         s.sta_credentials[i].password[sizeof(s.sta_credentials[i].password) - 1] = '\0';
     }
     memcpy(s_sta_credentials, s.sta_credentials, sizeof(s.sta_credentials));
+    memcpy(s_sens_intervals, s.sens_intervals, sizeof(s.sens_intervals));
     ESP_LOGI(TAG, "설정 복원: CAM촬영주기=%us 응답성=%us 적응형반응=%us AGC=%d AEC=%d XCLK=%uMHz "
              "WiFi=%s SSID=%s",
              (unsigned)s_cam_capture_interval_sec, (unsigned)s_response_interval_sec,
@@ -241,3 +262,34 @@ const char *device_config_find_sta_password(const char *ssid)
                                        출처(위 device_config_get_nack_max_rounds 선언부 참고) */
 
 uint8_t device_config_get_nack_max_rounds(void) { return NACK_MAX_ROUNDS_DEFAULT; }
+
+/* 없으면 0(미설정) 반환 — 호출부가 기본값(15)으로 폴백 */
+uint32_t device_config_get_sens_sample_interval_sec(const uint8_t *mac)
+{
+    if (!s_sens_intervals || !mac) return 0;
+    for (int i = 0; i < SENS_INTERVAL_SLOTS; i++) {
+        if (s_sens_intervals[i].in_use && memcmp(s_sens_intervals[i].mac, mac, 6) == 0) {
+            return s_sens_intervals[i].sample_interval_sec;
+        }
+    }
+    return 0;
+}
+
+void device_config_set_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec)
+{
+    if (!s_sens_intervals || !mac) return;
+    int found = -1, empty = -1;
+    for (int i = 0; i < SENS_INTERVAL_SLOTS; i++) {
+        if (s_sens_intervals[i].in_use && memcmp(s_sens_intervals[i].mac, mac, 6) == 0) { found = i; break; }
+        if (empty < 0 && !s_sens_intervals[i].in_use) empty = i;
+    }
+    int slot = (found >= 0) ? found : empty;
+    if (slot < 0) {
+        ESP_LOGW(TAG, "Sens 주기 슬롯 꽉 참(%d개) — 저장 못 함", SENS_INTERVAL_SLOTS);
+        return;
+    }
+    memcpy(s_sens_intervals[slot].mac, mac, 6);
+    s_sens_intervals[slot].in_use = 1;
+    s_sens_intervals[slot].sample_interval_sec = sec;
+    device_config_save();
+}

@@ -88,6 +88,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LABEL_AEC]                  = { "자동노출(AEC)",               "Auto exposure (AEC)" },
     [STR_LABEL_XCLK]                 = { "픽셀클럭(XCLK)",              "Pixel clock (XCLK)" },
     [STR_OPT_XCLK_LIST]              = { "5MHz\n10MHz\n20MHz\n24MHz",  "5MHz\n10MHz\n20MHz\n24MHz" },
+    [STR_LABEL_SENS_MEASURE_INTERVAL]    = { "측정 주기",                 "Measure period" },
+    [STR_OPT_SENS_MEASURE_INTERVAL_LIST] = { "10초\n30초\n1분\n5분\n30분", "10S\n30S\n1M\n5M\n30M" },
     [STR_BTN_APPLY]                  = { "적용",                       "Apply" },
     [STR_CONFIG_APPLY_PROGRESS]      = { "설정 적용 중...",             "Applying settings..." },
     [STR_CONFIG_APPLY_STALLED]       = { "응답 없음 — 연결 상태를 확인하세요", "No response — check connection" },
@@ -106,7 +108,10 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
      * ui_main.c의 s_response_interval_values와 반드시 같이 맞출 것 */
     /* 2026-08-11, 사용자 지시 — 첫 단계는 더 이상 리터럴 초 값이 아니라(값 자체가 0으로
      * 바뀜, ui_main.c의 s_response_interval_values 참고) "즉시"/"Live" 라벨로 고정 */
-    [STR_OPT_RESPONSE_INTERVAL_LIST] = { "즉시\n3초\n10초\n30초\n30분",     "Live\n3S\n10S\n30S\n30M" },
+    /* 2026-09-05(사용자 지시) — 마지막 단계를 30분->1분으로 조정(센스 MIN(응답성,측정주기)
+     * 계산의 상한이 너무 크면 실효성이 없어서, ui_main.c의 s_response_interval_values와
+     * 반드시 같이 맞출 것) */
+    [STR_OPT_RESPONSE_INTERVAL_LIST] = { "즉시\n3초\n10초\n30초\n1분",      "Live\n3S\n10S\n30S\n1M" },
     [STR_LABEL_TIME]                 = { "시각",                       "Time" },
     [STR_BTN_SET_TIME]               = { "설정",                       "Set" },
     [STR_TITLE_SET_TIME]             = { "시각 설정",                   "Set time" },
@@ -175,6 +180,20 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_DISCONNECT_SUCCESS]          = { "연결 해제됨",               "Disconnected" },
     [STR_LIST_FETCH_SUCCESS]          = { "목록 수신 완료",             "List received" },
     [STR_LIST_FETCH_FAILED]           = { "목록 가져오기 실패",         "Failed to fetch list" },
+    /* 2026-09-05(사용자 설계) — sensor_channel_type_t(esp_now_link.h) enum 순서와 반드시
+     * 같이 맞출 것: NONE=0(미사용), TEMP_C, HUMI_PCT, CO2_PPM */
+    [STR_CHAN_LABEL_TEMP_C]           = { "온도",                       "Temperature" },
+    [STR_CHAN_UNIT_TEMP_C]            = { "\xC2\xB0""C",                "\xC2\xB0""C" },
+    [STR_CHAN_LABEL_HUMI_PCT]         = { "습도",                       "Humidity" },
+    [STR_CHAN_UNIT_HUMI_PCT]          = { "%",                          "%" },
+    [STR_CHAN_LABEL_CO2_PPM]          = { "이산화탄소(CO2)",             "CO2" },
+    [STR_CHAN_UNIT_CO2_PPM]           = { "ppm",                        "ppm" },
+    /* 2026-09-05 — %f 안 씀(newlib-nano+LVGL 둘 다 float printf 미지원 전례,
+     * format_battery_display()와 동일 회피 — feedback_lvgl_no_percent_f 메모리 참고).
+     * 값을 정수부/소수부(2자리)로 미리 쪼개서 넘김 */
+    [STR_SENSOR_VALUE_ROW_FMT]        = { "%s %d.%02d%s (ID:%lu, Time: %02u:%02u:%02u)",
+                                           "%s %d.%02d%s (ID:%lu, Time: %02u:%02u:%02u)" },
+    [STR_SENSOR_VALUE_PENDING]        = { "측정 중...",                 "Measuring..." },
 };
 
 void ui_lang_load(void)

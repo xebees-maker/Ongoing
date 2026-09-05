@@ -96,8 +96,27 @@ static void send_cask_sleep_now(esp_now_hub_node_t *n)
     uint32_t quiet_ms = now_ms - s_last_user_action_ms;
     uint32_t threshold_ms = device_config_get_adaptive_response_sec() * 1000U;
     bool transacting = esp_now_photo_is_transacting_with(n->mac);
-    uint32_t sleep_sec = (quiet_ms < threshold_ms || transacting)
-        ? 0 : device_config_get_response_interval_sec();
+    /* 2026-09-05(사용자 지시로 재정정) — 딥슬립 실제 시간은 어느 노드 종류든 SLEEP_NOW의
+     * sleep_sec 그 자체가 맞음(캠과 동일 구조, 노드 쪽은 특별취급 없이 이 값을 그대로 씀).
+     * 센스는 MIN(응답성, 이 센스의 측정주기)만큼마다 깨야 함 — 응답성>측정주기면 측정주기
+     * 마다(그래야 전력소모 큰 센서를 불필요하게 자주 안 깨움), 응답성<측정주기면 응답성
+     * 주기로 더 자주 깨되(콘이 그 사이에도 이 센스를 제어할 기회, 사용자 지시) 실측정은
+     * 센스 쪽 게이팅(sens_deep_sleep_node.c)이 알아서 건너뜀. 응답성==0("즉시"/Live 전역
+     * 설정)은 캠과 동일하게 절대 안 재우는 특수값이라 MIN 계산 없이 그대로 0 유지 */
+    uint32_t base_sleep_sec;
+    if (n->kind == HUB_NODE_KIND_SENS) {
+        uint32_t measure_sec = device_config_get_sens_sample_interval_sec(n->mac);
+        if (measure_sec == 0) measure_sec = 15;  /* push_sens_config_to()와 동일 기본값 */
+        uint32_t response_sec = device_config_get_response_interval_sec();
+        if (response_sec == 0) {
+            base_sleep_sec = 0;
+        } else {
+            base_sleep_sec = (response_sec < measure_sec) ? response_sec : measure_sec;
+        }
+    } else {
+        base_sleep_sec = device_config_get_response_interval_sec();
+    }
+    uint32_t sleep_sec = (quiet_ms < threshold_ms || transacting) ? 0 : base_sleep_sec;
 
     ESP_LOGI(TAG, "SLEEP_NOW -> %s: sleep_sec=%u(조용%lums/임계값%lums/통신중=%d)",
              n->name, (unsigned)sleep_sec, (unsigned long)quiet_ms, (unsigned long)threshold_ms, (int)transacting);
@@ -123,11 +142,12 @@ static esp_timer_handle_t s_liveness_sweep_timer = NULL;
 static void liveness_sweep_cb(void *arg)
 {
     (void)arg;
-    uint32_t now_ms     = (uint32_t)(esp_timer_get_time() / 1000);
-    uint32_t timeout_ms = esp_now_hub_node_timeout_ms();
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count; i++) {
         esp_now_hub_node_t *n = &s_nodes[i];
+        uint32_t timeout_ms = esp_now_hub_node_timeout_ms(n);  /* 2026-09-05 — 노드별(특히
+                                                                    Sens 자체 샘플주기) 기준으로 */
         if (n->conn_state == NODE_CONN_PAIRED && now_ms - n->last_seen_ms > timeout_ms) {
             ESP_LOGW(TAG, "%s 무응답(%us 이상) — PAIRED에서 강등", n->name, (unsigned)(timeout_ms / 1000));
             n->conn_state = NODE_CONN_ORPHAN;
@@ -274,6 +294,27 @@ static void push_cam_config_to(const uint8_t *mac)
              (unsigned)cfg.nack_max_rounds);
 }
 
+/* 2026-09-05 — push_cam_config_to()와 동일 위치/원칙(CASK "항상 먼저" 단계, 설정 로컬
+ * 미저장이라 매 사이클 재전송), 다만 샘플링 주기는 노드마다(붙은 센서에 따라) 다를 수
+ * 있어(사용자 지시 — "센스마다 만들 필요도 있겠는데") 전역 하나가 아니라 이 mac에 저장된
+ * 값을 그때그때 조회해서 보냄. 미설정(0)이면 15초 기본값으로 폴백(Sens Kconfig 기본과
+ * 일치, Cntl이 처음 보는 노드도 즉시 정상 주기로 동작하게) */
+static void push_sens_config_to(const uint8_t *mac)
+{
+    uint32_t interval_sec = device_config_get_sens_sample_interval_sec(mac);
+    if (interval_sec == 0) interval_sec = 15;
+
+    esp_now_sens_config_t cfg = {
+        .version             = ESP_NOW_LINK_VERSION,
+        .msg_type            = ESP_NOW_MSG_SENS_CONFIG_SET,
+        .sample_interval_sec = interval_sec,
+        .unix_time           = rtc_sync_get_unix_time(),
+    };
+    static const uint8_t s_sens_config_ack_types[] = { ESP_NOW_MSG_SENS_CONFIG_ACK };
+    esp_now_tx_enqueue(mac, &cfg, sizeof(cfg), s_sens_config_ack_types, 1, 800, 3, "Sens 설정");
+    ESP_LOGI(TAG, "SENS_CONFIG_SET -> 샘플링주기=%us 큐잉됨", (unsigned)cfg.sample_interval_sec);
+}
+
 /* recv_cb(ADVERTISE 핸들러)가 먼저 쓰고 실제 정의는 파일 뒤쪽(esp_now_hub_request_pair
  * 근처)에 있음 — 전방 선언 */
 static void esp_now_hub_pair(const uint8_t *mac);
@@ -392,6 +433,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     } else if (msg_type == ESP_NOW_MSG_PAIR_ACK) {
         if (len < (int)sizeof(esp_now_pair_ack_t)) return;
+        const esp_now_pair_ack_t *ack = (const esp_now_pair_ack_t *)data;
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
         esp_now_hub_node_t *n = find_node(info->src_addr);
@@ -404,6 +446,16 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         hub_node_kind_t kind_copy = HUB_NODE_KIND_UNKNOWN;
         if (n) {
             kind_copy = n->kind;
+            /* 2026-09-05(사용자 지시) — 센서종류/채널구성은 페어링 완료 이 순간에 1회만
+             * 옴(esp_now_pair_ack_t 참고, 매 캐스크마다 다시 안 옴) — 여기서 받아서 기억해두면
+             * 이후 WAKE_HELLO_SENS 처리(esp_now_hub.c 아래쪽)가 이 값을 계속 재사용함.
+             * 캠은 이 필드들을 0으로 보내므로(아직 카메라 기종 미구현) kind==SENS일 때만 씀 */
+            if (n->kind == HUB_NODE_KIND_SENS) {
+                n->sensor_kind     = ack->sensor_kind;
+                n->chan_count      = ack->chan_count > ESP_NOW_MAX_CHANNELS ? ESP_NOW_MAX_CHANNELS : ack->chan_count;
+                memcpy(n->chan_type, ack->chan_type, n->chan_count);
+                n->has_sensor_data = true;
+            }
             /* 생존 신호(last_seen_ms)는 항상 갱신 — 페어링 후엔 CAM/SENS가 ADVERTISE를
              * 끊고 이 PAIR_ACK(keepalive)로만 살아있음을 알리는 것으로 보이는데, 이걸
              * user_unpaired로 걸러버리면(예전 버그) 연결 해제 직후부터 생존 신호 자체가
@@ -452,6 +504,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * Apply한 값으로 곧바로 동작함 */
             if (kind_copy == HUB_NODE_KIND_CAM) {
                 push_cam_config_to(info->src_addr);
+            } else if (kind_copy == HUB_NODE_KIND_SENS) {
+                push_sens_config_to(info->src_addr);
             }
         }
 
@@ -510,6 +564,75 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 주석 참고) */
         if (n->kind == HUB_NODE_KIND_CAM) {
             push_cam_config_to(info->src_addr);
+        }
+        esp_now_hub_pending_action_t action;
+        if (dequeue_pending_action_locked(n, &action)) {
+            esp_now_tx_enqueue(info->src_addr, action.req, action.req_len,
+                                action.ack_types, action.ack_types_count,
+                                action.timeout_ms, action.max_attempts, action.what);
+            ESP_LOGI(TAG, "CASK 할일 -> %s: %s (대기열 %d개 남음)", n->name, action.what, n->action_queue_count);
+        } else {
+            esp_now_cask_work_none_t none = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE };
+            static const uint8_t s_work_none_ack_types[] = { ESP_NOW_MSG_CASK_WORK_NONE_ACK };
+            esp_now_tx_enqueue(info->src_addr, &none, sizeof(none), s_work_none_ack_types, 1, 500, 3, "할일없음");
+        }
+        send_cask_sleep_now(n);
+        xSemaphoreGive(s_nodes_mutex);
+
+    } else if (msg_type == ESP_NOW_MSG_WAKE_HELLO_SENS) {
+        /* 2026-09-05 — WAKE_HELLO 분기의 구조적 사본(사용자 지시: "나머지(ACK 재시도,
+         * 할일 처리, SLEEP_NOW)는 캠 것과 같은 함수를 그대로 불러 씀"). 이 분기 안에서
+         * 새로 쓰는 부분은 딱 하나 — 센서값을 노드 구조체에 저장하는 부분뿐 */
+        if (len < (int)sizeof(esp_now_wake_hello_sens_t)) return;
+        const esp_now_wake_hello_sens_t *hello = (const esp_now_wake_hello_sens_t *)data;
+
+        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        esp_now_hub_node_t *n = find_node(info->src_addr);
+        if (!n || !n->ever_paired || n->user_unpaired) {
+            xSemaphoreGive(s_nodes_mutex);
+            return;
+        }
+        n->last_seen_ms    = now_ms;
+        n->conn_state      = NODE_CONN_PAIRED;
+        n->last_paired_ms  = now_ms;
+        n->has_deepsleep_stats        = true;
+        n->ds_cycle_count++;
+        if (hello->wake_reason == CAM_WAKE_REASON_RWDT) n->ds_rwdt_catch_count++;
+        n->ds_last_wake_reason         = hello->wake_reason;
+        n->ds_last_awake_uptime_ms     = hello->awake_uptime_ms;
+        n->ds_last_sleep_interval_sec  = hello->sleep_interval_sec;
+        n->ds_last_actual_sleep_sec    = hello->actual_last_sleep_sec;
+        n->battery_adc_raw = hello->battery_adc_raw;
+        n->battery_mv      = hello->battery_mv;
+        n->battery_pct     = (uint8_t)battery_mv_to_pct(hello->battery_mv);
+
+        /* 새로 쓰는 부분 — 센서 채널값 저장. 2026-09-05(사용자 지시로 정정) — sensor_kind/
+         * chan_count/chan_type은 더 이상 여기 안 옴(페어링 때 PAIR_ACK로 이미 받아둔 n->
+         * chan_count/chan_type을 그대로 씀). 센스는 콘 개입 없이 자기 주기대로 측정해서
+         * 캐시값을 매 캐스크마다 실어보내므로, measurement_id가 직전과 같으면(새로 측정
+         * 안 됨) 값 갱신을 건너뜀 — 중복 처리 방지. 새 값일 때만 "콘이 이 측정을 처음 본
+         * 시각"도 같이 찍어서 상황판 표시(Time: HH:MM:SS)의 기준으로 씀 */
+        bool is_new_measurement = (hello->measurement_id != n->sensor_measurement_id);
+        if (is_new_measurement) {
+            memcpy(n->chan_ok,  hello->chan_ok,  n->chan_count);
+            memcpy(n->chan_val, hello->chan_val, n->chan_count * sizeof(float));
+            n->sensor_measurement_id      = hello->measurement_id;
+            n->sensor_last_update_unix_time = rtc_sync_get_unix_time();
+        }
+
+        ESP_LOGI(TAG, "WAKE_HELLO_SENS <- %s: 사이클#%lu wake=%u batt_mv=%u batt_pct=%u 채널#%u 측정ID=%lu%s",
+                 n->name, (unsigned long)n->ds_cycle_count, (unsigned)hello->wake_reason,
+                 (unsigned)n->battery_mv, (unsigned)n->battery_pct, (unsigned)n->chan_count,
+                 (unsigned long)hello->measurement_id, is_new_measurement ? "" : "(중복)");
+
+        add_peer_if_needed(info->src_addr);
+        esp_now_wake_hello_sens_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_WAKE_HELLO_SENS_ACK };
+        for (int ack_attempt = 0; ack_attempt < 3; ack_attempt++) {
+            if (esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack)) == ESP_OK) break;
+        }
+
+        if (n->kind == HUB_NODE_KIND_SENS) {
+            push_sens_config_to(info->src_addr);
         }
         esp_now_hub_pending_action_t action;
         if (dequeue_pending_action_locked(n, &action)) {
@@ -1001,22 +1124,33 @@ uint8_t esp_now_hub_get_wifi_channel(void)
  * 오탐(false 끊김)이 남 — CAM 쪽 판정+한 번 더 재시도할 시간까지 여유있게 감안한 배수 */
 #define HUB_NODE_TIMEOUT_MARGIN_MULT 6
 
-uint32_t esp_now_hub_node_timeout_ms(void)
+/* 2026-09-05 버그수정(사용자 지시로 Sens에 CASK 도입하며 발견) — 노드 하나(mac 인자 없이)
+ * 전역 응답성 설정 하나로 전체 노드의 타임아웃을 계산했었음. Sens는 자기만의(훨씬 긴)
+ * 샘플주기를 따로 가지므로, 그 값을 CAM 전용 응답성 설정으로 재는 순간 정상적으로 자고
+ * 있을 뿐인 Sens가 "무응답"으로 오판되어 목록에서 깜빡임 — 노드 자신이 리포트한
+ * ds_last_sleep_interval_sec(WAKE_HELLO_SENS로 옴)이 있으면 그걸 쓰고, 없으면(아직 한 번도
+ * 못 받음, 또는 CAM) 기존처럼 전역 응답성 설정으로 폴백 */
+uint32_t esp_now_hub_node_timeout_ms(const esp_now_hub_node_t *n)
 {
-    uint32_t response_sec = device_config_get_response_interval_sec();
-    if (response_sec == 0) return ESP_NOW_HUB_NODE_TIMEOUT_MS;
-    uint32_t computed = response_sec * 1000U * HUB_NODE_TIMEOUT_MARGIN_MULT;
+    uint32_t interval_sec = 0;
+    if (n && n->kind == HUB_NODE_KIND_SENS && n->has_deepsleep_stats) {
+        interval_sec = n->ds_last_sleep_interval_sec;
+    } else {
+        interval_sec = device_config_get_response_interval_sec();
+    }
+    if (interval_sec == 0) return ESP_NOW_HUB_NODE_TIMEOUT_MS;
+    uint32_t computed = interval_sec * 1000U * HUB_NODE_TIMEOUT_MARGIN_MULT;
     return computed > ESP_NOW_HUB_NODE_TIMEOUT_MS ? computed : ESP_NOW_HUB_NODE_TIMEOUT_MS;
 }
 
 int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    uint32_t timeout_ms = esp_now_hub_node_timeout_ms();
     int count = 0;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count && count < max; i++) {
         if (kind != HUB_NODE_KIND_UNKNOWN && s_nodes[i].kind != kind) continue;
+        uint32_t timeout_ms = esp_now_hub_node_timeout_ms(&s_nodes[i]);
         if (now_ms - s_nodes[i].last_seen_ms > timeout_ms) continue;
         out[count++] = s_nodes[i];
     }
@@ -1027,10 +1161,10 @@ int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max
 bool esp_now_hub_is_reconnect_stuck(const uint8_t *mac)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    uint32_t timeout_ms = esp_now_hub_node_timeout_ms();
     bool stuck = false;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     esp_now_hub_node_t *n = find_node(mac);
+    uint32_t timeout_ms = esp_now_hub_node_timeout_ms(n);
     if (n && n->ever_paired && n->conn_state != NODE_CONN_PAIRED && (now_ms - n->last_paired_ms) > timeout_ms) {
         stuck = true;
     }
@@ -1170,6 +1304,12 @@ void esp_now_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec
 {
     device_config_set_cam_capture_interval_sec(sec);
     push_cam_config_to(mac);
+}
+
+void esp_now_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec)
+{
+    device_config_set_sens_sample_interval_sec(mac, sec);
+    push_sens_config_to(mac);
 }
 
 /* 2026-08-21 — AGC/AEC On/Off(세로줄 노이즈 진단용), 촬영주기와 같은 카메라별 설정 패턴 */

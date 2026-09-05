@@ -93,6 +93,8 @@ typedef enum {
     STR_LABEL_AEC,
     STR_LABEL_XCLK,
     STR_OPT_XCLK_LIST,
+    STR_LABEL_SENS_MEASURE_INTERVAL,
+    STR_OPT_SENS_MEASURE_INTERVAL_LIST,
     STR_BTN_APPLY,
     STR_CONFIG_APPLY_PROGRESS,
     STR_CONFIG_APPLY_STALLED,
@@ -166,6 +168,18 @@ typedef enum {
     STR_DISCONNECT_SUCCESS,
     STR_LIST_FETCH_SUCCESS,
     STR_LIST_FETCH_FAILED,
+    /* 2026-09-05(사용자 설계) — 상황판-측정기 판넬의 센서값 표시. 라벨/단위는 sensor_channel_
+     * type_t enum 값 순서와 반드시 같이 맞출 것(ui_main.c의 channel 매핑 함수 참고) — 와이어엔
+     * enum만 오가고, 사람이 읽을 텍스트는 여기 콘의 로컬 테이블에서만 나옴 */
+    STR_CHAN_LABEL_TEMP_C,
+    STR_CHAN_UNIT_TEMP_C,
+    STR_CHAN_LABEL_HUMI_PCT,
+    STR_CHAN_UNIT_HUMI_PCT,
+    STR_CHAN_LABEL_CO2_PPM,
+    STR_CHAN_UNIT_CO2_PPM,
+    /* "%s %.1f%s (ID:%lu, Time: %02u:%02u:%02u)" — 라벨/값/단위/측정ID/시분초 순서 */
+    STR_SENSOR_VALUE_ROW_FMT,
+    STR_SENSOR_VALUE_PENDING,
     STR_COUNT,
 } ui_str_id_t;
 

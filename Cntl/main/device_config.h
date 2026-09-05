@@ -78,6 +78,13 @@ const char *device_config_find_sta_password(const char *ssid);
  * 신뢰성 값이라 설정 UI/영구저장 없음 — 상수 하나를 여기 한 곳에서만 관리 */
 uint8_t device_config_get_nack_max_rounds(void);
 
+/* Sens 노드별 샘플링 주기(초, 2026-09-05) — 붙은 센서 종류가 노드마다 달라서(온도/습도/
+ * CO2/암모니아 등) 캠의 촬영주기처럼 전역 하나로 두지 않고 STA 자격증명과 같은 mac 키
+ * 슬롯 배열로 저장(사용자 지시: "센스마다 만들 필요도 있겠는데"). 없는 mac을 조회하면
+ * 0을 반환(미설정) — 호출부(esp_now_hub.c push_sens_config_to)가 기본값으로 폴백 */
+uint32_t device_config_get_sens_sample_interval_sec(const uint8_t *mac);
+void     device_config_set_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec);
+
 #ifdef __cplusplus
 }
 #endif

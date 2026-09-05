@@ -5,12 +5,26 @@
 # SRCS는 이 문제가 없음(실제 빌드 단계에서 다시 평가되어 Kconfig 값이 반영됨) — 그래서
 # 소스 파일만 조건부로 가르고, REQUIRES는 안 쓰는 쪽도 그냥 같이 요구한다(빌드는 되지만
 # 안 쓰는 쪽 SRCS가 없으니 실제로 컴파일/링크되진 않음).
+# 2026-09-05 — SCD41 헤드리스 빌드만 esp_now_node_cask.c(CAM과 동일한 CASK/WAKE_HELLO 구조,
+# project_cntl_cam_wake_hello_no_mem_desync 세션 참고)를 씀. 그 외(레거시 C6 콤보,
+# DHT22/SHT45/SHT40 헤드리스)는 예전 esp_now_node.c 그대로 — 사용자가 이번 작업 범위를
+# SCD41 헤드리스로만 명시적으로 한정함. 위 REQUIRES 조기평가 문제와 같은 이유로 여기도
+# SRCS(빌드 단계에서 재평가됨)만 가르고 두 파일을 동시에 REQUIRES에 넣지는 않음(esp_now_node.h가
+# 둘 다에서 쓰는 공용 선언부).
 if(CONFIG_SENS_BUILD_HEADLESS)
-    set(sens_srcs
-        "sensor_node.c"
-        "wifi_dashboard.c"
-        "esp_now_node.c"
-    )
+    if(CONFIG_SENS_SENSOR_SCD41)
+        set(sens_srcs
+            "sens_deep_sleep_node.c"
+            "esp_now_node_cask.c"
+            "rwdt_guard.c"
+        )
+    else()
+        set(sens_srcs
+            "sensor_node.c"
+            "wifi_dashboard.c"
+            "esp_now_node.c"
+        )
+    endif()
 else()
     set(sens_srcs
         "sensor-c6.c"
@@ -46,7 +60,11 @@ set(sens_requires
     esp_http_server
     esp_timer
     esp_now_link
+    esp_now_channelsync
+    esp_now_reliable
     esp_pm
+    esp_hal_wdt
+    esp_hw_support
 )
 if(NOT IDF_TARGET STREQUAL "esp32c3")
     list(APPEND sens_requires bsp_c6)
