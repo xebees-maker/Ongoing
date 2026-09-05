@@ -171,6 +171,10 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
                                                      "Network settings saved. Restart to apply. Restart now?" },
     [STR_BTN_SHOW]                    = { "보기",                     "Show" },
     [STR_BTN_HIDE]                    = { "숨김",                     "Hide" },
+    [STR_CONNECT_FAILED]              = { "연결 실패",                 "Connect failed" },
+    [STR_DISCONNECT_SUCCESS]          = { "연결 해제됨",               "Disconnected" },
+    [STR_LIST_FETCH_SUCCESS]          = { "목록 수신 완료",             "List received" },
+    [STR_LIST_FETCH_FAILED]           = { "목록 가져오기 실패",         "Failed to fetch list" },
 };
 
 void ui_lang_load(void)

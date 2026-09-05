@@ -69,6 +69,8 @@ static lv_obj_t          *s_camera_split_row    = NULL;
 static lv_obj_t          *s_camera_photo_label  = NULL;
 static lv_obj_t          *s_camera_capture_lbl  = NULL;
 static lv_obj_t          *s_camera_renew_lbl    = NULL;
+static lv_obj_t          *s_camera_renew_btn    = NULL;  /* 2026-09-04 — 웹 합성용(버튼 자체를
+                                                              찾아 탭 이벤트를 보내야 해서 저장) */
 static lv_obj_t          *s_camera_delete_all_lbl = NULL;
 static lv_obj_t          *s_list_title          = NULL;
 static lv_obj_t          *s_list_info_label     = NULL;  /* "N개(Pic.)  XX%" — 목록 제목 오른쪽 */
@@ -528,6 +530,11 @@ static void cb_modal_close(lv_event_t *e)
     resume_bg_timers();
 }
 
+/* 2026-09-04(사용자 설계: "PC 원격제어처럼", 웹 입력 합성용) — 방금 만들어진 모달을
+ * 기억해둠. 웹이 row를 탭 합성한 직후(같은 LVGL 처리 안에서, 팝업 생성엔 무선 왕복이
+ * 없어 동기적으로 이어짐) 이 안에서 확인 버튼을 찾아 또 탭 합성하는 데 씀 */
+static lv_obj_t *s_last_modal = NULL;
+
 static lv_obj_t *create_modal(void)
 {
     pause_bg_timers();
@@ -542,6 +549,7 @@ static lv_obj_t *create_modal(void)
     lv_obj_set_size(box, 420, LV_SIZE_CONTENT);
     lv_obj_center(box);
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    s_last_modal = box;
     return box;
 }
 
@@ -549,6 +557,10 @@ static lv_obj_t *add_modal_button(lv_obj_t *btn_row, ui_str_id_t text_id, lv_eve
 {
     lv_obj_t *btn = lv_button_create(btn_row);
     lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
+    /* 2026-09-04(웹 합성용) — lv_event_dsc_t는 공개 API에서 불투명해서 등록된 콜백을 밖에서
+     * 못 읽음. 대신 위젯 자체의 범용 user_data(이벤트 콜백의 user_data와는 별개 슬롯)에
+     * 콜백 함수포인터를 그대로 저장 — find_widget_by_event_cb()가 이걸로 찾음 */
+    lv_obj_set_user_data(btn, (void *)cb);
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, ui_str(text_id));
     lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -900,7 +912,13 @@ static void show_fetch_progress_popup(void);  /* 아래 공용 진행팝업 모�
 static void display_photo(uint32_t file_id);  /* 아래 정의 — 캐시 히트 시 여기서 바로 씀 */
 static void consume_ready_photo_if_current(void);  /* 아래 정의 — display_photo() 직후 */
 static void cb_async_sync_selected_photo(void *user_data);  /* 아래 정의 — lv_async_call 트램폴린,
-                                                                 ui_main_set_selected_photo()가 씀 */
+                                                                 refresh_photo_list_ui()의 자동선택 분기가 씀 */
+static bool sync_photo_list_tick(int select_index);  /* 아래 정의 — on_list_result_event()가 씀 */
+static bool fetch_popup_is_active(void);  /* 아래 정의(fetch_popup_tick_fn 뒤) —
+                                              cb_async_photo_result()가 사진가져오기 진행팝업
+                                              자신의 tick과 상태 소비를 두고 경쟁하지 않으려고 씀 */
+static bool list_popup_is_active(void);   /* 아래 정의(renew_list_tick_fn 뒤) — cb_async_list_result()가
+                                              동일한 이유로 씀 */
 
 /* CAM의 실제 파일명 표기(base36 4자리, 0-9A-Z, CAM/main/cam_storage.c의 encode_seq()와
  * 동일 인코딩)를 그대로 미러링 — 예전엔 file_id를 %u로 그냥 10진수로 찍어서 CAM SD카드의
@@ -918,8 +936,9 @@ static void encode_file_seq_base36(uint32_t seq, char *out /* 5바이트: 4자�
 }
 
 /* Model: 선택 상태 그 자체(s_selected_file_id) 하나만 바꿈 — View/Action은 절대 안 건드림.
- * OnTap(cb_photo_row_select)/목록 재구성(refresh_photo_list_ui)/웹(ui_main_set_selected_photo)
- * 전부 "선택이 바뀌었다"는 사실만 여기로 알림.
+ * OnTap(cb_photo_row_select)/목록 재구성(refresh_photo_list_ui) 전부 "선택이 바뀌었다"는
+ * 사실만 여기로 알림. 2026-09-04부터 웹도 이 함수를 직접 안 부르고 cb_photo_row_select 자체를
+ * 탭 합성으로 거쳐 감(ui_main_inject_photo_select, "PC 원격제어처럼" 설계).
  * 2026-08-30 버그수정 — esp_now_hub_note_user_action()이 예전엔 start_single_receive()
  * 안에서만(=실제 요청이 lv_async_call을 거쳐 시작될 때) 불려서, 탭/선택 시점과 그 사이에
  * 간극이 있었음. 이 간극에 WAKE_HELLO가 걸리면 적응형 판단(send_cask_sleep_now)이 아직
@@ -930,20 +949,6 @@ static void set_selected_file_id(uint32_t file_id)
     s_selected_file_id = file_id;
     s_has_selected_file_id = true;
     esp_now_hub_note_user_action();
-}
-
-/* 2026-08-30("웹기생" 설계, 사용자 지시: "웹이 이 이벤트를 발생시키는 걸로 작성해야되") —
- * ui_main.h 참고. main.c의 웹 API(httpd 태스크)가 온디바이스 탭과 완전히 같은 경로를 타는
- * 진입점. 처음엔 모델만 세팅하고 실제 요청은 main.c가 직접 esp_now_photo_fetch_by_id()로
- * 불렀는데, 그 직접호출을 없애면서 sync_selected_photo_if_needed()를 여기서 직접 부르려던
- * 시도는 위험했음 — 그 함수는 display_photo()(LVGL 위젯 조작)까지 이어질 수 있어서 LVGL
- * 태스크가 아닌 httpd 태스크에서 직접 부르면 안 됨. 대신 목록 자동선택이 쓰는 것과 같은
- * lv_async_call() 트램폴린으로 "이벤트만 발생"시켜서 LVGL 태스크에서 안전하게 실행되게 함 —
- * 그래야 다른 영향 없이 끼어들 수 있음(탭 이벤트와 완전히 동일한 진입 지점) */
-void ui_main_set_selected_photo(uint32_t file_id)
-{
-    set_selected_file_id(file_id);
-    lv_async_call(cb_async_sync_selected_photo, NULL);
 }
 
 /* reconcile_selection — "View/Action은 Model의 그림자일 뿐"(2026-08-02, 사용자 지적)을
@@ -1014,6 +1019,64 @@ static void cb_async_sync_selected_photo(void *user_data)
 {
     (void)user_data;
     sync_selected_photo_if_needed(true);
+}
+
+/* 2026-09-04(사용자 설계: "이벤트로 처리해") — 사진 수신 완료(성공/실패) 이벤트의 앱 쪽
+ * 반응. esp_now_photo.c는 LVGL을 몰라서 원시 콜백(esp_now_photo_event_cb_t, 어느 태스크든
+ * 될 수 있음)만 주므로, 여기서 바로 lv_async_call()로 LVGL 태스크에 미룸 — 예전에 매틱
+ * 폴링하던 refresh_dashboard()의 해당 분기와 정확히 같은 처리를 이벤트 시점에 1회만 함 */
+static void cb_async_photo_result(void *user_data)
+{
+    (void)user_data;
+    /* 2026-09-04 리그레션 수정 — 사진가져오기 진행팝업이 떠 있으면 그 팝업 자신의 200ms
+     * tick(fetch_popup_tick_fn)이 READY/ERROR를 보고 소비하는 게 원래 경로. 여기서 먼저
+     * consume_ready_photo_if_current()(내부에서 esp_now_photo_ready_ack()로 상태를 즉시
+     * IDLE로 리셋)를 불러버리면, 팝업의 다음 tick은 READY도 ERROR도 아닌 IDLE만 보게 돼서
+     * 진행정체 타임아웃(STALLED)으로 오판 — 실기에서 확인("사진은 받았는데 팝업이 실패로
+     * 닫힘"). 팝업이 떠 있는 동안은 이 이벤트 소비를 양보함 */
+    if (fetch_popup_is_active()) return;
+    esp_now_photo_state_t st = esp_now_photo_get_state();
+    if (st == ESP_NOW_PHOTO_STATE_READY) {
+        consume_ready_photo_if_current();
+    } else if (st == ESP_NOW_PHOTO_STATE_ERROR) {
+        esp_now_photo_clear();
+    }
+}
+
+static void on_photo_result_event(void)
+{
+    lv_async_call(cb_async_photo_result, NULL);
+}
+
+/* 목록판, 위와 동일 패턴 */
+static void cb_async_list_result(void *user_data)
+{
+    (void)user_data;
+    /* fetch_popup_is_active()와 동일 이유(2026-09-04 리그레션 수정) — renew_list_tick_fn은
+     * 이미 READY를 스스로 소비하는(refresh_photo_list_ui+esp_now_photo_list_ack) 자기완결형
+     * 코드라, 여기서 먼저 소비해버리면 팝업이 다음 틱에 상태를 놓쳐 정체 타임아웃
+     * (UI_ERR_LIST_NORESPONSE=3007)으로 오판한다 */
+    if (list_popup_is_active()) return;
+    sync_photo_list_tick(-1);
+}
+
+static void on_list_result_event(void)
+{
+    lv_async_call(cb_async_list_result, NULL);
+}
+
+/* 연결/끊기판 — 카메라 판넬이 다음 1초 대시보드 틱까지 안 기다리고 즉시 갱신되게(사용자
+ * 설계: "앱도... 이 이벤트에서 다음 절차를 수행"). 실제 목록 재구성은 refresh_camera_list()
+ * 자신의 스냅샷 비교가 담당 — 여기선 그걸 "지금 당장 다시 비교해" 하고 트리거만 함 */
+static void cb_async_connect_result(void *user_data)
+{
+    (void)user_data;
+    force_camera_list_redraw();
+}
+
+static void on_connect_result_event(void)
+{
+    lv_async_call(cb_async_connect_result, NULL);
 }
 
 static void reconcile_selection(lv_obj_t *row, bool show_popup)
@@ -1129,6 +1192,11 @@ static void refresh_photo_list_ui(int select_index)
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(row, cb_photo_row_select, LV_EVENT_CLICKED,
                              (void *)(uintptr_t)s_current_list[i].file_id);
+        /* 2026-09-04(웹 합성용, project_cntl_web_full_ui_injection_design 참고) — 이벤트
+         * 콜백의 user_data는 공개 API로 못 읽어서(lv_event_dsc_t가 불투명), 위젯 자체의
+         * 범용 user_data 슬롯에 별도로 file_id를 매담 — 강조표시 로직과는 무관(2026-08-30
+         * MVC 되돌림과 별개) */
+        lv_obj_set_user_data(row, (void *)(uintptr_t)s_current_list[i].file_id);
 
         /* 목록 번호는 위치 기반(i+1) 대신 CAM이 실제로 갖고 있는 file_id(+kind)를 그대로
          * 보여줌(2026-08-01, 사용자 지시 — 중간 삭제 시 번호가 밀리지 않게). file_id는
@@ -1639,6 +1707,12 @@ static bool fetch_popup_tick_fn(lv_obj_t *box)
     esp_now_photo_state_t state = esp_now_photo_get_state();
 
     if (state == ESP_NOW_PHOTO_STATE_READY) {
+        /* 2026-09-04 수정 — renew_list_tick_fn과 같은 패턴으로 통일: 팝업 자신이 READY를
+         * 보면 직접 소비(ack+화면표시)까지 끝낸다. 예전엔 이걸 다른 곳(1초 대시보드 폴링)이
+         * 대신 해준다고 전제했는데, 그 폴링이 이벤트 기반으로 바뀌면서 팝업이 떠 있는 동안은
+         * 그 이벤트 소비가 양보되므로(fetch_popup_is_active() 참고) 이제 여기서 직접 해야
+         * 실제로 소비된다 */
+        consume_ready_photo_if_current();
         lv_label_set_text(s_fetch_progress_label, ui_str(STR_FETCH_DONE));
         lv_obj_set_style_text_color(s_fetch_progress_label, lv_palette_main(LV_PALETTE_GREEN), 0);
         return true;
@@ -1685,6 +1759,11 @@ static bool fetch_popup_tick_fn(lv_obj_t *box)
     }
     lv_obj_set_style_text_color(s_fetch_progress_label, lv_palette_main(LV_PALETTE_GREY), 0);
     return false;
+}
+
+static bool fetch_popup_is_active(void)
+{
+    return s_progress_tick_fn == fetch_popup_tick_fn;
 }
 
 static void show_fetch_progress_popup(void)
@@ -1788,6 +1867,11 @@ static bool renew_list_tick_fn(lv_obj_t *box)
     }
 
     return false;
+}
+
+static bool list_popup_is_active(void)
+{
+    return s_progress_tick_fn == renew_list_tick_fn;
 }
 
 static void cb_renew_list(lv_event_t *e)
@@ -2125,6 +2209,12 @@ static void refresh_dashboard(lv_timer_t *t)
     bool dash_changed = (total != s_dash_count_prev);
     for (int i = 0; !dash_changed && i < total; i++) {
         if (!node_display_equal(&s_dash_nodes[i], &s_dash_nodes_prev[i])) dash_changed = true;
+        /* 2026-09-04 버그수정 — node_display_equal()은 mac/kind/ever_paired/name만 봐서
+         * conn_state(끊기 시 PAIRED->ORPHAN)는 변화로 안 잡힘. 그래서 끊기 직후에도 이
+         * 노드가 esp_now_hub_get_nodes()의 last_seen_ms 타임아웃(응답성*6)에 걸려 목록에서
+         * 빠지기 전까지 요약판넬 행이 안 지워지고 남아있었음(실기 확인: 끊기 후에도
+         * 한동안 "연결중"으로 보임) — conn_state 변화도 직접 비교해서 즉시 재생성 트리거 */
+        else if (s_dash_nodes[i].conn_state != s_dash_nodes_prev[i].conn_state) dash_changed = true;
     }
     if (dash_changed) {
         memcpy(s_dash_nodes_prev, s_dash_nodes, sizeof(esp_now_hub_node_t) * total);
@@ -2261,21 +2351,10 @@ static void refresh_dashboard(lv_timer_t *t)
         lv_obj_add_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
     }
 
-    /* 사진 수신 폴링 — recv_cb(ESP-NOW 태스크)가 CRC까지 검증해서 캐시에 넣고 READY로
-     * 표시해두면 여기(LVGL 워커 태스크)서 그 file_id를 캐시에서 판넬 크기로 디코드해 그림.
-     * LVGL 호출은 항상 이 태스크에서만 해야 해서 esp_now_photo 쪽은 상태 플래그/캐시만
-     * 들고 있고 디코드+그리는 건 UI 쪽 책임 */
-    esp_now_photo_state_t photo_state = esp_now_photo_get_state();
-    if (photo_state == ESP_NOW_PHOTO_STATE_READY) {
-        consume_ready_photo_if_current();  /* 2026-08-05 — 지금 선택과 일치할 때만 반영 */
-    } else if (photo_state == ESP_NOW_PHOTO_STATE_ERROR) {
-        esp_now_photo_clear();  /* 실패 로그는 esp_now_photo.c 쪽에서 이미 남김 */
-    }
-
-    /* 목록갱신 버튼(cb_renew_list)으로 요청한 목록 — 지금촬영/모두지우기 팝업 쪽 목록 완료
-     * 처리는 각자의 진행 팝업 tick이 하는데, 그동안은 이 타이머 자체가 pause_bg_timers()로
-     * 멈춰있어서 여기와 겹칠 일이 없음 */
-    sync_photo_list_tick(-1);
+    /* 2026-09-04 — 사진/목록 수신 완료 반응은 매틱 폴링 대신 이벤트(on_photo_result_event/
+     * on_list_result_event, esp_now_photo_set_ready_cb 등록)로 옮김. 지금촬영/모두지우기
+     * 팝업 쪽 목록 완료 처리는 각자의 진행 팝업 tick이 별도로 계속 담당(그동안 이 배경
+     * 타이머 자체가 pause_bg_timers()로 멈춰있어서 이벤트와 안 겹침) */
 }
 
 /* 통계 탭 로그박스 갱신 — ui_log 모듈에 쌓인 스냅샷을 그대로 라벨에 채우고 항상 맨
@@ -3408,6 +3487,142 @@ void ui_main_register_wifi_events(void)
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, &wifi_scan_event_handler, NULL));
 }
 
+/* ════════════════════════════════════════════════════════════
+ * 2026-09-04(사용자 설계: "PC 원격제어처럼") — 웹 입력을 실제 탭/팝업/확인 시퀀스로 합성.
+ * 웹(httpd 태스크)이 직접 esp_now_hub_request_pair() 등을 부르는 대신, 온디바이스 탭이
+ * 눌렀을 그 위젯에 그대로 lv_event_send()를 보냄 — 그래야 로직이 갈라질 여지가 없음
+ * (project_cntl_web_full_ui_injection_design_2026_09_04 메모리 참고).
+ * ════════════════════════════════════════════════════════════ */
+
+/* 모달의 자식들 중 특정 콜백이 등록된 위젯을 찾음(재귀) — 확인 버튼을 찾는 용도.
+ * 팝업 생성엔 무선 왕복이 없어 동기적으로 이어지므로, 방금 탭 합성한 직후 바로 써도 됨 */
+static lv_obj_t *find_widget_by_event_cb(lv_obj_t *root, lv_event_cb_t target_cb)
+{
+    if (!root) return NULL;
+    uint32_t child_cnt = lv_obj_get_child_cnt(root);
+    for (uint32_t i = 0; i < child_cnt; i++) {
+        lv_obj_t *child = lv_obj_get_child(root, i);
+        if (lv_obj_get_user_data(child) == (void *)target_cb) return child;
+        lv_obj_t *found = find_widget_by_event_cb(child, target_cb);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+/* httpd 태스크에서 LVGL 태스크의 함수를 동기 호출하듯 실행 — lv_event_send()는 LVGL
+ * 태스크에서만 안전해서 lv_async_call()로 미루되, "합성 자체가 성공했는지"(위젯을
+ * 찾았는지)는 즉시(동기적으로) 알아야 함. 단일 슬롯 — "웹과 앱이 동시 작업하지 않는다"는
+ * 전제(사용자 확인) 하에 안전함 */
+static SemaphoreHandle_t s_inject_done_sem = NULL;
+static bool (*s_inject_fn)(void *arg) = NULL;
+static void  *s_inject_arg = NULL;
+static bool   s_inject_result = false;
+
+static void cb_async_inject_trampoline(void *user_data)
+{
+    (void)user_data;
+    s_inject_result = s_inject_fn ? s_inject_fn(s_inject_arg) : false;
+    xSemaphoreGive(s_inject_done_sem);
+}
+
+static bool run_on_lvgl_task(bool (*fn)(void *arg), void *arg, uint32_t timeout_ms)
+{
+    if (!s_inject_done_sem) s_inject_done_sem = xSemaphoreCreateBinary();
+    s_inject_fn  = fn;
+    s_inject_arg = arg;
+    xSemaphoreTake(s_inject_done_sem, 0);  /* 이전에 남아있을 수 있는 신호 비움 */
+    lv_async_call(cb_async_inject_trampoline, NULL);
+    if (xSemaphoreTake(s_inject_done_sem, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return false;
+    return s_inject_result;
+}
+
+static lv_obj_t *find_camera_row_by_mac(const uint8_t *mac)
+{
+    for (int i = 0; i < s_camera_row_count; i++) {
+        if (memcmp(s_camera_row_macs[i], mac, 6) == 0) return s_camera_row_objs[i];
+    }
+    return NULL;
+}
+
+static bool inject_fn_connect(void *arg)
+{
+    const uint8_t *mac = (const uint8_t *)arg;
+    lv_obj_t *row = find_camera_row_by_mac(mac);
+    if (!row) return false;  /* 지금 목록에 없음 */
+    lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_camera_item_clicked -> show_pair_confirm_popup */
+    lv_obj_t *confirm = find_widget_by_event_cb(s_last_modal, cb_pair_confirm);
+    if (!confirm) return false;
+    lv_obj_send_event(confirm, LV_EVENT_CLICKED, NULL);  /* -> cb_pair_confirm -> esp_now_hub_request_pair() */
+    return true;
+}
+
+bool ui_main_inject_connect(const uint8_t *mac)
+{
+    static uint8_t mac_copy[6];
+    memcpy(mac_copy, mac, 6);
+    return run_on_lvgl_task(inject_fn_connect, mac_copy, 1000);
+}
+
+static bool inject_fn_disconnect(void *arg)
+{
+    const uint8_t *mac = (const uint8_t *)arg;
+    lv_obj_t *row = find_camera_row_by_mac(mac);
+    if (!row) return false;
+    lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_camera_item_clicked -> show_unpair_confirm_popup
+                                                     (show_confirm_popup 경유, 확인버튼은 공용 트램폴린) */
+    lv_obj_t *confirm = find_widget_by_event_cb(s_last_modal, cb_confirm_yes_trampoline);
+    if (!confirm) return false;
+    lv_obj_send_event(confirm, LV_EVENT_CLICKED, NULL);  /* -> cb_confirm_yes_trampoline -> cb_unpair_confirm */
+    return true;
+}
+
+bool ui_main_inject_disconnect(const uint8_t *mac)
+{
+    static uint8_t mac_copy[6];
+    memcpy(mac_copy, mac, 6);
+    return run_on_lvgl_task(inject_fn_disconnect, mac_copy, 1000);
+}
+
+static bool inject_fn_list_refresh(void *arg)
+{
+    (void)arg;
+    if (!s_camera_renew_btn) return false;
+    uint32_t before = esp_now_photo_list_get_current_generation();
+    lv_obj_send_event(s_camera_renew_btn, LV_EVENT_CLICKED, NULL);  /* -> cb_renew_list */
+    uint32_t after = esp_now_photo_list_get_current_generation();
+    return after != before;  /* 눌렸지만 cb_renew_list의 가드(선택된 CAM 없음 등)에 걸리면
+                                 세대가 그대로라 실패로 판정됨 */
+}
+
+/* 성공 시 실제로 새로 생긴 세대번호(main.c가 esp_now_photo_list_wait_result()에 넘길 것) */
+uint32_t ui_main_inject_list_refresh(bool *out_ok)
+{
+    *out_ok = run_on_lvgl_task(inject_fn_list_refresh, NULL, 1000);
+    return esp_now_photo_list_get_current_generation();
+}
+
+static bool inject_fn_photo_select(void *arg)
+{
+    uint32_t file_id = (uint32_t)(uintptr_t)arg;
+    uint32_t child_cnt = lv_obj_get_child_cnt(s_photo_list);
+    for (uint32_t i = 0; i < child_cnt; i++) {
+        lv_obj_t *row = lv_obj_get_child(s_photo_list, i);
+        /* 2026-09-04(웹 합성용) — 행 생성 시 lv_obj_set_user_data()로 file_id를 매달아둠
+         * (refresh_photo_list_ui() 참고) — 이벤트 콜백 user_data(공개 API로 못 읽음)와는
+         * 별개인 위젯 자체의 범용 슬롯 */
+        if ((uint32_t)(uintptr_t)lv_obj_get_user_data(row) == file_id) {
+            lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_photo_row_select */
+            return true;
+        }
+    }
+    return false;  /* 지금 목록에 없는 file_id(웹이 가져간 목록이 낡았을 수 있음) */
+}
+
+bool ui_main_inject_photo_select(uint32_t file_id)
+{
+    return run_on_lvgl_task(inject_fn_photo_select, (void *)(uintptr_t)file_id, 1000);
+}
+
 void ui_init(void)
 {
     lv_demo_widgets_components_init();  /* profile/analytics가 쓰는 공용 스타일/폰트 초기화 */
@@ -3600,9 +3815,9 @@ void ui_init(void)
     lv_label_set_text(s_camera_capture_lbl, ui_str(STR_BTN_CAPTURE_NOW));
     lv_obj_set_style_text_font(s_camera_capture_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    lv_obj_t *btn_renew = lv_button_create(camera_btn_group);
-    lv_obj_add_event_cb(btn_renew, cb_renew_list, LV_EVENT_CLICKED, NULL);
-    s_camera_renew_lbl = lv_label_create(btn_renew);
+    s_camera_renew_btn = lv_button_create(camera_btn_group);
+    lv_obj_add_event_cb(s_camera_renew_btn, cb_renew_list, LV_EVENT_CLICKED, NULL);
+    s_camera_renew_lbl = lv_label_create(s_camera_renew_btn);
     lv_label_set_text(s_camera_renew_lbl, ui_str(STR_BTN_RENEW_LIST));
     lv_obj_set_style_text_font(s_camera_renew_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
@@ -4189,7 +4404,7 @@ void ui_init(void)
      * s_action_btn_width가 여기서 설정된 뒤부터 뜨므로 자동으로 같은 폭을 받음.
      * 사진목록의 del_btn(휴지통 아이콘, 반복되는 작은 버튼)은 성격이 달라 제외 */
     lv_obj_t *action_buttons[] = {
-        btn_capture, btn_renew, btn_delete_all, restart_btn,
+        btn_capture, s_camera_renew_btn, btn_delete_all, restart_btn,
         s_capture_apply_btn, s_response_apply_btn, s_adaptive_apply_btn, time_set_btn,
         s_xclk_apply_btn,
     };
@@ -4206,4 +4421,10 @@ void ui_init(void)
     /* 네트워크 행의 값+화살표 셀렉터(2026-08-29, 사용자 지시) — 다른 버튼들과 폭 통일
      * 대상이 아니라 위 루프에서 제외했지만, 그 표준폭의 2배로 이제 계산 가능 */
     lv_obj_set_width(s_network_find_btn, s_action_btn_width * 2);
+
+    /* 2026-09-04(사용자 설계: "이벤트로 처리해") — 사진/목록/연결 완료 이벤트에 앱 쪽 반응을
+     * 등록. 매틱 폴링하던 refresh_dashboard()의 해당 부분은 제거하고 여기로 옮김 */
+    esp_now_photo_set_ready_cb(on_photo_result_event);
+    esp_now_photo_list_set_ready_cb(on_list_result_event);
+    esp_now_hub_set_connect_event_cb(on_connect_result_event);
 }

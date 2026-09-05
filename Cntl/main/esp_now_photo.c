@@ -21,6 +21,18 @@ static const char *TAG = "esp_now_photo";
  * 쪼갤 실익이 없음 */
 static SemaphoreHandle_t s_mutex;
 
+/* 2026-09-04(사용자 설계: "이벤트로 처리해") — 사진 수신 완료(성공/실패) 이벤트. 웹은
+ * 세마포어로 블로킹 대기(폴링 아님), 앱은 등록된 콜백으로 즉시 통지받음(이 모듈은 LVGL을
+ * 몰라서 콜백 안에서 lv_async_call()로 미루는 건 콜백 구현부 책임) */
+static SemaphoreHandle_t s_photo_event_sem = NULL;
+static esp_now_photo_event_cb_t s_photo_ready_cb = NULL;
+
+static void fire_photo_event(void)
+{
+    xSemaphoreGive(s_photo_event_sem);
+    if (s_photo_ready_cb) s_photo_ready_cb();
+}
+
 /* ────────────────────────────────────────────────────────────
  * 1. 단일 사진 수신(capture_now/fetch_by_id 공용)
  * ──────────────────────────────────────────────────────────── */
@@ -169,9 +181,22 @@ static uint32_t s_list_generation      = 0;  /* esp_now_photo_list_request() 호
 static uint32_t s_list_done_generation = 0;  /* 마지막으로 완료(성공/실패)된 세대 */
 static bool     s_list_done_ok         = false;
 
+/* 2026-09-04(사용자 설계: "이벤트로 처리해") — 목록 수신 완료(성공/실패) 이벤트, 사진과
+ * 동일 패턴(fire_photo_event 참고) */
+static SemaphoreHandle_t s_list_event_sem = NULL;
+static esp_now_photo_event_cb_t s_list_ready_cb = NULL;
+
+static void fire_list_event(void)
+{
+    xSemaphoreGive(s_list_event_sem);
+    if (s_list_ready_cb) s_list_ready_cb();
+}
+
 void esp_now_photo_init(void)
 {
     s_mutex = xSemaphoreCreateMutex();
+    s_photo_event_sem = xSemaphoreCreateBinary();
+    s_list_event_sem = xSemaphoreCreateBinary();
 
     ui_log_add("INIT free PSRAM(start)=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
@@ -325,6 +350,7 @@ static void handle_meta(const uint8_t *src_mac, const uint8_t *data, int len)
         ESP_LOGE(TAG, "사진이 고정 수신 버퍼보다 큼(%u > %u bytes) — 버림",
                  (unsigned)meta->total_size, (unsigned)s_recv_cap);
         ui_log_add_err(UI_ERR_META_TOO_BIG, "Photo receive failed (too big) %u > %u", (unsigned)meta->total_size, (unsigned)s_recv_cap);
+        fire_photo_event();
         return;
     }
     s_file_id         = meta->file_id;
@@ -476,6 +502,7 @@ static void handle_done(const uint8_t *data, int len)
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_state = ESP_NOW_PHOTO_STATE_ERROR;
         xSemaphoreGive(s_mutex);
+        fire_photo_event();
         return;
     }
 
@@ -486,6 +513,7 @@ static void handle_done(const uint8_t *data, int len)
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_state = ESP_NOW_PHOTO_STATE_ERROR;
         xSemaphoreGive(s_mutex);
+        fire_photo_event();
         return;
     }
 
@@ -501,6 +529,7 @@ static void handle_done(const uint8_t *data, int len)
     send_done_ack(0, NULL);  /* 완료 통보(2026-08-05, Layer 1) — missing_count=0 */
     ESP_LOGI(TAG, "사진 수신 완료: file_id=%u, %u bytes", (unsigned)s_file_id, (unsigned)s_total_size);
     ui_log_add("READY file_id=%u %u bytes", (unsigned)s_file_id, (unsigned)s_total_size);
+    fire_photo_event();
 }
 
 /* Selective Repeat 실험(2026-08-05) — handle_done()과 같은 원칙(모르는 거래엔 무응답, CAM의
@@ -589,6 +618,34 @@ void esp_now_photo_clear(void)
         s_state = ESP_NOW_PHOTO_STATE_IDLE;
     }
     xSemaphoreGive(s_mutex);
+}
+
+void esp_now_photo_set_ready_cb(esp_now_photo_event_cb_t cb)
+{
+    s_photo_ready_cb = cb;
+}
+
+bool esp_now_photo_wait_cached(uint32_t file_id, uint32_t timeout_ms,
+                                const uint8_t **out_data, size_t *out_len)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        if (esp_now_photo_cache_get(file_id, out_data, out_len)) return true;
+
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        /* 2026-09-05 버그수정 — file_id 비교 없이 전역 s_state만 봐서, 지금 기다리는 것과
+         * 무관한 다른 요청(예: 그 사이 desync로 인한 실패)이 ERROR를 스치기만 해도 즉시
+         * "내 요청 실패"로 오판했음(실기 확인: 다른 사진 전송 직후 desync가 나면, 그와
+         * 무관한 사진 요청도 누르자마자 실패로 뜸) — 단일슬롯 현재 대상(s_file_id)이 내가
+         * 기다리는 file_id와 같을 때만 내 실패로 인정 */
+        bool errored = (s_state == ESP_NOW_PHOTO_STATE_ERROR && s_file_id == file_id);
+        xSemaphoreGive(s_mutex);
+        if (errored) return false;  /* 실패도 이벤트로 즉시 나옴 — 타임아웃까지 안 기다림 */
+
+        TickType_t now = xTaskGetTickCount();
+        if (now >= deadline) return false;
+        xSemaphoreTake(s_photo_event_sem, deadline - now);
+    }
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -702,6 +759,33 @@ bool esp_now_photo_list_get_result(uint32_t generation, bool *out_ok)
     if (done) *out_ok = s_list_done_ok;
     xSemaphoreGive(s_mutex);
     return done;
+}
+
+void esp_now_photo_list_set_ready_cb(esp_now_photo_event_cb_t cb)
+{
+    s_list_ready_cb = cb;
+}
+
+/* 2026-09-04 — 새로 요청하지 않고(REQUESTING 중인 걸 그대로 기다리고 싶을 때) "지금
+ * 진행 중인(또는 막 끝난) 세대가 몇 번인지"만 읽음 — esp_now_photo_list_wait_result()에
+ * 그대로 넘기면 새 요청 없이도 이벤트 기반 대기가 됨(main.c 참고) */
+uint32_t esp_now_photo_list_get_current_generation(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    uint32_t g = s_list_generation;
+    xSemaphoreGive(s_mutex);
+    return g;
+}
+
+bool esp_now_photo_list_wait_result(uint32_t generation, uint32_t timeout_ms, bool *out_ok)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        if (esp_now_photo_list_get_result(generation, out_ok)) return true;
+        TickType_t now = xTaskGetTickCount();
+        if (now >= deadline) return false;
+        xSemaphoreTake(s_list_event_sem, deadline - now);
+    }
 }
 
 bool esp_now_photo_list_count_received(void)
@@ -829,6 +913,7 @@ static void handle_list_done(const uint8_t *src_mac, const uint8_t *data, int le
     s_list_done_generation = s_list_generation;  /* ack 여부와 무관하게 남는 결과 표시 */
     s_list_done_ok = ok;
     xSemaphoreGive(s_mutex);
+    fire_list_event();  /* 2026-09-04 — 성공/실패 공통 지점(둘 다 위에서 이미 판정 끝남) */
 
     if (!ok) {
         ESP_LOGW(TAG, "PHOTO_LIST_DONE 조기도착(%u/%u) — 에러 처리", received, expected);

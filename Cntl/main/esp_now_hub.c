@@ -54,6 +54,20 @@ static int                s_node_count = 0;
  * 반응 없던 문제의 원인으로 추정). 아래 뮤텍스로 s_nodes[]/s_node_count 접근 전체를 보호. */
 static SemaphoreHandle_t s_nodes_mutex = NULL;
 
+/* 2026-09-04(사용자 설계: "이벤트로 처리해") — 노드 연결상태(페어링 성사/해제)가 바뀔 때마다
+ * 발생. 사진/목록과 동일 패턴: 웹은 세마포어로 블로킹 대기, 앱은 등록된 콜백으로 통지받음.
+ * "연결실패"는 별도 이벤트가 아니라 esp_now_hub_wait_paired()가 이 이벤트로 깨어날 때마다
+ * 자기 목표(mac)가 여전히 PAIRED가 아닌지 재확인하다가 자기 타임아웃에 도달하는 것 자체가
+ * 실패 신호(사용자 지시: "타임아웃이 이벤트가 되는 것") — 별도 "실패" 신호를 안 만들어도 됨 */
+static SemaphoreHandle_t s_connect_event_sem = NULL;
+static esp_now_hub_event_cb_t s_connect_ready_cb = NULL;
+
+static void fire_connect_event(void)
+{
+    xSemaphoreGive(s_connect_event_sem);
+    if (s_connect_ready_cb) s_connect_ready_cb();
+}
+
 /* 적응형 반응시간(2026-08-10) — 마지막 사용자 조작 시각(esp_now_photo.c의 5개 액션 함수가
  * esp_now_hub_note_user_action()으로 갱신). 전역 하나로 충분 — 지금은 CAM이 보통 1대라
  * esp_now_hub_bench_start()/apply_response_interval_sec()이 이미 쓰는 단순화와 동일 원칙.
@@ -417,6 +431,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         }
         xSemaphoreGive(s_nodes_mutex);
         if (became_paired) {
+            fire_connect_event();  /* 2026-09-04 — 웹/앱 대기자 통지 */
             ESP_LOGI(TAG, "페어링 완료: %s", name_copy);
             /* 2026-08-10 — "최초 페어링"과 "단순 생존확인 재페어링"을 구분(사용자 지적으로
              * 재설계). 처음엔 모든 became_paired에서 이 리셋을 했는데, 그러면 페어링(=CAM이
@@ -478,7 +493,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 또 reliable을 감싸지 않음, SET_TIME_ACK/CAPTURE_STATUS_ACK와 동일 관례) */
         add_peer_if_needed(info->src_addr);
         esp_now_wake_hello_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_WAKE_HELLO_ACK };
-        esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+        /* 2026-09-05 버그수정 — esp_now_send()의 반환값을 안 봐서, 무선 TX큐가 순간적으로
+         * 꽉 찼을 때(예: 방금 끝난 사진전송 뒷정리) 이 ACK가 조용히 실패했었음. 캠은 100ms
+         * 안에 이 ACK를 못 받으면 WAKE_HELLO를 그대로 재전송하는데, CNTL은 그걸 새 사이클로
+         * 구분 못 해서 CONFIG+할일+SLEEP_NOW를 통째로 다시 만듦 — 바쁠수록 더 바빠지는
+         * 폭주로 이어져 결국 NO_MEM+캠 재광고(desync)까지 실기에서 확인. recv_cb 안이라
+         * 완전한 reliable 왕복은 못 씌우지만, 실패 시 즉석에서 몇 번 더 시도는 가능 */
+        for (int ack_attempt = 0; ack_attempt < 3; ack_attempt++) {
+            if (esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack)) == ESP_OK) break;
+        }
 
         /* CASK — 항상 고정 3단계(2026-08-26, 사용자 지시로 재설계): CONFIG(항상 먼저, 캠이
          * 설정을 로컬에 저장 안 하므로 매번 필요) -> 할일(대기 큐에 있으면 그것, 없으면
@@ -927,6 +950,7 @@ void esp_now_hub_init(void)
      * s_nodes[]를 건드릴 수 있음 */
     s_nodes_mutex = xSemaphoreCreateMutex();
     assert(s_nodes_mutex != NULL);
+    s_connect_event_sem = xSemaphoreCreateBinary();
 
     /* 2026-08-22 — Cntl 자신은 배터리가 없지만, CAM/Sens가 보고해오는 mV값을 %%로 바꾸려면
      * battery_mv_to_pct()의 커브 상수(full/empty_mv)가 세팅돼있어야 함(battery_init()을 안
@@ -1201,6 +1225,8 @@ void esp_now_hub_unpair(const uint8_t *mac)
     }
     xSemaphoreGive(s_nodes_mutex);
     if (!n) return;
+    fire_connect_event();  /* 2026-09-04 — 끊기 절차의 로컬 완료 시점(사용자 설계: "끊기 절차가
+                               완료되는 마지막 단계에서 발생") — CAM 응답은 안 기다림(기존 설계) */
 
     /* 2026-08-25(CASK 재설계, 사용자 지시) — UNPAIR은 사용자의 실시간 조작이라 즉각·확실히
      * 반영돼야 해서 reliable 스택으로 승격(예전엔 raw esp_now_send라, 유실되면 캠은 영원히
@@ -1216,4 +1242,24 @@ void esp_now_hub_unpair(const uint8_t *mac)
     static const uint8_t s_unpair_ack_types[] = { ESP_NOW_MSG_UNPAIR_ACK };
     esp_now_tx_enqueue(mac, &msg, sizeof(msg), s_unpair_ack_types, 1, 300, 3, "UNPAIR");
     ESP_LOGI(TAG, "연결 해제: %s (UNPAIR 큐잉됨)", name_copy);
+}
+
+void esp_now_hub_set_connect_event_cb(esp_now_hub_event_cb_t cb)
+{
+    s_connect_ready_cb = cb;
+}
+
+bool esp_now_hub_wait_paired(const uint8_t *mac, uint32_t timeout_ms)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        esp_now_hub_node_t tmp[ESP_NOW_HUB_MAX_NODES];
+        int n = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, tmp, ESP_NOW_HUB_MAX_NODES);
+        for (int i = 0; i < n; i++) {
+            if (memcmp(tmp[i].mac, mac, 6) == 0 && tmp[i].conn_state == NODE_CONN_PAIRED) return true;
+        }
+        TickType_t now = xTaskGetTickCount();
+        if (now >= deadline) return false;  /* 타임아웃 자체가 "연결실패" 이벤트(사용자 설계) */
+        xSemaphoreTake(s_connect_event_sem, deadline - now);
+    }
 }

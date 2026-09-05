@@ -159,6 +159,13 @@ typedef enum {
     STR_MSG_WIFI_CREDENTIALS_RESTART_CONFIRM,
     STR_BTN_SHOW,
     STR_BTN_HIDE,
+    /* 2026-09-04(사용자 설계: 웹 응답도 ui_str() 문구를 그대로 실어보냄, JS가 따로 문구를
+     * 갖지 않게) — 연결/끊기/목록가져오기의 웹 완료문구. 연결성공은 STR_STATUS_PAIRED,
+     * 사진 성공/실패는 STR_FETCH_DONE/STR_FETCH_FAILED를 그대로 재사용(이미 깔끔한 문구) */
+    STR_CONNECT_FAILED,
+    STR_DISCONNECT_SUCCESS,
+    STR_LIST_FETCH_SUCCESS,
+    STR_LIST_FETCH_FAILED,
     STR_COUNT,
 } ui_str_id_t;
 

@@ -193,6 +193,14 @@ int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max
 void esp_now_hub_request_pair(const uint8_t *mac);
 void esp_now_hub_unpair(const uint8_t *mac);
 
+/* 2026-09-04(사용자 설계: "이벤트로 처리해") — 연결됨/끊어졌음 공통 이벤트(esp_now_photo.h의
+ * esp_now_photo_event_cb_t와 동일 패턴). 앱은 콜백 등록, 웹은 esp_now_hub_wait_paired()로
+ * 블로킹 대기(폴링 아님). "연결실패"는 별도 이벤트가 아니라 wait_paired()가 자기 타임아웃에
+ * 도달하는 것 자체가 실패 신호(사용자 지시: "타임아웃이 이벤트가 되는 것") */
+typedef void (*esp_now_hub_event_cb_t)(void);
+void esp_now_hub_set_connect_event_cb(esp_now_hub_event_cb_t cb);
+bool esp_now_hub_wait_paired(const uint8_t *mac, uint32_t timeout_ms);
+
 /* 2026-08-10, CAM Deep Sleep 전환 — 딥슬립 사이클마다 순간적으로 언페어 상태를 스치는 건
  * 정상 동작(자동 재연결이 다음 사이클 안에 알아서 다시 붙임)이지 에러가 아님. 이 함수는
  * "정말로 문제가 있는 상태"(자동 재연결이 기대 시간 안에 회복을 못 하고 있음)만 true를

@@ -75,6 +75,21 @@ bool esp_now_photo_cache_get(uint32_t file_id, const uint8_t **out_data, size_t 
  * RECEIVING이 아닐 땐 의미 없는 값일 수 있으니 호출부가 state를 먼저 확인할 것 */
 void esp_now_photo_get_chunk_progress(uint16_t *received, uint16_t *total);
 
+/* 2026-09-04(사용자 설계: "이벤트로 처리해") — 사진 수신이 완료(성공/실패 둘 다)되는 바로 그
+ * 지점에서 발생. 앱(UI)과 웹(httpd) 둘 다 폴링 대신 이 시점에 반응해야 함:
+ * - 앱: ui_main.c가 esp_now_photo_set_ready_cb()로 콜백을 등록해두면, 완료 시 그 콜백이
+ *   즉시(같은 호출 스택에서, 어느 태스크든) 불림 — 콜백 안에서 LVGL을 건드릴 거면 콜백
+ *   구현부가 스스로 lv_async_call()로 미뤄야 함(이 모듈은 LVGL을 모름, 위 헤더 설명 참고)
+ * - 웹: esp_now_photo_wait_cached()가 내부적으로 이 이벤트를 기다림(폴링 아님) */
+typedef void (*esp_now_photo_event_cb_t)(void);
+void esp_now_photo_set_ready_cb(esp_now_photo_event_cb_t cb);
+
+/* file_id가 캐시에 들어올 때까지(성공) 또는 이번 수신이 실패로 끝날 때까지 이벤트로
+ * 블로킹 대기(폴링 아님, xSemaphoreTake) — timeout_ms 안에 못 받으면 false.
+ * httpd 태스크에서 부르는 용도(main.c) */
+bool esp_now_photo_wait_cached(uint32_t file_id, uint32_t timeout_ms,
+                                const uint8_t **out_data, size_t *out_len);
+
 /* ────────────────────────────────────────────────────────────
  * 2. 지금촬영 — 진행 팝업 단계 추적(사진 전송은 안 함, 위 헤더 설명 참고)
  * ──────────────────────────────────────────────────────────── */
@@ -140,6 +155,15 @@ esp_now_photo_list_state_t esp_now_photo_list_get_state(void);
  * false면 아직 진행 중이거나 그 뒤로 새 요청이 없었음. 결과가 나왔으면 esp_now_photo_list_get_items()로
  * 그대로 목록을 읽으면 됨(버퍼 자체는 ack와 무관하게 안 지워짐) */
 bool esp_now_photo_list_get_result(uint32_t generation, bool *out_ok);
+
+/* 2026-09-04(사용자 설계: "이벤트로 처리해") — 위 esp_now_photo_set_ready_cb()와 동일 패턴,
+ * 목록판. 앱/웹 둘 다 이 이벤트로 반응(폴링 아님) */
+void esp_now_photo_list_set_ready_cb(esp_now_photo_event_cb_t cb);
+bool esp_now_photo_list_wait_result(uint32_t generation, uint32_t timeout_ms, bool *out_ok);
+
+/* 새로 요청 안 하고 "지금 진행 중(또는 막 끝난) 세대 번호"만 읽음 — 다른 곳에서 이미
+ * 걸어둔 요청을 새로 걸지 않고 그대로 기다리고 싶을 때 씀(main.c 참고) */
+uint32_t esp_now_photo_list_get_current_generation(void);
 
 /* PHOTO_LIST_COUNT 응답을 받았는지(=CAM이 요청을 실제로 받아 처리를 시작했는지) — 진행팝업의
  * "명령 전송" 단계 완료 판정용(2026-08-11). get_progress()의 total>0을 대신 쓰면 CAM의 실제

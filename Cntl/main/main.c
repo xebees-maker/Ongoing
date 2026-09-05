@@ -131,17 +131,24 @@ static esp_err_t api_devices_get_handler(httpd_req_t *req)
         hub_conn_state_t cs = esp_now_hub_get_conn_state(cams[i].mac);
         const char *status = (cs == HUB_CONN_STATE_WAITING) ? "waiting"
                             : (cs == HUB_CONN_STATE_ACTIVE)  ? "active" : "paired";
+        /* 2026-09-04(사용자 설계: "앱의 문구들을 그대로 웹에서 써야한다") — status는 JS의
+         * 로직 분기용 코드로 남기고, 표시용 문구는 콘 자신이 카메라판넬에 쓰는 ui_str()을
+         * 그대로 별도 필드로 실어보냄 */
+        const char *status_msg = (cs == HUB_CONN_STATE_WAITING) ? ui_str(STR_STATUS_CONNECTING)
+                                : (cs == HUB_CONN_STATE_ACTIVE)  ? ui_str(STR_STATUS_ACTIVE)
+                                                                  : ui_str(STR_STATUS_PAIRED);
         len += snprintf(body + len, 2048 - len,
-                         "%s{\"mac\":\"%02x%02x%02x%02x%02x%02x\",\"name\":\"%s\",\"status\":\"%s\",\"paired\":%s}",
+                         "%s{\"mac\":\"%02x%02x%02x%02x%02x%02x\",\"name\":\"%s\",\"status\":\"%s\","
+                         "\"status_msg\":\"%s\",\"paired\":%s}",
                          i == 0 ? "" : ",",
                          cams[i].mac[0], cams[i].mac[1], cams[i].mac[2],
                          cams[i].mac[3], cams[i].mac[4], cams[i].mac[5],
-                         cams[i].name, status,
+                         cams[i].name, status, status_msg,
                          cams[i].conn_state == NODE_CONN_PAIRED ? "true" : "false");
     }
     len += snprintf(body + len, 2048 - len, "]");
 
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     esp_err_t ret = httpd_resp_send(req, body, len);
     heap_caps_free(body);
     return ret;
@@ -159,24 +166,22 @@ static esp_err_t api_connect_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    esp_now_hub_request_pair(mac);
-    const int timeout_ms = 25000;
-    int waited_ms = 0;
+    /* 2026-09-04(사용자 설계: "PC 원격제어처럼") — esp_now_hub_request_pair()를 직접 안 부르고
+     * 실제 카메라 행 탭+확인 팝업까지 합성. 합성 자체가 실패하면(지금 목록에 없음 등) 그
+     * 자리에서 바로 실패 — 성공했으면 이벤트 기반 블로킹 대기("연결실패"는 이 대기가
+     * 타임아웃에 도달하는 것 자체가 신호) */
     bool paired = false;
-    while (waited_ms < timeout_ms) {
-        esp_now_hub_node_t tmp[ESP_NOW_HUB_MAX_NODES];
-        int tn = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, tmp, ESP_NOW_HUB_MAX_NODES);
-        for (int i = 0; i < tn; i++) {
-            if (memcmp(tmp[i].mac, mac, 6) == 0 && tmp[i].conn_state == NODE_CONN_PAIRED) { paired = true; break; }
-        }
-        if (paired) break;
-        vTaskDelay(pdMS_TO_TICKS(200));
-        waited_ms += 200;
+    if (ui_main_inject_connect(mac)) {
+        paired = esp_now_hub_wait_paired(mac, 25000);
     }
 
-    char body[32];
-    int len = snprintf(body, sizeof(body), "{\"ok\":%s}", paired ? "true" : "false");
-    httpd_resp_set_type(req, "application/json");
+    /* 2026-09-04(사용자 설계: "앱의 문구들을 그대로 웹에서 써야한다") — JS가 따로 문구를
+     * 갖지 않고, 콘 자신이 쓰는 ui_str() 문구를 그대로 실어보냄 */
+    char body[96];
+    int len = snprintf(body, sizeof(body), "{\"ok\":%s,\"msg\":\"%s\"}",
+                        paired ? "true" : "false",
+                        paired ? ui_str(STR_STATUS_PAIRED) : ui_str(STR_CONNECT_FAILED));
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     return httpd_resp_send(req, body, len);
 }
 
@@ -191,9 +196,15 @@ static esp_err_t api_disconnect_get_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid mac");
         return ESP_FAIL;
     }
-    esp_now_hub_unpair(mac);
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":true}");
+    /* 2026-09-04("PC 원격제어처럼") — 카메라 행 탭+끊기 확인 팝업까지 합성. 로컬 상태변경이라
+     * 합성이 성공하면 그 안에서 이미 완료된 것(esp_now_hub_unpair()가 동기적) */
+    bool ok = ui_main_inject_disconnect(mac);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    char body[96];
+    int len = snprintf(body, sizeof(body), "{\"ok\":%s,\"msg\":\"%s\"}",
+                        ok ? "true" : "false",
+                        ok ? ui_str(STR_DISCONNECT_SUCCESS) : "");
+    return httpd_resp_send(req, body, len);
 }
 
 static esp_err_t api_photos_get_handler(httpd_req_t *req)
@@ -215,8 +226,9 @@ static esp_err_t api_photos_get_handler(httpd_req_t *req)
     if (!body) { httpd_resp_send_500(req); return ESP_FAIL; }
 
     if (cam_idx < 0) {
-        int len = snprintf(body, 4096, "{\"cam\":false,\"state\":\"no_cam\",\"items\":[]}");
-        httpd_resp_set_type(req, "application/json");
+        int len = snprintf(body, 4096, "{\"cam\":false,\"state\":\"no_cam\",\"items\":[],\"msg\":\"%s\"}",
+                            ui_str(STR_PANEL_NO_PAIRED_DEVICE));
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
         esp_err_t ret = httpd_resp_send(req, body, len);
         heap_caps_free(body);
         return ret;
@@ -230,34 +242,24 @@ static esp_err_t api_photos_get_handler(httpd_req_t *req)
     if (!force_refresh && (cur_state == ESP_NOW_PHOTO_LIST_STATE_READY || cur_state == ESP_NOW_PHOTO_LIST_STATE_ERROR)) {
         have_result = true;
         result_ok = (cur_state == ESP_NOW_PHOTO_LIST_STATE_READY);
-    } else {
-        const int timeout_ms = 25000;
-        int waited_ms = 0;
-        if (force_refresh || cur_state == ESP_NOW_PHOTO_LIST_STATE_IDLE) {
-            /* 2026-08-30 버그수정 — REQUESTING 중에도 무조건 새로 esp_now_photo_list_request()를
-             * 부르던 걸 원래대로(IDLE이거나 강제 새로고침일 때만) 되돌림. REQUESTING 중에 또
-             * 요청을 걸면 캠에 중복 PHOTO_LIST_REQUEST가 나가고, ESP-NOW 전송 큐가 밀려서
-             * WAKE_HELLO_ACK 등 다른 전송까지 ESP_ERR_ESPNOW_NO_MEM으로 실패 — 캠이 응답
-             * 없음으로 보고 재광고하는 현상으로 실기에서 확인됨 */
-            uint32_t generation = esp_now_photo_list_request(cams[cam_idx].mac);
-            while (waited_ms < timeout_ms) {
-                if (esp_now_photo_list_get_result(generation, &result_ok)) { have_result = true; break; }
-                vTaskDelay(pdMS_TO_TICKS(200));
-                waited_ms += 200;
-            }
+    } else if (force_refresh || cur_state == ESP_NOW_PHOTO_LIST_STATE_IDLE) {
+        /* 2026-09-04(사용자 설계: "PC 원격제어처럼") — esp_now_photo_list_request()를 직접
+         * 안 부르고 실제 "다시 가져오기" 버튼 탭을 합성(2026-08-30 버그수정 — REQUESTING
+         * 중엔 새로 요청 안 함, 그건 아래 else 분기가 담당 — 중복요청이 나가면 ESP-NOW
+         * 전송 큐가 밀려 WAKE_HELLO_ACK까지 실패해서 캠이 재광고하는 현상으로 실기에서
+         * 확인됨). 합성 자체가 실패하면(카메라 선택 안 됨 등) 대기 없이 바로 실패 */
+        bool inject_ok = false;
+        uint32_t generation = ui_main_inject_list_refresh(&inject_ok);
+        if (inject_ok) {
+            have_result = esp_now_photo_list_wait_result(generation, 25000, &result_ok);
         } else {
-            /* 이미 REQUESTING 중(다른 곳에서 시작된 요청) — 새로 걸지 않고 완료만 기다림 */
-            while (waited_ms < timeout_ms) {
-                esp_now_photo_list_state_t st = esp_now_photo_list_get_state();
-                if (st == ESP_NOW_PHOTO_LIST_STATE_READY || st == ESP_NOW_PHOTO_LIST_STATE_ERROR) {
-                    have_result = true;
-                    result_ok = (st == ESP_NOW_PHOTO_LIST_STATE_READY);
-                    break;
-                }
-                vTaskDelay(pdMS_TO_TICKS(200));
-                waited_ms += 200;
-            }
+            have_result = true;
+            result_ok = false;
         }
+    } else {
+        /* 이미 REQUESTING 중(다른 곳에서 시작된 요청) — 새로 걸지 않고 그 세대를 그대로 기다림 */
+        uint32_t generation = esp_now_photo_list_get_current_generation();
+        have_result = esp_now_photo_list_wait_result(generation, 25000, &result_ok);
     }
 
     const char *state_str = !have_result ? "timeout" : (result_ok ? "ready" : "error");
@@ -275,9 +277,11 @@ static esp_err_t api_photos_get_handler(httpd_req_t *req)
                              (unsigned)items[i].capture_time, (unsigned)items[i].file_size);
         }
     }
-    len += snprintf(body + len, 4096 - len, "]}");
+    /* 2026-09-04(사용자 설계: "앱의 문구들을 그대로 웹에서 써야한다") */
+    const char *msg = (have_result && result_ok) ? ui_str(STR_LIST_FETCH_SUCCESS) : ui_str(STR_LIST_FETCH_FAILED);
+    len += snprintf(body + len, 4096 - len, "],\"msg\":\"%s\"}", msg);
 
-    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     esp_err_t ret = httpd_resp_send(req, body, len);
     heap_caps_free(body);
     return ret;
@@ -308,25 +312,21 @@ static esp_err_t api_photo_fetch_get_handler(httpd_req_t *req)
                 if (cams[i].conn_state == NODE_CONN_PAIRED) { cam_idx = i; break; }
             }
             if (cam_idx >= 0) {
-                /* 2026-08-30("웹기생" 설계) — 온디바이스 탭과 완전히 같은 경로: 여기선 모델만
-                 * 세팅하고, 실제 요청은 CNTL의 기존 배경 리컨실러(sync_selected_photo_if_needed,
-                 * 1초 주기)가 함(직접 esp_now_photo_fetch_by_id()를 부르면 리컨실러와 겹쳐서
-                 * 이중 요청이 나감 — 실사용 중 확인). 결과 확인도 상태플래그(콘이 매틱
-                 * ack로 소비함) 대신 캐시(비파괴적, ack와 무관하게 안 지워짐)를 직접 폴링 */
-                ui_main_set_selected_photo(file_id);
-                const int timeout_ms = 25000;
-                int waited_ms = 0;
-                while (waited_ms < timeout_ms) {
-                    if (esp_now_photo_cache_get(file_id, &data, &len0)) { ok = true; break; }
-                    vTaskDelay(pdMS_TO_TICKS(200));
-                    waited_ms += 200;
-                }
+                /* 2026-09-04(사용자 설계: "PC 원격제어처럼") — 모델만 세팅하는 대신 실제
+                 * 사진목록 행 탭을 합성(지금 화면/목록에 그 file_id가 없으면 합성 자체가
+                 * 실패 — 대기 없이 바로 실패). 결과 대기는 이벤트 기반(비파괴적 캐시 확인) */
+                ok = ui_main_inject_photo_select(file_id) &&
+                     esp_now_photo_wait_cached(file_id, 25000, &data, &len0);
             }
         }
     }
-    char body[32];
-    int len = snprintf(body, sizeof(body), "{\"ok\":%s}", ok ? "true" : "false");
-    httpd_resp_set_type(req, "application/json");
+    /* 2026-09-04(사용자 설계: "앱의 문구들을 그대로 웹에서 써야한다") — 사진 성공/실패는
+     * 콘 자신의 진행팝업이 이미 쓰는 STR_FETCH_DONE/STR_FETCH_FAILED를 그대로 재사용 */
+    char body[96];
+    int len = snprintf(body, sizeof(body), "{\"ok\":%s,\"msg\":\"%s\"}",
+                        ok ? "true" : "false",
+                        ok ? ui_str(STR_FETCH_DONE) : ui_str(STR_FETCH_FAILED));
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
     return httpd_resp_send(req, body, len);
 }
 

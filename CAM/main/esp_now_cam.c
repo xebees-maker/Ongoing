@@ -1264,7 +1264,10 @@ static bool esp_now_cam_try_wake_hello_fast_path(void)
     cam_node_reset_sleep_now_state();
     esp_err_t err = esp_now_reliable_request(s_hub_mac, &hello, sizeof(hello),
                                               s_wake_hello_ack_types, 1,
-                                              100, 3,
+                                              200, 3,  /* 2026-09-05 — 100ms는 CNTL이 사진전송
+                                                          뒷정리 등으로 순간 바쁠 때 너무 타이트해서
+                                                          불필요한 재전송을 유발(esp_now_hub.c의
+                                                          WAKE_HELLO_ACK 재시도 수정과 짝) */
                                               &ack, sizeof(ack), NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WAKE_HELLO 무응답(3회) — 폴백 스캔으로 전환");
