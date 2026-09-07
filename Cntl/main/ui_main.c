@@ -2402,7 +2402,9 @@ static void find_node_name_by_mac(const uint8_t mac[6], char *out, size_t out_ca
 
 /* 개괄 판넬(2026-09-07 재설계, 구 "최대/최소 판넬") — 좌=온도/이산화탄소,
  * 우=습도/암모니아. Scale 드롭다운으로 고른 기간 기준으로 재계산(사용자 확정:
- * "스케일마다 계산해야되"). Max/Min/Average는 X/N/A 약자로 표기 */
+ * "스케일마다 계산해야되"). Max/Min/Average 범례는 제목(STR_PANEL_STATS_OVERVIEW)에
+ * 한 번만 있고, 각 줄은 "라벨[단위]: 값 / 값 / 값"만(사용자 재지시 — 이산화탄소처럼
+ * 긴 값이 X/N/A 반복으로 줄바꿈되던 문제 해결) */
 static void refresh_stats_overview_panel(void)
 {
     uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
@@ -2427,10 +2429,10 @@ static void refresh_stats_overview_panel(void)
             int mx_s = (int)(mx * 100.0f + 0.5f);
             int mn_s = (int)(mn * 100.0f + 0.5f);
             int avg_s = (int)(avg * 100.0f + 0.5f);
-            snprintf(line, sizeof(line), ui_str(STR_STATS_OVERVIEW_ROW_FMT), ui_str(label_id),
-                     mx_s / 100, mx_s % 100, ui_str(unit_id),
-                     mn_s / 100, mn_s % 100, ui_str(unit_id),
-                     avg_s / 100, avg_s % 100, ui_str(unit_id));
+            snprintf(line, sizeof(line), ui_str(STR_STATS_OVERVIEW_ROW_FMT), ui_str(label_id), ui_str(unit_id),
+                     mx_s / 100, mx_s % 100,
+                     mn_s / 100, mn_s % 100,
+                     avg_s / 100, avg_s % 100);
         } else {
             snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_STATS_OVERVIEW_NO_DATA));
         }
@@ -4587,6 +4589,14 @@ void ui_init(void)
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_stats_scale_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_stats_scale_dd, cb_stats_scale_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
+    /* 2026-09-07(사용자 지시 — "모두 지우기 단추는 오버뷰 제목 줄로 옮겨. 스케일 오른쪽으로")
+     * SPACE_BETWEEN 3번째 자식이라 자동으로 맨 오른쪽에 붙음 */
+    s_stats_delete_btn = lv_button_create(overview_header_row);
+    lv_obj_add_event_cb(s_stats_delete_btn, cb_delete_stats_tap, LV_EVENT_CLICKED, NULL);
+    s_stats_delete_lbl = lv_label_create(s_stats_delete_btn);
+    lv_label_set_text(s_stats_delete_lbl, ui_str(STR_BTN_DELETE_STATS));
+    lv_obj_set_style_text_font(s_stats_delete_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+
     lv_obj_t *overview_sub_row = lv_obj_create(overview_box);
     lv_obj_set_size(overview_sub_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(overview_sub_row, LV_FLEX_FLOW_ROW);
@@ -4653,9 +4663,42 @@ void ui_init(void)
     lv_label_set_text_fmt(stats_table_header_lbl, "%s / %s / %s", ui_str(STR_STATS_TABLE_HEADER_ITEM),
                            ui_str(STR_STATS_TABLE_HEADER_VALUE), ui_str(STR_STATS_TABLE_HEADER_TIME));
 
-    s_stats_page_label = lv_label_create(stats_table_header_row);
+    /* 2026-09-07(사용자 지시 — "테이블 이동 단추 4개는 제목줄로 옮겨") — ±1/±10 버튼과
+     * 페이지표시를 전부 한 묶음으로 헤더 우측에 배치(구 하단 버튼줄/우하단 오버레이 제거) */
+    lv_obj_t *stats_nav_cluster = lv_obj_create(stats_table_header_row);
+    lv_obj_set_size(stats_nav_cluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(stats_nav_cluster, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_all(stats_nav_cluster, 0, 0);
+    lv_obj_set_style_pad_column(stats_nav_cluster, 4, 0);
+    lv_obj_set_style_border_width(stats_nav_cluster, 0, 0);
+
+    s_stats_jump_prev_btn = lv_button_create(stats_nav_cluster);
+    lv_obj_add_event_cb(s_stats_jump_prev_btn, stats_jump_prev_page_cb, LV_EVENT_CLICKED, NULL);
+    s_stats_jump_prev_lbl = lv_label_create(s_stats_jump_prev_btn);
+    lv_label_set_text(s_stats_jump_prev_lbl, ui_str(STR_BTN_JUMP_PREV10));
+    lv_obj_set_style_text_font(s_stats_jump_prev_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+
+    s_stats_prev_btn = lv_button_create(stats_nav_cluster);
+    lv_obj_add_event_cb(s_stats_prev_btn, stats_prev_page_cb, LV_EVENT_CLICKED, NULL);
+    s_stats_prev_lbl = lv_label_create(s_stats_prev_btn);
+    lv_label_set_text(s_stats_prev_lbl, ui_str(STR_BTN_PREV_PAGE));
+    lv_obj_set_style_text_font(s_stats_prev_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+
+    s_stats_page_label = lv_label_create(stats_nav_cluster);
     lv_obj_set_style_text_font(s_stats_page_label, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_label_set_text(s_stats_page_label, "");
+
+    s_stats_next_btn = lv_button_create(stats_nav_cluster);
+    lv_obj_add_event_cb(s_stats_next_btn, stats_next_page_cb, LV_EVENT_CLICKED, NULL);
+    s_stats_next_lbl = lv_label_create(s_stats_next_btn);
+    lv_label_set_text(s_stats_next_lbl, ui_str(STR_BTN_NEXT_PAGE));
+    lv_obj_set_style_text_font(s_stats_next_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+
+    s_stats_jump_next_btn = lv_button_create(stats_nav_cluster);
+    lv_obj_add_event_cb(s_stats_jump_next_btn, stats_jump_next_page_cb, LV_EVENT_CLICKED, NULL);
+    s_stats_jump_next_lbl = lv_label_create(s_stats_jump_next_btn);
+    lv_label_set_text(s_stats_jump_next_lbl, ui_str(STR_BTN_JUMP_NEXT10));
+    lv_obj_set_style_text_font(s_stats_jump_next_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
 
     s_stats_table = lv_table_create(s_stats_table_view);
     lv_obj_set_width(s_stats_table, LV_PCT(100));
@@ -4674,43 +4717,6 @@ void ui_init(void)
     /* 세로 스와이프로 페이지 이동, 좌측 스와이프로 그래프 전환(사용자 설계) */
     lv_obj_add_event_cb(s_stats_table, cb_stats_table_gesture, LV_EVENT_GESTURE, NULL);
 
-    /* 하단 이전/다음 버튼 줄 제거(사용자 지시: "하단의 페이지 콘트롤이 공간을 너무 많이
-     * 차지") — 우하단 구석에 작게 오버레이, ±1/±10칸 전부 이 자리로 모음(사용자 지시:
-     * "별도 버튼으로") */
-    lv_obj_t *stats_nav_overlay = lv_obj_create(s_stats_table_view);
-    lv_obj_add_flag(stats_nav_overlay, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_align(stats_nav_overlay, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
-    lv_obj_set_size(stats_nav_overlay, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(stats_nav_overlay, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_all(stats_nav_overlay, 2, 0);
-    lv_obj_set_style_pad_column(stats_nav_overlay, 4, 0);
-    lv_obj_set_style_border_width(stats_nav_overlay, 0, 0);
-    lv_obj_set_style_bg_opa(stats_nav_overlay, LV_OPA_70, 0);
-
-    s_stats_jump_prev_btn = lv_button_create(stats_nav_overlay);
-    lv_obj_add_event_cb(s_stats_jump_prev_btn, stats_jump_prev_page_cb, LV_EVENT_CLICKED, NULL);
-    s_stats_jump_prev_lbl = lv_label_create(s_stats_jump_prev_btn);
-    lv_label_set_text(s_stats_jump_prev_lbl, ui_str(STR_BTN_JUMP_PREV10));
-    lv_obj_set_style_text_font(s_stats_jump_prev_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
-
-    s_stats_prev_btn = lv_button_create(stats_nav_overlay);
-    lv_obj_add_event_cb(s_stats_prev_btn, stats_prev_page_cb, LV_EVENT_CLICKED, NULL);
-    s_stats_prev_lbl = lv_label_create(s_stats_prev_btn);
-    lv_label_set_text(s_stats_prev_lbl, ui_str(STR_BTN_PREV_PAGE));
-    lv_obj_set_style_text_font(s_stats_prev_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
-
-    s_stats_next_btn = lv_button_create(stats_nav_overlay);
-    lv_obj_add_event_cb(s_stats_next_btn, stats_next_page_cb, LV_EVENT_CLICKED, NULL);
-    s_stats_next_lbl = lv_label_create(s_stats_next_btn);
-    lv_label_set_text(s_stats_next_lbl, ui_str(STR_BTN_NEXT_PAGE));
-    lv_obj_set_style_text_font(s_stats_next_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
-
-    s_stats_jump_next_btn = lv_button_create(stats_nav_overlay);
-    lv_obj_add_event_cb(s_stats_jump_next_btn, stats_jump_next_page_cb, LV_EVENT_CLICKED, NULL);
-    s_stats_jump_next_lbl = lv_label_create(s_stats_jump_next_btn);
-    lv_label_set_text(s_stats_jump_next_lbl, ui_str(STR_BTN_JUMP_NEXT10));
-    lv_obj_set_style_text_font(s_stats_jump_next_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
-
     /* "<<" 오버레이(좌측 끝, 사용자 설계: 테이블에서 좌측 스와이프/이 버튼 둘 다로 그래프 전환) */
     lv_obj_t *table_to_graph_btn = lv_button_create(s_stats_table_view);
     lv_obj_add_flag(table_to_graph_btn, LV_OBJ_FLAG_IGNORE_LAYOUT);
@@ -4719,15 +4725,6 @@ void ui_init(void)
     lv_obj_t *table_to_graph_lbl = lv_label_create(table_to_graph_btn);
     lv_label_set_text(table_to_graph_lbl, "<<");
     lv_obj_set_style_text_font(table_to_graph_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    /* 통계 전체 삭제(사용자 지시 — "저장값 지우기 기능도 있으면 좋곘어", 확인팝업 포함) */
-    s_stats_delete_btn = lv_button_create(s_stats_table_view);
-    lv_obj_add_flag(s_stats_delete_btn, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_align(s_stats_delete_btn, LV_ALIGN_BOTTOM_LEFT, 4, -4);
-    lv_obj_add_event_cb(s_stats_delete_btn, cb_delete_stats_tap, LV_EVENT_CLICKED, NULL);
-    s_stats_delete_lbl = lv_label_create(s_stats_delete_btn);
-    lv_label_set_text(s_stats_delete_lbl, ui_str(STR_BTN_DELETE_STATS));
-    lv_obj_set_style_text_font(s_stats_delete_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
 
     /* 그래프 뼈대(2026-09-07, 사용자 지시: "그래프 자체는 나중에 구현하더라도... 틀은
      * 만들어 놔") — lv_chart 내용은 다음 단계, 지금은 전환+자리만 */

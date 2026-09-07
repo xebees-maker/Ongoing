@@ -211,11 +211,13 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_BTN_PREV_PAGE]               = { "< 이전",                    "< Prev" },
     [STR_BTN_NEXT_PAGE]               = { "다음 >",                    "Next >" },
     /* 2026-09-07(통계탭 레이아웃 재설계, 사용자 설계) */
-    [STR_PANEL_STATS_OVERVIEW]        = { "개괄",                       "Overview" },
+    /* 2026-09-07 재수정 — X/N/A를 매 줄마다 반복하면 이산화탄소처럼 긴 값이 줄바꿈되던 문제가
+     * 있어서(사용자 실기 확인: "흰색 밑줄"), 범례를 제목 옆에 한 번만 두고 각 줄은 숫자만 */
+    [STR_PANEL_STATS_OVERVIEW]        = { "개괄 (최대/최소/평균)",       "Overview (Max/Min/Avg)" },
     [STR_STATS_SCALE_OPTIONS]         = { "1시간\n12시간\n1일\n3일\n1주",
                                            "1h\n12h\n1d\n3d\n1w" },
-    [STR_STATS_OVERVIEW_ROW_FMT]      = { "%s X%d.%02d%s N%d.%02d%s A%d.%02d%s",
-                                           "%s X%d.%02d%s N%d.%02d%s A%d.%02d%s" },
+    [STR_STATS_OVERVIEW_ROW_FMT]      = { "%s[%s]: %d.%02d / %d.%02d / %d.%02d",
+                                           "%s[%s]: %d.%02d / %d.%02d / %d.%02d" },
     [STR_STATS_OVERVIEW_NO_DATA]      = { "데이터 없음",                "No data" },
     [STR_BTN_JUMP_PREV10]             = { "이전10",                    "Prev10" },
     [STR_BTN_JUMP_NEXT10]             = { "다음10",                    "Next10" },
