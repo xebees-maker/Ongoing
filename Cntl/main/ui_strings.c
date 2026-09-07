@@ -6,7 +6,9 @@
 static const char *TAG = "ui_strings";
 #define SETTINGS_PATH  FS_MOUNT_POINT "/settings.bin"
 
-static ui_lang_t s_lang = UI_LANG_KO;
+/* 2026-09-07(임시 실험 — 비트맵 폰트엔 한글 글리프가 없음) — 기본값을 EN으로 강제.
+ * 원복: UI_LANG_KO로 되돌리면 됨 */
+static ui_lang_t s_lang = UI_LANG_EN;
 
 static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LOGO_TITLE]     = { "플렉스팜", "FlexFarm" },
@@ -229,6 +231,10 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
 
 void ui_lang_load(void)
 {
+    /* 2026-09-07(임시 실험) — 저장된 값(과거 KO 선택)이 EN 강제를 덮어쓰지 않도록 건너뜀.
+     * 원복: 아래 주석 해제 */
+    return;
+#if 0
     FILE *f = fopen(SETTINGS_PATH, "rb");
     if (!f) return;  /* 파일 없음 — 첫 부팅, 기본값(UI_LANG_KO) 유지 */
     uint8_t val = 0;
@@ -236,6 +242,7 @@ void ui_lang_load(void)
         s_lang = (ui_lang_t)val;
     }
     fclose(f);
+#endif
 }
 
 void ui_lang_set(ui_lang_t lang)

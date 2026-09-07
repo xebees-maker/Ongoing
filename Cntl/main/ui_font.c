@@ -1,100 +1,37 @@
 /**
  * @file    ui_font.c
- * @brief   TinyTTF 런타임 폰트 로드 — 12 / 18 / 30pt
+ * @brief   2026-09-07(임시 실험 브랜치 — 사용자 지시: "TTF 로드를 모두 임시로 막아보자") —
+ *          TinyTTF 대신 내장 비트맵 폰트(12/18/24/30pt)로 교체. 목적: 팝업 닫을 때 메모리가
+ *          완전히 회수 안 되던 문제(통계/설정/로그 각각 -5092/-5364/-772 bytes)가 TTF
+ *          글리프/커닝/드로우데이터 캐시(lv_tiny_ttf.c) 때문인지 확인. 인터페이스
+ *          (ui_font_init/ui_font_get/ui_font_deinit)는 무변경 — 호출부 113곳 안 건드림.
+ *          원복: 이 파일을 이전 버전(TTF 로드)으로 되돌리면 됨, 폰트 파일/파티션은 무변경.
  */
 
 #include "ui_font.h"
 #include "lvgl.h"
-#include "libs/tiny_ttf/lv_tiny_ttf.h"
 #include "esp_log.h"
-#include "esp_heap_caps.h"
-#include "ui_log.h"
-#include <stdio.h>
-#include <sys/stat.h>
 
 static const char *TAG = "ui_font";
 
-static void    *s_ttf_buf  = NULL;
-static size_t   s_ttf_size = 0;
-
-static lv_font_t *s_font_12 = NULL;
-static lv_font_t *s_font_18 = NULL;
-static lv_font_t *s_font_24 = NULL;
-static lv_font_t *s_font_30 = NULL;
-
-static esp_err_t load_ttf_to_psram(void)
-{
-    struct stat st;
-    if (stat(UI_FONT_TTF_VFS_PATH, &st) != 0) {
-        ESP_LOGE(TAG, "stat failed: %s", UI_FONT_TTF_VFS_PATH);
-        ui_log_add_err(UI_ERR_FONT_FILE_MISSING, "Font file missing: %s", UI_FONT_TTF_VFS_PATH);
-        return ESP_FAIL;
-    }
-    s_ttf_size = (size_t)st.st_size;
-
-    s_ttf_buf = heap_caps_malloc(s_ttf_size, MALLOC_CAP_SPIRAM);
-    if (!s_ttf_buf) {
-        ESP_LOGE(TAG, "PSRAM alloc failed: %u KB", (unsigned)(s_ttf_size / 1024));
-        ui_log_add_err(UI_ERR_FONT_BUF_ALLOC, "Font buffer alloc failed (%u KB)", (unsigned)(s_ttf_size / 1024));
-        return ESP_FAIL;
-    }
-
-    FILE *f = fopen(UI_FONT_TTF_VFS_PATH, "rb");
-    if (!f) {
-        ESP_LOGE(TAG, "fopen failed");
-        ui_log_add_err(UI_ERR_FONT_FILE_OPEN, "Font file open failed");
-        heap_caps_free(s_ttf_buf);
-        s_ttf_buf = NULL;
-        return ESP_FAIL;
-    }
-    fread(s_ttf_buf, 1, s_ttf_size, f);
-    fclose(f);
-    ESP_LOGI(TAG, "TTF loaded to PSRAM: %u KB", (unsigned)(s_ttf_size / 1024));
-    return ESP_OK;
-}
-
-static lv_font_t *create_font(uint8_t size)
-{
-    lv_font_t *f = lv_tiny_ttf_create_data_ex(s_ttf_buf, s_ttf_size, size,
-                                           LV_FONT_KERNING_NORMAL, LV_TINY_TTF_CACHE_GLYPH_CNT);
-    if (!f) {
-        ESP_LOGE(TAG, "Failed: %dpt", size);
-        ui_log_add_err(UI_ERR_FONT_CREATE, "Font create failed (%dpt)", size);
-    } else {
-        ESP_LOGI(TAG, "OK: %dpt", size);
-    }
-    return f;
-}
-
 esp_err_t ui_font_init(void)
 {
-    if (load_ttf_to_psram() != ESP_OK) return ESP_FAIL;
-
-    s_font_12 = create_font(12);
-    s_font_18 = create_font(18);
-    s_font_24 = create_font(24);
-    s_font_30 = create_font(30);
-
-    if (!s_font_12 || !s_font_18 || !s_font_24 || !s_font_30) return ESP_FAIL;
+    ESP_LOGI(TAG, "비트맵 폰트 모드(TTF 임시 비활성화) — 12/18/24/30pt 내장 Montserrat");
     return ESP_OK;
 }
 
 const lv_font_t *ui_font_get(uint8_t size)
 {
     switch (size) {
-        case 12: return s_font_12;
-        case 18: return s_font_18;
-        case 24: return s_font_24;
-        case 30: return s_font_30;
-        default: return s_font_12;
+        case 12: return &lv_font_montserrat_12;
+        case 18: return &lv_font_montserrat_18;
+        case 24: return &lv_font_montserrat_24;
+        case 30: return &lv_font_montserrat_30;
+        default: return &lv_font_montserrat_12;
     }
 }
 
 void ui_font_deinit(void)
 {
-    if (s_font_12) { lv_tiny_ttf_destroy(s_font_12); s_font_12 = NULL; }
-    if (s_font_18) { lv_tiny_ttf_destroy(s_font_18); s_font_18 = NULL; }
-    if (s_font_24) { lv_tiny_ttf_destroy(s_font_24); s_font_24 = NULL; }
-    if (s_font_30) { lv_tiny_ttf_destroy(s_font_30); s_font_30 = NULL; }
-    if (s_ttf_buf) { heap_caps_free(s_ttf_buf); s_ttf_buf = NULL; }
+    /* 비트맵 폰트는 플래시 상주 상수라 해제할 게 없음 */
 }
