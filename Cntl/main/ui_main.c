@@ -4582,16 +4582,24 @@ void ui_init(void)
     lv_label_set_text(s_stats_overview_title, ui_str(STR_PANEL_STATS_OVERVIEW));
     lv_obj_set_style_text_font(s_stats_overview_title, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_stats_scale_dd = lv_dropdown_create(overview_header_row);
+    /* 2026-09-07(사용자 지시 — "Overview(좌정렬) - 공간 - 우정렬 드랍다운, 모두지우기") —
+     * 3개를 그냥 SPACE_BETWEEN에 나란히 두면 Scale이 가운데 어중간한 자리에 뜸. Scale+삭제를
+     * 하나의 묶음으로 만들어서 그 묶음 자체를 오른쪽 끝에 붙임(제목은 왼쪽 끝 그대로) */
+    lv_obj_t *overview_header_right = lv_obj_create(overview_header_row);
+    lv_obj_set_size(overview_header_right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_header_right, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_all(overview_header_right, 0, 0);
+    lv_obj_set_style_pad_column(overview_header_right, 8, 0);
+    lv_obj_set_style_border_width(overview_header_right, 0, 0);
+
+    s_stats_scale_dd = lv_dropdown_create(overview_header_right);
     lv_dropdown_set_options(s_stats_scale_dd, ui_str(STR_STATS_SCALE_OPTIONS));
     lv_dropdown_set_selected(s_stats_scale_dd, 0);
     lv_obj_set_style_text_font(s_stats_scale_dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_stats_scale_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_stats_scale_dd, cb_stats_scale_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    /* 2026-09-07(사용자 지시 — "모두 지우기 단추는 오버뷰 제목 줄로 옮겨. 스케일 오른쪽으로")
-     * SPACE_BETWEEN 3번째 자식이라 자동으로 맨 오른쪽에 붙음 */
-    s_stats_delete_btn = lv_button_create(overview_header_row);
+    s_stats_delete_btn = lv_button_create(overview_header_right);
     lv_obj_add_event_cb(s_stats_delete_btn, cb_delete_stats_tap, LV_EVENT_CLICKED, NULL);
     s_stats_delete_lbl = lv_label_create(s_stats_delete_btn);
     lv_label_set_text(s_stats_delete_lbl, ui_str(STR_BTN_DELETE_STATS));
