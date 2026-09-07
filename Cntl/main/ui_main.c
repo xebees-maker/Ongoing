@@ -184,13 +184,16 @@ static lv_obj_t *s_network_find_btn   = NULL;   /* STA모드+미연결일 때만
 static lv_obj_t *s_network_find_lbl   = NULL;
 static void refresh_network_right_zone(void);  /* fwd — refresh_dashboard(위쪽)와 행 생성부(아래쪽) 둘 다에서 씀 */
 
-/* 2026-09-07(사용자 설계 — "탭을 모두 팝업으로 교체... 상황판은 빼고") — 통계/설정/로그
- * 탭을 상주 대신 열 때 생성/닫을 때 파괴하는 전체화면 팝업으로 전환(부팅시 ~50KB 상시
- * 점유 회수 목적). cb_page_control_changed(탭바 클릭 이벤트)가 호출하므로 그보다 앞서
- * fwd 필요 */
-static void open_stats_popup(void);
-static void open_option_popup(void);
-static void open_log_popup(void);
+/* 2026-09-08(사용자 재설계 — "탭을 눌러서 선택할 때 그 탭의 콘텐츠를 생성하고 다른 탭을
+ * 누를 때 그 탭의 콘텐츠를 날리는 거였거든") — 통계/설정/로그는 진짜 탭이고, 선택될 때
+ * 콘텐츠를 짓고 벗어날 때 지움(부팅시 ~50KB 상시 점유 회수 목적, 상황판은 예외로 상주).
+ * cb_page_control_changed(탭바 전환 이벤트)가 호출하므로 그보다 앞서 fwd 필요 */
+static void build_stats_tab(void);
+static void build_option_tab(void);
+static void build_log_tab(void);
+static void teardown_stats_tab(void);
+static void teardown_option_tab(void);
+static void teardown_log_tab(void);
 
 /* 적응형 반응시간 행(2026-08-10) — 마지막 사용자 조작 후 이만큼 조용해야 CAM에 SLEEP_NOW.
  * CAM에는 전송 안 되는 Cntl 내부 판단값이라(esp_now_hub.c 참고), Apply해도 네트워크 왕복이
@@ -298,9 +301,11 @@ static lv_obj_t   *s_power_log_pause_btn = NULL;
 static lv_obj_t   *s_power_log_pause_lbl = NULL;
 static lv_timer_t *s_power_panel_timer   = NULL;  /* 일시멈춤 단추가 pause/resume(2026-08-10) */
 
-/* 2026-09-07 — 로그탭이 상주 탭에서 팝업으로 바뀌면서 추가된 핸들 */
-static lv_obj_t   *s_log_popup       = NULL;
-static lv_obj_t   *s_log_popup_title = NULL;
+/* 2026-09-08 — 로그탭이 팝업에서 진짜 탭전환(선택 시 생성/이탈 시 파괴)으로 재설계됨.
+ * s_log_tab_page는 lv_tabview_add_tab()이 만든 실제 탭 페이지(항상 존재, 내용만 비워짐),
+ * s_log_tab_built는 지금 그 안에 내용이 지어져 있는지 플래그 */
+static lv_obj_t   *s_log_tab_page  = NULL;
+static bool        s_log_tab_built = false;
 static lv_timer_t *s_log_box_timer   = NULL;  /* refresh_log_box, 예전엔 핸들 없이 생성만 하고 버림 */
 static bool        s_power_log_paused    = false;
 
@@ -341,11 +346,11 @@ static lv_obj_t *s_stats_graph_view  = NULL;
 static lv_obj_t *s_stats_delete_btn  = NULL;
 static lv_obj_t *s_stats_delete_lbl  = NULL;
 
-/* 2026-09-07 — 통계탭이 상주 탭에서 팝업으로 바뀌면서 추가된 핸들(팝업 루트/제목/타이머).
- * 팝업이 닫히면 셋 다 NULL로 되돌아감(cb_close_stats_popup 참고) — refresh_lang_texts()가
- * "지금 팝업이 열려있나"를 판단하는 기준으로도 s_stats_popup을 그대로 씀 */
-static lv_obj_t   *s_stats_popup       = NULL;
-static lv_obj_t   *s_stats_popup_title = NULL;
+/* 2026-09-08 — 통계탭: 팝업에서 진짜 탭전환(선택 시 생성/이탈 시 파괴)으로 재설계.
+ * s_stats_tab_page는 lv_tabview_add_tab()의 실제 탭 페이지(항상 존재), s_stats_tab_built는
+ * 지금 내용이 지어져 있는지 — refresh_lang_texts()가 이 플래그로 건드릴지 판단 */
+static lv_obj_t   *s_stats_tab_page  = NULL;
+static bool        s_stats_tab_built = false;
 static lv_timer_t *s_stats_page_timer  = NULL;
 
 /* ds_cycle_count 하나만 비교하면 됨(2026-08-10) — 매 리포트가 항상 새 사이클이라 Light
@@ -367,10 +372,9 @@ static char *s_power_log_buf = NULL;
 static lv_timer_t *s_camera_list_timer = NULL;
 static lv_timer_t *s_sensor_list_timer = NULL;
 
-/* 2026-09-07 — 설정탭이 상주 탭에서 팝업으로 바뀌면서 추가된 핸들. 팝업이 닫히면 NULL로
- * 되돌아감(cb_close_option_popup 참고) */
-static lv_obj_t *s_option_popup       = NULL;
-static lv_obj_t *s_option_popup_title = NULL;
+/* 2026-09-08 — 설정탭: 팝업에서 진짜 탭전환(선택 시 생성/이탈 시 파괴)으로 재설계 */
+static lv_obj_t *s_option_tab_page  = NULL;
+static bool      s_option_tab_built = false;
 static lv_timer_t *s_dashboard_timer   = NULL;
 
 /* 2026-09-07 — s_camera_list_timer/s_sensor_list_timer는 이제 설정탭 팝업이 열려있을
@@ -515,7 +519,7 @@ static void refresh_lang_texts(void)
     lv_tabview_set_tab_text(s_page_control, 2, ui_str(STR_TAB_OPTION));
     lv_tabview_set_tab_text(s_page_control, 3, ui_str(STR_TAB_LOG));
 
-    if (s_option_popup) {
+    if (s_option_tab_built) {
         for (ui_str_id_t id = STR_GROUP_CNTL; id <= STR_GROUP_SYSTEM; id++) {
             lv_label_set_text(s_group_title[id - STR_GROUP_CNTL], ui_str(id));
         }
@@ -544,10 +548,11 @@ static void refresh_lang_texts(void)
     /* 2026-08-08 — 새 라벨은 전부 여기 등록할 것(사용자 지시: "앞으로 모든 label은 그
      * 구조체에 넣어야해" — ui_str_id_t 테이블만으론 부족하고, 이 함수에도 반드시 같이
      * 추가해야 언어전환이 실제로 반영됨).
-     * 2026-09-07(탭→팝업 전환) — 통계/설정/로그 위젯은 이제 그 팝업이 열려있을 때만
-     * 존재함(s_stats_popup/s_option_popup/s_log_popup 참고) — 닫혀있으면 건드리지 않고
-     * 건너뜀(다음에 다시 열릴 때 ui_str()로 새로 지어지므로 언어가 밀릴 일은 없음) */
-    if (s_option_popup) {
+     * 2026-09-08(팝업→진짜 탭전환) — 통계/설정/로그 위젯은 이제 그 탭이 현재 선택돼있을
+     * 때만 존재함(s_stats_tab_built/s_option_tab_built/s_log_tab_built 참고) — 다른 탭에
+     * 가있으면 건드리지 않고 건너뜀(다시 그 탭으로 올 때 ui_str()로 새로 지어지므로 언어가
+     * 밀릴 일은 없음) */
+    if (s_option_tab_built) {
         lv_label_set_text(s_capture_interval_label, ui_str(STR_LABEL_CAPTURE_INTERVAL));
         lv_label_set_text(s_capture_apply_lbl, ui_str(STR_BTN_APPLY));
         lv_label_set_text(s_response_interval_label, ui_str(STR_LABEL_RESPONSE_INTERVAL));
@@ -607,12 +612,12 @@ static void refresh_lang_texts(void)
         lv_dropdown_set_selected(s_adaptive_response_dd, adaptive_sel);
     }
 
-    if (s_log_popup) {
+    if (s_log_tab_built) {
         lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
         lv_label_set_text(s_log_panel_title, ui_str(STR_PANEL_GENERAL_LOG));
     }
 
-    if (s_stats_popup) {
+    if (s_stats_tab_built) {
         lv_label_set_text(s_stats_overview_title, ui_str(STR_PANEL_STATS_OVERVIEW));
         /* 2026-09-07 버그수정(사용자 지적 — "항목/값/시간은 영문으로 안나와") — 이 라벨을
          * 생성부에서 지역변수로만 갖고 있어서 여기서 갱신할 방법이 아예 없었음(전역화 필요) */
@@ -694,47 +699,9 @@ static lv_obj_t *create_modal(void)
     return box;
 }
 
-/* 2026-09-07 — 통계/설정/로그 팝업 전용 배경(create_modal과 같은 이유로 완전 불투명이지만,
- * 420px 고정폭 대화상자가 아니라 화면 전체를 채우는 콘텐츠 컨테이너라 별도 헬퍼로 분리 */
-static lv_obj_t *create_page_popup(void)
-{
-    pause_bg_timers();
-    lv_obj_t *overlay = lv_obj_create(lv_screen_active());
-    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(overlay, 0, 0);
-    lv_obj_set_style_radius(overlay, 0, 0);
-    lv_obj_set_style_pad_all(overlay, 0, 0);
-    lv_obj_set_flex_flow(overlay, LV_FLEX_FLOW_COLUMN);
-    return overlay;
-}
-
-/* 팝업 헤더 공용(제목 좌, 닫기 우) — 심볼폰트 글리프 누락 위험 회피를 위해 network_chevron과
- * 동일하게 순수 ASCII "X" 사용(나눔고딕에 포함된 문자) */
-static lv_obj_t *add_page_popup_header(lv_obj_t *popup, const char *title, lv_event_cb_t close_cb,
-                                       lv_obj_t **title_lbl_out)
-{
-    lv_obj_t *header = lv_obj_create(popup);
-    lv_obj_set_size(header, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(header, 0, 0);
-    lv_obj_set_style_pad_hor(header, 12, 0);
-    lv_obj_set_style_pad_ver(header, 6, 0);
-
-    lv_obj_t *title_lbl = lv_label_create(header);
-    lv_label_set_text(title_lbl, title);
-    lv_obj_set_style_text_font(title_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-    if (title_lbl_out) *title_lbl_out = title_lbl;
-
-    lv_obj_t *close_btn = lv_button_create(header);
-    lv_obj_add_event_cb(close_btn, close_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *close_lbl = lv_label_create(close_btn);
-    lv_label_set_text(close_lbl, "X");
-    lv_obj_set_style_text_font(close_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    return header;
-}
+/* 2026-09-08 — create_page_popup()/add_page_popup_header()는 탭→팝업 전환 때 추가됐다가
+ * 진짜 탭전환(build_*_tab/teardown_*_tab)으로 재설계되면서 더 이상 안 씀(탭바 자체가
+ * 진입/이탈 UI를 제공하므로 별도 오버레이/닫기버튼이 불필요) — 삭제됨 */
 
 static lv_obj_t *add_modal_button(lv_obj_t *btn_row, ui_str_id_t text_id, lv_event_cb_t cb, void *user_data)
 {
@@ -4399,21 +4366,31 @@ bool ui_main_inject_photo_select(uint32_t file_id)
  * 탭바 클릭으로 인덱스가 바뀌어도 즉시 0(상황판)으로 되돌리고 대신 팝업을 염. 같은 이벤트
  * 사이클 안에서 set_active(0)을 호출해 시각적 깜빡임 없이 처리됨(LVGL이 다음 프레임에
  * 한번에 그림) */
+/* 2026-09-08(사용자 재설계) — 진짜 탭전환: 떠나는 탭의 콘텐츠는 지우고(teardown_*_tab),
+ * 들어가는 탭의 콘텐츠를 그 자리에 지음(build_*_tab). 상황판(인덱스 0)은 항상 상주라
+ * 대상에서 제외 */
 static void cb_page_control_changed(lv_event_t *e)
 {
     (void)e;
     static size_t s_prev_free = 0;
+    static uint32_t s_prev_idx = 0;
     size_t now = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGW(TAG, "MEMDIAG 탭전환: internal=%u (직전 대비 %d)",
              (unsigned)now, s_prev_free ? (int)s_prev_free - (int)now : 0);
     s_prev_free = now;
 
     uint32_t idx = lv_tabview_get_tab_active(s_page_control);
-    if (idx == 0) return;
-    lv_tabview_set_active(s_page_control, 0, LV_ANIM_OFF);
-    if (idx == 1) open_stats_popup();
-    else if (idx == 2) open_option_popup();
-    else if (idx == 3) open_log_popup();
+    if (idx == s_prev_idx) return;
+
+    if (s_prev_idx == 1) teardown_stats_tab();
+    else if (s_prev_idx == 2) teardown_option_tab();
+    else if (s_prev_idx == 3) teardown_log_tab();
+
+    if (idx == 1) build_stats_tab();
+    else if (idx == 2) build_option_tab();
+    else if (idx == 3) build_log_tab();
+
+    s_prev_idx = idx;
 }
 
 void ui_init(void)
@@ -4722,22 +4699,21 @@ void ui_init(void)
 
     s_dashboard_timer = lv_timer_create(refresh_dashboard, 1000, NULL);
 
-    /* 2026-09-07(탭→팝업 전환 — 사용자 지적: "탭이 없어 상황판 하나만 있어") — 통계/설정/
-     * 로그의 실제 내용은 이제 open_*_popup()이 열 때마다 짓지만, 탭바 자체(버튼 4개)는
-     * lv_tabview에 탭이 실제로 등록돼있어야 존재함 — 내용 없는 빈 플레이스홀더 탭 3개를
-     * 등록만 해둠(cb_page_control_changed가 이 인덱스로 전환되는 즉시 0번으로 되돌리고
-     * 대신 팝업을 열므로, 이 빈 페이지들은 실제로 화면에 그려질 일이 없음) */
-    lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_STATISTICS));
-    lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_OPTION));
-    lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_LOG));
+    /* 2026-09-08(팝업→진짜 탭전환 재설계 — 사용자 지시: "탭을 눌러서 선택할 때 그 탭의
+     * 콘텐츠를 생성하고 다른 탭을 누를 때 그 탭의 콘텐츠를 날리는 거였거든") — 통계/설정/
+     * 로그는 진짜 탭으로 등록해두되 내용은 비워둠(build_stats_tab() 등이 탭 전환 시점에
+     * 이 페이지 안에 직접 지음/지움). 상황판만 예외로 항상 상주 */
+    s_stats_tab_page  = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_STATISTICS));
+    s_option_tab_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_OPTION));
+    s_log_tab_page    = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_LOG));
 
     /* 버튼 폭 통일(2026-08-09, 사용자 지시) — 지금까지 만든 메인 화면(상황판) 버튼들의 실측
      * 자연폭 중 최댓값을 기준폭으로 잡아 적용. 팝업 버튼(add_modal_button)은 s_action_btn_width가
      * 여기서 설정된 뒤부터 뜨므로 자동으로 같은 폭을 받음. 사진목록의 del_btn(휴지통 아이콘,
      * 반복되는 작은 버튼)은 성격이 달라 제외.
-     * 2026-09-07(탭→팝업 전환) — 설정탭(재시작/각 Apply/시각설정) 버튼들은 이제 부팅 시점에
-     * 존재하지 않아(팝업이 열려야 생김) 이 배열에서 뺐음 — 그 버튼들은 open_option_popup()
-     * 안에서 이미 정해진 s_action_btn_width를 그대로 적용만 함(재계산 없음) */
+     * 2026-09-08(탭→진짜 탭전환) — 설정탭(재시작/각 Apply/시각설정) 버튼들은 이제 부팅
+     * 시점에 존재하지 않아(그 탭이 선택돼야 생김) 이 배열에서 뺐음 — 그 버튼들은
+     * build_option_tab() 안에서 이미 정해진 s_action_btn_width를 그대로 적용만 함(재계산 없음) */
     lv_obj_t *action_buttons[] = { btn_capture, s_camera_renew_btn, btn_delete_all };
     lv_obj_update_layout(lv_screen_active());
     for (size_t i = 0; i < sizeof(action_buttons) / sizeof(action_buttons[0]); i++) {
@@ -4756,21 +4732,19 @@ void ui_init(void)
     esp_now_hub_set_connect_event_cb(on_connect_result_event);
 }
 
-/* 2026-09-07 — 통계 팝업 닫기: 타이머 삭제 + 팝업 삭제 + 이 팝업 안에서 만들어졌던 모든
- * 위젯 핸들을 NULL로 되돌림(refresh_lang_texts 등 외부에서 이 핸들을 계속 참조하므로
- * 댕글링 포인터 방지가 필수) */
-static void cb_close_stats_popup(lv_event_t *e)
+/* 2026-09-08 — 통계탭 이탈: 타이머 삭제 + 자식 위젯 전부 삭제(lv_obj_clean, 탭 페이지
+ * 자체는 남겨둠 — lv_tabview가 관리하는 실제 탭이라 다음 전환 때 또 씀) + 이 안에서
+ * 만들어졌던 위젯 핸들을 NULL로 되돌림(refresh_lang_texts 등 외부 참조 댕글링 방지) */
+static void teardown_stats_tab(void)
 {
-    (void)e;
     size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     if (s_stats_page_timer) { lv_timer_delete(s_stats_page_timer); s_stats_page_timer = NULL; }
-    lv_obj_delete(s_stats_popup);
-    s_stats_popup = NULL;
+    lv_obj_clean(s_stats_tab_page);
+    s_stats_tab_built = false;
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 통계팝업 닫기: internal %u -> %u (회수 %d bytes)",
+    ESP_LOGW(TAG, "MEMDIAG 통계탭 이탈: internal %u -> %u (회수 %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
-    s_stats_popup_title = NULL;
     s_stats_overview_title = NULL;
     s_stats_scale_dd = NULL;
     s_overview_temp_label = NULL;
@@ -4793,23 +4767,22 @@ static void cb_close_stats_popup(lv_event_t *e)
     s_stats_jump_next_btn = NULL;
     s_stats_jump_next_lbl = NULL;
     s_stats_table = NULL;
-    resume_bg_timers();
 }
 
-/* 2026-09-07(사용자 설계 — "탭을 모두 팝업으로 교체") — 구 stats_page 상주 탭 내용을 그대로
- * 옮김(로직 무변경), 부모만 lv_tabview_add_tab() 반환값 대신 create_page_popup() 전체화면
- * 오버레이로 교체 */
-static void open_stats_popup(void)
+/* 2026-09-08(사용자 재설계 — "탭을 눌러서 선택할 때 그 탭의 콘텐츠를 생성하고 다른 탭을
+ * 누를 때 그 탭의 콘텐츠를 날리는 거였거든") — s_stats_tab_page(부팅 시 lv_tabview_add_tab로
+ * 이미 만들어진 빈 탭) 안에 내용을 지음. 로직 자체(위젯 구성)는 팝업 버전과 동일 */
+static void build_stats_tab(void)
 {
-    if (s_stats_popup) return;  /* 이미 열려있음 */
+    if (s_stats_tab_built) return;  /* 이미 지어짐 */
+    s_stats_tab_built = true;
 
-    lv_obj_t *stats_page = create_page_popup();
-    s_stats_popup = stats_page;
-    add_page_popup_header(stats_page, ui_str(STR_TAB_STATISTICS), cb_close_stats_popup, &s_stats_popup_title);
+    lv_obj_t *stats_page = s_stats_tab_page;
     lv_obj_set_style_pad_hor(stats_page, 4, 0);
     lv_obj_set_style_pad_bottom(stats_page, 4, 0);
     lv_obj_set_style_pad_row(stats_page, 4, 0);
     lv_obj_set_style_bg_color(stats_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    lv_obj_set_style_bg_opa(stats_page, LV_OPA_COVER, 0);
 
     /* 2026-09-07(임시 진단 — 사용자 지시: "통계탭에서 소모되는 메모리들을 측정해") — 어젯밤
      * 부팅단계별 프로파일링과 동일 기법, 이번엔 통계탭 위젯 생성 구간만 잘라서 측정 */
@@ -5024,12 +4997,12 @@ static void open_stats_popup(void)
              (int)heap_before_stats_tab - (int)heap_after_stats_tab);
 }
 
-/* 2026-09-07 — 설정 팝업 닫기: 타이머들 삭제 + 팝업 삭제 + 모든 위젯 핸들 NULL. 설정탭엔
- * 카메라/센서 연결목록의 캐시(행 개수/오브젝트배열)도 있어서 그것도 같이 리셋 —
- * 안 그러면 웹 인젝션(find_camera_row_by_mac 등)이 이미 지워진 행을 계속 가리킬 수 있음 */
-static void cb_close_option_popup(lv_event_t *e)
+/* 2026-09-08 — 설정탭 이탈: 타이머들 삭제 + 자식 위젯 전부 삭제(lv_obj_clean, 탭 페이지는
+ * 남겨둠) + 모든 위젯 핸들 NULL. 설정탭엔 카메라/센서 연결목록의 캐시(행 개수/오브젝트배열)도
+ * 있어서 그것도 같이 리셋 — 안 그러면 웹 인젝션(find_camera_row_by_mac 등)이 이미 지워진
+ * 행을 계속 가리킬 수 있음 */
+static void teardown_option_tab(void)
 {
-    (void)e;
     size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     if (s_camera_list_timer) { lv_timer_delete(s_camera_list_timer); s_camera_list_timer = NULL; }
     if (s_sensor_list_timer) { lv_timer_delete(s_sensor_list_timer); s_sensor_list_timer = NULL; }
@@ -5037,11 +5010,10 @@ static void cb_close_option_popup(lv_event_t *e)
     s_sensor_row_count = 0;
     s_camera_count_prev = -1;
     s_sensor_count_prev = -1;
-    lv_obj_delete(s_option_popup);
-    s_option_popup = NULL;
-    s_option_popup_title = NULL;
+    lv_obj_clean(s_option_tab_page);
+    s_option_tab_built = false;
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 설정팝업 닫기: internal %u -> %u (회수 %d bytes)",
+    ESP_LOGW(TAG, "MEMDIAG 설정탭 이탈: internal %u -> %u (회수 %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
     memset(s_group_title, 0, sizeof(s_group_title));  /* 제어기/측정기/영상/시스템 그룹박스 제목 4개 */
@@ -5086,21 +5058,19 @@ static void cb_close_option_popup(lv_event_t *e)
     s_sens_measure_dd = NULL;
     s_sens_measure_apply_btn = NULL;
     s_sens_measure_apply_lbl = NULL;
-    resume_bg_timers();
 }
 
-/* 2026-09-07(사용자 설계) — 구 option_page 상주 탭 내용을 그대로 옮김(로직 무변경), 부모만
- * create_page_popup() 전체화면 오버레이로 교체 */
-static void open_option_popup(void)
+/* 2026-09-08(사용자 재설계) — s_option_tab_page(부팅 시 이미 만들어진 빈 탭) 안에 내용을
+ * 지음. 위젯 구성 로직은 팝업 버전과 동일 */
+static void build_option_tab(void)
 {
-    if (s_option_popup) return;
+    if (s_option_tab_built) return;
+    s_option_tab_built = true;
 
     /* 2026-09-07(임시 진단 — 사용자 지시: "메모리가 더 줄어든 것 같아") — 통계탭과 동일 기법,
      * 설정탭(카메라/센서/시스템 그룹박스 전체) 위젯 생성 구간만 잘라서 측정 */
     size_t heap_before_option_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    lv_obj_t *option_page = create_page_popup();
-    s_option_popup = option_page;
-    add_page_popup_header(option_page, ui_str(STR_TAB_OPTION), cb_close_option_popup, &s_option_popup_title);
+    lv_obj_t *option_page = s_option_tab_page;
     lv_obj_set_style_pad_hor(option_page, 5, 0);
     /* dashboard_page와 같은 이유로 절반(10px) 축소(2026-08-09) — 그룹박스-화면 가장자리
      * 간격 + 그룹박스 사이 세로 간격 */
@@ -5554,18 +5524,16 @@ static void open_option_popup(void)
              (int)heap_before_option_tab - (int)heap_after_option_tab);
 }
 
-/* 2026-09-07 — 로그 팝업 닫기 */
-static void cb_close_log_popup(lv_event_t *e)
+/* 2026-09-08 — 로그탭 이탈: 타이머 삭제 + 자식 위젯 전부 삭제(탭 페이지는 남겨둠) */
+static void teardown_log_tab(void)
 {
-    (void)e;
     size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     if (s_power_panel_timer) { lv_timer_delete(s_power_panel_timer); s_power_panel_timer = NULL; }
     if (s_log_box_timer) { lv_timer_delete(s_log_box_timer); s_log_box_timer = NULL; }
-    lv_obj_delete(s_log_popup);
-    s_log_popup = NULL;
-    s_log_popup_title = NULL;
+    lv_obj_clean(s_log_tab_page);
+    s_log_tab_built = false;
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 로그팝업 닫기: internal %u -> %u (회수 %d bytes)",
+    ESP_LOGW(TAG, "MEMDIAG 로그탭 이탈: internal %u -> %u (회수 %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
     s_log_panel_title = NULL;
@@ -5576,28 +5544,25 @@ static void cb_close_log_popup(lv_event_t *e)
     s_power_log_pause_lbl = NULL;
     s_power_list = NULL;
     s_power_log_label = NULL;
-    resume_bg_timers();
 }
 
-/* 2026-09-07(사용자 설계) — 구 log_page 상주 탭 내용을 그대로 옮김(로직 무변경) */
-static void open_log_popup(void)
+/* 2026-09-08(사용자 재설계) — s_log_tab_page(부팅 시 이미 만들어진 빈 탭) 안에 내용을 지음 */
+static void build_log_tab(void)
 {
-    if (s_log_popup) return;
+    if (s_log_tab_built) return;
+    s_log_tab_built = true;
 
     size_t heap_before_log_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
     /* 2026-09-06(사용자 지시) — 4번째 "로그" 탭. 기존 통계탭에 있던 일반로그+전력로그
      * 판넬을 그대로 옮김(위젯 생성 코드 자체는 무변경, stats_page->log_page로 부모만
-     * 교체) — 통계탭은 이제 실제 시계열 통계/그래프 전용으로 비움(위 참고).
-     * 2026-09-07(탭→팝업 전환) — 부모가 다시 한 번 바뀜: lv_tabview_add_tab() 대신
-     * create_page_popup() */
-    lv_obj_t *log_page = create_page_popup();
-    s_log_popup = log_page;
-    add_page_popup_header(log_page, ui_str(STR_TAB_LOG), cb_close_log_popup, &s_log_popup_title);
+     * 교체) — 통계탭은 이제 실제 시계열 통계/그래프 전용으로 비움(위 참고) */
+    lv_obj_t *log_page = s_log_tab_page;
     lv_obj_set_style_pad_hor(log_page, 4, 0);
     lv_obj_set_style_pad_bottom(log_page, 4, 0);
     lv_obj_set_style_pad_row(log_page, 4, 0);
     lv_obj_set_style_bg_color(log_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    lv_obj_set_style_bg_opa(log_page, LV_OPA_COVER, 0);
 
     /* 2026-08-11, 사용자 지시 — 일반로그/전력로그 위아래 순서 맞바꿈(일반로그가 위, 전력로그가
      * 아래). 두 블록 내용 자체는 그대로, log_page에 자식으로 추가되는 순서만 바뀜(LVGL
