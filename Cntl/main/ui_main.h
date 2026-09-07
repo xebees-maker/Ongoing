@@ -27,6 +27,8 @@ bool ui_main_inject_disconnect(const uint8_t *mac);
 bool ui_main_inject_connect_sensor(const uint8_t *mac);
 /* 응답성(response_interval) 드롭다운+Apply 합성 — sec는 0/3/10/30/60만 유효 */
 bool ui_main_inject_set_response_interval(uint32_t sec);
+/* 통계 전체 삭제 버튼+확인팝업 합성(2026-09-07, 어젯밤 쌓인 이산화탄소 0 레코드 정리용) */
+bool ui_main_inject_delete_stats(void);
 /* 성공 시 out_ok=true + 새로 생긴 세대번호 반환(main.c가 esp_now_photo_list_wait_result()에
  * 그대로 넘기면 됨) */
 uint32_t ui_main_inject_list_refresh(bool *out_ok);

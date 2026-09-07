@@ -4187,6 +4187,24 @@ bool ui_main_inject_disconnect(const uint8_t *mac)
     return run_on_lvgl_task(inject_fn_disconnect, mac_copy, 1000);
 }
 
+/* 2026-09-07(사용자 지시 — 어젯밤 이미 쌓인 이산화탄소 0 레코드 정리용) — 삭제 버튼+확인
+ * 팝업 둘 다 탭 합성, 다른 확인팝업류(unpair 등)와 동일 패턴 */
+static bool inject_fn_delete_stats(void *arg)
+{
+    (void)arg;
+    if (!s_stats_delete_btn) return false;
+    lv_obj_send_event(s_stats_delete_btn, LV_EVENT_CLICKED, NULL);  /* -> cb_delete_stats_tap -> show_confirm_popup */
+    lv_obj_t *confirm = find_widget_by_event_cb(s_last_modal, cb_confirm_yes_trampoline);
+    if (!confirm) return false;
+    lv_obj_send_event(confirm, LV_EVENT_CLICKED, NULL);  /* -> cb_confirm_yes_trampoline -> cb_delete_stats_confirmed */
+    return true;
+}
+
+bool ui_main_inject_delete_stats(void)
+{
+    return run_on_lvgl_task(inject_fn_delete_stats, NULL, 1000);
+}
+
 static bool inject_fn_list_refresh(void *arg)
 {
     (void)arg;

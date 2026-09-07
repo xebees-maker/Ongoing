@@ -234,6 +234,18 @@ static esp_err_t api_set_response_interval_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, body, len);
 }
 
+/* 2026-09-07(사용자 지시 — 어젯밤 쌓인 이산화탄소 0 레코드 정리용) — 통계 전체 삭제
+ * 버튼+확인팝업 합성. 되돌릴 수 없는 동작이라 이 엔드포인트도 실제 온디바이스 탭과
+ * 동일 경로(버튼->확인팝업->Yes)를 그대로 탐 */
+static esp_err_t api_delete_stats_get_handler(httpd_req_t *req)
+{
+    bool ok = ui_main_inject_delete_stats();
+    char body[64];
+    int len = snprintf(body, sizeof(body), "{\"ok\":%s}", ok ? "true" : "false");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    return httpd_resp_send(req, body, len);
+}
+
 static esp_err_t api_disconnect_get_handler(httpd_req_t *req)
 {
     char query[32] = { 0 };
@@ -575,6 +587,9 @@ void web_dashboard_start(void)
                                                                   .method = HTTP_GET,
                                                                   .handler = api_set_response_interval_get_handler };
     httpd_register_uri_handler(server, &api_set_response_interval_uri);
+    static const httpd_uri_t api_delete_stats_uri = { .uri = "/api/delete_stats", .method = HTTP_GET,
+                                                        .handler = api_delete_stats_get_handler };
+    httpd_register_uri_handler(server, &api_delete_stats_uri);
     static const httpd_uri_t api_photos_uri = { .uri = "/api/photos", .method = HTTP_GET,
                                                   .handler = api_photos_get_handler };
     httpd_register_uri_handler(server, &api_photos_uri);
