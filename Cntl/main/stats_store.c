@@ -11,15 +11,23 @@
 #include "sd_storage.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "stats_store";
 #define STATS_FILE_PATH SD_STORAGE_MOUNT_POINT "/stats/values.bin"
 
+/* 2026-09-07(임시 진단 — 사용자 지시: "메모리 누수... 이유를 찾아야겠어") — 내부RAM이
+ * 측정 성공 사이클마다 서서히 준다는 관찰을 이 함수(SD fopen/fwrite/fclose 반복)로 좁혀서
+ * 실측 검증. 원인 확정되면 이 로그는 제거 예정 */
+static size_t s_stats_append_call_count = 0;
+
 void stats_store_append(const uint8_t mac[6], uint8_t chan_type, uint8_t chan_index,
                          uint32_t unix_time, float value)
 {
+    size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
     FILE *f = fopen(STATS_FILE_PATH, "ab");
     if (!f) {
         ESP_LOGW(TAG, "값 파일 열기 실패(append) — SD 미마운트 등으로 추정, 이번 값은 유실");
@@ -34,6 +42,12 @@ void stats_store_append(const uint8_t mac[6], uint8_t chan_type, uint8_t chan_in
     memcpy(rec.mac, mac, 6);
     fwrite(&rec, sizeof(rec), 1, f);
     fclose(f);
+
+    s_stats_append_call_count++;
+    size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG, "MEMDIAG stats_store_append #%u: internal free %u -> %u (delta=%d)",
+             (unsigned)s_stats_append_call_count, (unsigned)before, (unsigned)after,
+             (int)before - (int)after);
 }
 
 uint32_t stats_store_get_count(void)

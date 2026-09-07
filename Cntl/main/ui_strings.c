@@ -187,7 +187,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_CHAN_UNIT_TEMP_C]            = { "\xC2\xB0""C",                "\xC2\xB0""C" },
     [STR_CHAN_LABEL_HUMI_PCT]         = { "습도",                       "Humidity" },
     [STR_CHAN_UNIT_HUMI_PCT]          = { "%",                          "%" },
-    [STR_CHAN_LABEL_CO2_PPM]          = { "이산화탄소(CO2)",             "CO2" },
+    [STR_CHAN_LABEL_CO2_PPM]          = { "이산화탄소",                  "CO2" },
     [STR_CHAN_UNIT_CO2_PPM]           = { "ppm",                        "ppm" },
     /* 2026-09-05 — %f 안 씀(newlib-nano+LVGL 둘 다 float printf 미지원 전례,
      * format_battery_display()와 동일 회피 — feedback_lvgl_no_percent_f 메모리 참고).
@@ -213,7 +213,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     /* 2026-09-07(통계탭 레이아웃 재설계, 사용자 설계) */
     /* 2026-09-07 재수정 — X/N/A를 매 줄마다 반복하면 이산화탄소처럼 긴 값이 줄바꿈되던 문제가
      * 있어서(사용자 실기 확인: "흰색 밑줄"), 범례를 제목 옆에 한 번만 두고 각 줄은 숫자만 */
-    [STR_PANEL_STATS_OVERVIEW]        = { "개괄 (최대/최소/평균)",       "Overview (Max/Min/Avg)" },
+    [STR_PANEL_STATS_OVERVIEW]        = { "개괄 (최대 / 최소 / 평균)",   "Overview (Max / Min / Avg)" },
     [STR_STATS_SCALE_OPTIONS]         = { "1시간\n12시간\n1일\n3일\n1주",
                                            "1h\n12h\n1d\n3d\n1w" },
     [STR_STATS_OVERVIEW_ROW_FMT]      = { "%s[%s]: %d.%02d / %d.%02d / %d.%02d",
@@ -221,7 +221,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_STATS_OVERVIEW_NO_DATA]      = { "데이터 없음",                "No data" },
     [STR_BTN_JUMP_PREV10]             = { "이전10",                    "Prev10" },
     [STR_BTN_JUMP_NEXT10]             = { "다음10",                    "Next10" },
-    [STR_BTN_DELETE_STATS]            = { "통계 전체 삭제",             "Delete all stats" },
+    [STR_BTN_DELETE_STATS]            = { "전체 삭제",                   "Delete All" },
     [STR_CONFIRM_DELETE_STATS]        = { "저장된 통계값을 전부 삭제할까요?\n되돌릴 수 없습니다.",
                                            "Delete all saved statistics?\nThis cannot be undone." },
     [STR_LABEL_GRAPH_PLACEHOLDER]     = { "그래프 (준비 중)",           "Graph (coming soon)" },

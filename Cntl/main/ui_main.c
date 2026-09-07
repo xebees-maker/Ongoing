@@ -296,6 +296,7 @@ static bool        s_power_log_paused    = false;
  * peak_title/prev_lbl/next_lbl은 정적 제목이라 refresh_lang_texts에서 갱신 —
  * peak_label/table/page_label 내용은 refresh_stats_page() 타이머가 매번 새로 채움 */
 static lv_obj_t *s_stats_table       = NULL;
+static lv_obj_t *s_stats_table_header_lbl = NULL;  /* 2026-09-07 버그수정 — refresh_lang_texts에서 갱신하려면 전역이어야 함 */
 static lv_obj_t *s_stats_page_label  = NULL;
 static lv_obj_t *s_stats_prev_btn    = NULL;
 static lv_obj_t *s_stats_prev_lbl    = NULL;
@@ -379,7 +380,7 @@ static void show_toast(const char *msg, lv_color_t bg_color)
     lv_obj_set_size(s_toast, LV_PCT(85), LV_SIZE_CONTENT);
     lv_obj_align(s_toast, LV_ALIGN_TOP_MID, 0, 85);  /* tab bar(75px) 바로 아래 */
     lv_obj_set_style_bg_color(s_toast, bg_color, 0);
-    lv_obj_set_style_bg_opa(s_toast, LV_OPA_90, 0);
+    lv_obj_set_style_bg_opa(s_toast, LV_OPA_COVER, 0);  /* 2026-09-07(사용자 지시) — 모든 팝업류 완전 불투명 */
     lv_obj_set_style_pad_all(s_toast, 10, 0);
 
     lv_obj_t *lbl = lv_label_create(s_toast);
@@ -530,6 +531,12 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
     lv_label_set_text(s_log_panel_title, ui_str(STR_PANEL_GENERAL_LOG));
     lv_label_set_text(s_stats_overview_title, ui_str(STR_PANEL_STATS_OVERVIEW));
+    /* 2026-09-07 버그수정(사용자 지적 — "항목/값/시간은 영문으로 안나와") — 이 라벨을
+     * 생성부에서 지역변수로만 갖고 있어서 여기서 갱신할 방법이 아예 없었음(전역화 필요) */
+    if (s_stats_table_header_lbl) {
+        lv_label_set_text_fmt(s_stats_table_header_lbl, "%s / %s / %s", ui_str(STR_STATS_TABLE_HEADER_ITEM),
+                               ui_str(STR_STATS_TABLE_HEADER_VALUE), ui_str(STR_STATS_TABLE_HEADER_TIME));
+    }
     lv_label_set_text(s_stats_prev_lbl, ui_str(STR_BTN_PREV_PAGE));
     lv_label_set_text(s_stats_next_lbl, ui_str(STR_BTN_NEXT_PAGE));
     lv_label_set_text(s_stats_jump_prev_lbl, ui_str(STR_BTN_JUMP_PREV10));
@@ -630,7 +637,12 @@ static lv_obj_t *create_modal(void)
     lv_obj_t *overlay = lv_obj_create(lv_screen_active());
     lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(overlay, LV_OPA_50, 0);
+    /* 2026-09-07(사용자 지시 — malloc 멈춤 근본원인) — 반투명(LV_OPA_50)이면 뒤 화면과
+     * 알파블렌딩해야 해서 LVGL이 별도 합성 레이어버퍼를 malloc해야 함(lv_draw_layer_alloc_buf).
+     * 내부RAM이 빠듯한 지금 상태에서 이 malloc이 heap을 뒤지느라 몇 초씩 멈추는 원인이었음
+     * (찾기 팝업, 페어링 확인팝업 둘 다 이걸로 멈췄음) — 완전 불투명이면 이 레이어버퍼
+     * 자체가 필요 없어짐 */
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(overlay, 0, 0);
     lv_obj_set_style_radius(overlay, 0, 0);
 
@@ -2516,11 +2528,21 @@ static void refresh_stats_table(void)
     else          lv_obj_add_state(s_stats_jump_next_btn, LV_STATE_DISABLED);
 }
 
+/* 2026-09-07(임시 진단 — 사용자 지시: "지속적으로 감소하는 메모리 소모 위치를 파악해") —
+ * 이 타이머는 2초마다 연결여부 무관하게 항상 도는데(개괄판넬 4채널 조회+테이블 페이지
+ * 조회, 전부 SD fopen/fread/fclose), "연결도 없는데 감소한다"는 관찰과 정확히 맞아떨어져서
+ * 유력 후보로 봄 — 이 한 사이클 전체의 내부RAM 비용을 통째로 재서 확인 */
 static void refresh_stats_page(lv_timer_t *t)
 {
     (void)t;
+    size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     refresh_stats_overview_panel();
     refresh_stats_table();
+    size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    if (before != after) {
+        ESP_LOGW(TAG, "MEMDIAG refresh_stats_page: internal %u -> %u (delta=%d)",
+                 (unsigned)before, (unsigned)after, (int)before - (int)after);
+    }
 }
 
 static void stats_prev_page_cb(lv_event_t *e)
@@ -2686,9 +2708,17 @@ static void refresh_dashboard(lv_timer_t *t)
 
     /* 2026-08-21 — 요약 둘째줄, 내부/PSRAM 여유메모리 상시 표시(사용자 지시) */
     char mem_i[16], mem_p[16];
-    format_bytes_human((uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL), mem_i, sizeof(mem_i));
+    uint32_t free_internal_now = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    format_bytes_human(free_internal_now, mem_i, sizeof(mem_i));
     format_bytes_human((uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), mem_p, sizeof(mem_p));
     lv_label_set_text_fmt(s_mem_status_label, "%s : I = %s / P = %s", ui_str(STR_LABEL_MEMORY), mem_i, mem_p);
+    /* 2026-09-07(임시 진단 — 내부RAM 서서히 감소 원인 추적) — 10초마다(이 틱이 1초 주기라
+     * 10번째마다) 전체 추이를 로그로 남김. stats_store_append() 안쪽 진단과 대조용 */
+    static int s_mem_log_tick = 0;
+    if (++s_mem_log_tick >= 10) {
+        s_mem_log_tick = 0;
+        ESP_LOGW(TAG, "MEMDIAG periodic internal free=%u", (unsigned)free_internal_now);
+    }
 
     if (!s_dash_nodes || !s_dash_nodes_prev) return;  /* PSRAM 할당 실패 시(극히 드묾) */
 
@@ -3071,7 +3101,12 @@ static void refresh_power_panel(lv_timer_t *t)
         }
         lv_obj_scroll_to_y(s_power_list, LV_COORD_MAX, LV_ANIM_OFF);
     } else if (count == 0 && s_power_log_buf[0] == '\0') {
-        lv_label_set_text(s_power_log_label, ui_str(STR_PANEL_NO_CAMERA));
+        /* 2026-09-07 버그수정(사용자 지적) — 이 라벨(s_power_log_label)은 성능 때문에
+         * 나눔고딕 TTF가 아니라 lv_font_montserrat_18(한글 글리프 없음)을 씀 — 로그 자체가
+         * 원래 항상 영문(feedback_cntl_stats_tab_log_perf 참고)인데 여기만 ui_str()로
+         * 한국어 문구를 시도해서 한글모드에서 네모박스로 깨졌었음. 이 판넬 한정으로는
+         * 언어 무관 항상 영문 고정이 맞음 */
+        lv_label_set_text(s_power_log_label, "No camera device");
     }
 }
 
@@ -3095,6 +3130,22 @@ static lv_obj_t *create_group_box(lv_obj_t *parent, ui_str_id_t title_id)
     s_group_title[title_id - STR_GROUP_CNTL] = title;
 
     return box;
+}
+
+/* 2026-09-07(사용자 지시 — "레이블-값/드랍다운-버튼 형태를 레이블-공백-우정렬 값/드랍다운
+ * 버튼 형식으로 통일") — SPACE_BETWEEN에 자식 3개(라벨/드롭다운/버튼)를 그대로 두면
+ * 드롭다운이 가운데 애매한 자리에 뜸(개괄 판넬 헤더에서 먼저 발견된 문제와 동일). 드롭다운
+ * (or 값 라벨)+버튼을 하나의 우측 묶음으로 만들어 라벨-공백-묶음 2분할이 되게 함 */
+static lv_obj_t *create_row_right_cluster(lv_obj_t *row)
+{
+    lv_obj_t *cluster = lv_obj_create(row);
+    lv_obj_set_size(cluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(cluster, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(cluster, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(cluster, 0, 0);
+    lv_obj_set_style_pad_column(cluster, 8, 0);
+    lv_obj_set_style_border_width(cluster, 0, 0);
+    return cluster;
 }
 
 static void refresh_clock(lv_timer_t *t)
@@ -3200,6 +3251,9 @@ static lv_obj_t *add_settime_dropdown(lv_obj_t *row, int start, int count, const
     lv_obj_set_width(dd, width);
     lv_obj_set_style_text_font(dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 2026-09-07(사용자 지시 — "위아래 패딩을 반으로") — 기본테마 pad_small(14px 상하좌우)
+     * 중 상하만 절반(7px)으로, 좌우는 그대로 */
+    lv_obj_set_style_pad_ver(dd, 7, 0);
     return dd;
 }
 
@@ -4100,6 +4154,12 @@ static lv_obj_t *find_camera_row_by_mac(const uint8_t *mac)
 static bool inject_fn_connect(void *arg)
 {
     const uint8_t *mac = (const uint8_t *)arg;
+    /* 2026-09-07 버그수정(사용자 지적 — "앞으로 테스트 때도 문제가 될 것 같아서") — 이미
+     * 연결된 상태에서 행을 탭하면 cb_camera_item_clicked()가 연결이 아니라 연결해제
+     * 확인팝업을 띄움. 이 함수는 pair_confirm 버튼만 찾으므로 그 경우 못 찾고 false를
+     * 반환하면서 연결해제 팝업만 화면에 덩그러니 남는 사고가 났음 — 이미 연결됐으면
+     * 애초에 아무것도 안 건드리고 바로 성공 처리 */
+    if (esp_now_hub_get_conn_state(mac) != HUB_CONN_STATE_WAITING) return true;
     lv_obj_t *row = find_camera_row_by_mac(mac);
     if (!row) return false;  /* 지금 목록에 없음 */
     lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_camera_item_clicked -> show_pair_confirm_popup */
@@ -4131,6 +4191,9 @@ static lv_obj_t *find_sensor_row_by_mac(const uint8_t *mac)
 static bool inject_fn_connect_sensor(void *arg)
 {
     const uint8_t *mac = (const uint8_t *)arg;
+    /* 2026-09-07 버그수정 — inject_fn_connect()와 동일 이유(사용자 지적: "앞으로 테스트
+     * 때도 문제가 될 것 같아서") — 이미 연결됐으면 연결해제 확인팝업이 뜨는 걸 막음 */
+    if (esp_now_hub_get_conn_state(mac) != HUB_CONN_STATE_WAITING) return true;
     lv_obj_t *row = find_sensor_row_by_mac(mac);
     if (!row) return false;
     lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_sensor_item_clicked -> show_pair_confirm_popup */
@@ -4247,6 +4310,19 @@ bool ui_main_inject_photo_select(uint32_t file_id)
     return run_on_lvgl_task(inject_fn_photo_select, (void *)(uintptr_t)file_id, 1000);
 }
 
+/* 2026-09-07(임시 진단 — 사용자 실측 리포트: "탭 선택 몇 번 하고 나면 3K가 줄어드는데") —
+ * 탭 전환 자체는 지금 LVGL 콘텐츠 스크롤일 뿐 새 위젯 할당 이유가 없어야 하는데, 실측으로
+ * 반복 드랍이 확인돼서 전환마다 직접 찍어봄 */
+static void cb_page_control_changed(lv_event_t *e)
+{
+    (void)e;
+    static size_t s_prev_free = 0;
+    size_t now = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG, "MEMDIAG 탭전환: internal=%u (직전 대비 %d)",
+             (unsigned)now, s_prev_free ? (int)s_prev_free - (int)now : 0);
+    s_prev_free = now;
+}
+
 void ui_init(void)
 {
     lv_demo_widgets_components_init();  /* profile/analytics가 쓰는 공용 스타일/폰트 초기화 */
@@ -4293,6 +4369,7 @@ void ui_init(void)
      * 탭 전환은 탭 바 버튼으로만, 스와이프로는 안 바뀌게 함(탭 콘텐츠 컨테이너의 스크롤을
      * 끄면 스와이프-스냅 탭전환이 꺼짐 — 탭 버튼 자체의 클릭 전환은 무관하게 그대로 동작) */
     lv_obj_remove_flag(lv_tabview_get_content(s_page_control), LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_page_control, cb_page_control_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *tab_bar = lv_tabview_get_tab_bar(s_page_control);
     /* 페이지탭 라벨(한글)엔 기본 LVGL 폰트(Montserrat)에 한글 글리프가 없어서
@@ -4432,6 +4509,7 @@ void ui_init(void)
      * 기본 폭(LV_DPI_DEF=130px)이 좁아 보인다는 지적 — 50px 더 키움 */
     s_camera_select_dd = lv_dropdown_create(camera_toolbar);
     lv_obj_set_width(s_camera_select_dd, LV_DPI_DEF + 50);
+    lv_obj_set_style_pad_ver(s_camera_select_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
     lv_obj_add_event_cb(s_camera_select_dd, cb_camera_select_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *camera_btn_group = lv_obj_create(camera_toolbar);
@@ -4553,6 +4631,9 @@ void ui_init(void)
 
     /* 위(절전상태)/아래(기존 로그) 2판넬 세로 배치(2026-08-10, 사용자 지시로 가로->세로 변경 —
      * 절전상태를 더 눈에 띄게 위로) */
+    /* 2026-09-07(임시 진단 — 사용자 지시: "통계탭에서 소모되는 메모리들을 측정해") — 어젯밤
+     * 부팅단계별 프로파일링과 동일 기법, 이번엔 통계탭 위젯 생성 구간만 잘라서 측정 */
+    size_t heap_before_stats_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     lv_obj_t *stats_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_STATISTICS));
     lv_obj_set_flex_flow(stats_page, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(stats_page, 4, 0);
@@ -4588,6 +4669,8 @@ void ui_init(void)
     lv_obj_t *overview_header_right = lv_obj_create(overview_header_row);
     lv_obj_set_size(overview_header_right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(overview_header_right, LV_FLEX_FLOW_ROW);
+    /* 2026-09-07 — stats_nav_cluster와 동일 이유로 세로 CENTER 명시(안 그러면 기본값 TOP) */
+    lv_obj_set_flex_align(overview_header_right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(overview_header_right, 0, 0);
     lv_obj_set_style_pad_column(overview_header_right, 8, 0);
     lv_obj_set_style_border_width(overview_header_right, 0, 0);
@@ -4595,6 +4678,7 @@ void ui_init(void)
     s_stats_scale_dd = lv_dropdown_create(overview_header_right);
     lv_dropdown_set_options(s_stats_scale_dd, ui_str(STR_STATS_SCALE_OPTIONS));
     lv_dropdown_set_selected(s_stats_scale_dd, 0);
+    lv_obj_set_style_pad_ver(s_stats_scale_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
     lv_obj_set_style_text_font(s_stats_scale_dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_stats_scale_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_stats_scale_dd, cb_stats_scale_changed, LV_EVENT_VALUE_CHANGED, NULL);
@@ -4666,9 +4750,9 @@ void ui_init(void)
     lv_obj_set_style_border_width(stats_table_header_row, 0, 0);
     lv_obj_set_style_pad_all(stats_table_header_row, 4, 0);
 
-    lv_obj_t *stats_table_header_lbl = lv_label_create(stats_table_header_row);
-    lv_obj_set_style_text_font(stats_table_header_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text_fmt(stats_table_header_lbl, "%s / %s / %s", ui_str(STR_STATS_TABLE_HEADER_ITEM),
+    s_stats_table_header_lbl = lv_label_create(stats_table_header_row);
+    lv_obj_set_style_text_font(s_stats_table_header_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text_fmt(s_stats_table_header_lbl, "%s / %s / %s", ui_str(STR_STATS_TABLE_HEADER_ITEM),
                            ui_str(STR_STATS_TABLE_HEADER_VALUE), ui_str(STR_STATS_TABLE_HEADER_TIME));
 
     /* 2026-09-07(사용자 지시 — "테이블 이동 단추 4개는 제목줄로 옮겨") — ±1/±10 버튼과
@@ -4676,6 +4760,10 @@ void ui_init(void)
     lv_obj_t *stats_nav_cluster = lv_obj_create(stats_table_header_row);
     lv_obj_set_size(stats_nav_cluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(stats_nav_cluster, LV_FLEX_FLOW_ROW);
+    /* 2026-09-07 버그수정 — flex_align을 안 줘서 기본값(START/START)으로 자식들이 위쪽
+     * 정렬되고 있었음(사용자 지적: "페이지 레이블... TOP으로 되있는 것 같아"). 세로는
+     * CENTER로 버튼들과 나란히 맞춤 */
+    lv_obj_set_flex_align(stats_nav_cluster, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(stats_nav_cluster, 0, 0);
     lv_obj_set_style_pad_column(stats_nav_cluster, 4, 0);
     lv_obj_set_style_border_width(stats_nav_cluster, 0, 0);
@@ -4756,6 +4844,14 @@ void ui_init(void)
 
     lv_timer_create(refresh_stats_page, 2000, NULL);
 
+    size_t heap_after_stats_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG, "MEMDIAG 통계탭 위젯 생성 비용: internal %u -> %u (소모 %d bytes)",
+             (unsigned)heap_before_stats_tab, (unsigned)heap_after_stats_tab,
+             (int)heap_before_stats_tab - (int)heap_after_stats_tab);
+
+    /* 2026-09-07(임시 진단 — 사용자 지시: "메모리가 더 줄어든 것 같아") — 통계탭과 동일 기법,
+     * 설정탭(카메라/센서/시스템 그룹박스 전체) 위젯 생성 구간만 잘라서 측정 */
+    size_t heap_before_option_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     lv_obj_t *option_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_OPTION));
     lv_obj_set_flex_flow(option_page, LV_FLEX_FLOW_COLUMN);
     /* dashboard_page와 같은 이유로 절반(10px) 축소(2026-08-09) — 그룹박스-화면 가장자리
@@ -4827,14 +4923,14 @@ void ui_init(void)
     lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
     lv_obj_set_style_text_font(s_restart_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    /* 네트워크 행(2026-08-29, 사용자 설계 — "설정-제어기 판넬") — [라벨:좌][독립/종속
-     * 드롭다운:중앙][IP 또는 SSID 또는 찾기버튼:우]. 좌/우 컨테이너에 동일 flex_grow(1)를
-     * 줘서 가운데 드롭다운이 자연스럽게 중앙에 오도록 함(그 사이 여백을 균등하게 나눠 가짐)
-     * — SPACE_BETWEEN 대신 이 방식을 쓴 이유는 3분할 좌/중앙/우 정렬을 각각 다르게 하기 위함 */
+    /* 네트워크 행(2026-08-29 설계, 2026-09-07 재정렬 — 사용자 지시: "레이블-공백-우정렬
+     * 값/드랍다운 버튼 형식으로 통일") — [라벨:좌][공백][독립/종속 드롭다운 + IP/SSID/찾기
+     * 버튼:우 묶음]. 다른 설정행들과 동일하게 create_row_right_cluster로 묶어 라벨과
+     * 2분할되게 함(구 방식: 좌/우 flex_grow(1) 3분할 — 드롭다운이 가운데 애매하게 떴었음) */
     lv_obj_t *network_row = lv_obj_create(cntl_box);
     lv_obj_set_size(network_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(network_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(network_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(network_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(network_row, 0, 0);
     lv_obj_set_style_pad_hor(network_row, 12, 0);
     lv_obj_set_style_pad_ver(network_row, 0, 0);
@@ -4842,9 +4938,11 @@ void ui_init(void)
     s_network_label = lv_label_create(network_row);
     lv_label_set_text(s_network_label, ui_str(STR_LABEL_NETWORK));
     lv_obj_set_style_text_font(s_network_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_flex_grow(s_network_label, 1);
 
-    s_network_mode_dd = lv_dropdown_create(network_row);
+    lv_obj_t *network_cluster = create_row_right_cluster(network_row);
+
+    s_network_mode_dd = lv_dropdown_create(network_cluster);
+    lv_obj_set_style_pad_ver(s_network_mode_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
     {
         char opts[64];
         snprintf(opts, sizeof(opts), "%s\n%s", ui_str(STR_NETWORK_MODE_AP), ui_str(STR_NETWORK_MODE_STA));
@@ -4855,9 +4953,8 @@ void ui_init(void)
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_network_mode_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_network_mode_dd, cb_network_mode_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    lv_obj_t *network_right = lv_obj_create(network_row);
-    lv_obj_set_flex_grow(network_right, 1);
-    lv_obj_set_height(network_right, LV_SIZE_CONTENT);
+    lv_obj_t *network_right = lv_obj_create(network_cluster);
+    lv_obj_set_size(network_right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(network_right, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(network_right, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(network_right, 0, 0);
@@ -4917,7 +5014,10 @@ void ui_init(void)
     lv_label_set_text(s_sens_measure_label, ui_str(STR_LABEL_SENS_MEASURE_INTERVAL));
     lv_obj_set_style_text_font(s_sens_measure_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_sens_measure_dd = lv_dropdown_create(sens_measure_row);
+    lv_obj_t *sens_measure_right = create_row_right_cluster(sens_measure_row);
+
+    s_sens_measure_dd = lv_dropdown_create(sens_measure_right);
+    lv_obj_set_style_pad_ver(s_sens_measure_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
     lv_dropdown_set_options(s_sens_measure_dd, ui_str(STR_OPT_SENS_MEASURE_INTERVAL_LIST));
     lv_dropdown_set_selected(s_sens_measure_dd, 0);  /* 아직 선택된 센서 없음 — select_sensor()가
                                                          첫 선택 때 실제 저장값으로 다시 맞춤 */
@@ -4925,11 +5025,15 @@ void ui_init(void)
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_sens_measure_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_sens_measure_dd, cb_sens_measure_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    s_sens_measure_apply_btn = lv_button_create(sens_measure_row);
+    s_sens_measure_apply_btn = lv_button_create(sens_measure_right);
     lv_obj_add_event_cb(s_sens_measure_apply_btn, cb_apply_sens_measure_interval, LV_EVENT_CLICKED, NULL);
     lv_obj_add_state(s_sens_measure_apply_btn, LV_STATE_DISABLED);  /* 선택된 센서 없이는 항상 비활성 */
     s_sens_measure_apply_lbl = lv_label_create(s_sens_measure_apply_btn);
     lv_label_set_text(s_sens_measure_apply_lbl, ui_str(STR_BTN_APPLY));
+    /* 2026-09-07 버그수정(사용자 지적 — "한글에서 깨져서 나와") — 다른 Apply 라벨들(촬영주기/
+     * 응답성/xclk/적응형)은 전부 이 폰트 지정 줄이 있는데 이것만 빠져있었음. 지정 없으면
+     * 한글 글리프 없는 기본폰트로 떨어져서 한글모드에서 네모박스로 깨짐 */
+    lv_obj_set_style_text_font(s_sens_measure_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 영상(Camera) 그룹박스 — 발견된 CAM 리스트(연결중/연결됨), 1초마다 갱신.
      * 자식이 리스트 하나뿐이라 별도 content 래퍼 없이 box 직접 자식으로 둠 */
@@ -4952,7 +5056,10 @@ void ui_init(void)
     lv_label_set_text(s_capture_interval_label, ui_str(STR_LABEL_CAPTURE_INTERVAL));
     lv_obj_set_style_text_font(s_capture_interval_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_capture_interval_dd = lv_dropdown_create(capture_row);
+    lv_obj_t *capture_right = create_row_right_cluster(capture_row);
+
+    s_capture_interval_dd = lv_dropdown_create(capture_right);
+    lv_obj_set_style_pad_ver(s_capture_interval_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
     lv_dropdown_set_options(s_capture_interval_dd, ui_str(STR_OPT_CAPTURE_INTERVAL_LIST));
     s_capture_interval_applied_idx = find_value_index(s_capture_interval_values,
         sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]),
@@ -4969,7 +5076,7 @@ void ui_init(void)
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_capture_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_capture_interval_dd, cb_capture_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    s_capture_apply_btn = lv_button_create(capture_row);
+    s_capture_apply_btn = lv_button_create(capture_right);
     lv_obj_add_event_cb(s_capture_apply_btn, cb_apply_capture_interval, LV_EVENT_CLICKED, NULL);
     /* 2026-08-11 버그수정 — "부팅 직후엔 표시값==저장값"이라는 가정이 항상 맞지는 않음(저장된
      * 값이 지금 프리셋 목록에 없으면 applied_idx=-1이라 드롭다운 표시와 실제 적용값이 다를 수
@@ -5029,7 +5136,10 @@ void ui_init(void)
     lv_label_set_text(s_xclk_label, ui_str(STR_LABEL_XCLK));
     lv_obj_set_style_text_font(s_xclk_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_xclk_dd = lv_dropdown_create(xclk_row);
+    lv_obj_t *xclk_right = create_row_right_cluster(xclk_row);
+
+    s_xclk_dd = lv_dropdown_create(xclk_right);
+    lv_obj_set_style_pad_ver(s_xclk_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
     lv_dropdown_set_options(s_xclk_dd, ui_str(STR_OPT_XCLK_LIST));
     s_xclk_applied_idx = find_value_index(s_xclk_values,
         sizeof(s_xclk_values) / sizeof(s_xclk_values[0]),
@@ -5040,7 +5150,7 @@ void ui_init(void)
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_xclk_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_xclk_dd, cb_xclk_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    s_xclk_apply_btn = lv_button_create(xclk_row);
+    s_xclk_apply_btn = lv_button_create(xclk_right);
     lv_obj_add_event_cb(s_xclk_apply_btn, cb_apply_xclk, LV_EVENT_CLICKED, NULL);
     update_xclk_apply_enabled();
     s_xclk_apply_lbl = lv_label_create(s_xclk_apply_btn);
@@ -5062,7 +5172,10 @@ void ui_init(void)
     lv_label_set_text(s_response_interval_label, ui_str(STR_LABEL_RESPONSE_INTERVAL));
     lv_obj_set_style_text_font(s_response_interval_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_response_interval_dd = lv_dropdown_create(response_row);
+    lv_obj_t *response_right = create_row_right_cluster(response_row);
+
+    s_response_interval_dd = lv_dropdown_create(response_right);
+    lv_obj_set_style_pad_ver(s_response_interval_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
     lv_dropdown_set_options(s_response_interval_dd, ui_str(STR_OPT_RESPONSE_INTERVAL_LIST));
     s_response_interval_applied_idx = find_value_index(s_response_interval_values,
         sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0]),
@@ -5073,7 +5186,7 @@ void ui_init(void)
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_response_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_response_interval_dd, cb_response_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    s_response_apply_btn = lv_button_create(response_row);
+    s_response_apply_btn = lv_button_create(response_right);
     lv_obj_add_event_cb(s_response_apply_btn, cb_apply_response_interval, LV_EVENT_CLICKED, NULL);
     update_response_apply_enabled();  /* 2026-08-11 버그수정 — capture_interval과 동일 이유 */
     s_response_apply_lbl = lv_label_create(s_response_apply_btn);
@@ -5109,7 +5222,10 @@ void ui_init(void)
     lv_label_set_text(s_adaptive_response_label, ui_str(STR_LABEL_ADAPTIVE_RESPONSE));
     lv_obj_set_style_text_font(s_adaptive_response_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_adaptive_response_dd = lv_dropdown_create(adaptive_row);
+    lv_obj_t *adaptive_right = create_row_right_cluster(adaptive_row);
+
+    s_adaptive_response_dd = lv_dropdown_create(adaptive_right);
+    lv_obj_set_style_pad_ver(s_adaptive_response_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
     lv_dropdown_set_options(s_adaptive_response_dd, ui_str(STR_OPT_ADAPTIVE_RESPONSE_LIST));
     s_adaptive_response_applied_idx = find_value_index(s_adaptive_response_values,
         sizeof(s_adaptive_response_values) / sizeof(s_adaptive_response_values[0]),
@@ -5120,7 +5236,7 @@ void ui_init(void)
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_adaptive_response_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_adaptive_response_dd, cb_adaptive_response_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    s_adaptive_apply_btn = lv_button_create(adaptive_row);
+    s_adaptive_apply_btn = lv_button_create(adaptive_right);
     lv_obj_add_event_cb(s_adaptive_apply_btn, cb_apply_adaptive_response, LV_EVENT_CLICKED, NULL);
     update_adaptive_apply_enabled();  /* 2026-08-11 버그수정 — capture_interval과 동일 이유 */
     s_adaptive_apply_lbl = lv_label_create(s_adaptive_apply_btn);
@@ -5154,16 +5270,26 @@ void ui_init(void)
     lv_label_set_text(s_time_label, ui_str(STR_LABEL_TIME));
     lv_obj_set_style_text_font(s_time_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_time_value_label = lv_label_create(time_row);
+    lv_obj_t *time_right = create_row_right_cluster(time_row);
+
+    s_time_value_label = lv_label_create(time_right);
     lv_obj_add_style(s_time_value_label, &style_text_muted, 0);
     lv_obj_set_style_text_font(s_time_value_label, ui_font_get(UI_FONT_SIZE_18), 0);
     refresh_clock(NULL);  /* 다음 1초 tick 전까지 빈 채로 안 보이게 즉시 한 번 채움(로고부제와 동일 이유) */
 
-    lv_obj_t *time_set_btn = lv_button_create(time_row);
+    lv_obj_t *time_set_btn = lv_button_create(time_right);
     lv_obj_add_event_cb(time_set_btn, cb_settime_btn, LV_EVENT_CLICKED, NULL);
     s_time_set_btn_lbl = lv_label_create(time_set_btn);
     lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
     lv_obj_set_style_text_font(s_time_set_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-09-07(임시 진단 — 사용자 지적: "38,916 bytes가 순수 설정탭만이야?") — 기존
+     * 브라켓이 설정탭+로그탭을 합쳐서 재고 있었음(로그탭 생성부가 "after" 측정 이전에
+     * 있었음). 여기서 한 번 더 끊어서 설정탭/로그탭 각각의 순수 비용으로 분리 */
+    size_t heap_before_log_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG, "MEMDIAG 설정탭 위젯 생성 비용(순수): internal %u -> %u (소모 %d bytes)",
+             (unsigned)heap_before_option_tab, (unsigned)heap_before_log_tab,
+             (int)heap_before_option_tab - (int)heap_before_log_tab);
 
     /* 2026-09-06(사용자 지시) — 4번째 "로그" 탭. 기존 통계탭에 있던 일반로그+전력로그
      * 판넬을 그대로 옮김(위젯 생성 코드 자체는 무변경, stats_page->log_page로 부모만
@@ -5288,9 +5414,15 @@ void ui_init(void)
         lv_obj_center(lv_obj_get_child(action_buttons[i], 0));  /* 레이블 중앙정렬(2026-08-09) */
     }
 
-    /* 네트워크 행의 값+화살표 셀렉터(2026-08-29, 사용자 지시) — 다른 버튼들과 폭 통일
-     * 대상이 아니라 위 루프에서 제외했지만, 그 표준폭의 2배로 이제 계산 가능 */
-    lv_obj_set_width(s_network_find_btn, s_action_btn_width * 2);
+    /* 네트워크 행의 값+화살표 셀렉터(2026-08-29 설계, 2026-09-07 수정 — 사용자 지적:
+     * "SSID> 표시가 버튼보다 커서 종속 드랍다운 위치가 이상해져") — 표준폭의 2배로 뒀던 걸
+     * 다른 버튼들과 같은 표준폭 하나로 줄임 */
+    lv_obj_set_width(s_network_find_btn, s_action_btn_width);
+
+    size_t heap_after_option_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG, "MEMDIAG 로그탭 위젯 생성 비용(순수, +버튼폭통일 루프 무할당분): internal %u -> %u (소모 %d bytes)",
+             (unsigned)heap_before_log_tab, (unsigned)heap_after_option_tab,
+             (int)heap_before_log_tab - (int)heap_after_option_tab);
 
     /* 2026-09-04(사용자 설계: "이벤트로 처리해") — 사진/목록/연결 완료 이벤트에 앱 쪽 반응을
      * 등록. 매틱 폴링하던 refresh_dashboard()의 해당 부분은 제거하고 여기로 옮김 */

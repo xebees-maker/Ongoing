@@ -674,7 +674,16 @@ void app_main(void)
     /* 2026-09-06(사용자 지시) — SD카드 마운트, 통계탭 시계열 저장용. LCD/CH422G가 이미
      * 초기화된 뒤에 불러야 함(CH422G 공유 I2C 버스/섀도우 상태 의존, sd_storage.h 참고).
      * 실패해도(SD 미장착 등) 앱 전체를 막지 않음 — 화면/통신 등 다른 기능은 SD와 무관 */
+    /* 2026-09-07(임시 진단 — 사용자 지시: "통계탭 넣기 전보다 30~40KB 줄었어") — 통계탭
+     * 위젯 자체 비용(ui_main.c의 MEMDIAG 로그)은 10.5KB로 이미 확인됐는데, 이거보다 훨씬
+     * 큰 차이가 나서 여기(SD/SPI DMA 마운트, ui_init()보다 먼저라 그 측정 범위 밖) 비용도
+     * 별도로 재봄 */
+    size_t heap_before_sd = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     esp_err_t sd_err = sd_storage_init();
+    size_t heap_after_sd = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG, "MEMDIAG SD카드 마운트 비용: internal %u -> %u (소모 %d bytes)",
+             (unsigned)heap_before_sd, (unsigned)heap_after_sd,
+             (int)heap_before_sd - (int)heap_after_sd);
     if (sd_err != ESP_OK) {
         ESP_LOGW(TAG, "SD카드 마운트 실패(%s) — 통계 저장 기능 없이 계속 진행", esp_err_to_name(sd_err));
         ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "SD card mount failed: %s", esp_err_to_name(sd_err));
