@@ -19,6 +19,9 @@ typedef enum {
     STR_TAB_DASHBOARD,
     STR_TAB_STATISTICS,
     STR_TAB_OPTION,
+    /* 2026-09-06(사용자 지시) — 4번째 탭. 기존 통계탭에 있던 로그(일반로그+전력로그)를
+     * 여기로 옮기고, 통계탭은 실제 시계열 통계/그래프로 용도 변경 */
+    STR_TAB_LOG,
     STR_GROUP_CNTL,
     STR_GROUP_SENSOR,
     STR_GROUP_CAMERA,
@@ -177,9 +180,22 @@ typedef enum {
     STR_CHAN_UNIT_HUMI_PCT,
     STR_CHAN_LABEL_CO2_PPM,
     STR_CHAN_UNIT_CO2_PPM,
+    STR_CHAN_LABEL_NH3_PPM,   /* 암모니아(2026-09-06, 실물 센서 아직 없음) */
+    STR_CHAN_UNIT_NH3_PPM,
     /* "%s %.1f%s (ID:%lu, Time: %02u:%02u:%02u)" — 라벨/값/단위/측정ID/시분초 순서 */
     STR_SENSOR_VALUE_ROW_FMT,
     STR_SENSOR_VALUE_PENDING,
+    /* 통계탭 값 판넬(2026-09-06, 사용자 설계) — 항목/값/시간 테이블 + 페이지콘트롤 */
+    STR_PANEL_STATS_PEAK,
+    STR_STATS_PEAK_ROW_FMT,     /* "%s: 최대 %d.%02d%s / 최소 %d.%02d%s" */
+    STR_STATS_PEAK_NO_DATA,
+    STR_STATS_TABLE_HEADER_ITEM,
+    STR_STATS_TABLE_HEADER_VALUE,
+    STR_STATS_TABLE_HEADER_TIME,
+    STR_STATS_TABLE_EMPTY,
+    STR_STATS_PAGE_FMT,        /* "%lu / %lu" */
+    STR_BTN_PREV_PAGE,
+    STR_BTN_NEXT_PAGE,
     STR_COUNT,
 } ui_str_id_t;
 

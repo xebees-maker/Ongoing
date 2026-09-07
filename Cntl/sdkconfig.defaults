@@ -11,6 +11,13 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 CONFIG_SPIRAM_MEMTEST=n
+# 2026-09-06 — ALWAYSINTERNAL=0은 LVGL 소프트웨어 렌더 태스크("swdraw")가 lv_draw_create_task()
+# 에서 매 프레임 draw-task마다 lv_malloc_zeroed()로 만드는 작은 스크래치(수백 바이트, lv_draw.c
+# 확인)까지 PSRAM으로 밀어서 렌더링이 watchdog 타임아웃 넘게 느려짐. 기본값(16384)은 원래
+# 문제(위젯트리가 내부 RAM 다 먹음)로 되돌아감. 웹 검색 결과(esp32.com 포럼) — 512~1024는
+# WiFi-mesh 등이 부적절하게 외부 RAM 할당받아 크래시난 사례 있고, 2048에서 그 문제가
+# 해결됐다는 사례 다수 — 커뮤니티에서 수렴한 안정적 중간값으로 2048 채택, 실기 검증 예정
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=2048
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 CONFIG_ESP32S3_DATA_CACHE_64KB=y

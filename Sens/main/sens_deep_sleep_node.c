@@ -28,8 +28,10 @@
 #include <string.h>
 #include "nvs_flash.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_sleep.h"
+#include "esp_pm.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_event.h"
@@ -44,6 +46,7 @@
 #include "status_led.h"
 #include "rwdt_guard.h"
 #include "scd41.h"
+#include "led_strip.h"
 
 static const char *TAG = "sens_deep_sleep_node";
 
@@ -186,6 +189,118 @@ static led_pattern_t batt_pct_to_led_pattern(int pct)
     return LED_PATTERN_HEARTBEAT_URGENT;
 }
 
+/* 2026-09-06(사용자 지시: "잘 되면 대치하려고 해") — 온보드 WS2812(GPIO7, bsp_c3_pico.h
+ * 주석 확인) 하드웨어 검증용 임시 테스트. 원색 3개(빨/초/파) + 혼합색 3개(보라=빨+파,
+ * 노랑=빨+초, 청록=초+파) 1초 간격 6가지 — "혼합도 되는지 확인" 목적. 이 실험이 잘 되면
+ * 기존 단색 상태 LED(HEARTBEAT/BLINK_FAST 등)를 이걸로 대치할 예정 — 지금은 순수 시각
+ * 확인용 임시 코드, 실제 상태 매핑 아님 */
+#define WS2812_TEST_GPIO       7
+#define WS2812_TEST_BRIGHTNESS 32  /* 0~255, 눈부심 방지로 낮게 */
+
+/* 2026-09-06(사용자 지시: "코드에도 정의해") — 빨/초/파/보/노/청/백 색 이름과 RGB 조합을
+ * 코드로 고정. 나중에 실제 상태(HEARTBEAT/BLINK_FAST 등 대치)를 이 색 중 하나로 매핑할
+ * 때 이 enum/테이블을 그대로 재사용하면 됨 — 순서는 실기로 확인한 시각 테스트 순서와 동일 */
+typedef enum {
+    WS2812_COLOR_RED,     /* 빨 */
+    WS2812_COLOR_GREEN,   /* 초 */
+    WS2812_COLOR_BLUE,    /* 파 */
+    WS2812_COLOR_PURPLE,  /* 보 = 빨+파 */
+    WS2812_COLOR_YELLOW,  /* 노 = 빨+초 */
+    WS2812_COLOR_CYAN,    /* 청 = 초+파 */
+    WS2812_COLOR_WHITE,   /* 백 = 빨+초+파 */
+    WS2812_COLOR_COUNT,
+} ws2812_color_t;
+
+static const struct { uint8_t r, g, b; const char *name; } s_ws2812_colors[WS2812_COLOR_COUNT] = {
+    [WS2812_COLOR_RED]    = { WS2812_TEST_BRIGHTNESS, 0, 0, "빨강" },
+    [WS2812_COLOR_GREEN]  = { 0, WS2812_TEST_BRIGHTNESS, 0, "초록" },
+    [WS2812_COLOR_BLUE]   = { 0, 0, WS2812_TEST_BRIGHTNESS, "파랑" },
+    [WS2812_COLOR_PURPLE] = { WS2812_TEST_BRIGHTNESS, 0, WS2812_TEST_BRIGHTNESS, "보라" },
+    [WS2812_COLOR_YELLOW] = { WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, 0, "노랑" },
+    [WS2812_COLOR_CYAN]   = { 0, WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, "청록" },
+    [WS2812_COLOR_WHITE]  = { WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, "백색" },
+};
+
+/* 상태 매핑 코드가 재사용할 헬퍼 — 색 이름(enum)만 넘기면 실제 픽셀 설정+refresh까지 함 */
+static void ws2812_set_color(led_strip_handle_t strip, ws2812_color_t color)
+{
+    led_strip_set_pixel(strip, 0, s_ws2812_colors[color].r, s_ws2812_colors[color].g, s_ws2812_colors[color].b);
+    led_strip_refresh(strip);
+}
+
+/* 2026-09-06(사용자 지시) — 측정 시작/완료/실패를 이 WS2812로 눈에 보이게 표시(SCD41 판독
+ * 실패 진단용). 핸들은 최초 호출 때 한 번만 만들고 계속 재사용 */
+static led_strip_handle_t s_ws2812_strip = NULL;
+
+static void ws2812_init_once(void)
+{
+    if (s_ws2812_strip) return;
+    led_strip_config_t strip_config = {
+        .strip_gpio_num        = WS2812_TEST_GPIO,
+        .max_leds              = 1,
+        .led_model             = LED_MODEL_WS2812,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_RGB,  /* 이 보드는 GRB 아니라
+                                                                          RGB 순서(실기 확인) */
+    };
+    led_strip_rmt_config_t rmt_config = { .resolution_hz = 10 * 1000 * 1000 };
+    if (led_strip_new_rmt_device(&strip_config, &rmt_config, &s_ws2812_strip) != ESP_OK) {
+        ESP_LOGW(TAG, "WS2812 초기화 실패 — 측정 표시 LED 없이 진행");
+        s_ws2812_strip = NULL;
+    }
+}
+
+static void ws2812_off(void)
+{
+    if (!s_ws2812_strip) return;
+    led_strip_clear(s_ws2812_strip);
+    led_strip_refresh(s_ws2812_strip);
+}
+
+/* 한 번 켰다가 on_ms 뒤에 끔 */
+static void ws2812_flash(ws2812_color_t color, uint32_t on_ms)
+{
+    ws2812_init_once();
+    if (!s_ws2812_strip) return;
+    ws2812_set_color(s_ws2812_strip, color);
+    vTaskDelay(pdMS_TO_TICKS(on_ms));
+    ws2812_off();
+}
+
+/* on_ms 켬 -> on_ms 끔을 times번 반복(측정 실패 표시: 보라 2회 깜빡임) */
+static void ws2812_blink(ws2812_color_t color, uint32_t on_ms, int times)
+{
+    ws2812_init_once();
+    if (!s_ws2812_strip) return;
+    for (int i = 0; i < times; i++) {
+        ws2812_set_color(s_ws2812_strip, color);
+        vTaskDelay(pdMS_TO_TICKS(on_ms));
+        ws2812_off();
+        if (i + 1 < times) vTaskDelay(pdMS_TO_TICKS(on_ms));
+    }
+}
+
+/* 2026-09-06(사용자 지시) — CONFIG_PM_ENABLE=y + FREERTOS_USE_TICKLESS_IDLE=y(자동
+ * 라이트슬립)가 켜져 있어서, SCD41 측정 폴링 중(vTaskDelay 사이사이) 라이트슬립에 들어갔다
+ * 나왔다 하면서 I2C 상태가 깨질 가능성 — 측정 시작~완료까지는 라이트슬립 자체를 못 하게
+ * 락을 잡음(이 락은 esp_deep_sleep_start()의 진짜 딥슬립과는 무관, 자동 라이트슬립만 막음) */
+static esp_pm_lock_handle_t s_no_light_sleep_lock = NULL;
+
+static void pm_lock_no_light_sleep_acquire(void)
+{
+    if (!s_no_light_sleep_lock) {
+        if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "sens_measure", &s_no_light_sleep_lock) != ESP_OK) {
+            ESP_LOGW(TAG, "PM 락 생성 실패 — 라이트슬립 방지 없이 측정 진행");
+            return;
+        }
+    }
+    esp_pm_lock_acquire(s_no_light_sleep_lock);
+}
+
+static void pm_lock_no_light_sleep_release(void)
+{
+    if (s_no_light_sleep_lock) esp_pm_lock_release(s_no_light_sleep_lock);
+}
+
 /* SCD41 single-shot 판독 — 트리거 후 최대 SCD41_MEASURE_TIMEOUT_MS까지 블로킹 폴링.
  * 예전 sensor_node.c는 이걸 여러 esp_timer 틱에 걸쳐 논블로킹으로 했는데(계속실행 전제),
  * 딥슬립은 부팅마다 한 번뿐이라 "다음 틱"이 없음 — CAM의 촬영 대기 패턴과 동일하게
@@ -208,6 +323,80 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
     }
     ESP_LOGW(TAG, "SCD41 측정 타임아웃(%ums)", (unsigned)SCD41_MEASURE_TIMEOUT_MS);
     return false;
+}
+
+/* 2026-09-06(사용자 지시) — 측정 시도 한 번(노랑 시작 표시 -> 트리거+폴링 -> 청록/보라
+ * 결과 표시)을 통째로 감싼 헬퍼. 파워사이클 후 첫 워밍업 측정도 이 함수로 똑같이
+ * 표시하고(사용자 지시: 구분 없이 LED 표시), 실측정도 이 함수로 함 — 한 사이클 안에서
+ * 최대 두 번(워밍업+실측정) 불릴 수 있어서 elapsed는 호출부가 계속 누적하도록
+ * 포인터로 받음 */
+static bool attempt_one_scd41_measurement(float out[SENSOR_CHAN_COUNT], uint32_t *accum_elapsed_ms)
+{
+    ws2812_flash(WS2812_COLOR_YELLOW, 100);
+    uint32_t start_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    pm_lock_no_light_sleep_acquire();
+    bool ok = measure_scd41(out);
+    pm_lock_no_light_sleep_release();
+    *accum_elapsed_ms += (uint32_t)(esp_timer_get_time() / 1000) - start_ms;
+    if (ok) {
+        ws2812_flash(WS2812_COLOR_CYAN, 200);
+    } else {
+        ws2812_blink(WS2812_COLOR_PURPLE, 100, 2);
+    }
+    return ok;
+}
+
+/* 2026-09-06(사용자 지시 정정: "연결 전에 측정하지 말아", "광고를 하는 상황에서는
+ * 측정하지 않는다") — 예전엔 캠의 "캐스크 타이밍과 무관하게 측정"을 센스에도 그대로
+ * 확장해서 페어링 여부와 무관하게 부팅 직후 곧장 측정했는데, 이건 잘못된 확장이었음.
+ * 캠은 로컬저장이 있어 연결 안 돼도 촬영 자체는 가치가 있지만, 센스 값은 보낼 곳(콘)이
+ * 없으면 측정 자체가 무의미 — 그래서 이 함수는 반드시 "실제로 페어링된 게 확인된 뒤"에만
+ * app_main에서 호출해야 함(광고/스캔 중엔 호출 안 함). 측정주기 게이팅(due_for_measurement)
+ * 자체는 그대로 유지 */
+static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
+{
+    uint32_t measure_period_sec = esp_now_node_get_sample_interval_sec();
+    bool due_for_measurement = (s_measurement_id == 0) ||
+                               (s_seconds_since_last_measurement >= measure_period_sec);
+    if (due_for_measurement) {
+        bool is_first_ever = (s_measurement_id == 0);
+        float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
+        bool fresh_ok = attempt_one_scd41_measurement(fresh_vals, measurement_elapsed_ms);
+
+        if (fresh_ok && is_first_ever) {
+            /* 2026-09-06(Sensirion 공식 문서: "파워사이클 후 첫 싱글샷 결과는 항상 버려야
+             * 안정화됨") — 진짜 최초(측정ID==0)일 때만 해당, 딥슬립 웨이크는 센서 자체
+             * 전원이 안 끊기므로 매번 적용 안 함. 워밍업 결과는 버리고 곧장 한 번 더
+             * 측정해서 그 결과를 진짜 첫 값(측정ID=1)으로 씀 — 사용자 지시로 이 워밍업도
+             * 진짜 측정과 동일하게 LED로 표시(구분 없음) */
+            ESP_LOGI(TAG, "SCD41 워밍업 측정 완료(버림, 파워사이클 후 첫 값) — 실제 측정 재시도");
+            fresh_ok = attempt_one_scd41_measurement(fresh_vals, measurement_elapsed_ms);
+        }
+
+        if (fresh_ok) {
+            memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
+            for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = 1;
+            s_measurement_id++;
+            s_seconds_since_last_measurement = 0;
+            /* %f 안 씀(newlib-nano 미지원 — feedback_lvgl_no_percent_f 관례) — 정수부/소수부
+             * 수동 분리(format_battery_display()와 동일 패턴) */
+            int temp_x10 = (int)(s_cached_vals[1] * 10.0f + 0.5f);
+            int humi_x10 = (int)(s_cached_vals[2] * 10.0f + 0.5f);
+            ESP_LOGI(TAG, "SCD41MARK 측정 성공 — 측정ID=%u co2=%d temp=%d.%d humi=%d.%d",
+                     (unsigned)s_measurement_id, (int)s_cached_vals[0],
+                     temp_x10 / 10, temp_x10 % 10, humi_x10 / 10, humi_x10 % 10);
+        } else {
+            ESP_LOGW(TAG, "SCD41MARK 판독 실패 — 직전 캐시값(측정ID=%u) 재사용", (unsigned)s_measurement_id);
+        }
+    } else {
+        ESP_LOGI(TAG, "측정주기(%us) 미도달(경과 %us) — 재측정 생략, 캐시값(측정ID=%u) 재사용",
+                 (unsigned)measure_period_sec, (unsigned)s_seconds_since_last_measurement,
+                 (unsigned)s_measurement_id);
+    }
+    ESP_LOGW(TAG, "MEASCHK due=%d id=%u elapsed=%us period=%us reset_reason=%d",
+             (int)due_for_measurement, (unsigned)s_measurement_id,
+             (unsigned)s_seconds_since_last_measurement, (unsigned)measure_period_sec,
+             (int)esp_reset_reason());
 }
 
 void app_main(void)
@@ -240,43 +429,50 @@ void app_main(void)
 
     ESP_ERROR_CHECK(bsp_c3_pico_init());
 
-    if (!scd41_init(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) {
+    /* 2026-09-06(사용자 지시로 재확인) — single-shot만 쓰는 경로는 continuous(periodic)
+     * 모드를 아예 시작하지도 않으므로, "혹시 periodic이 켜져있을까봐 방어적으로 끄는" 절차
+     * 자체가 필요 없음(Sensirion 공식 문서: measure_single_shot은 start_periodic_measurement의
+     * 대안이지 같이 쓰는 게 아니고, wake_up도 power_down을 실제로 건 적이 있을 때만 필요한데
+     * 이 경로는 power_down을 안 씀). STOP_PERIODIC 자체는 없앴지만, 안정화 지연은 그 명령과
+     * 무관하게 별도로 필요함 — Sensirion 공식 데이터시트: "전원 인가 후 idle 상태 진입까지
+     * 1000ms 필요, 그래야 명령을 받을 준비가 됨"(싱글샷이든 뭐든 첫 명령 자체에 적용되는
+     * 일반 요구사항). 예전엔 컨티뉴어스 왕복(약 7~9초)이 우연히 이 요구사항을 넘겨서
+     * 가려주고 있었을 뿐 — 그 왕복을 없앤 지금은 이 지연을 그 목적 그대로 명시적으로 둠.
+     * I2C 버스만 지금 준비해두고, 실제 측정은 아래에서 페어링 확인 후로 미룸(사용자 지시:
+     * "연결 전에 측정하지 말아" — 캠의 "캐스크 타이밍과 무관"을 센스에 잘못 그대로 확장 적용한
+     * 실수를 정정. 캠은 로컬저장이 있어 연결 여부와 무관하게 촬영 가치가 있지만, 센스 값은
+     * 보낼 곳이 없으면 측정 자체가 무의미) */
+    if (!scd41_init_single_shot(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) {
         ESP_LOGW(TAG, "SCD41 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
     }
-    /* scd41_init()은 항상 continuous 모드로 시작 — single-shot 듀티사이클을 쓰려면 꺼야 함 */
-    scd41_stop_periodic_measurement();
-    /* 2026-09-05 버그수정(실기 로그로 확인) — stop_periodic_measurement 직후 곧바로 single-shot
-     * 트리거를 보내면 SCD41이 매번 send_cmd(0x219D) ESP_ERR_INVALID_RESPONSE로 실패함. 정지
-     * 명령 처리에 필요한 안정화 시간(scd41.c의 scd41_init() 내부, 자신의 stop_periodic 호출
-     * 뒤에 두는 1000ms와 동일 근거)이 필요 — 예전엔 이 사이에 "페어링 대기(최대 20초)"라는
-     * 버그가 있어서 우연히 시간이 충분히 벌어져 이 문제가 가려져 있었을 뿐, 그 버그를 고치고
-     * 측정을 캐스크보다 앞으로 옮기면서 실제로 드러남 */
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(1000));  /* 싱글샷용 전원안정화 지연(위 주석 참고) */
 
-    /* 2026-09-05(사용자 지시: "캠의 주기촬영과 같은 방법으로 구현해야 되는 건데") — 측정
-     * 시도 자체는 콘/캐스크와 완전히 무관하게, 하드웨어 초기화 직후 곧장 함(캠의 주기촬영
-     * esp_timer가 WAKE_HELLO 타이밍과 무관하게 독립적으로 도는 것과 동일 원칙). 다만 실제
-     * 트리거 여부는 게이팅됨(사용자 지시: "전력소모 큰 센서가 있어서... 측정주기에만
-     * 측정해야되") — 최초(한 번도 성공한 적 없음)이거나 마지막 실측정 이후 측정주기만큼
-     * 실제 시간이 지났을 때만 SCD41을 건드리고, 아니면 직전 캐시값을 그대로 재사용 */
-    uint32_t measure_period_sec = esp_now_node_get_sample_interval_sec();
-    bool due_for_measurement = (s_measurement_id == 0) ||
-                               (s_seconds_since_last_measurement >= measure_period_sec);
-    if (due_for_measurement) {
-        float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
-        bool fresh_ok = measure_scd41(fresh_vals);
-        if (fresh_ok) {
-            memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
-            for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = 1;
-            s_measurement_id++;
-            s_seconds_since_last_measurement = 0;
-        } else {
-            ESP_LOGW(TAG, "SCD41 판독 실패 — 직전 캐시값(측정ID=%u) 재사용", (unsigned)s_measurement_id);
-        }
-    } else {
-        ESP_LOGI(TAG, "측정주기(%us) 미도달(경과 %us) — 재측정 생략, 캐시값(측정ID=%u) 재사용",
-                 (unsigned)measure_period_sec, (unsigned)s_seconds_since_last_measurement,
-                 (unsigned)s_measurement_id);
+    uint32_t measurement_elapsed_ms = 0;  /* 2026-09-06(사용자 지시) — 이번 사이클에 측정으로
+                                            * 쓴 실제 시간, 나중에 딥슬립 시간에서 뺄 기준.
+                                            * 실제 측정은 페어링 확인 후(아래) 일어남 */
+
+    /* 2026-09-06 버그수정(사용자 보고: "배터리 값은 0.00 V 로 나와") — CASK 재작성(2026-09-05)
+     * 때 이 초기화 블록 자체를 실수로 빠뜨림. battery_read_mv()는 battery_init()이 세팅하는
+     * 내부 ADC 핸들(s_adc)이 없으면 그냥 0을 반환하므로(battery.c), 호출은 계속 됐지만 항상
+     * 0이 나왔던 것 — 매번 "0.00 V"로 보인 원인 */
+    battery_config_t batt_cfg = {
+        .adc_unit    = BSP_C3_BATTERY_ADC_UNIT,
+        .adc_channel = BSP_C3_BATTERY_ADC_CHANNEL,
+        .atten       = BSP_C3_BATTERY_ADC_ATTEN,
+        .divider     = BSP_C3_BATTERY_DIV,
+        .full_mv     = s_full_mv,
+        .empty_mv    = 3300.0f,
+        .ctrl_gpio   = GPIO_NUM_NC,
+    };
+    battery_init(&batt_cfg);
+
+    s_vin_adc = battery_get_adc_handle();
+    if (s_vin_adc) {
+        adc_oneshot_chan_cfg_t vin_ch_cfg = {
+            .atten    = BSP_C3_VIN_ADC_ATTEN,
+            .bitwidth = ADC_BITWIDTH_DEFAULT,
+        };
+        adc_oneshot_config_channel(s_vin_adc, BSP_C3_VIN_ADC_CHANNEL, &vin_ch_cfg);
     }
 
     int batt_mv = battery_read_mv();
@@ -331,12 +527,27 @@ void app_main(void)
     bool paired_now = esp_now_node_report_reading(SENSOR_CHAN_COUNT, s_cached_chan_ok, s_cached_vals,
                                                    s_measurement_id, 0, batt_mv_u16);
     uint32_t sleep_sec = ESP_NOW_NODE_UNPAIRED_RETRY_SEC;
+    /* 2026-09-06(사용자 지시) — Live 모드(sleep_sec==0)로 오래 깨있는 동안에도 측정주기가
+     * 되면 재측정해야 함(캠의 독립적 주기촬영과 동일 원칙) — 이 기준점을 실제로 측정할
+     * 때마다(워밍업 포함, do_gated_measurement_once 안에서) 갱신하고, 여기서부터는 Live
+     * 루프 안에서 "이 기준점 이후 실제로 깨있던 시간"을 재보고 판단. 최초값은 아래에서
+     * 실제로 측정이 일어난 시점에 다시 잡음(그 전엔 의미 없는 기준점) */
+    uint32_t live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    bool measured_this_boot = false;  /* 2026-09-06(사용자 지시) — 페어링 확인 전엔 측정 안 함,
+                                          확인되면 딱 한 번만 이 부팅의 최초 측정을 함 */
+
+    if (paired_now) {
+        do_gated_measurement_once(&measurement_elapsed_ms);
+        measured_this_boot = true;
+        live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    }
 
     for (;;) {
         if (!paired_now) {
             /* 알려진 허브가 없었거나 패스트패스가 실패해서 지금 폴백 스캔 중(백그라운드 —
              * esp_now_node_report_reading()의 폴백 분기 참고) — PAIR_REQUEST가 비동기로
-             * 도착할 때까지 이벤트 기반 대기, 스윕 한 바퀴 다 돌 때까지만 */
+             * 도착할 때까지 이벤트 기반 대기, 스윕 한 바퀴 다 돌 때까지만. 이 대기 동안은
+             * 광고/스캔 상태라 측정 안 함(사용자 지시) */
             while (!esp_now_node_is_paired() && !s_sweep_completed) {
                 xSemaphoreTake(s_wake_recheck_sem, pdMS_TO_TICKS(1000));
             }
@@ -348,6 +559,13 @@ void app_main(void)
             }
         }
         s_unpaired_backoff_elapsed_sec = 0;  /* 페어링 성공 — 백오프 리셋 */
+
+        if (!measured_this_boot) {
+            /* 폴백 스캔으로 방금 막 페어링됨 — 이제서야 이번 부팅의 최초 측정 수행 */
+            do_gated_measurement_once(&measurement_elapsed_ms);
+            measured_this_boot = true;
+            live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        }
 
         /* CASK 대기 — CONFIG부터 SLEEP_NOW까지, 이벤트 기반으로 기다리되 SENS_CASK_TIMEOUT_MS
          * 전체 상한을 둠(캠과 동일 원칙 — "WAKE_HELLO 성공 판정을 CASK 전체로 넓힌 것") */
@@ -381,6 +599,28 @@ void app_main(void)
             break;
         }
 
+        /* 2026-09-06(사용자 지시) — Live로 오래 깨있는 동안 측정주기가 되면 재측정. "이번
+         * 부팅 들어와서 실제로 깨있던 시간"(live_awake_baseline_ms 기준)을 마지막 실측정
+         * 이후 경과시간에 더해서 판단 — 딥슬립을 안 거치므로 s_seconds_since_last_measurement
+         * 자체는 그대로 두고(다음에 진짜 잘 때를 위해), 여기서는 로컬 변수로만 따짐 */
+        uint32_t live_now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        uint32_t live_awake_elapsed_sec = (live_now_ms - live_awake_baseline_ms) / 1000;
+        uint32_t live_measure_period_sec = esp_now_node_get_sample_interval_sec();
+        if (s_seconds_since_last_measurement + live_awake_elapsed_sec >= live_measure_period_sec) {
+            float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
+            if (attempt_one_scd41_measurement(fresh_vals, &measurement_elapsed_ms)) {
+                memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
+                for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = 1;
+                s_measurement_id++;
+                s_seconds_since_last_measurement = 0;
+                live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            } else {
+                ESP_LOGW(TAG, "SCD41 판독 실패(Live 재측정) — 직전 캐시값(측정ID=%u) 재사용",
+                         (unsigned)s_measurement_id);
+                /* 기준점을 안 옮겨서 다음 Live 반복에서 곧바로 다시 재시도됨 */
+            }
+        }
+
         /* Live 루프 — 이번 CASK가 걸린 시간이 페이싱 기준보다 짧으면 나머지를 채워 대기 */
         uint32_t elapsed_ms = (uint32_t)(esp_timer_get_time() / 1000) - cask_start_ms;
         if (elapsed_ms < SENS_CASK_LIVE_PACE_MS) {
@@ -391,11 +631,22 @@ void app_main(void)
     }
 
     /* 이번에 실제로 잠들 시간만큼 "마지막 실측정 이후 경과시간"에 더해둠 — 다음 부팅에서
-     * 위 due_for_measurement 판단의 기준이 됨(사용자 지시: 측정주기 게이팅) */
+     * 위 due_for_measurement 판단의 기준이 됨(사용자 지시: 측정주기 게이팅). 이 누적은
+     * CNTL이 준 "원래 자야 할 시간"(sleep_sec) 기준 그대로 — 아래 실제 딥슬립 시간 보정과는
+     * 별개(측정주기 게이팅은 "예산 하나를 다 썼다"는 의미라 원래 예산으로 유지) */
     s_seconds_since_last_measurement += sleep_sec;
 
+    /* 2026-09-06(사용자 지시) — "총 잠들어야 하는 시간에서 측정에 소요된 시간을 뺀 시간만큼만
+     * 잠들도록" — 이 센서는 측정 자체가 오래 걸려서(수 초), 측정시간을 안 빼면 전체 주기가
+     * (측정시간 + sleep_sec)로 밀림. 측정을 안 한 사이클(due_for_measurement==false)은
+     * measurement_elapsed_ms==0이라 자연히 그대로 sleep_sec만큼 잠 */
+    uint32_t measurement_elapsed_sec = measurement_elapsed_ms / 1000;
+    uint32_t actual_sleep_sec = (sleep_sec > measurement_elapsed_sec)
+                                     ? sleep_sec - measurement_elapsed_sec : 0;
+
     esp_now_node_note_sleep_entry();
-    ESP_LOGI(TAG, "딥슬립 진입: %us 후 웨이크", (unsigned)sleep_sec);
-    esp_sleep_enable_timer_wakeup((uint64_t)sleep_sec * 1000000ULL);
+    ESP_LOGI(TAG, "딥슬립 진입: %us 후 웨이크(원래 %us, 측정에 %us 씀)",
+             (unsigned)actual_sleep_sec, (unsigned)sleep_sec, (unsigned)measurement_elapsed_sec);
+    esp_sleep_enable_timer_wakeup((uint64_t)actual_sleep_sec * 1000000ULL);
     esp_deep_sleep_start();
 }

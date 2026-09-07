@@ -11,7 +11,10 @@ idf_component_register(
         "esp_now_tx.c"
         "rtc_sync.c"
         "device_config.c"
+        "sd_storage.c"
+        "stats_store.c"
         "../components/waveshare_rgb_lcd_port.c"
+        "../components/ch422g.c"
     INCLUDE_DIRS
         "."
         "../components"
@@ -26,6 +29,10 @@ idf_component_register(
         esp_timer
         waveshare__pcf85063a
         battery_monitor
+        fatfs
+        sdmmc
+        esp_driver_sdspi
+        esp_driver_spi
     PRIV_REQUIRES
         esp_new_jpeg)
 

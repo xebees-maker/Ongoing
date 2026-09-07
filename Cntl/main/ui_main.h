@@ -23,6 +23,10 @@ void ui_main_register_wifi_events(void);
  * 못 찾으면(지금 화면/목록에 없음) false — main.c가 이걸로 "합성 자체의 실패"를 즉시 판정 */
 bool ui_main_inject_connect(const uint8_t *mac);
 bool ui_main_inject_disconnect(const uint8_t *mac);
+/* 2026-09-06(야간 자동 테스트용) — 센스 행은 카메라 행과 별도 리스트라 연결 합성도 별도 */
+bool ui_main_inject_connect_sensor(const uint8_t *mac);
+/* 응답성(response_interval) 드롭다운+Apply 합성 — sec는 0/3/10/30/60만 유효 */
+bool ui_main_inject_set_response_interval(uint32_t sec);
 /* 성공 시 out_ok=true + 새로 생긴 세대번호 반환(main.c가 esp_now_photo_list_wait_result()에
  * 그대로 넘기면 됨) */
 uint32_t ui_main_inject_list_refresh(bool *out_ok);

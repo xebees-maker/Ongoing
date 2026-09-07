@@ -5,6 +5,7 @@
  */
 
 #include "waveshare_rgb_lcd_port.h"
+#include "ch422g.h"
 
 static const char *TAG = "example";
 
@@ -13,18 +14,15 @@ static const char *TAG = "example";
  * (it's written against an older IDF, per README "ESP-IDF >= 5.5"); ported to the
  * new i2c_master bus/device API here. Byte values, addresses, order and delays vs
  * the upstream vendor demo are otherwise unchanged. */
-static i2c_master_bus_handle_t s_i2c_bus       = NULL;
-static i2c_master_dev_handle_t s_ch422g_mode_dev = NULL; // I2C addr 0x24 - CH422G mode register
-static i2c_master_dev_handle_t s_ch422g_data_dev = NULL; // I2C addr 0x38 - CH422G output register
+static i2c_master_bus_handle_t s_i2c_bus = NULL;
 
-static esp_err_t i2c_write_byte(i2c_master_dev_handle_t dev, uint8_t val)
-{
-    return i2c_master_transmit(dev, &val, 1, I2C_MASTER_TIMEOUT_MS);
-}
-
-/**
- * @brief I2C master initialization
- */
+/* 2026-09-06 — CH422G 접근을 ch422g.c(공용 드라이버, 섀도우 상태 하나로 통합 관리)로
+ * 옮김. 예전엔 이 파일이 s_ch422g_mode_dev/s_ch422g_data_dev를 직접 들고 통짜
+ * 매직넘버(0x2C/0x2E/0x1E)만 썼는데, SD카드 CS(EXIO4)도 같은 레지스터의 다른 비트라
+ * 별도로 관리하면 섀도우가 두 군데로 나뉘어 서로 덮어쓸 위험이 있었음 — 이제 이
+ * 파일도 ch422g_set_io_raw()로 "정확히 같은 바이트"를 그대로 재현만 하고(동작 변화
+ * 없음), 이후 SD카드 쪽 코드는 ch422g_set_io(CH422G_IO_SD_CS, ...)로 안전하게
+ * 비트 단위 제어함 */
 static esp_err_t i2c_master_init(void)
 {
     if (s_i2c_bus != NULL) {
@@ -44,22 +42,7 @@ static esp_err_t i2c_master_init(void)
         return ret;
     }
 
-    i2c_device_config_t mode_dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = 0x24,
-        .scl_speed_hz = I2C_MASTER_FREQ_HZ,
-    };
-    ret = i2c_master_bus_add_device(s_i2c_bus, &mode_dev_cfg, &s_ch422g_mode_dev);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    i2c_device_config_t data_dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = 0x38,
-        .scl_speed_hz = I2C_MASTER_FREQ_HZ,
-    };
-    return i2c_master_bus_add_device(s_i2c_bus, &data_dev_cfg, &s_ch422g_data_dev);
+    return ch422g_init(s_i2c_bus);
 }
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_GT911
@@ -82,14 +65,12 @@ void gpio_init(void)
 // Reset the touch screen
 static void waveshare_esp32_s3_touch_reset(void)
 {
-    i2c_write_byte(s_ch422g_mode_dev, 0x01);
-
     // Reset the touch screen. It is recommended to reset the touch screen before using it.
-    i2c_write_byte(s_ch422g_data_dev, 0x2C);
+    ch422g_set_io_raw(CH422G_MODE_IO_OE, 0x2C);
     esp_rom_delay_us(100 * 1000);
     gpio_set_level(GPIO_INPUT_IO_4, 0);
     esp_rom_delay_us(100 * 1000);
-    i2c_write_byte(s_ch422g_data_dev, 0x2E);
+    ch422g_set_io_raw(CH422G_MODE_IO_OE, 0x2E);
     esp_rom_delay_us(200 * 1000);
 }
 
@@ -217,12 +198,11 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(uint8_t frame_buffer_count,
 /******************************* Turn on the screen backlight **************************************/
 esp_err_t waveshare_rgb_lcd_backlight_on(void)
 {
-    // Configure CH422G to output mode
     ESP_ERROR_CHECK(i2c_master_init());
-    ESP_ERROR_CHECK(i2c_write_byte(s_ch422g_mode_dev, 0x01));
 
     // Pull the backlight pin high to light the screen backlight
-    ESP_ERROR_CHECK(i2c_write_byte(s_ch422g_data_dev, 0x1E));
+    // (0x1E also happens to leave SD_CS=1/deselected — same as before this migration)
+    ESP_ERROR_CHECK(ch422g_set_io_raw(CH422G_MODE_IO_OE, 0x1E));
     return ESP_OK;
 }
 

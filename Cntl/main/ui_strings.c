@@ -13,6 +13,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_TAB_DASHBOARD]  = { "상황판", "Dashboard" },
     [STR_TAB_STATISTICS] = { "통계",   "Statistics" },
     [STR_TAB_OPTION]     = { "설정",   "Option" },
+    [STR_TAB_LOG]        = { "로그",   "Log" },
     [STR_GROUP_CNTL]     = { "제어기", "CNTL" },
     [STR_GROUP_SENSOR]   = { "측정기", "Sensor" },
     [STR_GROUP_CAMERA]   = { "영상",   "Camera" },
@@ -194,6 +195,20 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_SENSOR_VALUE_ROW_FMT]        = { "%s %d.%02d%s (ID:%lu, Time: %02u:%02u:%02u)",
                                            "%s %d.%02d%s (ID:%lu, Time: %02u:%02u:%02u)" },
     [STR_SENSOR_VALUE_PENDING]        = { "측정 중...",                 "Measuring..." },
+    [STR_CHAN_LABEL_NH3_PPM]          = { "암모니아",                   "Ammonia" },
+    [STR_CHAN_UNIT_NH3_PPM]           = { "ppm",                        "ppm" },
+    /* 2026-09-06(사용자 설계) — 통계탭 값 판넬 */
+    [STR_PANEL_STATS_PEAK]            = { "최대/최소",                  "Peak" },
+    [STR_STATS_PEAK_ROW_FMT]          = { "%s: 최대 %d.%02d%s / 최소 %d.%02d%s",
+                                           "%s: max %d.%02d%s / min %d.%02d%s" },
+    [STR_STATS_PEAK_NO_DATA]          = { "데이터 없음",                "No data" },
+    [STR_STATS_TABLE_HEADER_ITEM]     = { "항목",                       "Item" },
+    [STR_STATS_TABLE_HEADER_VALUE]    = { "값",                         "Value" },
+    [STR_STATS_TABLE_HEADER_TIME]     = { "시간",                       "Time" },
+    [STR_STATS_TABLE_EMPTY]           = { "저장된 값 없음",              "No data yet" },
+    [STR_STATS_PAGE_FMT]              = { "%lu / %lu",                  "%lu / %lu" },
+    [STR_BTN_PREV_PAGE]               = { "< 이전",                    "< Prev" },
+    [STR_BTN_NEXT_PAGE]               = { "다음 >",                    "Next >" },
 };
 
 void ui_lang_load(void)

@@ -19,6 +19,22 @@
 bool scd41_init(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio);
 
 /**
+ * @brief SCD41 초기화(single-shot 전용) — I2C 버스 생성 + 디바이스 등록만 하고 끝.
+ *        2026-09-06(사용자 지시) — single-shot만 쓰는 호출부(딥슬립 헤드리스 Sens)는
+ *        WAKE_UP/STOP_PERIODIC/START_PERIODIC이 전혀 필요 없음(Sensirion 공식 문서:
+ *        single-shot은 periodic measurement의 "대안"이지 같이 쓰는 게 아님, wake_up도
+ *        power_down을 실제로 건 적이 있을 때만 필요한데 이 경로는 power_down을 안 씀).
+ *        scd41_init()처럼 방어적으로 periodic을 멈추는 절차 자체가 필요 없어서, 그로 인한
+ *        1000ms 안정화 지연도 같이 사라짐 — 매 딥슬립 사이클마다 부팅 후 측정 시작까지의
+ *        시간이 크게 단축됨.
+ * @param i2c_port 전용으로 쓸 I2C 포트 번호
+ * @param sda_gpio SDA 핀
+ * @param scl_gpio SCL 핀
+ * @return 성공 시 true
+ */
+bool scd41_init_single_shot(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio);
+
+/**
  * @brief 새 측정값이 준비됐으면 읽기 (5초 주기로 갱신됨, 그 전엔 false)
  * @param co2_ppm     CO2 농도 ppm 출력 (NULL 가능)
  * @param temperature 섭씨 온도 출력 (NULL 가능)

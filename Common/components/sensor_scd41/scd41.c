@@ -21,17 +21,24 @@ static const char *TAG = "scd41";
 #define I2C_TIMEOUT_MS         1000
 #define REINIT_FAIL_THRESHOLD  3       /* 연속 통신 실패 횟수 — 도달 시 측정 재시작 시퀀스 재실행 */
 #define STALE_TIMEOUT_MS       16000   /* 마지막 성공 측정 이후 이만큼 지나면 무에러 idle 고착으로 간주 */
-#define SINGLE_SHOT_DURATION_MS  5000  /* 데이터시트 기준 single-shot 측정 소요시간 */
 
 static i2c_master_dev_handle_t  s_dev = NULL;
 static i2c_master_bus_handle_t  s_bus = NULL;
 static int                      s_fail_count = 0;
 static bool                     s_reinit_in_progress = false;
 static TickType_t               s_last_success_tick = 0;
+/* 2026-09-06(사용자 지적 — "이런 실수가 너무 많다") — scd41_init_single_shot()만 고치고
+ * force_reinit()이 여전히 start_measurement_sequence()(WAKE_UP+STOP+**START_PERIODIC**)를
+ * 부르는 걸 놓쳤던 실수를 고침. force_reinit()은 note_failure()/check_stale()을 통해
+ * data_ready()/read_measurement_frame() 안에서 자동으로 걸리므로, 싱글샷 전용 호출부
+ * (scd41_init_single_shot)에서도 그대로 타서 싱글샷 도중에 컨티뉴어스가 다시 켜지는
+ * 사고가 났음 — 이 플래그로 분기 */
+static bool                     s_single_shot_mode = false;
 
-/* single-shot 듀티사이클 상태 — continuous 모드(위 워치독들)와는 별개 경로 */
-static bool      s_single_shot_pending      = false;
-static TickType_t s_single_shot_trigger_tick = 0;
+/* single-shot 듀티사이클 상태 — continuous 모드(위 워치독들)와는 별개 경로. 2026-09-06 —
+ * 예전엔 트리거 시각을 RTC/틱으로 기억해뒀다가 "데이터시트 최대값(5000ms) 지났나"만 보고
+ * 판단했는데, data_ready()로 실제 준비 여부를 직접 물어보게 바꾸면서 더 이상 필요 없어짐 */
+static bool s_single_shot_pending = false;
 
 static bool start_measurement_sequence(void);
 
@@ -52,6 +59,17 @@ static void force_reinit(const char *reason)
     s_fail_count = 0;
     s_reinit_in_progress = true;
     recover_bus();
+
+    /* 2026-09-06(위 s_single_shot_mode 주석 참고) — 싱글샷 전용 경로는 여기서도 컨티뉴어스를
+     * 절대 시작하면 안 됨. I2C 버스 리셋까지만 하고 끝 — 다음 싱글샷 트리거는 호출부
+     * (scd41_trigger_single_shot)가 알아서 다시 함 */
+    if (s_single_shot_mode) {
+        s_reinit_in_progress = false;
+        s_last_success_tick = xTaskGetTickCount();
+        ESP_LOGI(TAG, "싱글샷 모드 — I2C 버스 리셋만 수행(컨티뉴어스 재시작 안 함)");
+        return;
+    }
+
     bool ok = start_measurement_sequence();
     s_reinit_in_progress = false;
     s_last_success_tick = xTaskGetTickCount();  /* 재시도 폭주 방지 — 다음 측정까지는 정상으로 간주 */
@@ -133,7 +151,9 @@ static bool start_measurement_sequence(void)
     return start_ok;
 }
 
-bool scd41_init(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
+/* scd41_init()/scd41_init_single_shot() 공용 — 전용 I2C 버스 생성 + 디바이스 등록만.
+ * 2026-09-06 — 두 초기화 경로가 공유하도록 분리(측정 시퀀스 시작 여부만 다름) */
+static bool init_i2c_bus_and_device(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
 {
     /* LP_I2C_SCLK_DEFAULT는 LP_I2C 페리페럴이 있는 칩(esp32c6 등)의 port 1 전용 —
      * esp32c3는 LP_I2C 자체가 없어서(SOC_I2C_NUM=1) 이 매크로도 미정의. 칩 역량
@@ -167,6 +187,13 @@ bool scd41_init(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
         ESP_LOGE(TAG, "i2c_master_bus_add_device failed");
         return false;
     }
+    return true;
+}
+
+bool scd41_init(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
+{
+    s_single_shot_mode = false;
+    if (!init_i2c_bus_and_device(i2c_port, sda_gpio, scl_gpio)) return false;
 
     if (!start_measurement_sequence()) {
         ESP_LOGW(TAG, "센서 응답 없음 — 연결 확인 필요");
@@ -176,6 +203,12 @@ bool scd41_init(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
 
     ESP_LOGI(TAG, "SCD41 주기 측정 시작 (5초 간격)");
     return true;
+}
+
+bool scd41_init_single_shot(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
+{
+    s_single_shot_mode = true;
+    return init_i2c_bus_and_device(i2c_port, sda_gpio, scl_gpio);
 }
 
 static bool data_ready(void)
@@ -264,17 +297,21 @@ bool scd41_trigger_single_shot(void)
 {
     if (!s_dev) return false;
     if (!send_cmd(CMD_MEASURE_SINGLE_SHOT)) return false;
-    s_single_shot_pending      = true;
-    s_single_shot_trigger_tick = xTaskGetTickCount();
+    s_single_shot_pending = true;
     return true;
 }
 
+/* 2026-09-06(사용자 지적) — 예전엔 "데이터시트 최대값(5000ms)만큼 소프트웨어 타이머로
+ * 기다렸다가 딱 한 번만 읽고, 그게 실패하면(센서가 그 언저리에서 아주 조금만 더 걸려도)
+ * 재시도 없이 포기"하는 구조였음. 실제로 센서에 "값 준비됐냐"를 물어본 적이 한 번도 없이
+ * 그냥 시간만 재고 있었던 것 — continuous 모드(scd41_read)가 이미 쓰고 있는
+ * CMD_GET_DATA_READY_STATUS(data_ready())로 실제 준비 여부를 물어보도록 통일함. 통상
+ * 1초 정도면 준비될 수 있고(사용자 언급, 확인 필요) 늦어도 데이터시트 최대값 안에서 준비되면
+ * 그 즉시 잡아냄 — 고정 타이머 추측이 아니라 센서가 직접 답하는 값 기준 */
 bool scd41_poll_single_shot(int *co2_ppm, float *temperature, float *humidity, bool *out_ok)
 {
     if (!s_dev || !s_single_shot_pending) return false;
-    if ((xTaskGetTickCount() - s_single_shot_trigger_tick) < pdMS_TO_TICKS(SINGLE_SHOT_DURATION_MS)) {
-        return false;  /* 아직 측정 중 — I2C 트래픽 없이 조용히 리턴 */
-    }
+    if (!data_ready()) return false;  /* 아직 준비 안 됨 — 호출자가 다음 폴에서 다시 확인 */
     *out_ok = read_measurement_frame(co2_ppm, temperature, humidity);
     s_single_shot_pending = false;  /* 성공/실패 무관 이번 사이클 종료 — 다음 트리거는 호출자 책임 */
     return true;

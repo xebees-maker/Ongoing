@@ -20,6 +20,7 @@
 #include "ui_log.h"
 #include "rtc_sync.h"
 #include "device_config.h"
+#include "sd_storage.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -181,6 +182,54 @@ static esp_err_t api_connect_get_handler(httpd_req_t *req)
     int len = snprintf(body, sizeof(body), "{\"ok\":%s,\"msg\":\"%s\"}",
                         paired ? "true" : "false",
                         paired ? ui_str(STR_STATUS_PAIRED) : ui_str(STR_CONNECT_FAILED));
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    return httpd_resp_send(req, body, len);
+}
+
+/* 2026-09-06(사용자 지시 — 야간 자동 테스트용, "사용자처럼" 센스 연결+응답성 변경) —
+ * api_connect_get_handler와 동일 패턴, 센스 전용 합성 함수만 다름 */
+static esp_err_t api_connect_sensor_get_handler(httpd_req_t *req)
+{
+    char query[32] = { 0 };
+    char mac_hex[16] = { 0 };
+    uint8_t mac[6];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "mac", mac_hex, sizeof(mac_hex)) != ESP_OK ||
+        !decode_mac_hex(mac_hex, mac)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid mac");
+        return ESP_FAIL;
+    }
+
+    bool paired = false;
+    if (ui_main_inject_connect_sensor(mac)) {
+        paired = esp_now_hub_wait_paired(mac, 25000);
+    }
+
+    char body[96];
+    int len = snprintf(body, sizeof(body), "{\"ok\":%s,\"msg\":\"%s\"}",
+                        paired ? "true" : "false",
+                        paired ? ui_str(STR_STATUS_PAIRED) : ui_str(STR_CONNECT_FAILED));
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    return httpd_resp_send(req, body, len);
+}
+
+/* ?sec=0|3|10|30|60 — 응답성 드롭다운+Apply 합성. 실제 적용 완료(CAM/SENS 응답 대기)까지는
+ * 기다리지 않고 "합성 자체가 성공했는지"만 반환 — 야간 자동 테스트 스크립트가 그 다음
+ * 단계(재연결 등) 전에 device_config 값이 실제로 바뀌었는지는 별도로 확인하면 됨 */
+static esp_err_t api_set_response_interval_get_handler(httpd_req_t *req)
+{
+    char query[32] = { 0 };
+    char sec_str[8] = { 0 };
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "sec", sec_str, sizeof(sec_str)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing sec");
+        return ESP_FAIL;
+    }
+    uint32_t sec = (uint32_t)strtoul(sec_str, NULL, 10);
+    bool ok = ui_main_inject_set_response_interval(sec);
+
+    char body[64];
+    int len = snprintf(body, sizeof(body), "{\"ok\":%s}", ok ? "true" : "false");
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     return httpd_resp_send(req, body, len);
 }
@@ -519,6 +568,13 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_disconnect_uri = { .uri = "/api/disconnect", .method = HTTP_GET,
                                                       .handler = api_disconnect_get_handler };
     httpd_register_uri_handler(server, &api_disconnect_uri);
+    static const httpd_uri_t api_connect_sensor_uri = { .uri = "/api/connect_sensor", .method = HTTP_GET,
+                                                          .handler = api_connect_sensor_get_handler };
+    httpd_register_uri_handler(server, &api_connect_sensor_uri);
+    static const httpd_uri_t api_set_response_interval_uri = { .uri = "/api/set_response_interval",
+                                                                  .method = HTTP_GET,
+                                                                  .handler = api_set_response_interval_get_handler };
+    httpd_register_uri_handler(server, &api_set_response_interval_uri);
     static const httpd_uri_t api_photos_uri = { .uri = "/api/photos", .method = HTTP_GET,
                                                   .handler = api_photos_get_handler };
     httpd_register_uri_handler(server, &api_photos_uri);
@@ -600,6 +656,17 @@ void app_main(void)
         &touch_handle));
     ESP_ERROR_CHECK(waveshare_rgb_lcd_backlight_on());
 
+    /* 2026-09-06(사용자 지시) — SD카드 마운트, 통계탭 시계열 저장용. LCD/CH422G가 이미
+     * 초기화된 뒤에 불러야 함(CH422G 공유 I2C 버스/섀도우 상태 의존, sd_storage.h 참고).
+     * 실패해도(SD 미장착 등) 앱 전체를 막지 않음 — 화면/통신 등 다른 기능은 SD와 무관 */
+    esp_err_t sd_err = sd_storage_init();
+    if (sd_err != ESP_OK) {
+        ESP_LOGW(TAG, "SD카드 마운트 실패(%s) — 통계 저장 기능 없이 계속 진행", esp_err_to_name(sd_err));
+        ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "SD card mount failed: %s", esp_err_to_name(sd_err));
+    } else {
+        ui_log_add("SD card mounted OK");
+    }
+
     /* 보드 실장 PCF85063A RTC — I2C 버스가 막 만들어진 직후, UI가 뜨기 전에 시각을
      * 읽어와야 로고 부제(시계)가 처음부터 맞는 값으로 뜸 */
     esp_err_t rtc_ret = rtc_sync_init();
@@ -617,6 +684,13 @@ void app_main(void)
         EXAMPLE_LCD_V_RES,
         rotation);
     disp_config.profile.use_psram = true;
+    /* 2026-09-06(내부 RAM 위기 대응) — TRIPLE_PARTIAL 찢김방지 모드의 부분버퍼는
+     * display_manager.c가 PSRAM 여부를 무시하고 항상 내부 RAM에 고정 할당함(벤더 컴포넌트,
+     * 직접 패치 안 함). 기본 buffer_height=50이면 800*50*2=78KB — 내부 RAM 106KB 소비의
+     * 대부분을 차지(project_cntl_stats_tab_memory_2026_09_06 메모리 참고). 10으로 낮춰서
+     * 800*10*2=16KB로 줄임(측정: 위기 시점 대비 약 50KB 회수) — 실기에서 화면 깜빡임/찢김
+     * 없음 확인(사용자), 20에서 한 단계 더 낮춘 값 */
+    disp_config.profile.buffer_height = 10;
 
     lv_display_t *disp = esp_lv_adapter_register_display(&disp_config);
     assert(disp != NULL);

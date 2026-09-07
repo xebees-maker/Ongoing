@@ -3,6 +3,7 @@
 #include "ui_font.h"
 #include "esp_now_hub.h"
 #include "device_config.h"
+#include "stats_store.h"
 #include "esp_now_photo.h"
 #include "ui_log.h"
 #include "rtc_sync.h"
@@ -92,6 +93,12 @@ static lv_obj_t *s_summary_row_objs[ESP_NOW_HUB_MAX_NODES];
 static uint8_t   s_summary_row_macs[ESP_NOW_HUB_MAX_NODES][6];
 static char      s_summary_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
 static int       s_summary_row_count = 0;
+/* 2026-09-06(실기에서 발견 — Live모드로 센스가 1초 간격 재전송하는 동안 lv_label_set_text가
+ * 내용이 같아도 매번 무조건 재할당+무효화+TTF 재래스터를 함(LVGL 소스 확인,
+ * set_text_internal에 문자열비교 없음) — IDLE0 태스크워치독이 몇 분씩 안 풀릴 정도로 이
+ * 렌더 파이프라인을 계속 밀어넣은 게 원인. 실제로 문구가 바뀔 때만 set_text 호출하도록
+ * 마지막 표시문구를 기억해뒀다가 비교 */
+static char      s_summary_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
 /* 2026-09-04(사용자 지시 — 요약판넬 우측에 신호세기, 숫자 대신 막대) — 위 s_summary_row_objs와
  * 같은 인덱스로 짝지어지는 신호막대 위젯(각 행의 우측 자식) */
 static lv_obj_t *s_summary_row_signal[ESP_NOW_HUB_MAX_NODES];
@@ -284,6 +291,20 @@ static lv_obj_t   *s_power_log_pause_lbl = NULL;
 static lv_timer_t *s_power_panel_timer   = NULL;  /* 일시멈춤 단추가 pause/resume(2026-08-10) */
 static bool        s_power_log_paused    = false;
 
+/* 통계탭(2026-09-06, 사용자 설계) — 실제 시계열 통계 판넬. 그래프는 다음 단계, 이번엔
+ * 항목별 최대/최소(peak_label)와 페이지네이션된 값 테이블(stats_table)만 구현.
+ * peak_title/prev_lbl/next_lbl은 정적 제목이라 refresh_lang_texts에서 갱신 —
+ * peak_label/table/page_label 내용은 refresh_stats_page() 타이머가 매번 새로 채움 */
+static lv_obj_t *s_stats_peak_title  = NULL;
+static lv_obj_t *s_stats_peak_label  = NULL;
+static lv_obj_t *s_stats_table       = NULL;
+static lv_obj_t *s_stats_page_label  = NULL;
+static lv_obj_t *s_stats_prev_btn    = NULL;
+static lv_obj_t *s_stats_prev_lbl    = NULL;
+static lv_obj_t *s_stats_next_btn    = NULL;
+static lv_obj_t *s_stats_next_lbl    = NULL;
+static uint32_t  s_stats_page_index  = 0;  /* 0 = 가장 최근 페이지 */
+
 /* ds_cycle_count 하나만 비교하면 됨(2026-08-10) — 매 리포트가 항상 새 사이클이라 Light
  * Sleep 시절처럼 여러 필드를 같이 diff할 필요가 없어짐(단조증가 카운터) */
 typedef struct {
@@ -440,6 +461,7 @@ static void refresh_lang_texts(void)
     lv_tabview_set_tab_text(s_page_control, 0, ui_str(STR_TAB_DASHBOARD));
     lv_tabview_set_tab_text(s_page_control, 1, ui_str(STR_TAB_STATISTICS));
     lv_tabview_set_tab_text(s_page_control, 2, ui_str(STR_TAB_OPTION));
+    lv_tabview_set_tab_text(s_page_control, 3, ui_str(STR_TAB_LOG));
 
     for (ui_str_id_t id = STR_GROUP_CNTL; id <= STR_GROUP_SYSTEM; id++) {
         lv_label_set_text(s_group_title[id - STR_GROUP_CNTL], ui_str(id));
@@ -485,6 +507,9 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
     lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
     lv_label_set_text(s_log_panel_title, ui_str(STR_PANEL_GENERAL_LOG));
+    lv_label_set_text(s_stats_peak_title, ui_str(STR_PANEL_STATS_PEAK));
+    lv_label_set_text(s_stats_prev_lbl, ui_str(STR_BTN_PREV_PAGE));
+    lv_label_set_text(s_stats_next_lbl, ui_str(STR_BTN_NEXT_PAGE));
     lv_label_set_text(s_network_label, ui_str(STR_LABEL_NETWORK));
     /* 2026-08-29 버그수정 — 캡션을 무조건 "찾기"로 덮어쓰면 연결된 상태(캡션=SSID)일 때
      * 언어 전환 시 SSID가 사라지고 "찾기"로 잘못 바뀜. 현재 상태 기준으로 다시 계산 */
@@ -965,6 +990,8 @@ static void cb_sensor_item_clicked(lv_event_t *e)
     else                                                                 show_pair_confirm_popup(node);
 }
 
+static char s_sensor_row_last_text[ESP_NOW_HUB_MAX_NODES][48];
+
 static void refresh_sensor_row_status_text(void)
 {
     for (int i = 0; i < s_sensor_row_count; i++) {
@@ -974,8 +1001,14 @@ static void refresh_sensor_row_status_text(void)
                                : STR_STATUS_PAIRED;
         char buf[48];
         snprintf(buf, sizeof(buf), "%s (%s)", s_sensor_row_names[i], ui_str(status_id));
+        /* 2026-09-06(실기 발견 — s_summary_row_last_text 선언부 설명 참고) */
+        if (strcmp(s_sensor_row_last_text[i], buf) == 0) continue;
         lv_obj_t *lbl = lv_obj_get_child(s_sensor_row_objs[i], 0);
-        if (lbl) lv_label_set_text(lbl, buf);
+        if (lbl) {
+            lv_label_set_text(lbl, buf);
+            strncpy(s_sensor_row_last_text[i], buf, sizeof(s_sensor_row_last_text[i]) - 1);
+            s_sensor_row_last_text[i][sizeof(s_sensor_row_last_text[i]) - 1] = '\0';
+        }
     }
 }
 
@@ -1011,6 +1044,7 @@ static void refresh_sensor_list(lv_timer_t *t)
                     memcpy(s_sensor_row_macs[i], s_sensor_nodes[i].mac, 6);
                     strncpy(s_sensor_row_names[i], s_sensor_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
                     s_sensor_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
+                    s_sensor_row_last_text[i][0] = '\0';  /* 새로 만든 라벨 — 다음 틱에 무조건 한 번은 채워지도록 */
                 }
             }
             s_sensor_row_count = (count < ESP_NOW_HUB_MAX_NODES) ? count : ESP_NOW_HUB_MAX_NODES;
@@ -2284,6 +2318,7 @@ static bool chan_type_to_strs(uint8_t chan_type, ui_str_id_t *label_id, ui_str_i
         case SENSOR_CHAN_TEMP_C:   *label_id = STR_CHAN_LABEL_TEMP_C;   *unit_id = STR_CHAN_UNIT_TEMP_C;   return true;
         case SENSOR_CHAN_HUMI_PCT: *label_id = STR_CHAN_LABEL_HUMI_PCT; *unit_id = STR_CHAN_UNIT_HUMI_PCT; return true;
         case SENSOR_CHAN_CO2_PPM:  *label_id = STR_CHAN_LABEL_CO2_PPM;  *unit_id = STR_CHAN_UNIT_CO2_PPM;  return true;
+        case SENSOR_CHAN_NH3_PPM:  *label_id = STR_CHAN_LABEL_NH3_PPM;  *unit_id = STR_CHAN_UNIT_NH3_PPM;  return true;
         default: return false;
     }
 }
@@ -2317,6 +2352,148 @@ static int append_sensor_value_row(char *buf, size_t buf_size, int used,
     int n_written = snprintf(buf + used, (used < (int)buf_size) ? buf_size - (size_t)used : 0,
                               "%s%s: %s", (used > 0) ? "\n" : "", n->name, line);
     return (n_written > 0) ? used + n_written : used;
+}
+
+/* 2026-09-06(사용자 설계) — 통계탭 값 테이블 한 행의 mac -> 노드 이름. 언페어/이름변경 등으로
+ * 지금 노드 목록에서 못 찾으면(오래된 기록) mac 뒤 2바이트로 폴백 표시 */
+static void find_node_name_by_mac(const uint8_t mac[6], char *out, size_t out_cap)
+{
+    esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
+    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, ESP_NOW_HUB_MAX_NODES);
+    for (int i = 0; i < total; i++) {
+        if (memcmp(nodes[i].mac, mac, 6) == 0) {
+            snprintf(out, out_cap, "%s", nodes[i].name);
+            return;
+        }
+    }
+    snprintf(out, out_cap, "%02X%02X", mac[4], mac[5]);
+}
+
+/* 통계탭 상단 최대/최소 판넬 — 온도/습도/CO2/암모니아 4종 고정(2026-09-06 설계) */
+static void refresh_stats_peak_panel(void)
+{
+    static const uint8_t s_peak_chan_types[] = {
+        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM,
+    };
+    char peak_buf[512];
+    int peak_len = 0;
+    for (size_t i = 0; i < sizeof(s_peak_chan_types); i++) {
+        uint8_t ct = s_peak_chan_types[i];
+        ui_str_id_t label_id, unit_id;
+        if (!chan_type_to_strs(ct, &label_id, &unit_id)) continue;
+
+        char line[128];
+        float mn, mx;
+        if (stats_store_get_min_max(ct, &mn, &mx)) {
+            int mn_scaled = (int)(mn * 100.0f + 0.5f);
+            int mx_scaled = (int)(mx * 100.0f + 0.5f);
+            snprintf(line, sizeof(line), ui_str(STR_STATS_PEAK_ROW_FMT), ui_str(label_id),
+                     mx_scaled / 100, mx_scaled % 100, ui_str(unit_id),
+                     mn_scaled / 100, mn_scaled % 100, ui_str(unit_id));
+        } else {
+            snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_STATS_PEAK_NO_DATA));
+        }
+        int n_written = snprintf(peak_buf + peak_len,
+                                  (peak_len < (int)sizeof(peak_buf)) ? sizeof(peak_buf) - (size_t)peak_len : 0,
+                                  "%s%s", (peak_len > 0) ? "\n" : "", line);
+        if (n_written > 0) peak_len += n_written;
+    }
+    lv_label_set_text(s_stats_peak_label, peak_buf);
+}
+
+/* 통계탭 값 테이블 — page_size(20)줄 고정 페이지네이션(2026-09-06 설계, 웹 스타일 —
+ * 무한스크롤 아님). stats_store_read_page()가 파일오프셋 직접계산으로 이 페이지분만
+ * 읽어오므로, 저장된 기록이 아무리 많아도(1년치) 여기서 읽는 양은 항상 20줄 고정 */
+static void refresh_stats_table(void)
+{
+    stats_record_t recs[STATS_STORE_PAGE_SIZE];
+    uint32_t got = stats_store_read_page(s_stats_page_index, STATS_STORE_PAGE_SIZE,
+                                          recs, STATS_STORE_PAGE_SIZE);
+    uint32_t total = stats_store_get_count();
+    uint32_t total_pages = (total + STATS_STORE_PAGE_SIZE - 1) / STATS_STORE_PAGE_SIZE;
+    if (total_pages == 0) total_pages = 1;
+
+    lv_table_set_row_count(s_stats_table, (got > 0 ? got : 1) + 1);
+    lv_table_set_cell_value(s_stats_table, 0, 0, ui_str(STR_STATS_TABLE_HEADER_ITEM));
+    lv_table_set_cell_value(s_stats_table, 0, 1, ui_str(STR_STATS_TABLE_HEADER_VALUE));
+    lv_table_set_cell_value(s_stats_table, 0, 2, ui_str(STR_STATS_TABLE_HEADER_TIME));
+
+    if (got == 0) {
+        lv_table_set_cell_value(s_stats_table, 1, 0, ui_str(STR_STATS_TABLE_EMPTY));
+        lv_table_set_cell_value(s_stats_table, 1, 1, "");
+        lv_table_set_cell_value(s_stats_table, 1, 2, "");
+    } else {
+        /* stats_store_read_page()는 파일에 쓰인 순서(오래된 것부터)로 채워서 돌려줌 —
+         * 화면엔 최신이 위로 오게 역순으로 순회 */
+        for (uint32_t i = 0; i < got; i++) {
+            const stats_record_t *r = &recs[got - 1 - i];
+
+            char name[ESP_NOW_LINK_NAME_LEN];
+            find_node_name_by_mac(r->mac, name, sizeof(name));
+
+            ui_str_id_t label_id, unit_id;
+            char item_buf[64];
+            char value_buf[32];
+            if (chan_type_to_strs(r->chan_type, &label_id, &unit_id)) {
+                snprintf(item_buf, sizeof(item_buf), "%s %s", name, ui_str(label_id));
+                int scaled = (int)(r->value * 100.0f + 0.5f);
+                snprintf(value_buf, sizeof(value_buf), "%d.%02d%s",
+                         scaled / 100, scaled % 100, ui_str(unit_id));
+            } else {
+                snprintf(item_buf, sizeof(item_buf), "%s", name);
+                int scaled = (int)(r->value * 100.0f + 0.5f);
+                snprintf(value_buf, sizeof(value_buf), "%d.%02d", scaled / 100, scaled % 100);
+            }
+
+            struct tm tm_buf;
+            time_t tt = (time_t)r->unix_time;
+            localtime_r(&tt, &tm_buf);
+            char time_buf[16];
+            snprintf(time_buf, sizeof(time_buf), "%02u:%02u:%02u",
+                     tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+
+            lv_table_set_cell_value(s_stats_table, i + 1, 0, item_buf);
+            lv_table_set_cell_value(s_stats_table, i + 1, 1, value_buf);
+            lv_table_set_cell_value(s_stats_table, i + 1, 2, time_buf);
+        }
+    }
+
+    uint32_t displayed_page = s_stats_page_index + 1;
+    char page_buf[32];
+    snprintf(page_buf, sizeof(page_buf), ui_str(STR_STATS_PAGE_FMT),
+             (unsigned long)displayed_page, (unsigned long)total_pages);
+    lv_label_set_text(s_stats_page_label, page_buf);
+
+    bool can_prev = (s_stats_page_index + 1) < total_pages;  /* 더 오래된 페이지 있음 */
+    bool can_next = (s_stats_page_index > 0);                /* 더 최신 페이지 있음 */
+    if (can_prev) lv_obj_remove_state(s_stats_prev_btn, LV_STATE_DISABLED);
+    else          lv_obj_add_state(s_stats_prev_btn, LV_STATE_DISABLED);
+    if (can_next) lv_obj_remove_state(s_stats_next_btn, LV_STATE_DISABLED);
+    else          lv_obj_add_state(s_stats_next_btn, LV_STATE_DISABLED);
+}
+
+static void refresh_stats_page(lv_timer_t *t)
+{
+    (void)t;
+    refresh_stats_peak_panel();
+    refresh_stats_table();
+}
+
+static void stats_prev_page_cb(lv_event_t *e)
+{
+    (void)e;
+    uint32_t total = stats_store_get_count();
+    uint32_t total_pages = (total + STATS_STORE_PAGE_SIZE - 1) / STATS_STORE_PAGE_SIZE;
+    if (total_pages == 0) total_pages = 1;
+    if (s_stats_page_index + 1 < total_pages) s_stats_page_index++;
+    refresh_stats_table();
+}
+
+static void stats_next_page_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_stats_page_index > 0) s_stats_page_index--;
+    refresh_stats_table();
 }
 
 /* 2026-09-04(사용자 지시 — 요약판넬 우측에 신호세기, 숫자보다 막대/흔한 와이파이 표시형태로,
@@ -2439,6 +2616,7 @@ static void refresh_dashboard(lv_timer_t *t)
                 memcpy(s_summary_row_macs[paired_count], s_dash_nodes[i].mac, 6);
                 strncpy(s_summary_row_names[paired_count], s_dash_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
                 s_summary_row_names[paired_count][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
+                s_summary_row_last_text[paired_count][0] = '\0';  /* 새로 만든 라벨 — 다음 틱에 무조건 한 번은 채워지도록 */
             }
             paired_count++;
         }
@@ -2477,7 +2655,13 @@ static void refresh_dashboard(lv_timer_t *t)
             update_signal_widget(s_summary_row_signal[i], s_dash_nodes[j].has_rssi, s_dash_nodes[j].rssi);
             break;
         }
-        lv_label_set_text(s_summary_row_objs[i], buf);
+        /* 2026-09-06(실기 발견 — 위 s_summary_row_last_text 선언부 설명 참고) — 문구가 실제로
+         * 안 바뀌었으면 lv_label_set_text 자체를 안 부름(무조건 재할당+무효화 방지) */
+        if (strcmp(s_summary_row_last_text[i], buf) != 0) {
+            lv_label_set_text(s_summary_row_objs[i], buf);
+            strncpy(s_summary_row_last_text[i], buf, sizeof(s_summary_row_last_text[i]) - 1);
+            s_summary_row_last_text[i][sizeof(s_summary_row_last_text[i]) - 1] = '\0';
+        }
     }
 
     /* 판넬2: 측정기 — 연결된 SENS 전부의 채널값을 한 줄씩(사용자 설계: "{라벨} xx.yy {단위}
@@ -2498,7 +2682,15 @@ static void refresh_dashboard(lv_timer_t *t)
     if (sensor_connected) {
         lv_obj_add_flag(s_sensor_empty, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_sensor_todo, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_sensor_todo, (sensor_values_len > 0) ? sensor_values_buf : ui_str(STR_SENSOR_VALUE_PENDING));
+        /* 2026-09-06(실기 발견 — s_summary_row_last_text 선언부 설명 참고) — 센스가 같은
+         * 캐시값을 반복 재전송(중복 측정ID)할 때는 이 문구도 그대로라서 매 틱 재설정 생략 */
+        const char *new_text = (sensor_values_len > 0) ? sensor_values_buf : ui_str(STR_SENSOR_VALUE_PENDING);
+        static char s_sensor_todo_last_text[512];
+        if (strcmp(s_sensor_todo_last_text, new_text) != 0) {
+            lv_label_set_text(s_sensor_todo, new_text);
+            strncpy(s_sensor_todo_last_text, new_text, sizeof(s_sensor_todo_last_text) - 1);
+            s_sensor_todo_last_text[sizeof(s_sensor_todo_last_text) - 1] = '\0';
+        }
     } else {
         lv_obj_remove_flag(s_sensor_empty, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_sensor_todo, LV_OBJ_FLAG_HIDDEN);
@@ -3792,6 +3984,59 @@ bool ui_main_inject_connect(const uint8_t *mac)
     return run_on_lvgl_task(inject_fn_connect, mac_copy, 1000);
 }
 
+/* 2026-09-06(사용자 지시 — 야간 자동 테스트용) — 센스 행은 카메라 행과 별도 리스트
+ * (s_sensor_row_objs/macs)라서 find_camera_row_by_mac 재사용이 안 됨. 확인팝업 콜백은
+ * cb_pair_confirm 그대로 공용(cb_sensor_item_clicked가 show_pair_confirm_popup을
+ * CAM과 동일하게 씀) */
+static lv_obj_t *find_sensor_row_by_mac(const uint8_t *mac)
+{
+    for (int i = 0; i < s_sensor_row_count; i++) {
+        if (memcmp(s_sensor_row_macs[i], mac, 6) == 0) return s_sensor_row_objs[i];
+    }
+    return NULL;
+}
+
+static bool inject_fn_connect_sensor(void *arg)
+{
+    const uint8_t *mac = (const uint8_t *)arg;
+    lv_obj_t *row = find_sensor_row_by_mac(mac);
+    if (!row) return false;
+    lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_sensor_item_clicked -> show_pair_confirm_popup */
+    lv_obj_t *confirm = find_widget_by_event_cb(s_last_modal, cb_pair_confirm);
+    if (!confirm) return false;
+    lv_obj_send_event(confirm, LV_EVENT_CLICKED, NULL);  /* -> cb_pair_confirm -> esp_now_hub_request_pair() */
+    return true;
+}
+
+bool ui_main_inject_connect_sensor(const uint8_t *mac)
+{
+    static uint8_t mac_copy[6];
+    memcpy(mac_copy, mac, 6);
+    return run_on_lvgl_task(inject_fn_connect_sensor, mac_copy, 1000);
+}
+
+/* 2026-09-06(사용자 지시 — 야간 자동 테스트용) — 응답성(response_interval) 드롭다운 선택
+ * + Apply 버튼 탭까지 그대로 합성. sec가 s_response_interval_values(0/3/10/30/60)에
+ * 없으면 실패 */
+static bool inject_fn_set_response_interval(void *arg)
+{
+    uint32_t sec = *(uint32_t *)arg;
+    int idx = find_value_index(s_response_interval_values,
+        sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0]), sec);
+    if (idx < 0 || !s_response_interval_dd || !s_response_apply_btn) return false;
+    lv_dropdown_set_selected(s_response_interval_dd, (uint16_t)idx);
+    lv_obj_send_event(s_response_interval_dd, LV_EVENT_VALUE_CHANGED, NULL);  /* -> cb_response_interval_changed */
+    lv_obj_send_event(s_response_apply_btn, LV_EVENT_CLICKED, NULL);          /* -> cb_apply_response_interval */
+    return true;
+}
+
+bool ui_main_inject_set_response_interval(uint32_t sec)
+{
+    static uint32_t sec_copy;
+    sec_copy = sec;
+    return run_on_lvgl_task(inject_fn_set_response_interval, &sec_copy, 1000);
+}
+
 static bool inject_fn_disconnect(void *arg)
 {
     const uint8_t *mac = (const uint8_t *)arg;
@@ -4161,99 +4406,63 @@ void ui_init(void)
     lv_obj_set_style_bg_color(stats_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
     lv_obj_set_style_bg_opa(stats_page, LV_OPA_COVER, 0);
 
-    /* 2026-08-11, 사용자 지시 — 일반로그/전력로그 위아래 순서 맞바꿈(일반로그가 위, 전력로그가
-     * 아래). 두 블록 내용 자체는 그대로, stats_page에 자식으로 추가되는 순서만 바뀜(LVGL
-     * flex-column은 생성 순서대로 위→아래 배치) */
-    lv_obj_t *log_box = lv_obj_create(stats_page);
-    /* 2026-08-11, 사용자 지시 — "전력, 일반 모두 320 픽셀로 맞춰": power_box와 동일하게
-     * 고정 320px(전에 flex_grow로 남는 ~73px만 나눠 갖던 걸 여기서 되돌림). power_box(320)
-     * + log_box(320) 합이 실제 콘텐츠 영역(~393px)보다 커지므로 stats_page 자체가 정상적으로
-     * overflow해서 스크롤이 필요해짐 — 이게 의도(사용자: "스크롤 하겠다는 거니까, 화면
-     * 크기에 맞추면 안되지") — power_title_row/log_title_row가 그 바깥 스크롤을 잡는
-     * 고정 영역 역할 */
-    lv_obj_set_size(log_box, LV_PCT(100), 320);
-    lv_obj_set_flex_flow(log_box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(log_box, 6, 0);
+    /* 2026-09-06(사용자 지시) — 일반로그/전력로그는 새 "로그" 탭(4번째)으로 이동함(아래
+     * log_page 생성부 참고, 위젯/변수는 그대로 재사용). 이 탭은 이제 실제 시계열 통계 —
+     * 그래프(Y=값, X=시간, 1h/12h/24h/1주일)는 다음 단계, 이번엔 최대/최소 판넬 +
+     * 페이지네이션 값 테이블만 구현 */
+    lv_obj_t *stats_peak_box = lv_obj_create(stats_page);
+    lv_obj_set_size(stats_peak_box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(stats_peak_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(stats_peak_box, 6, 0);
 
-    lv_obj_t *log_title_row = lv_obj_create(log_box);
-    lv_obj_set_size(log_title_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_border_width(log_title_row, 0, 0);
-    lv_obj_set_style_pad_all(log_title_row, 0, 0);
-    lv_obj_set_flex_flow(log_title_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(log_title_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    s_stats_peak_title = lv_label_create(stats_peak_box);
+    lv_label_set_text(s_stats_peak_title, ui_str(STR_PANEL_STATS_PEAK));
+    lv_obj_set_style_text_font(s_stats_peak_title, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_log_panel_title = lv_label_create(log_title_row);
-    lv_label_set_text(s_log_panel_title, ui_str(STR_PANEL_GENERAL_LOG));
-    lv_obj_set_style_text_font(s_log_panel_title, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_stats_peak_label = lv_label_create(stats_peak_box);
+    lv_obj_set_width(s_stats_peak_label, LV_PCT(100));
+    lv_obj_set_style_text_font(s_stats_peak_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_stats_peak_label, "");
 
-    s_log_container = lv_obj_create(log_box);
-    lv_obj_set_size(s_log_container, LV_PCT(100), 0);
-    lv_obj_set_flex_grow(s_log_container, 1);
-    lv_obj_set_scroll_dir(s_log_container, LV_DIR_VER);
-    lv_obj_set_style_border_width(s_log_container, 0, 0);
-    lv_obj_set_style_pad_all(s_log_container, 6, 0);
+    lv_obj_t *stats_table_box = lv_obj_create(stats_page);
+    lv_obj_set_size(stats_table_box, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(stats_table_box, 1);
+    lv_obj_set_flex_flow(stats_table_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(stats_table_box, 6, 0);
 
-    s_log_label = lv_label_create(s_log_container);
-    /* 2026-08-22, 사용자 지시 — 로그를 전부 영문으로 바꾸고 폭 넘는 줄은 우리가 직접
-     * "..."로 잘라서 넣으므로(trim_multiline_to_width) WRAP의 비싼 매 렌더 재계산이
-     * 필요 없음 → CLIP(단순 커팅, 실제로 걸릴 일은 없음). 폰트도 커스텀 TTF 대신
-     * 빠른 내장 비트맵 폰트(Montserrat 18pt, 전력로그와 통일 — 20pt는 한 줄에 너무 적게
-     * 들어가 트림 "..."이 자주 남아서 18pt로 축소, 2026-08-22 사용자 지시)로 교체 */
-    lv_label_set_long_mode(s_log_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(s_log_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_log_label, &lv_font_montserrat_18, 0);
-    lv_label_set_text(s_log_label, "");
+    s_stats_table = lv_table_create(stats_table_box);
+    lv_obj_set_width(s_stats_table, LV_PCT(100));
+    lv_obj_set_flex_grow(s_stats_table, 1);
+    lv_table_set_column_count(s_stats_table, 3);
+    lv_table_set_column_width(s_stats_table, 0, 300);
+    lv_table_set_column_width(s_stats_table, 1, 180);
+    lv_table_set_column_width(s_stats_table, 2, 150);
+    lv_obj_set_style_text_font(s_stats_table, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    lv_timer_create(refresh_log_box, 500, NULL);
+    lv_obj_t *stats_page_row = lv_obj_create(stats_table_box);
+    lv_obj_set_size(stats_page_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(stats_page_row, 0, 0);
+    lv_obj_set_style_pad_all(stats_page_row, 4, 0);
+    lv_obj_set_flex_flow(stats_page_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(stats_page_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    lv_obj_t *power_box = lv_obj_create(stats_page);
-    lv_obj_set_size(power_box, LV_PCT(100), 320);  /* 2026-08-10, 사용자 지시 — 고정 320px */
-    lv_obj_set_flex_flow(power_box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(power_box, 6, 0);
+    s_stats_prev_btn = lv_button_create(stats_page_row);
+    lv_obj_add_event_cb(s_stats_prev_btn, stats_prev_page_cb, LV_EVENT_CLICKED, NULL);
+    s_stats_prev_lbl = lv_label_create(s_stats_prev_btn);
+    lv_label_set_text(s_stats_prev_lbl, ui_str(STR_BTN_PREV_PAGE));
+    lv_obj_set_style_text_font(s_stats_prev_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    /* 제목 + 일시멈춤 단추를 한 행에(2026-08-10, 사용자 지시 — 값 읽는 동안 로그가 계속
-     * 밀리지 않게 멈출 수 있게). 2026-08-11 — 이 행은 스크롤 컨테이너(s_power_list) 밖의
-     * 고정 영역이라, 여기를 탭+드래그하면 안쪽 리스트가 가로채지 않고 바깥 stats_page가
-     * 스크롤됨(사용자 지시 — 로그 판넬이 전체 다 내부 스크롤 입력을 받아서 페이지 스크롤을
-     * 잡을 영역이 없었던 문제의 해결책) */
-    lv_obj_t *power_title_row = lv_obj_create(power_box);
-    lv_obj_set_size(power_title_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_border_width(power_title_row, 0, 0);
-    lv_obj_set_style_pad_all(power_title_row, 0, 0);
-    lv_obj_set_flex_flow(power_title_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(power_title_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    s_stats_page_label = lv_label_create(stats_page_row);
+    lv_obj_set_style_text_font(s_stats_page_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_stats_page_label, "");
 
-    s_power_panel_title = lv_label_create(power_title_row);
-    lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
-    lv_obj_set_style_text_font(s_power_panel_title, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_stats_next_btn = lv_button_create(stats_page_row);
+    lv_obj_add_event_cb(s_stats_next_btn, stats_next_page_cb, LV_EVENT_CLICKED, NULL);
+    s_stats_next_lbl = lv_label_create(s_stats_next_btn);
+    lv_label_set_text(s_stats_next_lbl, ui_str(STR_BTN_NEXT_PAGE));
+    lv_obj_set_style_text_font(s_stats_next_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_power_log_pause_btn = lv_button_create(power_title_row);
-    lv_obj_add_event_cb(s_power_log_pause_btn, cb_power_log_pause_toggle, LV_EVENT_CLICKED, NULL);
-    s_power_log_pause_lbl = lv_label_create(s_power_log_pause_btn);
-    lv_label_set_text(s_power_log_pause_lbl, ui_str(STR_BTN_PAUSE));
-    lv_obj_set_style_text_font(s_power_log_pause_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    /* s_log_container와 동일 구조 — 스크롤 컨테이너 + 폭 100% wrap 라벨 하나, 텍스트를
-     * 통째로 갈아끼우고 맨 아래로 자동 스크롤(2026-08-09, 로그처럼 누적 지시) */
-    s_power_list = lv_obj_create(power_box);
-    lv_obj_set_size(s_power_list, LV_PCT(100), 0);
-    lv_obj_set_flex_grow(s_power_list, 1);
-    lv_obj_set_scroll_dir(s_power_list, LV_DIR_VER);
-    lv_obj_set_style_border_width(s_power_list, 0, 0);
-    lv_obj_set_style_bg_opa(s_power_list, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(s_power_list, 6, 0);
-
-    s_power_log_label = lv_label_create(s_power_list);
-    /* 2026-08-22 — 일반로그와 동일 이유로 CLIP + 18pt 비트맵 폰트로 통일(사용자 지시) */
-    lv_label_set_long_mode(s_power_log_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(s_power_log_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_power_log_label, &lv_font_montserrat_18, 0);
-    /* 2026-08-10 — C/S 줄을 구분하려고 recolor(#RRGGBB text#) 켰었으나, 2026-08-11에 3가지
-     * 형태 다 실기에서 깨지는 걸 확인하고 recolor 자체를 포기(순수 텍스트 ">>> " 마커로
-     * 대체, refresh_power_panel 참고) — 더 이상 안 쓰므로 켜두지 않음 */
-    lv_label_set_text(s_power_log_label, "");
-
-    s_power_panel_timer = lv_timer_create(refresh_power_panel, 2000, NULL);
+    lv_timer_create(refresh_stats_page, 2000, NULL);
 
     lv_obj_t *option_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_OPTION));
     lv_obj_set_flex_flow(option_page, LV_FLEX_FLOW_COLUMN);
@@ -4663,6 +4872,110 @@ void ui_init(void)
     s_time_set_btn_lbl = lv_label_create(time_set_btn);
     lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
     lv_obj_set_style_text_font(s_time_set_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-09-06(사용자 지시) — 4번째 "로그" 탭. 기존 통계탭에 있던 일반로그+전력로그
+     * 판넬을 그대로 옮김(위젯 생성 코드 자체는 무변경, stats_page->log_page로 부모만
+     * 교체) — 통계탭은 이제 실제 시계열 통계/그래프 전용으로 비움(위 참고) */
+    lv_obj_t *log_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_LOG));
+    lv_obj_set_flex_flow(log_page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(log_page, 4, 0);
+    lv_obj_set_style_pad_row(log_page, 4, 0);
+    lv_obj_set_style_bg_color(log_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    lv_obj_set_style_bg_opa(log_page, LV_OPA_COVER, 0);
+
+    /* 2026-08-11, 사용자 지시 — 일반로그/전력로그 위아래 순서 맞바꿈(일반로그가 위, 전력로그가
+     * 아래). 두 블록 내용 자체는 그대로, log_page에 자식으로 추가되는 순서만 바뀜(LVGL
+     * flex-column은 생성 순서대로 위→아래 배치) */
+    lv_obj_t *log_box = lv_obj_create(log_page);
+    /* 2026-08-11, 사용자 지시 — "전력, 일반 모두 320 픽셀로 맞춰": power_box와 동일하게
+     * 고정 320px(전에 flex_grow로 남는 ~73px만 나눠 갖던 걸 여기서 되돌림). power_box(320)
+     * + log_box(320) 합이 실제 콘텐츠 영역(~393px)보다 커지므로 log_page 자체가 정상적으로
+     * overflow해서 스크롤이 필요해짐 — 이게 의도(사용자: "스크롤 하겠다는 거니까, 화면
+     * 크기에 맞추면 안되지") — power_title_row/log_title_row가 그 바깥 스크롤을 잡는
+     * 고정 영역 역할 */
+    lv_obj_set_size(log_box, LV_PCT(100), 320);
+    lv_obj_set_flex_flow(log_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(log_box, 6, 0);
+
+    lv_obj_t *log_title_row = lv_obj_create(log_box);
+    lv_obj_set_size(log_title_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(log_title_row, 0, 0);
+    lv_obj_set_style_pad_all(log_title_row, 0, 0);
+    lv_obj_set_flex_flow(log_title_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(log_title_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    s_log_panel_title = lv_label_create(log_title_row);
+    lv_label_set_text(s_log_panel_title, ui_str(STR_PANEL_GENERAL_LOG));
+    lv_obj_set_style_text_font(s_log_panel_title, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_log_container = lv_obj_create(log_box);
+    lv_obj_set_size(s_log_container, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(s_log_container, 1);
+    lv_obj_set_scroll_dir(s_log_container, LV_DIR_VER);
+    lv_obj_set_style_border_width(s_log_container, 0, 0);
+    lv_obj_set_style_pad_all(s_log_container, 6, 0);
+
+    s_log_label = lv_label_create(s_log_container);
+    /* 2026-08-22, 사용자 지시 — 로그를 전부 영문으로 바꾸고 폭 넘는 줄은 우리가 직접
+     * "..."로 잘라서 넣으므로(trim_multiline_to_width) WRAP의 비싼 매 렌더 재계산이
+     * 필요 없음 → CLIP(단순 커팅, 실제로 걸릴 일은 없음). 폰트도 커스텀 TTF 대신
+     * 빠른 내장 비트맵 폰트(Montserrat 18pt, 전력로그와 통일 — 20pt는 한 줄에 너무 적게
+     * 들어가 트림 "..."이 자주 남아서 18pt로 축소, 2026-08-22 사용자 지시)로 교체 */
+    lv_label_set_long_mode(s_log_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(s_log_label, LV_PCT(100));
+    lv_obj_set_style_text_font(s_log_label, &lv_font_montserrat_18, 0);
+    lv_label_set_text(s_log_label, "");
+
+    lv_timer_create(refresh_log_box, 500, NULL);
+
+    lv_obj_t *power_box = lv_obj_create(log_page);
+    lv_obj_set_size(power_box, LV_PCT(100), 320);  /* 2026-08-10, 사용자 지시 — 고정 320px */
+    lv_obj_set_flex_flow(power_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(power_box, 6, 0);
+
+    /* 제목 + 일시멈춤 단추를 한 행에(2026-08-10, 사용자 지시 — 값 읽는 동안 로그가 계속
+     * 밀리지 않게 멈출 수 있게). 2026-08-11 — 이 행은 스크롤 컨테이너(s_power_list) 밖의
+     * 고정 영역이라, 여기를 탭+드래그하면 안쪽 리스트가 가로채지 않고 바깥 log_page가
+     * 스크롤됨(사용자 지시 — 로그 판넬이 전체 다 내부 스크롤 입력을 받아서 페이지 스크롤을
+     * 잡을 영역이 없었던 문제의 해결책) */
+    lv_obj_t *power_title_row = lv_obj_create(power_box);
+    lv_obj_set_size(power_title_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(power_title_row, 0, 0);
+    lv_obj_set_style_pad_all(power_title_row, 0, 0);
+    lv_obj_set_flex_flow(power_title_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(power_title_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    s_power_panel_title = lv_label_create(power_title_row);
+    lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
+    lv_obj_set_style_text_font(s_power_panel_title, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_power_log_pause_btn = lv_button_create(power_title_row);
+    lv_obj_add_event_cb(s_power_log_pause_btn, cb_power_log_pause_toggle, LV_EVENT_CLICKED, NULL);
+    s_power_log_pause_lbl = lv_label_create(s_power_log_pause_btn);
+    lv_label_set_text(s_power_log_pause_lbl, ui_str(STR_BTN_PAUSE));
+    lv_obj_set_style_text_font(s_power_log_pause_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* s_log_container와 동일 구조 — 스크롤 컨테이너 + 폭 100% wrap 라벨 하나, 텍스트를
+     * 통째로 갈아끼우고 맨 아래로 자동 스크롤(2026-08-09, 로그처럼 누적 지시) */
+    s_power_list = lv_obj_create(power_box);
+    lv_obj_set_size(s_power_list, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(s_power_list, 1);
+    lv_obj_set_scroll_dir(s_power_list, LV_DIR_VER);
+    lv_obj_set_style_border_width(s_power_list, 0, 0);
+    lv_obj_set_style_bg_opa(s_power_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_power_list, 6, 0);
+
+    s_power_log_label = lv_label_create(s_power_list);
+    /* 2026-08-22 — 일반로그와 동일 이유로 CLIP + 18pt 비트맵 폰트로 통일(사용자 지시) */
+    lv_label_set_long_mode(s_power_log_label, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(s_power_log_label, LV_PCT(100));
+    lv_obj_set_style_text_font(s_power_log_label, &lv_font_montserrat_18, 0);
+    /* 2026-08-10 — C/S 줄을 구분하려고 recolor(#RRGGBB text#) 켰었으나, 2026-08-11에 3가지
+     * 형태 다 실기에서 깨지는 걸 확인하고 recolor 자체를 포기(순수 텍스트 ">>> " 마커로
+     * 대체, refresh_power_panel 참고) — 더 이상 안 쓰므로 켜두지 않음 */
+    lv_label_set_text(s_power_log_label, "");
+
+    s_power_panel_timer = lv_timer_create(refresh_power_panel, 2000, NULL);
 
     /* 버튼 폭 통일(2026-08-09, 사용자 지시) — 지금까지 만든 메인 화면 버튼들의 실측
      * 자연폭 중 최댓값을 기준폭으로 잡아 전부에 적용. 팝업 버튼(add_modal_button)은

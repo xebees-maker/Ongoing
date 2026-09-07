@@ -288,6 +288,7 @@ typedef enum {
     SENSOR_CHAN_TEMP_C,
     SENSOR_CHAN_HUMI_PCT,
     SENSOR_CHAN_CO2_PPM,
+    SENSOR_CHAN_NH3_PPM,      /* 암모니아(2026-09-06) — 아직 실물 센서 없음, 통계탭 설계용 */
     SENSOR_CHAN_TYPE_COUNT,   /* 배열 크기용 — 새 채널 종류 추가 시 항상 마지막에 유지 */
 } sensor_channel_type_t;
 

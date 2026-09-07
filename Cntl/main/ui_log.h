@@ -87,6 +87,10 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
                                              하나라도 Apply하면 그 폴백 기본값이 새 파일에
                                              그대로 눌러써져 영구화되는 사고로 이어짐(응답성이
                                              조용히 2로 굳어버림) — 화면에도 반드시 보이게 함 */
+#define UI_ERR_SD_MOUNT_FAILED      5008  /* SD카드 마운트 실패(2026-09-06) — 통계탭 시계열
+                                             저장 기능이 없이 계속 진행됨. 사용자 지시:
+                                             "그래야 네가 캡쳐 안하고 보지" — 시리얼 캡처 없이
+                                             화면 로그탭에서 바로 확인 가능하게 */
 
 void ui_log_add_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 

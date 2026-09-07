@@ -6,6 +6,7 @@
 #include "ui_log.h"
 #include "device_config.h"
 #include "battery.h"
+#include "stats_store.h"
 #include "main.h"
 
 #include <string.h>
@@ -618,6 +619,14 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             memcpy(n->chan_val, hello->chan_val, n->chan_count * sizeof(float));
             n->sensor_measurement_id      = hello->measurement_id;
             n->sensor_last_update_unix_time = rtc_sync_get_unix_time();
+
+            /* 2026-09-06(통계탭 저장) — 새로 측정된 값만 SD에 영구 기록. 캐시 재전송(중복)
+             * 사이클엔 안 씀 — 어차피 같은 값이라 시계열에 의미 있는 새 점이 아님 */
+            for (uint8_t ci = 0; ci < n->chan_count; ci++) {
+                if (!n->chan_ok[ci]) continue;
+                stats_store_append(n->mac, n->chan_type[ci], ci,
+                                    n->sensor_last_update_unix_time, n->chan_val[ci]);
+            }
         }
 
         ESP_LOGI(TAG, "WAKE_HELLO_SENS <- %s: 사이클#%lu wake=%u batt_mv=%u batt_pct=%u 채널#%u 측정ID=%lu%s",
