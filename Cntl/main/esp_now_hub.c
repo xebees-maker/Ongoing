@@ -140,6 +140,11 @@ static void send_cask_sleep_now(esp_now_hub_node_t *n)
 static esp_timer_handle_t s_liveness_sweep_timer = NULL;
 #define LIVENESS_SWEEP_INTERVAL_US (1 * 1000 * 1000)
 
+/* 2026-09-07 — 실외 대기 CO2도 항상 400ppm대라 이보다 훨씬 낮은 값은 물리적으로 불가능
+ * (SCD41이 CRC는 통과시키지만 이산화탄소 채널 계산만 이상값을 내놓는 경우가 실기에서
+ * 확인됨) — 여유를 두고 50ppm 미만이면 부적합으로 판정 */
+#define CO2_PPM_PLAUSIBLE_MIN 50.0f
+
 static void liveness_sweep_cb(void *arg)
 {
     (void)arg;
@@ -620,10 +625,24 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             n->sensor_measurement_id      = hello->measurement_id;
             n->sensor_last_update_unix_time = rtc_sync_get_unix_time();
 
+            /* 2026-09-07(사용자 지시 — "이산화탄소 0으로 오면...") — SCD41이 CRC는 통과하지만
+             * 이산화탄소 채널만 물리적으로 불가능한 값(실외 기준치 400ppm대, 절대 0 근처가
+             * 될 수 없음)을 내놓는 현상이 실기에서 확인됨. 통신 자체는 정상(chan_ok=1)이라
+             * chan_ok는 그대로 두고 별도 chan_invalid만 세움 — "부적합" 표시(상황판)와 통계
+             * 제외 양쪽이 이 플래그 하나로 갈림(온도/습도는 0이 실제로 가능한 값이라 이
+             * 필터 미적용) */
+            memset(n->chan_invalid, 0, n->chan_count);
+            for (uint8_t ci = 0; ci < n->chan_count; ci++) {
+                if (n->chan_type[ci] == SENSOR_CHAN_CO2_PPM &&
+                    n->chan_ok[ci] && n->chan_val[ci] < CO2_PPM_PLAUSIBLE_MIN) {
+                    n->chan_invalid[ci] = 1;
+                }
+            }
+
             /* 2026-09-06(통계탭 저장) — 새로 측정된 값만 SD에 영구 기록. 캐시 재전송(중복)
              * 사이클엔 안 씀 — 어차피 같은 값이라 시계열에 의미 있는 새 점이 아님 */
             for (uint8_t ci = 0; ci < n->chan_count; ci++) {
-                if (!n->chan_ok[ci]) continue;
+                if (!n->chan_ok[ci] || n->chan_invalid[ci]) continue;
                 stats_store_append(n->mac, n->chan_type[ci], ci,
                                     n->sensor_last_update_unix_time, n->chan_val[ci]);
             }

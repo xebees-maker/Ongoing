@@ -295,15 +295,37 @@ static bool        s_power_log_paused    = false;
  * 항목별 최대/최소(peak_label)와 페이지네이션된 값 테이블(stats_table)만 구현.
  * peak_title/prev_lbl/next_lbl은 정적 제목이라 refresh_lang_texts에서 갱신 —
  * peak_label/table/page_label 내용은 refresh_stats_page() 타이머가 매번 새로 채움 */
-static lv_obj_t *s_stats_peak_title  = NULL;
-static lv_obj_t *s_stats_peak_label  = NULL;
 static lv_obj_t *s_stats_table       = NULL;
 static lv_obj_t *s_stats_page_label  = NULL;
 static lv_obj_t *s_stats_prev_btn    = NULL;
 static lv_obj_t *s_stats_prev_lbl    = NULL;
 static lv_obj_t *s_stats_next_btn    = NULL;
 static lv_obj_t *s_stats_next_lbl    = NULL;
+static lv_obj_t *s_stats_jump_prev_btn = NULL;
+static lv_obj_t *s_stats_jump_prev_lbl = NULL;
+static lv_obj_t *s_stats_jump_next_btn = NULL;
+static lv_obj_t *s_stats_jump_next_lbl = NULL;
 static uint32_t  s_stats_page_index  = 0;  /* 0 = 가장 최근 페이지 */
+#define STATS_JUMP_PAGE_COUNT 10
+
+/* 2026-09-07(통계탭 레이아웃 재설계, 사용자 설계 — "개괄" 판넬) — 구 "최대/최소 판넬"
+ * 대체. 제목+Scale은 좌우 서브판넬 바깥(전체폭), 서브판넬은 좌=온도/이산화탄소,
+ * 우=습도/암모니아. Scale을 바꾸면 이 판넬 숫자도 그 기간 기준으로 재계산됨(사용자 확정) */
+static lv_obj_t *s_stats_overview_title = NULL;
+static lv_obj_t *s_stats_scale_dd       = NULL;
+static lv_obj_t *s_overview_temp_label  = NULL;
+static lv_obj_t *s_overview_humi_label  = NULL;
+static lv_obj_t *s_overview_co2_label   = NULL;
+static lv_obj_t *s_overview_nh3_label   = NULL;
+static const uint32_t s_stats_scale_values[] = { 3600, 43200, 86400, 259200, 604800 };
+
+/* 통계탭 테이블<->그래프 스와이프 전환(2026-09-07, 사용자 설계) — 그래프는 뼈대만
+ * (실제 lv_chart 내용은 다음 단계) */
+static lv_obj_t *s_stats_pager       = NULL;  /* 좌우 스와이프로 이동하는 컨테이너(자식 2개) */
+static lv_obj_t *s_stats_table_view  = NULL;
+static lv_obj_t *s_stats_graph_view  = NULL;
+static lv_obj_t *s_stats_delete_btn  = NULL;
+static lv_obj_t *s_stats_delete_lbl  = NULL;
 
 /* ds_cycle_count 하나만 비교하면 됨(2026-08-10) — 매 리포트가 항상 새 사이클이라 Light
  * Sleep 시절처럼 여러 필드를 같이 diff할 필요가 없어짐(단조증가 카운터) */
@@ -507,9 +529,12 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
     lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
     lv_label_set_text(s_log_panel_title, ui_str(STR_PANEL_GENERAL_LOG));
-    lv_label_set_text(s_stats_peak_title, ui_str(STR_PANEL_STATS_PEAK));
+    lv_label_set_text(s_stats_overview_title, ui_str(STR_PANEL_STATS_OVERVIEW));
     lv_label_set_text(s_stats_prev_lbl, ui_str(STR_BTN_PREV_PAGE));
     lv_label_set_text(s_stats_next_lbl, ui_str(STR_BTN_NEXT_PAGE));
+    lv_label_set_text(s_stats_jump_prev_lbl, ui_str(STR_BTN_JUMP_PREV10));
+    lv_label_set_text(s_stats_jump_next_lbl, ui_str(STR_BTN_JUMP_NEXT10));
+    lv_label_set_text(s_stats_delete_lbl, ui_str(STR_BTN_DELETE_STATS));
     lv_label_set_text(s_network_label, ui_str(STR_LABEL_NETWORK));
     /* 2026-08-29 버그수정 — 캡션을 무조건 "찾기"로 덮어쓰면 연결된 상태(캡션=SSID)일 때
      * 언어 전환 시 SSID가 사라지고 "찾기"로 잘못 바뀜. 현재 상태 기준으로 다시 계산 */
@@ -552,6 +577,10 @@ static void refresh_lang_texts(void)
     uint16_t adaptive_sel = lv_dropdown_get_selected(s_adaptive_response_dd);
     lv_dropdown_set_options(s_adaptive_response_dd, ui_str(STR_OPT_ADAPTIVE_RESPONSE_LIST));
     lv_dropdown_set_selected(s_adaptive_response_dd, adaptive_sel);
+
+    uint16_t scale_sel = lv_dropdown_get_selected(s_stats_scale_dd);
+    lv_dropdown_set_options(s_stats_scale_dd, ui_str(STR_STATS_SCALE_OPTIONS));
+    lv_dropdown_set_selected(s_stats_scale_dd, scale_sel);
 }
 
 /* 실제 반영(ui_lang_set — s_lang 갱신 + nvs 저장)이 끝난 뒤에만 라디오/라벨을 갱신한다
@@ -2333,7 +2362,9 @@ static int append_sensor_value_row(char *buf, size_t buf_size, int used,
     if (!chan_type_to_strs(n->chan_type[chan_idx], &label_id, &unit_id)) return used;
 
     char line[96];
-    if (!n->chan_ok[chan_idx]) {
+    if (n->chan_ok[chan_idx] && n->chan_invalid[chan_idx]) {
+        snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_SENSOR_VALUE_INVALID));
+    } else if (!n->chan_ok[chan_idx]) {
         snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_SENSOR_VALUE_PENDING));
     } else {
         float val = n->chan_val[chan_idx];
@@ -2369,37 +2400,45 @@ static void find_node_name_by_mac(const uint8_t mac[6], char *out, size_t out_ca
     snprintf(out, out_cap, "%02X%02X", mac[4], mac[5]);
 }
 
-/* 통계탭 상단 최대/최소 판넬 — 온도/습도/CO2/암모니아 4종 고정(2026-09-06 설계) */
-static void refresh_stats_peak_panel(void)
+/* 개괄 판넬(2026-09-07 재설계, 구 "최대/최소 판넬") — 좌=온도/이산화탄소,
+ * 우=습도/암모니아. Scale 드롭다운으로 고른 기간 기준으로 재계산(사용자 확정:
+ * "스케일마다 계산해야되"). Max/Min/Average는 X/N/A 약자로 표기 */
+static void refresh_stats_overview_panel(void)
 {
-    static const uint8_t s_peak_chan_types[] = {
-        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM,
+    uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
+    uint32_t scale_sec = (idx < (sizeof(s_stats_scale_values) / sizeof(s_stats_scale_values[0])))
+                         ? s_stats_scale_values[idx] : s_stats_scale_values[0];
+    uint32_t now = rtc_sync_get_unix_time();
+    uint32_t cutoff = (now > scale_sec) ? now - scale_sec : 0;
+
+    struct { uint8_t chan_type; lv_obj_t *label; } rows[] = {
+        { SENSOR_CHAN_TEMP_C,   s_overview_temp_label },
+        { SENSOR_CHAN_HUMI_PCT, s_overview_humi_label },
+        { SENSOR_CHAN_CO2_PPM,  s_overview_co2_label  },
+        { SENSOR_CHAN_NH3_PPM,  s_overview_nh3_label  },
     };
-    char peak_buf[512];
-    int peak_len = 0;
-    for (size_t i = 0; i < sizeof(s_peak_chan_types); i++) {
-        uint8_t ct = s_peak_chan_types[i];
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
         ui_str_id_t label_id, unit_id;
-        if (!chan_type_to_strs(ct, &label_id, &unit_id)) continue;
+        if (!chan_type_to_strs(rows[i].chan_type, &label_id, &unit_id)) continue;
 
         char line[128];
-        float mn, mx;
-        if (stats_store_get_min_max(ct, &mn, &mx)) {
-            int mn_scaled = (int)(mn * 100.0f + 0.5f);
-            int mx_scaled = (int)(mx * 100.0f + 0.5f);
-            snprintf(line, sizeof(line), ui_str(STR_STATS_PEAK_ROW_FMT), ui_str(label_id),
-                     mx_scaled / 100, mx_scaled % 100, ui_str(unit_id),
-                     mn_scaled / 100, mn_scaled % 100, ui_str(unit_id));
+        float mn, mx, avg;
+        if (stats_store_get_min_max_avg_since(cutoff, rows[i].chan_type, &mn, &mx, &avg)) {
+            int mx_s = (int)(mx * 100.0f + 0.5f);
+            int mn_s = (int)(mn * 100.0f + 0.5f);
+            int avg_s = (int)(avg * 100.0f + 0.5f);
+            snprintf(line, sizeof(line), ui_str(STR_STATS_OVERVIEW_ROW_FMT), ui_str(label_id),
+                     mx_s / 100, mx_s % 100, ui_str(unit_id),
+                     mn_s / 100, mn_s % 100, ui_str(unit_id),
+                     avg_s / 100, avg_s % 100, ui_str(unit_id));
         } else {
-            snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_STATS_PEAK_NO_DATA));
+            snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_STATS_OVERVIEW_NO_DATA));
         }
-        int n_written = snprintf(peak_buf + peak_len,
-                                  (peak_len < (int)sizeof(peak_buf)) ? sizeof(peak_buf) - (size_t)peak_len : 0,
-                                  "%s%s", (peak_len > 0) ? "\n" : "", line);
-        if (n_written > 0) peak_len += n_written;
+        lv_label_set_text(rows[i].label, line);
     }
-    lv_label_set_text(s_stats_peak_label, peak_buf);
 }
+
+static void cb_stats_scale_changed(lv_event_t *e) { (void)e; refresh_stats_overview_panel(); }
 
 /* 통계탭 값 테이블 — page_size(20)줄 고정 페이지네이션(2026-09-06 설계, 웹 스타일 —
  * 무한스크롤 아님). stats_store_read_page()가 파일오프셋 직접계산으로 이 페이지분만
@@ -2413,15 +2452,14 @@ static void refresh_stats_table(void)
     uint32_t total_pages = (total + STATS_STORE_PAGE_SIZE - 1) / STATS_STORE_PAGE_SIZE;
     if (total_pages == 0) total_pages = 1;
 
-    lv_table_set_row_count(s_stats_table, (got > 0 ? got : 1) + 1);
-    lv_table_set_cell_value(s_stats_table, 0, 0, ui_str(STR_STATS_TABLE_HEADER_ITEM));
-    lv_table_set_cell_value(s_stats_table, 0, 1, ui_str(STR_STATS_TABLE_HEADER_VALUE));
-    lv_table_set_cell_value(s_stats_table, 0, 2, ui_str(STR_STATS_TABLE_HEADER_TIME));
+    /* 2026-09-07 — 헤더(항목/값/시간)는 이제 테이블 밖(stats_table_header_row)에 고정으로
+     * 따로 그림(사용자 지시: "스크롤 안되야되"), 테이블 자신은 데이터 행만 채움 */
+    lv_table_set_row_count(s_stats_table, got > 0 ? got : 1);
 
     if (got == 0) {
-        lv_table_set_cell_value(s_stats_table, 1, 0, ui_str(STR_STATS_TABLE_EMPTY));
-        lv_table_set_cell_value(s_stats_table, 1, 1, "");
-        lv_table_set_cell_value(s_stats_table, 1, 2, "");
+        lv_table_set_cell_value(s_stats_table, 0, 0, ui_str(STR_STATS_TABLE_EMPTY));
+        lv_table_set_cell_value(s_stats_table, 0, 1, "");
+        lv_table_set_cell_value(s_stats_table, 0, 2, "");
     } else {
         /* stats_store_read_page()는 파일에 쓰인 순서(오래된 것부터)로 채워서 돌려줌 —
          * 화면엔 최신이 위로 오게 역순으로 순회 */
@@ -2452,9 +2490,9 @@ static void refresh_stats_table(void)
             snprintf(time_buf, sizeof(time_buf), "%02u:%02u:%02u",
                      tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
 
-            lv_table_set_cell_value(s_stats_table, i + 1, 0, item_buf);
-            lv_table_set_cell_value(s_stats_table, i + 1, 1, value_buf);
-            lv_table_set_cell_value(s_stats_table, i + 1, 2, time_buf);
+            lv_table_set_cell_value(s_stats_table, i, 0, item_buf);
+            lv_table_set_cell_value(s_stats_table, i, 1, value_buf);
+            lv_table_set_cell_value(s_stats_table, i, 2, time_buf);
         }
     }
 
@@ -2470,12 +2508,16 @@ static void refresh_stats_table(void)
     else          lv_obj_add_state(s_stats_prev_btn, LV_STATE_DISABLED);
     if (can_next) lv_obj_remove_state(s_stats_next_btn, LV_STATE_DISABLED);
     else          lv_obj_add_state(s_stats_next_btn, LV_STATE_DISABLED);
+    if (can_prev) lv_obj_remove_state(s_stats_jump_prev_btn, LV_STATE_DISABLED);
+    else          lv_obj_add_state(s_stats_jump_prev_btn, LV_STATE_DISABLED);
+    if (can_next) lv_obj_remove_state(s_stats_jump_next_btn, LV_STATE_DISABLED);
+    else          lv_obj_add_state(s_stats_jump_next_btn, LV_STATE_DISABLED);
 }
 
 static void refresh_stats_page(lv_timer_t *t)
 {
     (void)t;
-    refresh_stats_peak_panel();
+    refresh_stats_overview_panel();
     refresh_stats_table();
 }
 
@@ -2494,6 +2536,86 @@ static void stats_next_page_cb(lv_event_t *e)
     (void)e;
     if (s_stats_page_index > 0) s_stats_page_index--;
     refresh_stats_table();
+}
+
+/* 2026-09-07(사용자 지시 — "10개씩 이동 단추도 있으면") — 1칸 이동과 동일 원칙, 그냥
+ * STATS_JUMP_PAGE_COUNT칸씩 클램프 */
+static void stats_jump_prev_page_cb(lv_event_t *e)
+{
+    (void)e;
+    uint32_t total = stats_store_get_count();
+    uint32_t total_pages = (total + STATS_STORE_PAGE_SIZE - 1) / STATS_STORE_PAGE_SIZE;
+    if (total_pages == 0) total_pages = 1;
+    s_stats_page_index += STATS_JUMP_PAGE_COUNT;
+    if (s_stats_page_index + 1 > total_pages) s_stats_page_index = total_pages - 1;
+    refresh_stats_table();
+}
+
+static void stats_jump_next_page_cb(lv_event_t *e)
+{
+    (void)e;
+    s_stats_page_index = (s_stats_page_index > STATS_JUMP_PAGE_COUNT) ? s_stats_page_index - STATS_JUMP_PAGE_COUNT : 0;
+    refresh_stats_table();
+}
+
+/* 2026-09-07(사용자 지시 — "저장값 지우기 기능도", "지울때 확인 팝업도") — Yes/Cancel
+ * 공용 확인팝업(show_confirm_popup) 재사용 */
+static void cb_delete_stats_confirmed(void *ctx)
+{
+    (void)ctx;
+    stats_store_delete_all();
+    s_stats_page_index = 0;
+    refresh_stats_table();
+    refresh_stats_overview_panel();
+}
+
+static void cb_delete_stats_tap(lv_event_t *e)
+{
+    (void)e;
+    show_confirm_popup(ui_str(STR_CONFIRM_DELETE_STATS), cb_delete_stats_confirmed, NULL);
+}
+
+/* 2026-09-07(사용자 설계 — "사용자는 그래프만 보거나 테이블만 보는 형태") — 한 번에 하나만
+ * 보임(분할 아님). 스크롤/스냅 애니메이션 대신 단순 HIDDEN 토글 — 정확히 이 요구사항과
+ * 일치하고, 제스처 처리도 훨씬 단순해짐 */
+static void switch_to_graph_view(void)
+{
+    lv_obj_add_flag(s_stats_table_view, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void switch_to_table_view(void)
+{
+    lv_obj_add_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_stats_table_view, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void cb_switch_to_graph_tap(lv_event_t *e) { (void)e; switch_to_graph_view(); }
+static void cb_switch_to_table_tap(lv_event_t *e) { (void)e; switch_to_table_view(); }
+
+/* 2026-09-07(사용자 설계) — 테이블: 좌측 스와이프하면 그래프로, 위/아래 스와이프하면
+ * 페이지 이동(세로 스와이프로 하단 버튼줄 대체, 사용자 지시: "세로 스와이프로 페이지
+ * 넘기기"). 테이블 자체의 CLICKABLE은 그대로 둬야 제스처 인식이 되므로(꺼버리면 눌림
+ * 자체가 안 잡힘), 선택 비활성화는 위젯 생성부에서 눌림 상태 스타일을 투명 처리하는
+ * 방식으로 별도 처리(cb_stats_table_gesture와는 무관) */
+static void cb_stats_table_gesture(lv_event_t *e)
+{
+    (void)e;
+    lv_indev_t *indev = lv_indev_active();
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir == LV_DIR_LEFT) { switch_to_graph_view(); return; }
+    if (dir == LV_DIR_TOP)    { stats_next_page_cb(NULL); return; }  /* 위로 스와이프 = 다음(최신) */
+    if (dir == LV_DIR_BOTTOM) { stats_prev_page_cb(NULL); return; }  /* 아래로 스와이프 = 이전(과거) */
+}
+
+static void cb_stats_graph_gesture(lv_event_t *e)
+{
+    (void)e;
+    lv_indev_t *indev = lv_indev_active();
+    if (!indev) return;
+    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
+    if (dir == LV_DIR_RIGHT) switch_to_table_view();
 }
 
 /* 2026-09-04(사용자 지시 — 요약판넬 우측에 신호세기, 숫자보다 막대/흔한 와이파이 표시형태로,
@@ -3857,6 +3979,14 @@ static void cb_apply_response_interval(lv_event_t *e)
      * 하나도 없으면(전부 WAITING) 값은 저장됐지만 응답 대기 팝업은 안 띄움 — 다른 4개
      * 통신 기능과 동일 원칙 */
     if (!esp_now_hub_apply_response_interval_sec(sec)) {
+        /* 2026-09-07 버그수정 — 페어링된 CAM이 하나도 없으면(예: 센스만 연결된 상태)
+         * esp_now_hub_apply_response_interval_sec()가 false를 반환하는데(ACK 대기 대상이
+         * CAM뿐이라, 센스는 매 사이클 자동으로 최신값을 받아가서 별도 ACK가 필요없음),
+         * 여기서 그냥 return해버리면 값은 실제로 저장됐는데도 s_response_interval_applied_idx가
+         * 안 갱신돼서 Apply 버튼이 영원히 활성 상태로 남았음(cb_apply_adaptive_response()의
+         * 즉시적용 패턴과 동일하게 여기서도 바로 반영) */
+        s_response_interval_applied_idx = idx;
+        update_response_apply_enabled();
         ui_log_add("Response interval saved - applied automatically on CAM reconnect");
         return;
     }
@@ -4139,6 +4269,10 @@ void ui_init(void)
 
     s_page_control = lv_tabview_create(lv_screen_active());
     lv_tabview_set_tab_bar_size(s_page_control, 75);  /* 800px 화면은 항상 DISP_LARGE 크기 */
+    /* 2026-09-07(사용자 설계 — 통계탭 안 테이블<->그래프 좌우 스와이프와 겹치지 않게) —
+     * 탭 전환은 탭 바 버튼으로만, 스와이프로는 안 바뀌게 함(탭 콘텐츠 컨테이너의 스크롤을
+     * 끄면 스와이프-스냅 탭전환이 꺼짐 — 탭 버튼 자체의 클릭 전환은 무관하게 그대로 동작) */
+    lv_obj_remove_flag(lv_tabview_get_content(s_page_control), LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *tab_bar = lv_tabview_get_tab_bar(s_page_control);
     /* 페이지탭 라벨(한글)엔 기본 LVGL 폰트(Montserrat)에 한글 글리프가 없어서
@@ -4410,27 +4544,102 @@ void ui_init(void)
      * log_page 생성부 참고, 위젯/변수는 그대로 재사용). 이 탭은 이제 실제 시계열 통계 —
      * 그래프(Y=값, X=시간, 1h/12h/24h/1주일)는 다음 단계, 이번엔 최대/최소 판넬 +
      * 페이지네이션 값 테이블만 구현 */
-    lv_obj_t *stats_peak_box = lv_obj_create(stats_page);
-    lv_obj_set_size(stats_peak_box, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(stats_peak_box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(stats_peak_box, 6, 0);
+    /* 개괄 판넬(2026-09-07 재설계, 구 "최대/최소 판넬") — 제목+Scale은 서브판넬 바깥
+     * (전체폭), 그 아래 좌=온도/이산화탄소, 우=습도/암모니아 서브판넬(사용자 확정) */
+    lv_obj_t *overview_box = lv_obj_create(stats_page);
+    lv_obj_set_size(overview_box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(overview_box, 6, 0);
 
-    s_stats_peak_title = lv_label_create(stats_peak_box);
-    lv_label_set_text(s_stats_peak_title, ui_str(STR_PANEL_STATS_PEAK));
-    lv_obj_set_style_text_font(s_stats_peak_title, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_t *overview_header_row = lv_obj_create(overview_box);
+    lv_obj_set_size(overview_header_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_header_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(overview_header_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(overview_header_row, 0, 0);
+    lv_obj_set_style_pad_all(overview_header_row, 0, 0);
 
-    s_stats_peak_label = lv_label_create(stats_peak_box);
-    lv_obj_set_width(s_stats_peak_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_stats_peak_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(s_stats_peak_label, "");
+    s_stats_overview_title = lv_label_create(overview_header_row);
+    lv_label_set_text(s_stats_overview_title, ui_str(STR_PANEL_STATS_OVERVIEW));
+    lv_obj_set_style_text_font(s_stats_overview_title, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    lv_obj_t *stats_table_box = lv_obj_create(stats_page);
-    lv_obj_set_size(stats_table_box, LV_PCT(100), 0);
-    lv_obj_set_flex_grow(stats_table_box, 1);
-    lv_obj_set_flex_flow(stats_table_box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(stats_table_box, 6, 0);
+    s_stats_scale_dd = lv_dropdown_create(overview_header_row);
+    lv_dropdown_set_options(s_stats_scale_dd, ui_str(STR_STATS_SCALE_OPTIONS));
+    lv_dropdown_set_selected(s_stats_scale_dd, 0);
+    lv_obj_set_style_text_font(s_stats_scale_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_stats_scale_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_stats_scale_dd, cb_stats_scale_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    s_stats_table = lv_table_create(stats_table_box);
+    lv_obj_t *overview_sub_row = lv_obj_create(overview_box);
+    lv_obj_set_size(overview_sub_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_sub_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_border_width(overview_sub_row, 0, 0);
+    lv_obj_set_style_pad_all(overview_sub_row, 0, 0);
+    lv_obj_set_style_pad_column(overview_sub_row, 12, 0);
+
+    lv_obj_t *overview_left_box = lv_obj_create(overview_sub_row);
+    lv_obj_set_flex_grow(overview_left_box, 1);
+    lv_obj_set_height(overview_left_box, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_left_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(overview_left_box, 0, 0);
+    lv_obj_set_style_pad_all(overview_left_box, 0, 0);
+
+    s_overview_temp_label = lv_label_create(overview_left_box);
+    lv_obj_set_style_text_font(s_overview_temp_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_overview_temp_label, "");
+
+    s_overview_co2_label = lv_label_create(overview_left_box);
+    lv_obj_set_style_text_font(s_overview_co2_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_overview_co2_label, "");
+
+    lv_obj_t *overview_right_box = lv_obj_create(overview_sub_row);
+    lv_obj_set_flex_grow(overview_right_box, 1);
+    lv_obj_set_height(overview_right_box, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_right_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(overview_right_box, 0, 0);
+    lv_obj_set_style_pad_all(overview_right_box, 0, 0);
+
+    s_overview_humi_label = lv_label_create(overview_right_box);
+    lv_obj_set_style_text_font(s_overview_humi_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_overview_humi_label, "");
+
+    s_overview_nh3_label = lv_label_create(overview_right_box);
+    lv_obj_set_style_text_font(s_overview_nh3_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_overview_nh3_label, "");
+
+    /* 테이블<->그래프 스와이프 전환(2026-09-07, 사용자 설계 — "사용자는 그래프만 보거나
+     * 테이블만 보는 형태"). 그래프 자체는 다음 단계, 지금은 뼈대(전환+자리)만 */
+    s_stats_pager = lv_obj_create(stats_page);
+    lv_obj_set_size(s_stats_pager, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(s_stats_pager, 1);
+    lv_obj_set_style_pad_all(s_stats_pager, 0, 0);
+    lv_obj_set_style_border_width(s_stats_pager, 0, 0);
+
+    s_stats_table_view = lv_obj_create(s_stats_pager);
+    lv_obj_set_size(s_stats_table_view, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_flex_flow(s_stats_table_view, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(s_stats_table_view, 6, 0);
+    lv_obj_set_style_border_width(s_stats_table_view, 0, 0);
+
+    /* 헤더(항목/값/시간) — 테이블 밖으로 분리해서 스크롤 안 되게 고정(사용자 지시:
+     * "스크롤 안되야되. 이게 어려우면 테이블 밖에 둬도 되"), 우측 끝에 현재/전체 페이지도
+     * 같이 표시(사용자 지시: "그 헤더 줄에 같이 넣으면") */
+    lv_obj_t *stats_table_header_row = lv_obj_create(s_stats_table_view);
+    lv_obj_set_size(stats_table_header_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(stats_table_header_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(stats_table_header_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(stats_table_header_row, 0, 0);
+    lv_obj_set_style_pad_all(stats_table_header_row, 4, 0);
+
+    lv_obj_t *stats_table_header_lbl = lv_label_create(stats_table_header_row);
+    lv_obj_set_style_text_font(stats_table_header_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text_fmt(stats_table_header_lbl, "%s / %s / %s", ui_str(STR_STATS_TABLE_HEADER_ITEM),
+                           ui_str(STR_STATS_TABLE_HEADER_VALUE), ui_str(STR_STATS_TABLE_HEADER_TIME));
+
+    s_stats_page_label = lv_label_create(stats_table_header_row);
+    lv_obj_set_style_text_font(s_stats_page_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_stats_page_label, "");
+
+    s_stats_table = lv_table_create(s_stats_table_view);
     lv_obj_set_width(s_stats_table, LV_PCT(100));
     lv_obj_set_flex_grow(s_stats_table, 1);
     lv_table_set_column_count(s_stats_table, 3);
@@ -4438,29 +4647,89 @@ void ui_init(void)
     lv_table_set_column_width(s_stats_table, 1, 180);
     lv_table_set_column_width(s_stats_table, 2, 150);
     lv_obj_set_style_text_font(s_stats_table, ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 줄간격 절반으로 축소(사용자 지시: "줄 간격이 너무 넓어. 반으로 줄여봐") */
+    lv_obj_set_style_pad_ver(s_stats_table, 2, LV_PART_ITEMS);
+    /* 선택(탭 시 셀 하이라이트) 비활성화(사용자 지시: "아예 선택이 안되야되") — CLICKABLE
+     * 자체를 끄면 제스처 인식(아래)까지 같이 죽으므로, 눌림 상태 배경만 투명 처리해서
+     * 시각적으로만 무효화 */
+    lv_obj_set_style_bg_opa(s_stats_table, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_PRESSED);
+    /* 세로 스와이프로 페이지 이동, 좌측 스와이프로 그래프 전환(사용자 설계) */
+    lv_obj_add_event_cb(s_stats_table, cb_stats_table_gesture, LV_EVENT_GESTURE, NULL);
 
-    lv_obj_t *stats_page_row = lv_obj_create(stats_table_box);
-    lv_obj_set_size(stats_page_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_border_width(stats_page_row, 0, 0);
-    lv_obj_set_style_pad_all(stats_page_row, 4, 0);
-    lv_obj_set_flex_flow(stats_page_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(stats_page_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    /* 하단 이전/다음 버튼 줄 제거(사용자 지시: "하단의 페이지 콘트롤이 공간을 너무 많이
+     * 차지") — 우하단 구석에 작게 오버레이, ±1/±10칸 전부 이 자리로 모음(사용자 지시:
+     * "별도 버튼으로") */
+    lv_obj_t *stats_nav_overlay = lv_obj_create(s_stats_table_view);
+    lv_obj_add_flag(stats_nav_overlay, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_align(stats_nav_overlay, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+    lv_obj_set_size(stats_nav_overlay, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(stats_nav_overlay, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_all(stats_nav_overlay, 2, 0);
+    lv_obj_set_style_pad_column(stats_nav_overlay, 4, 0);
+    lv_obj_set_style_border_width(stats_nav_overlay, 0, 0);
+    lv_obj_set_style_bg_opa(stats_nav_overlay, LV_OPA_70, 0);
 
-    s_stats_prev_btn = lv_button_create(stats_page_row);
+    s_stats_jump_prev_btn = lv_button_create(stats_nav_overlay);
+    lv_obj_add_event_cb(s_stats_jump_prev_btn, stats_jump_prev_page_cb, LV_EVENT_CLICKED, NULL);
+    s_stats_jump_prev_lbl = lv_label_create(s_stats_jump_prev_btn);
+    lv_label_set_text(s_stats_jump_prev_lbl, ui_str(STR_BTN_JUMP_PREV10));
+    lv_obj_set_style_text_font(s_stats_jump_prev_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+
+    s_stats_prev_btn = lv_button_create(stats_nav_overlay);
     lv_obj_add_event_cb(s_stats_prev_btn, stats_prev_page_cb, LV_EVENT_CLICKED, NULL);
     s_stats_prev_lbl = lv_label_create(s_stats_prev_btn);
     lv_label_set_text(s_stats_prev_lbl, ui_str(STR_BTN_PREV_PAGE));
-    lv_obj_set_style_text_font(s_stats_prev_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(s_stats_prev_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
 
-    s_stats_page_label = lv_label_create(stats_page_row);
-    lv_obj_set_style_text_font(s_stats_page_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(s_stats_page_label, "");
-
-    s_stats_next_btn = lv_button_create(stats_page_row);
+    s_stats_next_btn = lv_button_create(stats_nav_overlay);
     lv_obj_add_event_cb(s_stats_next_btn, stats_next_page_cb, LV_EVENT_CLICKED, NULL);
     s_stats_next_lbl = lv_label_create(s_stats_next_btn);
     lv_label_set_text(s_stats_next_lbl, ui_str(STR_BTN_NEXT_PAGE));
-    lv_obj_set_style_text_font(s_stats_next_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(s_stats_next_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+
+    s_stats_jump_next_btn = lv_button_create(stats_nav_overlay);
+    lv_obj_add_event_cb(s_stats_jump_next_btn, stats_jump_next_page_cb, LV_EVENT_CLICKED, NULL);
+    s_stats_jump_next_lbl = lv_label_create(s_stats_jump_next_btn);
+    lv_label_set_text(s_stats_jump_next_lbl, ui_str(STR_BTN_JUMP_NEXT10));
+    lv_obj_set_style_text_font(s_stats_jump_next_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+
+    /* "<<" 오버레이(좌측 끝, 사용자 설계: 테이블에서 좌측 스와이프/이 버튼 둘 다로 그래프 전환) */
+    lv_obj_t *table_to_graph_btn = lv_button_create(s_stats_table_view);
+    lv_obj_add_flag(table_to_graph_btn, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_align(table_to_graph_btn, LV_ALIGN_LEFT_MID, 2, 0);
+    lv_obj_add_event_cb(table_to_graph_btn, cb_switch_to_graph_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *table_to_graph_lbl = lv_label_create(table_to_graph_btn);
+    lv_label_set_text(table_to_graph_lbl, "<<");
+    lv_obj_set_style_text_font(table_to_graph_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 통계 전체 삭제(사용자 지시 — "저장값 지우기 기능도 있으면 좋곘어", 확인팝업 포함) */
+    s_stats_delete_btn = lv_button_create(s_stats_table_view);
+    lv_obj_add_flag(s_stats_delete_btn, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_align(s_stats_delete_btn, LV_ALIGN_BOTTOM_LEFT, 4, -4);
+    lv_obj_add_event_cb(s_stats_delete_btn, cb_delete_stats_tap, LV_EVENT_CLICKED, NULL);
+    s_stats_delete_lbl = lv_label_create(s_stats_delete_btn);
+    lv_label_set_text(s_stats_delete_lbl, ui_str(STR_BTN_DELETE_STATS));
+    lv_obj_set_style_text_font(s_stats_delete_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+
+    /* 그래프 뼈대(2026-09-07, 사용자 지시: "그래프 자체는 나중에 구현하더라도... 틀은
+     * 만들어 놔") — lv_chart 내용은 다음 단계, 지금은 전환+자리만 */
+    s_stats_graph_view = lv_obj_create(s_stats_pager);
+    lv_obj_set_size(s_stats_graph_view, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_border_width(s_stats_graph_view, 0, 0);
+    lv_obj_add_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(s_stats_graph_view, cb_stats_graph_gesture, LV_EVENT_GESTURE, NULL);
+
+    lv_obj_t *graph_placeholder_lbl = lv_label_create(s_stats_graph_view);
+    lv_label_set_text(graph_placeholder_lbl, ui_str(STR_LABEL_GRAPH_PLACEHOLDER));
+    lv_obj_set_style_text_font(graph_placeholder_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_center(graph_placeholder_lbl);
+
+    lv_obj_t *graph_to_table_btn = lv_button_create(s_stats_graph_view);
+    lv_obj_align(graph_to_table_btn, LV_ALIGN_RIGHT_MID, -2, 0);
+    lv_obj_add_event_cb(graph_to_table_btn, cb_switch_to_table_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *graph_to_table_lbl = lv_label_create(graph_to_table_btn);
+    lv_label_set_text(graph_to_table_lbl, ">>");
+    lv_obj_set_style_text_font(graph_to_table_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_timer_create(refresh_stats_page, 2000, NULL);
 
@@ -4984,7 +5253,7 @@ void ui_init(void)
     lv_obj_t *action_buttons[] = {
         btn_capture, s_camera_renew_btn, btn_delete_all, restart_btn,
         s_capture_apply_btn, s_response_apply_btn, s_adaptive_apply_btn, time_set_btn,
-        s_xclk_apply_btn,
+        s_xclk_apply_btn, s_sens_measure_apply_btn,
     };
     lv_obj_update_layout(lv_screen_active());
     for (size_t i = 0; i < sizeof(action_buttons) / sizeof(action_buttons[0]); i++) {

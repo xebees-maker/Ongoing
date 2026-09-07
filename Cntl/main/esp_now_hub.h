@@ -142,6 +142,11 @@ typedef struct {
     uint8_t         chan_type[ESP_NOW_MAX_CHANNELS];
     uint8_t         chan_ok[ESP_NOW_MAX_CHANNELS];
     float           chan_val[ESP_NOW_MAX_CHANNELS];
+    /* 2026-09-07 — chan_ok는 "통신 성공"(CRC 통과)만 뜻함. 통신은 됐지만 값 자체가 물리적으로
+     * 불가능한 경우(예: 이산화탄소 0ppm)를 별도로 표시하기 위한 필드 — chan_ok=1인데
+     * chan_invalid=1이면 "부적합(Invalid)"으로 표시(제외 아님), 통계저장에서는 제외
+     * (esp_now_hub.c의 WAKE_HELLO_SENS 분기 참고) */
+    uint8_t         chan_invalid[ESP_NOW_MAX_CHANNELS];
     /* 2026-09-05 — 센스는 콘 개입 없이 자기 주기대로 자율적으로 측정해서 캐스크마다 캐시값을
      * 실어보내므로(사용자 설계), 여러 사이클에 걸쳐 같은 값이 반복 도착할 수 있음. 이 값이
      * 직전과 같으면 위 chan_* 필드 갱신을 건너뜀(esp_now_hub.c의 WAKE_HELLO_SENS 분기 참고) —

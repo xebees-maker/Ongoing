@@ -195,6 +195,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_SENSOR_VALUE_ROW_FMT]        = { "%s %d.%02d%s (ID:%lu, Time: %02u:%02u:%02u)",
                                            "%s %d.%02d%s (ID:%lu, Time: %02u:%02u:%02u)" },
     [STR_SENSOR_VALUE_PENDING]        = { "측정 중...",                 "Measuring..." },
+    [STR_SENSOR_VALUE_INVALID]        = { "부적합",                     "Invalid" },
     [STR_CHAN_LABEL_NH3_PPM]          = { "암모니아",                   "Ammonia" },
     [STR_CHAN_UNIT_NH3_PPM]           = { "ppm",                        "ppm" },
     /* 2026-09-06(사용자 설계) — 통계탭 값 판넬 */
@@ -209,6 +210,19 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_STATS_PAGE_FMT]              = { "%lu / %lu",                  "%lu / %lu" },
     [STR_BTN_PREV_PAGE]               = { "< 이전",                    "< Prev" },
     [STR_BTN_NEXT_PAGE]               = { "다음 >",                    "Next >" },
+    /* 2026-09-07(통계탭 레이아웃 재설계, 사용자 설계) */
+    [STR_PANEL_STATS_OVERVIEW]        = { "개괄",                       "Overview" },
+    [STR_STATS_SCALE_OPTIONS]         = { "1시간\n12시간\n1일\n3일\n1주",
+                                           "1h\n12h\n1d\n3d\n1w" },
+    [STR_STATS_OVERVIEW_ROW_FMT]      = { "%s X%d.%02d%s N%d.%02d%s A%d.%02d%s",
+                                           "%s X%d.%02d%s N%d.%02d%s A%d.%02d%s" },
+    [STR_STATS_OVERVIEW_NO_DATA]      = { "데이터 없음",                "No data" },
+    [STR_BTN_JUMP_PREV10]             = { "이전10",                    "Prev10" },
+    [STR_BTN_JUMP_NEXT10]             = { "다음10",                    "Next10" },
+    [STR_BTN_DELETE_STATS]            = { "통계 전체 삭제",             "Delete all stats" },
+    [STR_CONFIRM_DELETE_STATS]        = { "저장된 통계값을 전부 삭제할까요?\n되돌릴 수 없습니다.",
+                                           "Delete all saved statistics?\nThis cannot be undone." },
+    [STR_LABEL_GRAPH_PLACEHOLDER]     = { "그래프 (준비 중)",           "Graph (coming soon)" },
 };
 
 void ui_lang_load(void)

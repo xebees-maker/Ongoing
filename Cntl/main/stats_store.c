@@ -97,6 +97,15 @@ bool stats_store_get_min_max(uint8_t chan_type, float *out_min, float *out_max)
     return found;
 }
 
+void stats_store_delete_all(void)
+{
+    if (remove(STATS_FILE_PATH) != 0) {
+        ESP_LOGI(TAG, "값 파일 삭제 — 이미 없음(정상, 미마운트/최초상태 등)");
+    } else {
+        ESP_LOGI(TAG, "값 파일 삭제 완료");
+    }
+}
+
 /* idx번째 레코드의 unix_time만 읽어옴(이진탐색용) */
 static bool read_time_at(FILE *f, uint32_t idx, uint32_t *out_time)
 {
@@ -158,4 +167,52 @@ uint32_t stats_store_read_since(uint32_t cutoff_unix_time, uint8_t chan_type,
     }
     fclose(f);
     return picked;
+}
+
+bool stats_store_get_min_max_avg_since(uint32_t cutoff_unix_time, uint8_t chan_type,
+                                        float *out_min, float *out_max, float *out_avg)
+{
+    uint32_t total = stats_store_get_count();
+    if (total == 0) return false;
+
+    FILE *f = fopen(STATS_FILE_PATH, "rb");
+    if (!f) return false;
+
+    /* stats_store_read_since()와 동일한 이진탐색으로 시작 오프셋만 찾음 */
+    uint32_t lo = 0, hi = total;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        uint32_t t;
+        if (!read_time_at(f, mid, &t)) { fclose(f); return false; }
+        if (t < cutoff_unix_time) lo = mid + 1;
+        else hi = mid;
+    }
+    uint32_t start_idx = lo;
+    if (start_idx >= total) { fclose(f); return false; }
+
+    fseek(f, (long)start_idx * (long)sizeof(stats_record_t), SEEK_SET);
+    bool found = false;
+    float mn = 0.0f, mx = 0.0f;
+    double sum = 0.0;
+    uint32_t count = 0;
+    stats_record_t buf[64];
+    size_t got;
+    while ((got = fread(buf, sizeof(stats_record_t), 64, f)) > 0) {
+        for (size_t i = 0; i < got; i++) {
+            if (buf[i].chan_type != chan_type) continue;
+            if (!found) { mn = mx = buf[i].value; found = true; }
+            else {
+                if (buf[i].value < mn) mn = buf[i].value;
+                if (buf[i].value > mx) mx = buf[i].value;
+            }
+            sum += (double)buf[i].value;
+            count++;
+        }
+    }
+    fclose(f);
+    if (!found) return false;
+    *out_min = mn;
+    *out_max = mx;
+    *out_avg = (float)(sum / (double)count);
+    return true;
 }

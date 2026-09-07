@@ -185,6 +185,9 @@ typedef enum {
     /* "%s %.1f%s (ID:%lu, Time: %02u:%02u:%02u)" — 라벨/값/단위/측정ID/시분초 순서 */
     STR_SENSOR_VALUE_ROW_FMT,
     STR_SENSOR_VALUE_PENDING,
+    /* 2026-09-07 — CRC는 통과했지만 값 자체가 물리적으로 불가능(예: 이산화탄소 0ppm)할 때
+     * 표시(제외 아님, esp_now_hub_node_t.chan_invalid 참고) */
+    STR_SENSOR_VALUE_INVALID,
     /* 통계탭 값 판넬(2026-09-06, 사용자 설계) — 항목/값/시간 테이블 + 페이지콘트롤 */
     STR_PANEL_STATS_PEAK,
     STR_STATS_PEAK_ROW_FMT,     /* "%s: 최대 %d.%02d%s / 최소 %d.%02d%s" */
@@ -196,6 +199,19 @@ typedef enum {
     STR_STATS_PAGE_FMT,        /* "%lu / %lu" */
     STR_BTN_PREV_PAGE,
     STR_BTN_NEXT_PAGE,
+    /* 2026-09-07(통계탭 레이아웃 재설계, 사용자 설계) — 구 "최대/최소 판넬"을 "개괄(Overview)"
+     * 판넬로 교체, 2줄+좌우 서브판넬 구조. STR_PANEL_STATS_PEAK/STATS_PEAK_ROW_FMT/
+     * STATS_PEAK_NO_DATA는 이제 안 씀(대체됨, 삭제는 안 함 — 되돌릴 경우 대비) */
+    STR_PANEL_STATS_OVERVIEW,        /* "개괄" / "Overview" */
+    STR_STATS_SCALE_OPTIONS,         /* 드롭다운 옵션 목록(줄바꿈 구분): 1시간/12시간/1일/3일/1주 */
+    /* "%s X%d.%02d%s N%d.%02d%s A%d.%02d%s" — 라벨 Max/Min/Average 약자(X/N/A) 표기 */
+    STR_STATS_OVERVIEW_ROW_FMT,
+    STR_STATS_OVERVIEW_NO_DATA,
+    STR_BTN_JUMP_PREV10,
+    STR_BTN_JUMP_NEXT10,
+    STR_BTN_DELETE_STATS,
+    STR_CONFIRM_DELETE_STATS,
+    STR_LABEL_GRAPH_PLACEHOLDER,
     STR_COUNT,
 } ui_str_id_t;
 

@@ -48,6 +48,17 @@ uint32_t stats_store_read_page(uint32_t page_index, uint32_t page_size,
 /* chan_type 전체 이력 중 최대/최소값 — 데이터 없으면 false */
 bool stats_store_get_min_max(uint8_t chan_type, float *out_min, float *out_max);
 
+/* 2026-09-07(통계탭 개괄 판넬 Scale 연동, 사용자 설계: "스케일마다 계산해야되") —
+ * cutoff_unix_time 이후(선택된 기간)만의 최대/최소/평균. 파일 끝에서부터 훑다가 cutoff보다
+ * 오래된 레코드를 만나면 중단(전체 스캔 아님, stats_store_read_since()와 동일 원칙).
+ * 데이터 없으면(그 기간에 이 chan_type 레코드가 하나도 없으면) false */
+bool stats_store_get_min_max_avg_since(uint32_t cutoff_unix_time, uint8_t chan_type,
+                                        float *out_min, float *out_max, float *out_avg);
+
+/* 2026-09-07(통계탭 "저장값 지우기" 기능, 사용자 지시) — 파일 전체 삭제. SD 미마운트 등으로
+ * 파일이 아예 없어도 에러 아님(그 상태가 곧 "이미 비어있음") */
+void stats_store_delete_all(void);
+
 /* cutoff_unix_time 이후(그래프 시간범위) 이 chan_type의 레코드만 골라 out에 채움(파일
  * 끝에서부터 거꾸로 훑다가 cutoff보다 오래된 레코드를 만나면 즉시 중단 — 전체 스캔 아님).
  * out은 파일에 쓰인 순서(오래된 것부터)로 채워짐. 실제 채운 개수 반환(out_cap 초과분은 버림 —
