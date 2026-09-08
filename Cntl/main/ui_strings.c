@@ -13,8 +13,8 @@ static ui_lang_t s_lang = UI_LANG_EN;
 static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LOGO_TITLE]     = { "플렉스팜", "FlexFarm" },
     [STR_TAB_DASHBOARD]  = { "상황판", "Dashboard" },
-    [STR_TAB_STATISTICS] = { "통계",   "Statistics" },
-    [STR_TAB_OPTION]     = { "설정",   "Option" },
+    [STR_TAB_STATISTICS] = { "통계",   "Sensor-Statistics" },
+    [STR_TAB_OPTION]     = { "설정",   "Settings" },
     [STR_TAB_LOG]        = { "로그",   "Log" },
     [STR_GROUP_CNTL]     = { "제어기", "CNTL" },
     [STR_GROUP_SENSOR]   = { "측정기", "Sensor" },
@@ -210,8 +210,10 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_STATS_TABLE_HEADER_TIME]     = { "시간",                       "Time" },
     [STR_STATS_TABLE_EMPTY]           = { "저장된 값 없음",              "No data yet" },
     [STR_STATS_PAGE_FMT]              = { "%lu / %lu",                  "%lu / %lu" },
-    [STR_BTN_PREV_PAGE]               = { "< 이전",                    "< Prev" },
-    [STR_BTN_NEXT_PAGE]               = { "다음 >",                    "Next >" },
+    /* 2026-09-08(사용자 지시 — "Prev10 -> '<< 10', <Prev -> '<', Next> -> '>', Next10 ->
+     * '10 >>'") — 기호는 언어 무관이라 ko/en 동일 */
+    [STR_BTN_PREV_PAGE]               = { " < ",                    " < " },
+    [STR_BTN_NEXT_PAGE]               = { " > ",                    " > " },
     /* 2026-09-07(통계탭 레이아웃 재설계, 사용자 설계) */
     /* 2026-09-07 재수정 — X/N/A를 매 줄마다 반복하면 이산화탄소처럼 긴 값이 줄바꿈되던 문제가
      * 있어서(사용자 실기 확인: "흰색 밑줄"), 범례를 제목 옆에 한 번만 두고 각 줄은 숫자만 */
@@ -221,8 +223,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_STATS_OVERVIEW_ROW_FMT]      = { "%s[%s]: %d.%02d / %d.%02d / %d.%02d",
                                            "%s[%s]: %d.%02d / %d.%02d / %d.%02d" },
     [STR_STATS_OVERVIEW_NO_DATA]      = { "데이터 없음",                "No data" },
-    [STR_BTN_JUMP_PREV10]             = { "이전10",                    "Prev10" },
-    [STR_BTN_JUMP_NEXT10]             = { "다음10",                    "Next10" },
+    [STR_BTN_JUMP_PREV10]             = { "<< 10",                    "<< 10" },
+    [STR_BTN_JUMP_NEXT10]             = { "10 >>",                    "10 >>" },
     [STR_BTN_DELETE_STATS]            = { "전체 삭제",                   "Delete All" },
     [STR_CONFIRM_DELETE_STATS]        = { "저장된 통계값을 전부 삭제할까요?\n되돌릴 수 없습니다.",
                                            "Delete all saved statistics?\nThis cannot be undone." },

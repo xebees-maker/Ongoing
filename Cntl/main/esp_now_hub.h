@@ -176,6 +176,7 @@ const char *esp_now_hub_get_own_ip_str(void);
 /* 2026-08-29 — STA 모드에서 실제 접속에 쓰인 SSID(저장된 값 있으면 그것, 없으면 폴백 기본값).
  * AP 모드일 땐 빈 문자열. "네트워크" 설정 행의 우측 표시용 */
 const char *esp_now_hub_get_active_sta_ssid(void);
+const char *esp_now_hub_get_ap_ssid(void);
 
 /* 2026-08-29(사용자 지시: "AP 찾고 선택하고 접속하는 과정은 재시작 안 함") — 재시작 없이
  * 실시간으로 STA 자격증명을 시도해보고 성공/실패를 비동기 콜백으로 통보. 실패하면 원래

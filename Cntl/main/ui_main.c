@@ -28,22 +28,35 @@ extern void lv_demo_widgets_components_init(void);
 extern lv_obj_t *lv_demo_widgets_title_create(lv_obj_t *parent, const char *text);
 extern lv_style_t style_text_muted;
 
-static lv_obj_t *s_page_control = NULL;
+/* 2026-09-08(사용자 재설계) — lv_tabview 제거, 단일 주화면 구조. s_main_screen이 화면
+ * 전체의 루트, s_top_bar가 그 첫 자식(구 tab_bar 자리) */
+static lv_obj_t *s_main_screen = NULL;
+static lv_obj_t *s_top_bar     = NULL;
 static lv_obj_t *s_logo_title = NULL;   /* "플렉스팜/FlexFarm" — 언어 전환 시 갱신 필요 */
-static lv_obj_t *s_clock_label = NULL;  /* 로고부제 자리 — "Widgets demo" 대신 실시간 시계(hh:mm:ss) */
 static lv_obj_t *s_lang_label = NULL;
 static lv_obj_t *s_btn_ko = NULL;
 static lv_obj_t *s_btn_en = NULL;
 
-/* 로고아이콘 정상/경고 두 상태 — 확인 안 한 실패(메모리/통신)가 하나라도 있으면 경고
- * 아이콘으로 바뀜(2026-08-01, 사용자 지시). 토스트는 몇 초 뒤 사라지지만 이 아이콘은
+/* 2026-09-08 — 상단바 좌측 시각/네트워크 컨트롤(구 s_clock_label 하나였던 걸 분리) */
+static lv_obj_t *s_time_ctrl_label    = NULL;
+static lv_obj_t *s_network_ctrl_label = NULL;
+
+/* 2026-09-08 — 상단바 설정 버튼(구 탭바 버튼 대체). 통계 버튼은 없앰(사용자 지시 —
+ * "센서 판넬 Sensor 역상을 누르면 열리게") — cb_stats_btn_tap은 그 트리거로 재사용됨 */
+static lv_obj_t *s_settings_btn     = NULL;
+static lv_obj_t *s_settings_btn_lbl = NULL;
+
+/* 상태 아이콘 정상/경고/에러 3단계 — 확인 안 한 실패(메모리/통신)가 하나라도 있으면 경고/
+ * 에러 아이콘으로 바뀜(2026-08-01, 사용자 지시). 토스트는 몇 초 뒤 사라지지만 이 아이콘은
  * 세션 내내(재부팅 전까지) 남아있어서 "한 번이라도 실패가 있었다"를 계속 알려줌.
- * 2026-08-11, 사용자 지시로 에러/워닝 두 심각도로 분리 — 에러=빨간 느낌표(확인해도
- * 아이콘 유지, 재부팅 전까지 안 없어짐), 워닝=기존 노란 느낌표(팝업으로 확인하면
- * 그 즉시 아이콘 원상복구). 둘 다 활성이면 더 심각한 에러(빨강)가 우선 — 아이콘 색은
- * update_logo_warning_display()에서 매번 다시 계산 */
-static lv_obj_t *s_logo_icon    = NULL;
-static lv_obj_t *s_logo_warning = NULL;
+ * 2026-08-11, 사용자 지시로 에러/워닝 두 심각도로 분리 — 에러=확인해도 아이콘 유지(재부팅
+ * 전까지 안 없어짐), 워닝=팝업으로 확인하면 그 즉시 아이콘 원상복구. 둘 다 활성이면 더
+ * 심각한 에러가 우선. 2026-09-08 재설계 — 이진 토글(로고/노랑삼각형)이었던 걸 3개 독립
+ * 위젯(녹색원/노랑삼각형/빨강원)으로 확장, 어느 게 보일지는 update_logo_warning_display()가
+ * 매번 다시 계산 */
+static lv_obj_t *s_status_normal  = NULL;
+static lv_obj_t *s_status_warning = NULL;
+static lv_obj_t *s_status_error   = NULL;
 static bool      s_error_active = false;
 static bool      s_warn_active  = false;
 
@@ -58,6 +71,7 @@ static lv_obj_t *s_group_title[STR_GROUP_SYSTEM - STR_GROUP_CNTL + 1];
 /* 상황판 판넬 3개(요약/측정기/카메라) — refresh_lang_texts()가 참조하므로 그 정의보다
  * 먼저 선언돼야 함(파일 스코프 static은 선언 지점 이후부터만 참조 가능) */
 static lv_obj_t          *s_dash_title[3];  /* 0=요약, 1=측정기, 2=카메라 */
+static bool               s_camera_title_enabled_prev = false;  /* 2026-09-08 — Camera 역상 회색/흰색 전환용 */
 static lv_obj_t          *s_web_url_label       = NULL;  /* 2026-08-21 — 요약 맨 윗줄, 웹 대시보드 접속 URL(사용자 지시) */
 static lv_obj_t          *s_mem_status_label    = NULL;  /* 2026-08-21 — 요약 둘째줄, 여유 메모리 상시 표시(사용자 지시) */
 static lv_obj_t          *s_summary_list        = NULL;
@@ -67,6 +81,12 @@ static lv_obj_t          *s_sensor_todo         = NULL;
 static lv_obj_t          *s_camera_empty        = NULL;
 static lv_obj_t          *s_camera_content      = NULL;  /* 카메라 판넬 툴바 — 아래 split_row와 함께 토글 */
 static lv_obj_t          *s_camera_split_row    = NULL;
+/* 2026-09-08(카메라 팝업 추출) — camera_box 자체(팝업 열고닫을 때 toolbar/split_row를
+ * 여기로/팝업으로 재부모화하는 데 씀), 그리고 팝업이 닫혀있는 평상시 주화면에 남는
+ * "연결된 카메라" 목록(요약판넬과 동일한 행 패턴, s_camera_list라는 이름은 설정탭 카메라
+ * 발견 리스트가 이미 씀 — 충돌 피하려고 s_camera_dash_* 접두어 사용) */
+static lv_obj_t          *s_camera_box          = NULL;
+static lv_obj_t          *s_camera_dash_list    = NULL;
 static lv_obj_t          *s_camera_photo_label  = NULL;
 static lv_obj_t          *s_camera_capture_lbl  = NULL;
 static lv_obj_t          *s_camera_renew_lbl    = NULL;
@@ -102,6 +122,16 @@ static char      s_summary_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
 /* 2026-09-04(사용자 지시 — 요약판넬 우측에 신호세기, 숫자 대신 막대) — 위 s_summary_row_objs와
  * 같은 인덱스로 짝지어지는 신호막대 위젯(각 행의 우측 자식) */
 static lv_obj_t *s_summary_row_signal[ESP_NOW_HUB_MAX_NODES];
+
+/* 2026-09-08(카메라 팝업 추출 — 주화면 카메라판넬에 남는 목록) — s_summary_row_*와 완전히
+ * 동일한 패턴, CAM 노드만 필터링해서 보여줌 */
+static lv_obj_t *s_camera_dash_row_objs[ESP_NOW_HUB_MAX_NODES];
+static uint8_t   s_camera_dash_row_macs[ESP_NOW_HUB_MAX_NODES][6];
+static char      s_camera_dash_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
+static int       s_camera_dash_row_count = 0;
+static char      s_camera_dash_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
+static lv_obj_t *s_camera_dash_row_signal[ESP_NOW_HUB_MAX_NODES];
+
 static uint8_t            s_selected_cam_mac[6];
 static bool               s_has_selected_cam = false;  /* 지금촬영/목록/삭제 등이 쏠 대상 —
                                                             이제 "자동으로 찾은 유일한 CAM"이
@@ -184,16 +214,26 @@ static lv_obj_t *s_network_find_btn   = NULL;   /* STA모드+미연결일 때만
 static lv_obj_t *s_network_find_lbl   = NULL;
 static void refresh_network_right_zone(void);  /* fwd — refresh_dashboard(위쪽)와 행 생성부(아래쪽) 둘 다에서 씀 */
 
-/* 2026-09-08(사용자 재설계 — "탭을 눌러서 선택할 때 그 탭의 콘텐츠를 생성하고 다른 탭을
- * 누를 때 그 탭의 콘텐츠를 날리는 거였거든") — 통계/설정/로그는 진짜 탭이고, 선택될 때
- * 콘텐츠를 짓고 벗어날 때 지움(부팅시 ~50KB 상시 점유 회수 목적, 상황판은 예외로 상주).
- * cb_page_control_changed(탭바 전환 이벤트)가 호출하므로 그보다 앞서 fwd 필요 */
+/* 2026-09-08(사용자 재설계 — "UI를 완전히 바꾸려고 해... 단일 화면") — 통계/설정은 상단바
+ * 버튼이 여는 전체화면 팝업, 로그는 설정 팝업 안에 중첩(콘텐츠 바꿔치기). 상단바 버튼
+ * 클릭 핸들러(cb_stats_btn_tap 등)가 호출하므로 그보다 앞서 fwd 필요 */
 static void build_stats_tab(void);
 static void build_option_tab(void);
 static void build_log_tab(void);
 static void teardown_stats_tab(void);
 static void teardown_option_tab(void);
 static void teardown_log_tab(void);
+static void cb_stats_btn_tap(lv_event_t *e);
+static void cb_settings_btn_tap(lv_event_t *e);
+static void cb_option_log_btn_tap(lv_event_t *e);
+static void cb_network_ctrl_tap(lv_event_t *e);
+/* 2026-09-08(카메라 팝업 추출) — 카메라판넬 제목이 여는 전체화면 팝업. 기존 toolbar/
+ * split_row 위젯을 새로 안 만들고 재부모화(lv_obj_set_parent)만 해서 여는 방식이라
+ * on_photo_result_event 등 기존 비동기 콜백을 하나도 안 건드림(위젯이 죽지 않고 그대로
+ * 살아있음) */
+static void build_camera_tab(void);
+static void teardown_camera_tab(void);
+static void cb_camera_btn_tap(lv_event_t *e);
 
 /* 적응형 반응시간 행(2026-08-10) — 마지막 사용자 조작 후 이만큼 조용해야 CAM에 SLEEP_NOW.
  * CAM에는 전송 안 되는 Cntl 내부 판단값이라(esp_now_hub.c 참고), Apply해도 네트워크 왕복이
@@ -301,10 +341,9 @@ static lv_obj_t   *s_power_log_pause_btn = NULL;
 static lv_obj_t   *s_power_log_pause_lbl = NULL;
 static lv_timer_t *s_power_panel_timer   = NULL;  /* 일시멈춤 단추가 pause/resume(2026-08-10) */
 
-/* 2026-09-08 — 로그탭이 팝업에서 진짜 탭전환(선택 시 생성/이탈 시 파괴)으로 재설계됨.
- * s_log_tab_page는 lv_tabview_add_tab()이 만든 실제 탭 페이지(항상 존재, 내용만 비워짐),
- * s_log_tab_built는 지금 그 안에 내용이 지어져 있는지 플래그 */
-static lv_obj_t   *s_log_tab_page  = NULL;
+/* 2026-09-08(재설계 — 단일화면+전체화면 팝업) — 로그는 설정 팝업 안에 중첩됨(별도 팝업
+ * 아님). s_log_tab_built는 지금 설정 팝업의 콘텐츠 영역(s_option_content)에 로그 내용이
+ * 지어져 있는지 플래그(= s_option_showing_log와 사실상 동기화됨) */
 static bool        s_log_tab_built = false;
 static lv_timer_t *s_log_box_timer   = NULL;  /* refresh_log_box, 예전엔 핸들 없이 생성만 하고 버림 */
 static bool        s_power_log_paused    = false;
@@ -346,12 +385,21 @@ static lv_obj_t *s_stats_graph_view  = NULL;
 static lv_obj_t *s_stats_delete_btn  = NULL;
 static lv_obj_t *s_stats_delete_lbl  = NULL;
 
-/* 2026-09-08 — 통계탭: 팝업에서 진짜 탭전환(선택 시 생성/이탈 시 파괴)으로 재설계.
- * s_stats_tab_page는 lv_tabview_add_tab()의 실제 탭 페이지(항상 존재), s_stats_tab_built는
- * 지금 내용이 지어져 있는지 — refresh_lang_texts()가 이 플래그로 건드릴지 판단 */
-static lv_obj_t   *s_stats_tab_page  = NULL;
+/* 2026-09-08(재설계 — 단일화면+전체화면 팝업) — 통계는 상단바 버튼이 여는 전체화면 팝업.
+ * s_stats_popup은 create_page_popup()이 만든 오버레이 루트(열려있을 때만 존재),
+ * s_stats_tab_built는 지금 내용이 지어져 있는지 — refresh_lang_texts()가 이 플래그로
+ * 건드릴지 판단(변수명은 구 탭 버전에서 그대로 재사용, 의미는 "팝업 열림"으로 바뀜) */
+static lv_obj_t   *s_stats_popup       = NULL;
+static lv_obj_t   *s_stats_popup_title = NULL;
 static bool        s_stats_tab_built = false;
 static lv_timer_t *s_stats_page_timer  = NULL;
+
+/* 2026-09-08(카메라 팝업 추출) — 카메라는 통계/설정과 달리 콘텐츠를 새로 짓지 않고
+ * 기존 toolbar(s_camera_content)/split_row(s_camera_split_row)를 이 팝업으로 재부모화만
+ * 함 — 그 둘의 내부 위젯(드롭다운/목록/미리보기)에 걸린 기존 이벤트/타이머는 그대로 살아있어
+ * 손댈 필요 없음 */
+static lv_obj_t   *s_camera_popup       = NULL;
+static lv_obj_t   *s_camera_popup_title = NULL;
 
 /* ds_cycle_count 하나만 비교하면 됨(2026-08-10) — 매 리포트가 항상 새 사이클이라 Light
  * Sleep 시절처럼 여러 필드를 같이 diff할 필요가 없어짐(단조증가 카운터) */
@@ -372,9 +420,14 @@ static char *s_power_log_buf = NULL;
 static lv_timer_t *s_camera_list_timer = NULL;
 static lv_timer_t *s_sensor_list_timer = NULL;
 
-/* 2026-09-08 — 설정탭: 팝업에서 진짜 탭전환(선택 시 생성/이탈 시 파괴)으로 재설계 */
-static lv_obj_t *s_option_tab_page  = NULL;
-static bool      s_option_tab_built = false;
+/* 2026-09-08(재설계) — 설정은 상단바 버튼이 여는 전체화면 팝업. s_option_popup은 오버레이
+ * 루트, s_option_content는 헤더 아래 실제 위젯이 지어지는 컨테이너(설정<->로그 콘텐츠
+ * 바꿔치기가 이 안에서 일어남), s_option_popup_title은 헤더 제목(설정/로그 전환 시 텍스트만
+ * 바뀜), s_option_showing_log는 지금 콘텐츠가 로그인지 설정인지 */
+static lv_obj_t *s_option_popup       = NULL;
+static lv_obj_t *s_option_content     = NULL;
+static lv_obj_t *s_option_popup_title = NULL;
+static bool      s_option_tab_built = false;  /* 설정 팝업이 열려있는지(설정/로그 어느 쪽이든) */
 static lv_timer_t *s_dashboard_timer   = NULL;
 
 /* 2026-09-07 — s_camera_list_timer/s_sensor_list_timer는 이제 설정탭 팝업이 열려있을
@@ -426,24 +479,21 @@ static void show_toast(const char *msg, lv_color_t bg_color)
     s_toast_expire_ms = lv_tick_get() + 4000;
 }
 
-/* s_error_active/s_warn_active가 바뀔 때마다 호출 — 아이콘 표시 여부 + 색을 다시 계산.
- * 에러가 하나라도 있으면 빨강이 우선(둘 다 활성이어도), 에러 없이 워닝만 있으면 노랑
- * (2026-08-11, 사용자 지시) */
+/* 2026-09-08(사용자 재설계 — 3단계 상태 아이콘) — s_error_active/s_warn_active가 바뀔 때마다
+ * 호출, 정상/경고/에러 3개 중 하나만 보이게 함. 에러가 하나라도 있으면 항상 에러 표시가
+ * 우선(둘 다 활성이어도) — 기존 이진 로직(2026-08-11)의 우선순위 그대로 유지 */
 static void update_logo_warning_display(void)
 {
-    bool active = s_error_active || s_warn_active;
-    if (s_logo_icon) {
-        if (active) lv_obj_add_flag(s_logo_icon, LV_OBJ_FLAG_HIDDEN);
-        else        lv_obj_remove_flag(s_logo_icon, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (s_logo_warning) {
-        if (active) {
-            lv_obj_remove_flag(s_logo_warning, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_style_text_color(s_logo_warning,
-                s_error_active ? lv_palette_main(LV_PALETTE_RED) : lv_color_hex(0xFFCC00), 0);
-        } else {
-            lv_obj_add_flag(s_logo_warning, LV_OBJ_FLAG_HIDDEN);
-        }
+    if (!s_status_normal || !s_status_warning || !s_status_error) return;
+    lv_obj_add_flag(s_status_normal, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_status_warning, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_status_error, LV_OBJ_FLAG_HIDDEN);
+    if (s_error_active) {
+        lv_obj_remove_flag(s_status_error, LV_OBJ_FLAG_HIDDEN);
+    } else if (s_warn_active) {
+        lv_obj_remove_flag(s_status_warning, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_flag(s_status_normal, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -513,11 +563,7 @@ static void refresh_lang_texts(void)
     s_dash_count_prev = -1;
 
     lv_label_set_text(s_logo_title, ui_str(STR_LOGO_TITLE));
-
-    lv_tabview_set_tab_text(s_page_control, 0, ui_str(STR_TAB_DASHBOARD));
-    lv_tabview_set_tab_text(s_page_control, 1, ui_str(STR_TAB_STATISTICS));
-    lv_tabview_set_tab_text(s_page_control, 2, ui_str(STR_TAB_OPTION));
-    lv_tabview_set_tab_text(s_page_control, 3, ui_str(STR_TAB_LOG));
+    lv_label_set_text(s_settings_btn_lbl, ui_str(STR_TAB_OPTION));
 
     if (s_option_tab_built) {
         for (ui_str_id_t id = STR_GROUP_CNTL; id <= STR_GROUP_SYSTEM; id++) {
@@ -699,9 +745,53 @@ static lv_obj_t *create_modal(void)
     return box;
 }
 
-/* 2026-09-08 — create_page_popup()/add_page_popup_header()는 탭→팝업 전환 때 추가됐다가
- * 진짜 탭전환(build_*_tab/teardown_*_tab)으로 재설계되면서 더 이상 안 씀(탭바 자체가
- * 진입/이탈 UI를 제공하므로 별도 오버레이/닫기버튼이 불필요) — 삭제됨 */
+/* 2026-09-08 — 통계/설정 전체화면 팝업 전용 배경. create_modal()과 같은 이유(레이어버퍼
+ * malloc 회피)로 완전 불투명이지만, 420px 고정폭 대화상자가 아니라 화면 전체를 채우는
+ * 콘텐츠 컨테이너라 별도 헬퍼로 분리. lv_tabview가 없어졌으므로 이 팝업들이 이제 유일한
+ * 진입/이탈 UI를 제공함(닫기 버튼) */
+static lv_obj_t *create_page_popup(void)
+{
+    lv_obj_t *overlay = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(overlay, 0, 0);
+    lv_obj_set_style_radius(overlay, 0, 0);
+    lv_obj_set_style_pad_all(overlay, 0, 0);
+    lv_obj_set_flex_flow(overlay, LV_FLEX_FLOW_COLUMN);
+    return overlay;
+}
+
+/* 팝업 헤더 공용(제목 좌, 닫기 우) — 심볼폰트 글리프 누락 위험 회피를 위해 network_chevron과
+ * 동일하게 순수 ASCII "X" 사용 */
+static lv_obj_t *add_page_popup_header(lv_obj_t *popup, const char *title, lv_event_cb_t close_cb,
+                                       lv_obj_t **title_lbl_out)
+{
+    lv_obj_t *header = lv_obj_create(popup);
+    lv_obj_set_size(header, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(header, 0, 0);
+    lv_obj_set_style_pad_hor(header, 12, 0);
+    lv_obj_set_style_pad_ver(header, 6, 0);
+
+    lv_obj_t *title_lbl = lv_label_create(header);
+    lv_label_set_text(title_lbl, title);
+    /* 2026-09-08(사용자 지시 — 팝업 제목도 크게, 볼드는 메모리 때문에 생략) */
+    lv_obj_set_style_text_font(title_lbl, ui_font_get(UI_FONT_SIZE_24), 0);
+    if (title_lbl_out) *title_lbl_out = title_lbl;
+
+    lv_obj_t *close_btn = lv_button_create(header);
+    /* 2026-09-08(사용자 지시 — "닫힘(X표) 배경을 빨간색으로") */
+    lv_obj_set_style_bg_color(close_btn, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_bg_opa(close_btn, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(close_btn, close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *close_lbl = lv_label_create(close_btn);
+    lv_label_set_text(close_lbl, "X");
+    lv_obj_set_style_text_color(close_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(close_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    return header;
+}
 
 static lv_obj_t *add_modal_button(lv_obj_t *btn_row, ui_str_id_t text_id, lv_event_cb_t cb, void *user_data)
 {
@@ -2917,6 +3007,53 @@ static void refresh_dashboard(lv_timer_t *t)
     }
     rebuild_camera_dropdown_if_changed(cam_nodes, cam_macs, cam_count);
 
+    /* 2026-09-08(카메라 팝업 추출) — 주화면에 남는 "연결된 카메라" 목록, 요약판넬(s_summary_list)과
+     * 완전히 같은 2단계 패턴: 구조 재생성은 dash_changed일 때만(위 요약판넬과 같은 조건 재사용),
+     * 문구/신호세기는 매 틱 갱신하되 실제로 바뀔 때만 lv_label_set_text 호출 */
+    if (dash_changed) {
+        lv_indev_reset(NULL, s_camera_dash_list);
+        lv_obj_clean(s_camera_dash_list);
+        for (int i = 0; i < cam_count && i < ESP_NOW_HUB_MAX_NODES; i++) {
+            lv_obj_t *row = lv_obj_create(s_camera_dash_list);
+            lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+            lv_obj_set_style_border_width(row, 0, 0);
+            lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_pad_all(row, 0, 0);
+            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+            lv_obj_t *label = lv_label_create(row);
+            lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+            lv_obj_t *signal = create_signal_widget(row);
+
+            s_camera_dash_row_objs[i] = label;
+            s_camera_dash_row_signal[i] = signal;
+            memcpy(s_camera_dash_row_macs[i], cam_macs[i], 6);
+            strncpy(s_camera_dash_row_names[i], cam_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
+            s_camera_dash_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
+            s_camera_dash_row_last_text[i][0] = '\0';
+        }
+        s_camera_dash_row_count = (cam_count < ESP_NOW_HUB_MAX_NODES) ? cam_count : ESP_NOW_HUB_MAX_NODES;
+    }
+    for (int i = 0; i < s_camera_dash_row_count; i++) {
+        hub_conn_state_t st = esp_now_hub_get_conn_state(s_camera_dash_row_macs[i]);
+        char buf[96];
+        snprintf(buf, sizeof(buf), "%s (%s)", s_camera_dash_row_names[i],
+                 ui_str(st == HUB_CONN_STATE_ACTIVE ? STR_STATUS_ACTIVE : STR_STATUS_PAIRED));
+        for (int j = 0; j < cam_count; j++) {
+            if (memcmp(cam_macs[j], s_camera_dash_row_macs[i], 6) != 0) continue;
+            update_signal_widget(s_camera_dash_row_signal[i], cam_nodes[j].has_rssi, cam_nodes[j].rssi);
+            break;
+        }
+        if (strcmp(s_camera_dash_row_last_text[i], buf) != 0) {
+            lv_label_set_text(s_camera_dash_row_objs[i], buf);
+            strncpy(s_camera_dash_row_last_text[i], buf, sizeof(s_camera_dash_row_last_text[i]) - 1);
+            s_camera_dash_row_last_text[i][sizeof(s_camera_dash_row_last_text[i]) - 1] = '\0';
+        }
+    }
+
     bool camera_connected = (cam_count > 0);
     if (camera_connected) {
         int  selected_idx = 0;
@@ -2936,12 +3073,27 @@ static void refresh_dashboard(lv_timer_t *t)
     }
     if (camera_connected) {
         lv_obj_add_flag(s_camera_empty, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_camera_dash_list, LV_OBJ_FLAG_HIDDEN);
+        /* 2026-09-08(카메라 팝업 추출) — toolbar/split_row는 팝업이 열려있을 때만 보여야 함
+         * (지금 부모가 주화면 camera_box인지 s_camera_popup인지로 판단) — 팝업이 열려있으면
+         * build_camera_tab()이 이미 hidden을 풀어뒀고, 닫혀있으면 팝업 쪽 표시는 의미가
+         * 없으므로 여기서는 부모가 팝업일 때만 hidden을 갱신(주화면에 있을 땐 무조건 숨김) */
+        if (s_camera_popup) {
+            lv_obj_remove_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
+        }
     } else {
         lv_obj_remove_flag(s_camera_empty, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_camera_dash_list, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
+    }
+    /* 2026-09-08(사용자 지시 — "한 개도 없으면 역상 속 글씨가 밝은 회색으로 안눌린다는
+     * 표현") — 상태 바뀔 때만 갱신(매틱 재적용 방지) */
+    if (camera_connected != s_camera_title_enabled_prev) {
+        s_camera_title_enabled_prev = camera_connected;
+        lv_obj_set_style_text_color(s_dash_title[2],
+            camera_connected ? lv_color_white() : lv_palette_lighten(LV_PALETTE_GREY, 1), 0);
     }
 
     /* 2026-09-04 — 사진/목록 수신 완료 반응은 매틱 폴링 대신 이벤트(on_photo_result_event/
@@ -3185,6 +3337,19 @@ static lv_obj_t *create_group_box(lv_obj_t *parent, ui_str_id_t title_id)
  * 버튼 형식으로 통일") — SPACE_BETWEEN에 자식 3개(라벨/드롭다운/버튼)를 그대로 두면
  * 드롭다운이 가운데 애매한 자리에 뜸(개괄 판넬 헤더에서 먼저 발견된 문제와 동일). 드롭다운
  * (or 값 라벨)+버튼을 하나의 우측 묶음으로 만들어 라벨-공백-묶음 2분할이 되게 함 */
+/* 2026-09-08(사용자 지시 — "지금 단추가 다 라운드스퀘어잖아... 직사각형 짙은 회색배경에
+ * 흰글씨였어") — 다른 버튼(둥근모서리)과 구분되는 "역상" 눌림 표시. 시간/네트워크/센서·
+ * 카메라판넬 제목 전부 이 스타일 공유 — CLICKABLE+event_cb는 호출부가 각자 따로 붙임 */
+static void style_inverted_control(lv_obj_t *label)
+{
+    lv_obj_set_style_bg_color(label, lv_palette_darken(LV_PALETTE_GREY, 3), 0);
+    lv_obj_set_style_bg_opa(label, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_set_style_radius(label, 0, 0);
+    lv_obj_set_style_pad_hor(label, 8, 0);
+    lv_obj_set_style_pad_ver(label, 4, 0);
+}
+
 static lv_obj_t *create_row_right_cluster(lv_obj_t *row)
 {
     lv_obj_t *cluster = lv_obj_create(row);
@@ -3197,6 +3362,9 @@ static lv_obj_t *create_row_right_cluster(lv_obj_t *row)
     return cluster;
 }
 
+/* 2026-09-08(재설계 — 상단바 시각/네트워크 컨트롤 분리) — 예전엔 s_clock_label 하나에
+ * "HH:MM:SS - CH3"처럼 합쳐서 찍었는데, 이제 시각 컨트롤과 네트워크 컨트롤이 각자 탭
+ * 가능한 별도 위젯이라 텍스트도 분리 */
 static void refresh_clock(lv_timer_t *t)
 {
     (void)t;
@@ -3205,25 +3373,30 @@ static void refresh_clock(lv_timer_t *t)
     localtime_r(&now, &tm_buf);
     char time_buf[12];
     strftime(time_buf, sizeof(time_buf), "%H:%M:%S", &tm_buf);
+    if (s_time_ctrl_label) lv_label_set_text(s_time_ctrl_label, time_buf);
 
-    char buf[32];  /* "HH:MM:SS - AP 없음" 등 한글 포함 시 UTF-8로 20바이트를 넘을 수 있어 확대 */
-    /* 2026-08-30(사용자 지시) — STA 모드에서 부팅 후 25초간 저장된 AP를 한 번도 못 찾았으면,
-     * 계속 재시도 중임을 시간/채널로 위장하지 말고 "AP 없음"을 명시. "찾기"로 수동 연결하면
-     * esp_now_hub_sta_boot_giveup()이 자동으로 false가 되어 원래 표시로 복귀 */
-    if (!device_config_get_wifi_ap_mode() && esp_now_hub_sta_boot_giveup()) {
-        snprintf(buf, sizeof(buf), "%s - %s", time_buf, ui_str(STR_STATUS_NO_AP));
-    } else {
-        /* 시간 옆에 WiFi 채널을 항상 같이 표기(2026-08-02, 사용자 지시) — 공유기
-         * 자동채널선택으로 세션 중간에 채널이 바뀌는 걸 실기에서 확인했는데, 그동안은
-         * 시리얼 없이 확인할 방법이 없어서 헤맸음. 통계탭 로그처럼 찾아봐야 하는 곳이
-         * 아니라 항상 보이는 자리에 둠 */
-        snprintf(buf, sizeof(buf), "%s - CH%u", time_buf, (unsigned)esp_now_hub_get_wifi_channel());
+    if (s_network_ctrl_label) {
+        char net_buf[48];
+        bool ap_mode = device_config_get_wifi_ap_mode();
+        /* 2026-08-30(사용자 지시) — STA 모드에서 부팅 후 25초간 저장된 AP를 한 번도 못
+         * 찾았으면, 계속 재시도 중임을 위장하지 말고 "AP 없음"을 명시. "찾기"로 수동
+         * 연결하면 esp_now_hub_sta_boot_giveup()이 자동으로 false가 되어 원래 표시로 복귀 */
+        if (!ap_mode && esp_now_hub_sta_boot_giveup()) {
+            snprintf(net_buf, sizeof(net_buf), "STA - %s", ui_str(STR_STATUS_NO_AP));
+        } else if (ap_mode) {
+            /* 2026-09-08(사용자 지시 — "AP라면 SSID가 뭔지도 표기") */
+            snprintf(net_buf, sizeof(net_buf), "AP - %s CH%u", esp_now_hub_get_ap_ssid(),
+                     (unsigned)esp_now_hub_get_wifi_channel());
+        } else {
+            /* 2026-09-08(사용자 지시 — "자리가 충분하면 SSID도") — 채널도 계속 같이 표기
+             * (2026-08-02 지시: 공유기 자동채널선택 변경을 알아채기 위함, 계속 유효) */
+            snprintf(net_buf, sizeof(net_buf), "STA - %s CH%u", esp_now_hub_get_active_sta_ssid(),
+                     (unsigned)esp_now_hub_get_wifi_channel());
+        }
+        lv_label_set_text(s_network_ctrl_label, net_buf);
     }
-    lv_label_set_text(s_clock_label, buf);
 
-    /* 설정탭 시각설정 행의 현재값 표시 — 이 타이머가 만들어지는 시점(1786행)엔 아직
-     * option_page/system_group_box가 안 생겨서 첫 즉시호출 땐 NULL, 이후 타이머 tick부터
-     * 채워짐 */
+    /* 설정탭 시각설정 행의 현재값 표시 — 설정 팝업이 안 열려있으면 NULL */
     if (s_time_value_label) {
         char date_buf[20];
         strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %H:%M", &tm_buf);
@@ -3269,6 +3442,16 @@ typedef struct {
 } settime_popup_state_t;
 
 static settime_popup_state_t s_settime_state;
+static lv_obj_t *s_settime_popup = NULL;
+
+/* 2026-09-08(사용자 지시 — "시간설정 팝업... 이것도 전화면으로") — create_modal() 대신
+ * 전체화면 셸이라 부모 체인 워크(cb_modal_close)를 못 씀, 직접 삭제 */
+static void cb_close_settime_popup(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_delete(s_settime_popup);
+    s_settime_popup = NULL;
+}
 
 static void cb_settime_confirm(lv_event_t *e)
 {
@@ -3284,7 +3467,7 @@ static void cb_settime_confirm(lv_event_t *e)
         ui_log_add_err(UI_ERR_RTC_SET_FAILED, "RTC time set failed: %s", esp_err_to_name(err));
     }
     refresh_clock(NULL);  /* 로고부제 + 이 행의 표시값을 새 시각으로 즉시 갱신(다음 1초 tick까지 안 기다림) */
-    cb_modal_close(e);
+    cb_close_settime_popup(e);
 }
 
 /* 팝업 안에 [라벨][드롭다운] 한 쌍을 만드는 헬퍼 — 연/월/일/시/분 다섯 번 반복돼서 공통화 */
@@ -3313,38 +3496,50 @@ static void show_settime_popup(void)
     localtime_r(&now, &tm_buf);
     int cur_year = tm_buf.tm_year + 1900;
 
+    if (s_settime_popup) return;  /* 이미 열려있음 */
+
     settime_popup_state_t *st = &s_settime_state;
     st->year_base = cur_year - SETTIME_YEAR_SPAN_BEFORE;
     int year_count = SETTIME_YEAR_SPAN_BEFORE + SETTIME_YEAR_SPAN_AFTER + 1;
 
-    lv_obj_t *box = create_modal();
-    lv_obj_set_width(box, 460);  /* 드롭다운 5개가 나란히 들어가야 해서 공용 모달 기본폭(420)보다 넓힘 */
+    s_settime_popup = create_page_popup();
+    add_page_popup_header(s_settime_popup, ui_str(STR_TITLE_SET_TIME), cb_close_settime_popup, NULL);
 
-    lv_obj_t *title = lv_label_create(box);
-    lv_label_set_text(title, ui_str(STR_TITLE_SET_TIME));
-    lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 콘텐츠 영역 — 화면 중앙에 픽커+확인버튼 */
+    lv_obj_t *content = lv_obj_create(s_settime_popup);
+    lv_obj_set_size(content, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(content, 1);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(content, 20, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
 
-    lv_obj_t *picker_row = lv_obj_create(box);
-    lv_obj_set_size(picker_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_t *picker_row = lv_obj_create(content);
+    lv_obj_set_size(picker_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(picker_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(picker_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(picker_row, 0, 0);
     lv_obj_set_style_pad_column(picker_row, 4, 0);
 
+    /* 2026-09-08(사용자 지적 — "숫자와 열림 기호가 겹쳐있고") — 비트맵 폰트(Montserrat)
+     * 숫자 폭이 TTF 때보다 넓어서 고정폭이 부족해 화살표와 겹침, 여유 있게 넓힘 */
     st->year_dd  = add_settime_dropdown(picker_row, st->year_base, year_count, "%04d",
-                                         cur_year - st->year_base, 78);
-    st->month_dd = add_settime_dropdown(picker_row, 1, 12, "%02d", tm_buf.tm_mon, 62);
-    st->day_dd   = add_settime_dropdown(picker_row, 1, 31, "%02d", tm_buf.tm_mday - 1, 62);
+                                         cur_year - st->year_base, 90);
+    st->month_dd = add_settime_dropdown(picker_row, 1, 12, "%02d", tm_buf.tm_mon, 74);
+    st->day_dd   = add_settime_dropdown(picker_row, 1, 31, "%02d", tm_buf.tm_mday - 1, 74);
 
     lv_obj_t *sep = lv_label_create(picker_row);
     lv_label_set_text(sep, " ");
 
-    st->hour_dd  = add_settime_dropdown(picker_row, 0, 24, "%02d", tm_buf.tm_hour, 62);
-    st->min_dd   = add_settime_dropdown(picker_row, 0, 60, "%02d", tm_buf.tm_min, 62);
+    st->hour_dd  = add_settime_dropdown(picker_row, 0, 24, "%02d", tm_buf.tm_hour, 74);
+    st->min_dd   = add_settime_dropdown(picker_row, 0, 60, "%02d", tm_buf.tm_min, 74);
 
-    lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_settime_confirm, NULL);
-    add_modal_button(btn_row, STR_BTN_CANCEL, cb_modal_close, NULL);
+    /* 확인 버튼 하나만 — 취소는 헤더의 닫기(X)가 대신함(통계/설정 팝업과 동일 패턴) */
+    lv_obj_t *confirm_btn = lv_button_create(content);
+    lv_obj_add_event_cb(confirm_btn, cb_settime_confirm, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *confirm_lbl = lv_label_create(confirm_btn);
+    lv_label_set_text(confirm_lbl, ui_str(STR_BTN_CONFIRM));
+    lv_obj_set_style_text_font(confirm_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 }
 
 static void cb_settime_btn(lv_event_t *e)
@@ -3422,6 +3617,7 @@ static void cb_network_mode_changed(lv_event_t *e)
  * 내용만 바꾸던 방식에서, 목록 위에 비밀번호 팝업이 "추가로" 스택되는 2단 팝업 구조로 변경 */
 static lv_obj_t *s_wifi_status_lbl  = NULL;  /* 스캔 팝업 상단 "연결됨: X" / "아직 없음" */
 static lv_obj_t *s_wifi_list        = NULL;  /* 스캔 결과 리스트(스캔 팝업 소속) */
+static lv_obj_t *s_wifi_scan_popup  = NULL;  /* 2026-09-08 — 전체화면 전환, 팝업 루트 직접 참조용 */
 static lv_obj_t *s_wifi_keyboard    = NULL;
 static lv_obj_t *s_wifi_password_ta = NULL;
 static lv_obj_t *s_wifi_pw_box         = NULL;  /* 비밀번호 팝업 자체(비동기 콜백에서 닫을 때 필요) */
@@ -3450,10 +3646,12 @@ static void update_wifi_status_label(void)
 
 static void cb_wifi_scan_popup_close(lv_event_t *e)
 {
+    (void)e;
     esp_now_hub_set_sta_reconnect_paused(false);
     s_wifi_status_lbl = NULL;
     s_wifi_list = NULL;
-    cb_modal_close(e);
+    lv_obj_delete(s_wifi_scan_popup);
+    s_wifi_scan_popup = NULL;
 }
 
 /* 비밀번호 팝업(+ 그 아래 스캔목록 팝업까지) 정리 — 저장하든 취소든 성공/실패든 공통으로
@@ -3475,8 +3673,8 @@ static void close_wifi_popups(void)
     /* 그 아래 스캔목록 팝업도 같이 닫기 — 목적을 이뤘으니(연결 성공이든 취소든) 목록까지
      * 볼 이유가 없음 */
     if (s_wifi_list) {
-        lv_obj_t *scan_overlay = lv_obj_get_parent(lv_obj_get_parent(s_wifi_list));
-        lv_obj_delete(scan_overlay);
+        lv_obj_delete(s_wifi_scan_popup);
+        s_wifi_scan_popup = NULL;
         s_wifi_list = NULL;
         s_wifi_status_lbl = NULL;
     }
@@ -3794,28 +3992,43 @@ static void cb_network_find_btn(lv_event_t *e)
         s_wifi_scan_records = heap_caps_calloc(WIFI_SCAN_MAX_RESULTS, sizeof(wifi_ap_record_t), MALLOC_CAP_SPIRAM);
     }
 
-    lv_obj_t *box = create_modal();
-    lv_obj_set_width(box, 700);  /* 2026-08-29 — 기본 420px는 너무 작다는 사용자 지적 */
+    if (s_wifi_scan_popup) return;  /* 이미 열려있음 */
 
-    lv_obj_t *title = lv_label_create(box);
-    lv_label_set_text(title, ui_str(STR_TITLE_WIFI_SCAN));
-    lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 2026-09-08(사용자 지시 — "Wifi scan popup이 전화면이 아니고") — 전체화면 셸로 전환 */
+    s_wifi_scan_popup = create_page_popup();
+    add_page_popup_header(s_wifi_scan_popup, ui_str(STR_TITLE_WIFI_SCAN), cb_wifi_scan_popup_close, NULL);
+
+    lv_obj_t *content = lv_obj_create(s_wifi_scan_popup);
+    lv_obj_set_size(content, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(content, 1);
+    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(content, 12, 0);
+    lv_obj_set_style_pad_row(content, 10, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
 
     /* 2026-08-29 사용자 지시 — 이미 연결된 네트워크가 있으면 표기, 없으면 "아직 없음" */
-    s_wifi_status_lbl = lv_label_create(box);
+    s_wifi_status_lbl = lv_label_create(content);
     lv_obj_set_style_text_font(s_wifi_status_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_style(s_wifi_status_lbl, &style_text_muted, 0);
     update_wifi_status_label();
 
-    s_wifi_list = lv_list_create(box);
-    lv_obj_set_size(s_wifi_list, LV_PCT(100), 320);
+    s_wifi_list = lv_list_create(content);
+    lv_obj_set_width(s_wifi_list, LV_PCT(100));
+    lv_obj_set_flex_grow(s_wifi_list, 1);
 
-    /* 2026-08-29 사용자 지시 — "다시 찾기"가 닫기 단추 왼쪽에 오도록 먼저 추가
-     * (create_modal_btn_row는 오른쪽 정렬이라 추가 순서 = 왼→오른). 이 팝업은 뭔가를
-     * "취소"하는 게 아니라 그냥 닫는 거라 공용 STR_BTN_CANCEL 대신 전용 STR_BTN_CLOSE 사용 */
-    lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_RESCAN, cb_wifi_rescan_btn, NULL);
-    add_modal_button(btn_row, STR_BTN_CLOSE, cb_wifi_scan_popup_close, NULL);
+    /* 2026-08-29 사용자 지시 — "다시 찾기"가 닫기 단추 왼쪽에 오도록 먼저 추가. 이 팝업은
+     * 뭔가를 "취소"하는 게 아니라 그냥 닫는 거라 공용 STR_BTN_CANCEL 대신 전용
+     * STR_BTN_CLOSE 사용(닫기는 이제 헤더의 X가 대신하므로 여기선 다시찾기만) */
+    lv_obj_t *btn_row = lv_obj_create(content);
+    lv_obj_set_size(btn_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(btn_row, 0, 0);
+    lv_obj_t *rescan_btn = lv_button_create(btn_row);
+    lv_obj_add_event_cb(rescan_btn, cb_wifi_rescan_btn, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *rescan_lbl = lv_label_create(rescan_btn);
+    lv_label_set_text(rescan_lbl, ui_str(STR_BTN_RESCAN));
+    lv_obj_set_style_text_font(rescan_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     trigger_wifi_scan();
 }
@@ -4369,28 +4582,16 @@ bool ui_main_inject_photo_select(uint32_t file_id)
 /* 2026-09-08(사용자 재설계) — 진짜 탭전환: 떠나는 탭의 콘텐츠는 지우고(teardown_*_tab),
  * 들어가는 탭의 콘텐츠를 그 자리에 지음(build_*_tab). 상황판(인덱스 0)은 항상 상주라
  * 대상에서 제외 */
-static void cb_page_control_changed(lv_event_t *e)
+/* 2026-09-08(사용자 지시 — "네트워크는 누르면 STA인 경우 wiFi scan이 나오면 좋겠고") —
+ * STA 모드면 WiFi 스캔 팝업을 바로 열고(cb_network_find_btn 재사용), AP 모드면 스캔할
+ * 대상이 없으므로 설정 팝업(네트워크 행)을 염 */
+static void cb_network_ctrl_tap(lv_event_t *e)
 {
-    (void)e;
-    static size_t s_prev_free = 0;
-    static uint32_t s_prev_idx = 0;
-    size_t now = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 탭전환: internal=%u (직전 대비 %d)",
-             (unsigned)now, s_prev_free ? (int)s_prev_free - (int)now : 0);
-    s_prev_free = now;
-
-    uint32_t idx = lv_tabview_get_tab_active(s_page_control);
-    if (idx == s_prev_idx) return;
-
-    if (s_prev_idx == 1) teardown_stats_tab();
-    else if (s_prev_idx == 2) teardown_option_tab();
-    else if (s_prev_idx == 3) teardown_log_tab();
-
-    if (idx == 1) build_stats_tab();
-    else if (idx == 2) build_option_tab();
-    else if (idx == 3) build_log_tab();
-
-    s_prev_idx = idx;
+    if (!device_config_get_wifi_ap_mode()) {
+        cb_network_find_btn(e);
+        return;
+    }
+    cb_settings_btn_tap(e);
 }
 
 void ui_init(void)
@@ -4433,74 +4634,117 @@ void ui_init(void)
         ESP_LOGE(TAG, "노드 추적 버퍼 할당 실패 — 상황판/카메라/측정기 목록 표시 불가");
     }
 
-    s_page_control = lv_tabview_create(lv_screen_active());
-    lv_tabview_set_tab_bar_size(s_page_control, 75);  /* 800px 화면은 항상 DISP_LARGE 크기 */
-    /* 2026-09-07(사용자 설계 — 통계탭 안 테이블<->그래프 좌우 스와이프와 겹치지 않게) —
-     * 탭 전환은 탭 바 버튼으로만, 스와이프로는 안 바뀌게 함(탭 콘텐츠 컨테이너의 스크롤을
-     * 끄면 스와이프-스냅 탭전환이 꺼짐 — 탭 버튼 자체의 클릭 전환은 무관하게 그대로 동작) */
-    lv_obj_remove_flag(lv_tabview_get_content(s_page_control), LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(s_page_control, cb_page_control_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    /* 2026-09-08(사용자 재설계 — "UI를 완전히 바꾸려고 해... 단일 화면") — lv_tabview 자체를
+     * 없애고 주화면(구 상황판) 하나만 상주하는 화면 구조로 전환. 통계/설정은 상단바의
+     * 버튼으로 여는 전체화면 팝업이 됨(아래 build_stats_popup/build_option_popup) */
+    s_main_screen = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(s_main_screen);
+    lv_obj_set_size(s_main_screen, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_flex_flow(s_main_screen, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_bg_color(s_main_screen, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    lv_obj_set_style_bg_opa(s_main_screen, LV_OPA_COVER, 0);
 
-    lv_obj_t *tab_bar = lv_tabview_get_tab_bar(s_page_control);
-    /* 페이지탭 라벨(한글)엔 기본 LVGL 폰트(Montserrat)에 한글 글리프가 없어서
-     * 로드해둔 나눔고딕(18pt, 이미 로드된 걸 재사용)을 tab bar에 적용 — text_font는
-     * 상속되는 스타일이라 탭 버튼 라벨들에 그대로 내려감 */
-    lv_obj_set_style_text_font(tab_bar, ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 상단바 — 구 tab_bar 자리(로고/시계) 재구성. 높이는 버튼/아이콘 크기에 맞춰 자연스럽게
+     * 정해짐(구 75px 고정보다 낮아짐, 로고 이미지가 빠지고 아이콘들이 표준 버튼 높이로
+     * 통일되므로) */
+    s_top_bar = lv_obj_create(s_main_screen);
+    lv_obj_set_size(s_top_bar, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_top_bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_top_bar, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_hor(s_top_bar, 12, 0);
+    lv_obj_set_style_pad_ver(s_top_bar, 6, 0);
+    lv_obj_set_style_border_width(s_top_bar, 0, 0);
+    lv_obj_set_style_radius(s_top_bar, 0, 0);
 
-    /* 로고아이콘 + 로고 + 로고부제 — tab bar 왼쪽 절반에 절대 위치, 페이지탭 버튼들은
-     * 오른쪽 절반으로 밀어냄(원래 데모 레이아웃 그대로) */
-    lv_obj_set_style_pad_left(tab_bar, LV_HOR_RES / 2, 0);
-    s_logo_icon = lv_image_create(tab_bar);
-    lv_obj_add_flag(s_logo_icon, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    LV_IMAGE_DECLARE(img_lvgl_logo);
-    lv_image_set_src(s_logo_icon, &img_lvgl_logo);
-    lv_obj_align(s_logo_icon, LV_ALIGN_LEFT_MID, -LV_HOR_RES / 2 + 25, 0);
-    /* 2026-08-10 — 경고 중이 아니어도 지금까지의 에러 이력을 언제든 확인할 수 있게 정상
-     * 상태 로고도 탭 가능하게(cb_logo_warning_tap 재사용 — 팝업 내용 자체는 경고 유무와
-     * 무관하게 항상 "지금 남아있는 이력"을 보여줌, 없으면 STR_ERROR_LIST_EMPTY) */
-    lv_obj_add_flag(s_logo_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_logo_icon, cb_logo_warning_tap, LV_EVENT_CLICKED, NULL);
-
-    /* 경고 상태일 때만 보이는 아이콘 — 배경 박스 없이 느낌표 삼각형 아이콘 그 자체
-     * (2026-08-01, 사용자가 참고 이미지로 지적: 빨간 네모가 아니라 노란/흰색 삼각형
-     * 경고 아이콘이어야 함). LVGL 내장 심볼 폰트(LV_SYMBOL_WARNING)가 이미 그 모양이라
-     * 별도 이미지 에셋 없이 크기만 2배로 키워서 씀, 기본은 숨김 */
-    s_logo_warning = lv_label_create(tab_bar);
-    lv_obj_add_flag(s_logo_warning, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_add_flag(s_logo_warning, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(s_logo_warning, LV_SYMBOL_WARNING);
-    /* tab_bar가 나눔고딕(한글 TTF)을 상속시키는데 거기엔 LV_SYMBOL_WARNING 글리프가
-     * 없어서 "글리프 없음" 네모가 그려짐(2026-08-01 실기에서 확인) — 심볼이 포함된
-     * LVGL 기본 폰트로 명시적으로 덮어써야 함. transform_scale로 14pt를 2배 키웠더니
-     * 정렬 기준(피벗)이 원래(작은) 박스 기준이라 아래로 쏠려 보이고 확대라 흐릿하기도
-     * 했음(2026-08-01 실기 확인) — 스케일 대신 원래 큰 폰트(24pt)를 그대로 씀 */
-    lv_obj_set_style_text_font(s_logo_warning, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(s_logo_warning, lv_color_hex(0xFFCC00), 0);
-    lv_obj_align(s_logo_warning, LV_ALIGN_LEFT_MID, -LV_HOR_RES / 2 + 25, 0);
-    lv_obj_add_flag(s_logo_warning, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_logo_warning, cb_logo_warning_tap, LV_EVENT_CLICKED, NULL);
-
-    s_logo_title = lv_demo_widgets_title_create(tab_bar, "");
-    lv_obj_add_flag(s_logo_title, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    /* 2026-09-08(사용자 재수정 지시 — "상단바 순서를 로고 - 공백 - 시간-네트워크-상태-
+     * Settings로") — 로고만 단독 좌측, 나머지는 전부 우측 클러스터 */
+    s_logo_title = lv_label_create(s_top_bar);
     lv_label_set_text(s_logo_title, ui_str(STR_LOGO_TITLE));
-    lv_obj_set_style_text_font(s_logo_title, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_align_to(s_logo_title, s_logo_icon, LV_ALIGN_OUT_RIGHT_TOP, 10, 0);
-    lv_obj_add_flag(s_logo_title, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_logo_title, cb_logo_title_tap, LV_EVENT_CLICKED, NULL);
+    /* 2026-09-08(사용자 지시 — "폰트는 볼드(가능하면)에 크기가 좀 더 컸으면", "메모리
+     * 더먹으면 안먹는 쪽으로") — 볼드 폰트 테이블을 새로 켜면 플래시가 더 드니 크기만 키움 */
+    lv_obj_set_style_text_font(s_logo_title, ui_font_get(UI_FONT_SIZE_24), 0);
 
-    /* 로고부제 자리 — 보드 실장 RTC(rtc_sync_init, main.c에서 UI보다 먼저 호출)로 세팅된
-     * 시스템 클록을 1초마다 hh:mm:ss로 보여줌 */
-    s_clock_label = lv_label_create(tab_bar);
-    lv_obj_add_flag(s_clock_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_add_style(s_clock_label, &style_text_muted, 0);
-    lv_obj_align_to(s_clock_label, s_logo_icon, LV_ALIGN_OUT_RIGHT_BOTTOM, 10, 0);
-    refresh_clock(NULL);  /* 첫 타이머 tick(최대 1초 뒤) 전까지 빈 채로 안 보이게 즉시 한 번 채움 */
+    lv_obj_t *top_bar_right = lv_obj_create(s_top_bar);
+    lv_obj_set_size(top_bar_right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(top_bar_right, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top_bar_right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(top_bar_right, 0, 0);
+    lv_obj_set_style_pad_column(top_bar_right, 10, 0);
+    lv_obj_set_style_border_width(top_bar_right, 0, 0);
+
+    /* 2026-09-08(사용자 수정 지시 — "지금 단추가 다 라운드스퀘어잖아... 직사각형 짙은
+     * 회색배경에 흰글씨였어") — 다른 버튼들(둥근모서리)과 구분되는 눌림 표시. 시간/네트워크
+     * 둘 다 같은 헬퍼로 만듦 */
+    s_time_ctrl_label = lv_label_create(top_bar_right);
+    style_inverted_control(s_time_ctrl_label);
+    lv_obj_add_flag(s_time_ctrl_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_time_ctrl_label, cb_settime_btn, LV_EVENT_CLICKED, NULL);
+
+    /* 네트워크 컨트롤 — AP/STA + SSID(가능하면), 탭하면: STA=WiFi 스캔 직접, AP=설정 팝업.
+     * 2026-09-08(사용자 지시 — 폭 부족 대비) — 긴 SSID는 말줄임 */
+    s_network_ctrl_label = lv_label_create(top_bar_right);
+    style_inverted_control(s_network_ctrl_label);
+    lv_label_set_long_mode(s_network_ctrl_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(s_network_ctrl_label, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_width(s_network_ctrl_label, 220, 0);
+    lv_obj_add_flag(s_network_ctrl_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_network_ctrl_label, cb_network_ctrl_tap, LV_EVENT_CLICKED, NULL);
+
+    refresh_clock(NULL);  /* 첫 타이머 tick 전까지 빈 채로 안 보이게 즉시 한 번 채움 */
     lv_timer_create(refresh_clock, 1000, NULL);
+
+    /* 2026-09-08(사용자 지시 — "상단바 통계 버튼을 없애고, 센서 판넬 Sensor 역상을 누르면
+     * 열리게", "순서를... 시간-네트워크-상태-Settings로") — 통계 버튼 제거(빈 자리는 그냥
+     * 둠), 상태아이콘이 Settings보다 먼저 오도록 순서 유지 */
+    /* 상태 아이콘(정상/경고/에러) — 3개 다 만들어두고 상태에 맞는 것만 보임(구 로고/경고
+     * 아이콘 이진 토글과 같은 패턴, 3단계로 확장). 전부 같은 크기(버튼 높이 기준) */
+    lv_obj_t *status_icon_box = lv_obj_create(top_bar_right);
+    lv_obj_remove_style_all(status_icon_box);
+    lv_obj_set_size(status_icon_box, 32, 32);
+    lv_obj_add_flag(status_icon_box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(status_icon_box, cb_logo_warning_tap, LV_EVENT_CLICKED, NULL);
+
+    /* 2026-09-08(사용자 지시 — "내가 생각한건 리프레시 모양의 회전하는 화살표 모양이었는데"
+     * → 정지 상태로, 크기는 경고/에러 아이콘과 동일하게) */
+    s_status_normal = lv_label_create(status_icon_box);
+    lv_obj_center(s_status_normal);
+    lv_label_set_text(s_status_normal, LV_SYMBOL_REFRESH);
+    lv_obj_set_style_text_font(s_status_normal, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_status_normal, lv_palette_main(LV_PALETTE_GREEN), 0);
+
+    s_status_warning = lv_label_create(status_icon_box);
+    lv_obj_center(s_status_warning);
+    lv_obj_add_flag(s_status_warning, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(s_status_warning, LV_SYMBOL_WARNING);
+    lv_obj_set_style_text_font(s_status_warning, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_status_warning, lv_color_hex(0xFFCC00), 0);
+
+    s_status_error = lv_obj_create(status_icon_box);
+    lv_obj_remove_style_all(s_status_error);
+    lv_obj_set_size(s_status_error, 24, 24);
+    lv_obj_center(s_status_error);
+    lv_obj_add_flag(s_status_error, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_radius(s_status_error, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_status_error, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_bg_opa(s_status_error, LV_OPA_COVER, 0);
+    lv_obj_t *status_error_lbl = lv_label_create(s_status_error);
+    lv_obj_center(status_error_lbl);
+    lv_label_set_text(status_error_lbl, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_font(status_error_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(status_error_lbl, lv_color_white(), 0);
+
+    s_settings_btn = lv_button_create(top_bar_right);
+    lv_obj_add_event_cb(s_settings_btn, cb_settings_btn_tap, LV_EVENT_CLICKED, NULL);
+    s_settings_btn_lbl = lv_label_create(s_settings_btn);
+    lv_label_set_text(s_settings_btn_lbl, ui_str(STR_TAB_OPTION));
+    lv_obj_set_style_text_font(s_settings_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_timer_create(error_poll_tick, 200, NULL);
 
-    /* 상황판 — 판넬 3개(요약/측정기/카메라), 1초마다 연결 상태 반영 */
-    lv_obj_t *dashboard_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_DASHBOARD));
+    /* 주화면 — 판넬 3개(요약/측정기/카메라), 1초마다 연결 상태 반영 */
+    lv_obj_t *dashboard_page = lv_obj_create(s_main_screen);
+    lv_obj_set_flex_grow(dashboard_page, 1);
+    lv_obj_set_width(dashboard_page, LV_PCT(100));
     lv_obj_set_flex_flow(dashboard_page, LV_FLEX_FLOW_COLUMN);
     /* 기본 테마 패딩(이 화면 DISP_LARGE 버킷 PAD_DEF=20px)이 판넬-화면 가장자리 간격과
      * 판넬 사이 세로 간격 둘 다에 그대로 쓰이고 있었음 — 절반(10px)로 줄임(2026-08-09,
@@ -4522,6 +4766,12 @@ void ui_init(void)
     s_web_url_label = lv_label_create(summary_box);
     lv_obj_set_style_text_font(s_web_url_label, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_flag(s_web_url_label, LV_OBJ_FLAG_HIDDEN);
+    /* 2026-09-08(사용자 재설계 — "요약의 웹 주소를 링크표시(파란색, 밑줄)로 바꿔서 클릭하면
+     * 뜨게 해") — 로고가 없어지면서 QR 팝업 트리거를 여기로 옮김(cb_logo_title_tap 재사용) */
+    lv_obj_set_style_text_color(s_web_url_label, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_set_style_text_decor(s_web_url_label, LV_TEXT_DECOR_UNDERLINE, 0);
+    lv_obj_add_flag(s_web_url_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_web_url_label, cb_logo_title_tap, LV_EVENT_CLICKED, NULL);
 
     /* 2026-08-21 — 요약 둘째줄, 여유 메모리 상시 표시(사용자 지시) — refresh_dashboard()가
      * 매 틱 텍스트를 채움, 웹 URL줄과 달리 항상 값이 있어서 숨김 처리 없음 */
@@ -4537,12 +4787,21 @@ void ui_init(void)
     lv_obj_set_style_border_width(s_summary_list, 0, 0);
     lv_obj_set_style_bg_opa(s_summary_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_pad_all(s_summary_list, 0, 0);
+    /* 2026-09-08(사용자 지적 — "Summary panel의 줄 간격과 Sensor의 줄 간격이 다른데") —
+     * pad_all(0)이 pad_row도 0으로 만들어서 Sensor 판넬(직접 자식이라 판넬의 pad_row=10을
+     * 그대로 받음)과 달라져 있었음 — 같은 값으로 맞춤 */
+    lv_obj_set_style_pad_row(s_summary_list, 10, 0);
     lv_obj_add_flag(s_summary_list, LV_OBJ_FLAG_HIDDEN);  /* 초기값: 연결된 장치 없음 */
     s_summary_empty = lv_label_create(summary_box);
     lv_label_set_text(s_summary_empty, ui_str(STR_PANEL_NO_PAIRED_DEVICE));
     lv_obj_set_style_text_font(s_summary_empty, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *sensor_box = create_dashboard_panel(dashboard_page, STR_GROUP_SENSOR, 1);
+    /* 2026-09-08(사용자 지시 — "센서 판넬 제목 Sensor를... 역상으로", "센서 판넬 Sensor
+     * 역상을 누르면 열리게") — 통계는 전부 센서 데이터라 진입점을 여기로 옮김 */
+    style_inverted_control(s_dash_title[1]);
+    lv_obj_add_flag(s_dash_title[1], LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_dash_title[1], cb_stats_btn_tap, LV_EVENT_CLICKED, NULL);
     s_sensor_empty = lv_label_create(sensor_box);
     lv_label_set_text(s_sensor_empty, ui_str(STR_PANEL_NO_SENSOR));
     lv_obj_set_style_text_font(s_sensor_empty, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -4552,9 +4811,30 @@ void ui_init(void)
     lv_obj_add_flag(s_sensor_todo, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *camera_box = create_dashboard_panel(dashboard_page, STR_GROUP_CAMERA, 2);
+    s_camera_box = camera_box;
+    /* 2026-09-08(사용자 지시 — "카메라 판넬 제목 Camera도" 역상, "한 개도 없으면 역상 속
+     * 글씨가 밝은 회색으로 안눌린다는 표현") — 초기값은 0대 상태(회색, 클릭 비활성) —
+     * refresh_dashboard()가 cam_count 바뀔 때마다 다시 계산(아래 참고). 2026-09-08(카메라
+     * 팝업 추출) — 센서판넬 제목과 동일 원칙으로 클릭 가능하게 만들되, cb_camera_btn_tap이
+     * s_camera_title_enabled_prev(회색/흰색 상태)를 직접 봐서 0대일 때는 탭이 안 먹게 막음 */
+    style_inverted_control(s_dash_title[2]);
+    lv_obj_set_style_text_color(s_dash_title[2], lv_palette_lighten(LV_PALETTE_GREY, 1), 0);
+    lv_obj_add_flag(s_dash_title[2], LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_dash_title[2], cb_camera_btn_tap, LV_EVENT_CLICKED, NULL);
     s_camera_empty = lv_label_create(camera_box);
     lv_label_set_text(s_camera_empty, ui_str(STR_PANEL_NO_CAMERA));
     lv_obj_set_style_text_font(s_camera_empty, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-09-08(카메라 팝업 추출) — 팝업이 닫혀있는 평상시 주화면에 남는 "연결된 카메라"
+     * 목록. s_summary_list와 완전히 같은 스타일(요약판넬과 통일) */
+    s_camera_dash_list = lv_obj_create(camera_box);
+    lv_obj_set_size(s_camera_dash_list, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_camera_dash_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(s_camera_dash_list, 0, 0);
+    lv_obj_set_style_bg_opa(s_camera_dash_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_camera_dash_list, 0, 0);
+    lv_obj_set_style_pad_row(s_camera_dash_list, 10, 0);
+    lv_obj_add_flag(s_camera_dash_list, LV_OBJ_FLAG_HIDDEN);  /* 초기값: 연결된 CAM 없음 */
 
     /* 상단 툴바 — 지금촬영/목록갱신 외에 나중에 다른 컨트롤도 여기 추가될 예정, 그래서
      * 목록/사진 판넬보다 위에 별도 행으로 둠. camera_box의 직접 자식(예전엔 s_camera_content라는
@@ -4699,14 +4979,6 @@ void ui_init(void)
 
     s_dashboard_timer = lv_timer_create(refresh_dashboard, 1000, NULL);
 
-    /* 2026-09-08(팝업→진짜 탭전환 재설계 — 사용자 지시: "탭을 눌러서 선택할 때 그 탭의
-     * 콘텐츠를 생성하고 다른 탭을 누를 때 그 탭의 콘텐츠를 날리는 거였거든") — 통계/설정/
-     * 로그는 진짜 탭으로 등록해두되 내용은 비워둠(build_stats_tab() 등이 탭 전환 시점에
-     * 이 페이지 안에 직접 지음/지움). 상황판만 예외로 항상 상주 */
-    s_stats_tab_page  = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_STATISTICS));
-    s_option_tab_page = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_OPTION));
-    s_log_tab_page    = lv_tabview_add_tab(s_page_control, ui_str(STR_TAB_LOG));
-
     /* 버튼 폭 통일(2026-08-09, 사용자 지시) — 지금까지 만든 메인 화면(상황판) 버튼들의 실측
      * 자연폭 중 최댓값을 기준폭으로 잡아 적용. 팝업 버튼(add_modal_button)은 s_action_btn_width가
      * 여기서 설정된 뒤부터 뜨므로 자동으로 같은 폭을 받음. 사진목록의 del_btn(휴지통 아이콘,
@@ -4732,17 +5004,24 @@ void ui_init(void)
     esp_now_hub_set_connect_event_cb(on_connect_result_event);
 }
 
-/* 2026-09-08 — 통계탭 이탈: 타이머 삭제 + 자식 위젯 전부 삭제(lv_obj_clean, 탭 페이지
- * 자체는 남겨둠 — lv_tabview가 관리하는 실제 탭이라 다음 전환 때 또 씀) + 이 안에서
- * 만들어졌던 위젯 핸들을 NULL로 되돌림(refresh_lang_texts 등 외부 참조 댕글링 방지) */
+/* 2026-09-08(재설계) — 통계 팝업 닫기: 타이머 삭제 + 팝업 전체 삭제(lv_obj_delete — 이제
+ * 실제 탭이 아니라 진짜 팝업이라 닫으면 완전히 없어짐) + 위젯 핸들 NULL */
+static void cb_close_stats_popup(lv_event_t *e)
+{
+    (void)e;
+    teardown_stats_tab();
+}
+
 static void teardown_stats_tab(void)
 {
     size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     if (s_stats_page_timer) { lv_timer_delete(s_stats_page_timer); s_stats_page_timer = NULL; }
-    lv_obj_clean(s_stats_tab_page);
+    lv_obj_delete(s_stats_popup);
+    s_stats_popup = NULL;
+    s_stats_popup_title = NULL;
     s_stats_tab_built = false;
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 통계탭 이탈: internal %u -> %u (회수 %d bytes)",
+    ESP_LOGW(TAG, "MEMDIAG 통계팝업 닫기: internal %u -> %u (회수 %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
     s_stats_overview_title = NULL;
@@ -4769,15 +5048,15 @@ static void teardown_stats_tab(void)
     s_stats_table = NULL;
 }
 
-/* 2026-09-08(사용자 재설계 — "탭을 눌러서 선택할 때 그 탭의 콘텐츠를 생성하고 다른 탭을
- * 누를 때 그 탭의 콘텐츠를 날리는 거였거든") — s_stats_tab_page(부팅 시 lv_tabview_add_tab로
- * 이미 만들어진 빈 탭) 안에 내용을 지음. 로직 자체(위젯 구성)는 팝업 버전과 동일 */
+/* 2026-09-08(재설계 — 상단바 통계 버튼이 여는 전체화면 팝업) */
 static void build_stats_tab(void)
 {
-    if (s_stats_tab_built) return;  /* 이미 지어짐 */
+    if (s_stats_tab_built) return;  /* 이미 열려있음 */
     s_stats_tab_built = true;
 
-    lv_obj_t *stats_page = s_stats_tab_page;
+    lv_obj_t *stats_page = create_page_popup();
+    s_stats_popup = stats_page;
+    add_page_popup_header(stats_page, ui_str(STR_TAB_STATISTICS), cb_close_stats_popup, &s_stats_popup_title);
     lv_obj_set_style_pad_hor(stats_page, 4, 0);
     lv_obj_set_style_pad_bottom(stats_page, 4, 0);
     lv_obj_set_style_pad_row(stats_page, 4, 0);
@@ -4834,7 +5113,8 @@ static void build_stats_tab(void)
     lv_obj_add_event_cb(s_stats_delete_btn, cb_delete_stats_tap, LV_EVENT_CLICKED, NULL);
     s_stats_delete_lbl = lv_label_create(s_stats_delete_btn);
     lv_label_set_text(s_stats_delete_lbl, ui_str(STR_BTN_DELETE_STATS));
-    lv_obj_set_style_text_font(s_stats_delete_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+    /* 2026-09-08(사용자 지시 — "통계의 버튼들은 다 높이가 작네... 폰트도 표준 폰트로") */
+    lv_obj_set_style_text_font(s_stats_delete_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *overview_sub_row = lv_obj_create(overview_box);
     lv_obj_set_size(overview_sub_row, LV_PCT(100), LV_SIZE_CONTENT);
@@ -4915,33 +5195,45 @@ static void build_stats_tab(void)
     lv_obj_set_style_pad_column(stats_nav_cluster, 4, 0);
     lv_obj_set_style_border_width(stats_nav_cluster, 0, 0);
 
+    /* 2026-09-08(사용자 지시 — "역상처리로 바꿔. Disable도 카메라와 같은 convention으로") —
+     * style_inverted_control()이 흰 글씨를 buttons에 지정하면 자식 라벨로 상속(LVGL
+     * text_color는 상속 속성) — LV_STATE_DISABLED 오버라이드만 따로 얹으면 자동 전환됨
+     * (Camera 판넬 제목처럼 수동 추적 불필요, LVGL 상태 시스템이 대신 처리) */
     s_stats_jump_prev_btn = lv_button_create(stats_nav_cluster);
+    style_inverted_control(s_stats_jump_prev_btn);
+    lv_obj_set_style_text_color(s_stats_jump_prev_btn, lv_palette_lighten(LV_PALETTE_GREY, 1), LV_STATE_DISABLED);
     lv_obj_add_event_cb(s_stats_jump_prev_btn, stats_jump_prev_page_cb, LV_EVENT_CLICKED, NULL);
     s_stats_jump_prev_lbl = lv_label_create(s_stats_jump_prev_btn);
     lv_label_set_text(s_stats_jump_prev_lbl, ui_str(STR_BTN_JUMP_PREV10));
-    lv_obj_set_style_text_font(s_stats_jump_prev_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+    lv_obj_set_style_text_font(s_stats_jump_prev_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_stats_prev_btn = lv_button_create(stats_nav_cluster);
+    style_inverted_control(s_stats_prev_btn);
+    lv_obj_set_style_text_color(s_stats_prev_btn, lv_palette_lighten(LV_PALETTE_GREY, 1), LV_STATE_DISABLED);
     lv_obj_add_event_cb(s_stats_prev_btn, stats_prev_page_cb, LV_EVENT_CLICKED, NULL);
     s_stats_prev_lbl = lv_label_create(s_stats_prev_btn);
     lv_label_set_text(s_stats_prev_lbl, ui_str(STR_BTN_PREV_PAGE));
-    lv_obj_set_style_text_font(s_stats_prev_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+    lv_obj_set_style_text_font(s_stats_prev_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_stats_page_label = lv_label_create(stats_nav_cluster);
     lv_obj_set_style_text_font(s_stats_page_label, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_label_set_text(s_stats_page_label, "");
 
     s_stats_next_btn = lv_button_create(stats_nav_cluster);
+    style_inverted_control(s_stats_next_btn);
+    lv_obj_set_style_text_color(s_stats_next_btn, lv_palette_lighten(LV_PALETTE_GREY, 1), LV_STATE_DISABLED);
     lv_obj_add_event_cb(s_stats_next_btn, stats_next_page_cb, LV_EVENT_CLICKED, NULL);
     s_stats_next_lbl = lv_label_create(s_stats_next_btn);
     lv_label_set_text(s_stats_next_lbl, ui_str(STR_BTN_NEXT_PAGE));
-    lv_obj_set_style_text_font(s_stats_next_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+    lv_obj_set_style_text_font(s_stats_next_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_stats_jump_next_btn = lv_button_create(stats_nav_cluster);
+    style_inverted_control(s_stats_jump_next_btn);
+    lv_obj_set_style_text_color(s_stats_jump_next_btn, lv_palette_lighten(LV_PALETTE_GREY, 1), LV_STATE_DISABLED);
     lv_obj_add_event_cb(s_stats_jump_next_btn, stats_jump_next_page_cb, LV_EVENT_CLICKED, NULL);
     s_stats_jump_next_lbl = lv_label_create(s_stats_jump_next_btn);
     lv_label_set_text(s_stats_jump_next_lbl, ui_str(STR_BTN_JUMP_NEXT10));
-    lv_obj_set_style_text_font(s_stats_jump_next_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+    lv_obj_set_style_text_font(s_stats_jump_next_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_stats_table = lv_table_create(s_stats_table_view);
     lv_obj_set_width(s_stats_table, LV_PCT(100));
@@ -4997,10 +5289,78 @@ static void build_stats_tab(void)
              (int)heap_before_stats_tab - (int)heap_after_stats_tab);
 }
 
-/* 2026-09-08 — 설정탭 이탈: 타이머들 삭제 + 자식 위젯 전부 삭제(lv_obj_clean, 탭 페이지는
- * 남겨둠) + 모든 위젯 핸들 NULL. 설정탭엔 카메라/센서 연결목록의 캐시(행 개수/오브젝트배열)도
- * 있어서 그것도 같이 리셋 — 안 그러면 웹 인젝션(find_camera_row_by_mac 등)이 이미 지워진
- * 행을 계속 가리킬 수 있음 */
+static void cb_stats_btn_tap(lv_event_t *e)
+{
+    (void)e;
+    build_stats_tab();
+}
+
+/* 2026-09-08(카메라 팝업 추출) — 카메라판넬 제목 탭. s_camera_title_enabled_prev가 false면
+ * (연결된 CAM 0대 — 회색 상태) 아무 것도 안 함, 센서와 달리 카메라는 "탭 불가" 표현이
+ * 이미 회색으로 나가 있으므로 그 약속을 실제 동작에서도 지킴(사용자 설계: "제목
+ * (탭가능/불가능)") */
+static void cb_camera_btn_tap(lv_event_t *e)
+{
+    (void)e;
+    if (!s_camera_title_enabled_prev) return;
+    build_camera_tab();
+}
+
+static void cb_close_camera_popup(lv_event_t *e)
+{
+    (void)e;
+    teardown_camera_tab();
+}
+
+/* 2026-09-08(카메라 팝업 추출) — 통계/설정과 달리 콘텐츠를 새로 안 짓고 기존
+ * toolbar(s_camera_content)/split_row(s_camera_split_row)를 이 팝업으로 재부모화만 함.
+ * 그 안의 드롭다운/목록/미리보기에 걸린 기존 이벤트 콜백·비동기 이벤트(on_photo_result_event
+ * 등)는 위젯이 죽지 않으므로 손댈 필요가 없음 — refresh_dashboard()가 이미 매 틱 그
+ * 내용을 최신으로 유지해줌(부모가 어디든 무관) */
+static void build_camera_tab(void)
+{
+    if (s_camera_popup) return;  /* 이미 열려있음 */
+
+    lv_obj_t *popup = create_page_popup();
+    s_camera_popup = popup;
+    add_page_popup_header(popup, ui_str(STR_GROUP_CAMERA), cb_close_camera_popup, &s_camera_popup_title);
+    lv_obj_set_style_pad_hor(popup, 4, 0);
+
+    lv_obj_set_parent(s_camera_content, popup);
+    lv_obj_set_parent(s_camera_split_row, popup);
+    /* 팝업은 카메라판넬 제목이 클릭 가능(=연결된 CAM 1대 이상)할 때만 열리므로 항상
+     * "연결됨" 상태 — 다음 refresh_dashboard() 틱까지 기다리지 않고 즉시 보이게 함 */
+    lv_obj_remove_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void teardown_camera_tab(void)
+{
+    if (!s_camera_popup) return;
+    size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
+    lv_obj_set_parent(s_camera_content, s_camera_box);
+    lv_obj_set_parent(s_camera_split_row, s_camera_box);
+    /* 주화면으로 돌아온 toolbar/split_row는 무조건 숨김(주화면은 s_camera_dash_list만
+     * 보여줌) — 다음 틱의 camera_connected 재계산을 기다리면 그 사이 한 틱 동안 주화면에
+     * 툴바가 보이는 깜빡임이 생길 수 있어 여기서 바로 정리 */
+    lv_obj_add_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_delete(s_camera_popup);
+    s_camera_popup = NULL;
+    s_camera_popup_title = NULL;
+
+    size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG, "MEMDIAG 카메라팝업 닫기: internal %u -> %u (회수 %d bytes)",
+             (unsigned)heap_before_close, (unsigned)heap_after_close,
+             (int)heap_after_close - (int)heap_before_close);
+}
+
+/* 2026-09-08(재설계) — 설정 콘텐츠만 지움(s_option_content 안 자식들, lv_obj_clean) — 팝업
+ * 자체(s_option_popup)는 안 건드림(로그로 바꿔치기할 때도 씀). 카메라/센서 연결목록의
+ * 캐시(행 개수/오브젝트배열)도 같이 리셋 — 안 그러면 웹 인젝션(find_camera_row_by_mac 등)이
+ * 이미 지워진 행을 계속 가리킬 수 있음 */
 static void teardown_option_tab(void)
 {
     size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -5010,10 +5370,9 @@ static void teardown_option_tab(void)
     s_sensor_row_count = 0;
     s_camera_count_prev = -1;
     s_sensor_count_prev = -1;
-    lv_obj_clean(s_option_tab_page);
-    s_option_tab_built = false;
+    lv_obj_clean(s_option_content);
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 설정탭 이탈: internal %u -> %u (회수 %d bytes)",
+    ESP_LOGW(TAG, "MEMDIAG 설정 콘텐츠 지움: internal %u -> %u (회수 %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
     memset(s_group_title, 0, sizeof(s_group_title));  /* 제어기/측정기/영상/시스템 그룹박스 제목 4개 */
@@ -5060,17 +5419,15 @@ static void teardown_option_tab(void)
     s_sens_measure_apply_lbl = NULL;
 }
 
-/* 2026-09-08(사용자 재설계) — s_option_tab_page(부팅 시 이미 만들어진 빈 탭) 안에 내용을
- * 지음. 위젯 구성 로직은 팝업 버전과 동일 */
+/* 2026-09-08(재설계) — s_option_content(설정 팝업의 헤더 아래 콘텐츠 영역) 안에 설정
+ * 내용을 지음. 팝업 자체가 이미 열려있다는 전제(cb_settings_btn_tap/로그↔설정 바꿔치기가
+ * 호출) — 여기선 이미 지어져있는지 체크 안 함(호출자가 teardown 먼저 보장) */
 static void build_option_tab(void)
 {
-    if (s_option_tab_built) return;
-    s_option_tab_built = true;
-
     /* 2026-09-07(임시 진단 — 사용자 지시: "메모리가 더 줄어든 것 같아") — 통계탭과 동일 기법,
      * 설정탭(카메라/센서/시스템 그룹박스 전체) 위젯 생성 구간만 잘라서 측정 */
     size_t heap_before_option_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    lv_obj_t *option_page = s_option_tab_page;
+    lv_obj_t *option_page = s_option_content;
     lv_obj_set_style_pad_hor(option_page, 5, 0);
     /* dashboard_page와 같은 이유로 절반(10px) 축소(2026-08-09) — 그룹박스-화면 가장자리
      * 간격 + 그룹박스 사이 세로 간격 */
@@ -5109,16 +5466,21 @@ static void build_option_tab(void)
 
     /* 버튼 대신 라디오버튼(체크박스를 원형 인디케이터로 스타일링, LVGL엔 전용 라디오
      * 위젯이 없음) — 하나 선택하면 다른 하나는 클릭 콜백에서 수동으로 해제 */
+    /* 2026-09-08(사용자 지시 — TTF/한글 임시 비활성 실험) — 라벨을 영문("Korean")으로
+     * 바꾸고 비활성화. 한글 관련 코드/데이터는 안 지움(나중에 되살릴 수도 있다고 하심) —
+     * 그냥 지금은 못 누르게만 함 */
     s_btn_ko = lv_checkbox_create(btn_group);
-    lv_checkbox_set_text(s_btn_ko, "한글");
+    lv_checkbox_set_text(s_btn_ko, "Korean");
     lv_obj_set_style_text_font(s_btn_ko, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_radius(s_btn_ko, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
     lv_obj_add_event_cb(s_btn_ko, cb_lang_ko, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_state(s_btn_ko, LV_STATE_DISABLED);
 
     s_btn_en = lv_checkbox_create(btn_group);
     lv_checkbox_set_text(s_btn_en, "English");
     lv_obj_set_style_radius(s_btn_en, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
     lv_obj_add_event_cb(s_btn_en, cb_lang_en, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_state(s_btn_en, LV_STATE_DISABLED);
 
     update_lang_buttons();  /* 초기 선택 상태(기본 UI_LANG_KO) 반영 */
 
@@ -5518,19 +5880,80 @@ static void build_option_tab(void)
      * 다른 버튼들과 같은 표준폭 하나로 줄임 */
     lv_obj_set_width(s_network_find_btn, s_action_btn_width);
 
+    /* 2026-09-08(사용자 재설계 — "로그는... 설정 팝업 안에 있는 별도 버튼", 일반 사용자는
+     * 안 볼 진단용이라 일부러 눈에 덜 띄는 자리) — 콘텐츠 맨 끝에 작은 버튼 하나. 누르면
+     * 이 팝업 안에서 설정 콘텐츠를 로그 콘텐츠로 바꿔치기(팝업을 새로 안 열음) */
+    lv_obj_t *log_entry_row = lv_obj_create(option_page);
+    lv_obj_set_size(log_entry_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(log_entry_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(log_entry_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(log_entry_row, 0, 0);
+    lv_obj_set_style_pad_hor(log_entry_row, 12, 0);
+    lv_obj_set_style_pad_ver(log_entry_row, 6, 0);
+    lv_obj_t *log_entry_btn = lv_button_create(log_entry_row);
+    lv_obj_add_event_cb(log_entry_btn, cb_option_log_btn_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *log_entry_lbl = lv_label_create(log_entry_btn);
+    lv_label_set_text(log_entry_lbl, ui_str(STR_TAB_LOG));
+    lv_obj_set_style_text_font(log_entry_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
+
     size_t heap_after_option_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGW(TAG, "MEMDIAG 설정탭 위젯 생성 비용(순수): internal %u -> %u (소모 %d bytes)",
              (unsigned)heap_before_option_tab, (unsigned)heap_after_option_tab,
              (int)heap_before_option_tab - (int)heap_after_option_tab);
 }
 
-/* 2026-09-08 — 로그탭 이탈: 타이머 삭제 + 자식 위젯 전부 삭제(탭 페이지는 남겨둠) */
+static void cb_close_option_popup(lv_event_t *e)
+{
+    (void)e;
+    if (s_log_tab_built) {
+        /* 로그를 보고 있었으면 "뒤로가기"처럼 설정 콘텐츠로 되돌림 — 팝업 자체는 안 닫음 */
+        teardown_log_tab();
+        build_option_tab();
+        lv_label_set_text(s_option_popup_title, ui_str(STR_TAB_OPTION));
+        return;
+    }
+    teardown_option_tab();
+    lv_obj_delete(s_option_popup);
+    s_option_popup = NULL;
+    s_option_content = NULL;
+    s_option_popup_title = NULL;
+    s_option_tab_built = false;
+}
+
+static void cb_settings_btn_tap(lv_event_t *e)
+{
+    (void)e;
+    if (s_option_tab_built) return;  /* 이미 열려있음 */
+    s_option_tab_built = true;
+
+    s_option_popup = create_page_popup();
+    add_page_popup_header(s_option_popup, ui_str(STR_TAB_OPTION), cb_close_option_popup, &s_option_popup_title);
+    s_option_content = lv_obj_create(s_option_popup);
+    lv_obj_set_size(s_option_content, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(s_option_content, 1);
+    lv_obj_set_flex_flow(s_option_content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(s_option_content, 0, 0);
+    lv_obj_set_style_border_width(s_option_content, 0, 0);
+    build_option_tab();
+}
+
+/* 설정 팝업 안 "로그" 버튼 — 같은 팝업 안에서 콘텐츠만 바꿔치기(설정 지우고 로그 지음) */
+static void cb_option_log_btn_tap(lv_event_t *e)
+{
+    (void)e;
+    teardown_option_tab();
+    build_log_tab();
+    lv_label_set_text(s_option_popup_title, ui_str(STR_TAB_LOG));
+}
+
+/* 2026-09-08(재설계) — 로그 콘텐츠 지움(s_option_content 안 자식들 — 설정 팝업과 같은
+ * 컨테이너를 공유하므로 팝업 자체는 안 건드림) */
 static void teardown_log_tab(void)
 {
     size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     if (s_power_panel_timer) { lv_timer_delete(s_power_panel_timer); s_power_panel_timer = NULL; }
     if (s_log_box_timer) { lv_timer_delete(s_log_box_timer); s_log_box_timer = NULL; }
-    lv_obj_clean(s_log_tab_page);
+    lv_obj_clean(s_option_content);
     s_log_tab_built = false;
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGW(TAG, "MEMDIAG 로그탭 이탈: internal %u -> %u (회수 %d bytes)",
@@ -5549,15 +5972,14 @@ static void teardown_log_tab(void)
 /* 2026-09-08(사용자 재설계) — s_log_tab_page(부팅 시 이미 만들어진 빈 탭) 안에 내용을 지음 */
 static void build_log_tab(void)
 {
-    if (s_log_tab_built) return;
     s_log_tab_built = true;
 
     size_t heap_before_log_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
-    /* 2026-09-06(사용자 지시) — 4번째 "로그" 탭. 기존 통계탭에 있던 일반로그+전력로그
-     * 판넬을 그대로 옮김(위젯 생성 코드 자체는 무변경, stats_page->log_page로 부모만
-     * 교체) — 통계탭은 이제 실제 시계열 통계/그래프 전용으로 비움(위 참고) */
-    lv_obj_t *log_page = s_log_tab_page;
+    /* 2026-09-08(재설계) — 설정 팝업 안 콘텐츠 바꿔치기로 진입(cb_option_log_btn_tap).
+     * 기존 통계탭에 있던 일반로그+전력로그 판넬을 그대로 옮김(위젯 생성 코드 자체는
+     * 무변경, 부모만 s_option_content로 교체) */
+    lv_obj_t *log_page = s_option_content;
     lv_obj_set_style_pad_hor(log_page, 4, 0);
     lv_obj_set_style_pad_bottom(log_page, 4, 0);
     lv_obj_set_style_pad_row(log_page, 4, 0);

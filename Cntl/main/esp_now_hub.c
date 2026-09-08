@@ -808,6 +808,12 @@ const char *esp_now_hub_get_active_sta_ssid(void)
     return ssid;
 }
 
+/* 2026-09-08(사용자 재설계 — 상단바 네트워크 컨트롤에 "AP라면 SSID도" 표기) */
+const char *esp_now_hub_get_ap_ssid(void)
+{
+    return CNTL_AP_SSID;
+}
+
 /* 2026-08-29 — "찾기" 팝업의 실시간 접속 시도(esp_now_hub_test_sta_connect) 상태.
  * s_sta_test_active일 때만 아래 wifi_event_handler가 정상 재연결 루프 대신 이 분기를 탐 */
 static bool                     s_sta_reconnect_paused = false;
