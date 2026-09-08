@@ -229,6 +229,12 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_CONFIRM_DELETE_STATS]        = { "저장된 통계값을 전부 삭제할까요?\n되돌릴 수 없습니다.",
                                            "Delete all saved statistics?\nThis cannot be undone." },
     [STR_LABEL_GRAPH_PLACEHOLDER]     = { "그래프 (준비 중)",           "Graph (coming soon)" },
+    [STR_BTN_DISCONNECT]              = { "연결끊기",                   "Disconnect" },
+    [STR_LABEL_ALIAS]                 = { "별칭",                       "Alias" },
+    [STR_LABEL_CONNECTED]             = { "연결됨",                     "Connected" },
+    [STR_LABEL_PENDING]               = { "대기중",                     "Pending" },
+    [STR_LABEL_AUTO_CONNECT_KNOWN]    = { "이전 연결 장치 자동연결",     "Auto-connect known devices" },
+    [STR_LABEL_AUTO_CONNECT_NEW]      = { "신규 장치도 자동연결",       "Auto-connect new devices" },
 };
 
 void ui_lang_load(void)

@@ -74,10 +74,15 @@ static lv_obj_t          *s_dash_title[3];  /* 0=요약, 1=측정기, 2=카메�
 static bool               s_camera_title_enabled_prev = false;  /* 2026-09-08 — Camera 역상 회색/흰색 전환용 */
 static lv_obj_t          *s_web_url_label       = NULL;  /* 2026-08-21 — 요약 맨 윗줄, 웹 대시보드 접속 URL(사용자 지시) */
 static lv_obj_t          *s_mem_status_label    = NULL;  /* 2026-08-21 — 요약 둘째줄, 여유 메모리 상시 표시(사용자 지시) */
-static lv_obj_t          *s_summary_list        = NULL;
-static lv_obj_t          *s_summary_empty       = NULL;
+/* 2026-09-08(연결 기능 주화면 이관, 사용자 설계) — Summary 실시간 순시치 블록. 통계
+ * Overview와 같은 채널 4개(온도/습도/CO2/암모니아)지만 스케일/min/max/avg 없이 그냥
+ * "지금 값"만 — 여러 센서가 같은 채널을 보고하면 첫 번째로 찾은 것만 씀(오늘은 센서
+ * 1개뿐이라 실질적으로 문제 없음) */
+static lv_obj_t          *s_summary_live_temp_label = NULL;
+static lv_obj_t          *s_summary_live_humi_label = NULL;
+static lv_obj_t          *s_summary_live_co2_label  = NULL;
+static lv_obj_t          *s_summary_live_nh3_label  = NULL;
 static lv_obj_t          *s_sensor_empty        = NULL;
-static lv_obj_t          *s_sensor_todo         = NULL;
 static lv_obj_t          *s_camera_empty        = NULL;
 static lv_obj_t          *s_camera_content      = NULL;  /* 카메라 판넬 툴바 — 아래 split_row와 함께 토글 */
 static lv_obj_t          *s_camera_split_row    = NULL;
@@ -105,32 +110,30 @@ static esp_now_hub_node_t *s_dash_nodes = NULL;
 static esp_now_hub_node_t *s_dash_nodes_prev = NULL;
 static int                s_dash_count_prev = -1;  /* -1: 아직 비교 대상 없음(첫 실행은 항상 그림) */
 
-/* 요약판넬 행의 상태 문구(페어됨/통신 중)만 매 틱 가볍게 갱신하기 위한 보조 배열
- * (2026-08-10) — 행 자체(리스트 구조)는 ever_paired 기준으로만 다시 그리므로(위
- * node_display_equal 참고) 라디오 레벨 paired 토글은 구조 재생성 없이 이 텍스트만
- * 갱신해서 반영함(요약판넬만 이 세분화를 보여주기로 함, 사용자 지시) */
-static lv_obj_t *s_summary_row_objs[ESP_NOW_HUB_MAX_NODES];
-static uint8_t   s_summary_row_macs[ESP_NOW_HUB_MAX_NODES][6];
-static char      s_summary_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
-static int       s_summary_row_count = 0;
-/* 2026-09-06(실기에서 발견 — Live모드로 센스가 1초 간격 재전송하는 동안 lv_label_set_text가
- * 내용이 같아도 매번 무조건 재할당+무효화+TTF 재래스터를 함(LVGL 소스 확인,
- * set_text_internal에 문자열비교 없음) — IDLE0 태스크워치독이 몇 분씩 안 풀릴 정도로 이
- * 렌더 파이프라인을 계속 밀어넣은 게 원인. 실제로 문구가 바뀔 때만 set_text 호출하도록
- * 마지막 표시문구를 기억해뒀다가 비교 */
-static char      s_summary_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
-/* 2026-09-04(사용자 지시 — 요약판넬 우측에 신호세기, 숫자 대신 막대) — 위 s_summary_row_objs와
- * 같은 인덱스로 짝지어지는 신호막대 위젯(각 행의 우측 자식) */
-static lv_obj_t *s_summary_row_signal[ESP_NOW_HUB_MAX_NODES];
-
-/* 2026-09-08(카메라 팝업 추출 — 주화면 카메라판넬에 남는 목록) — s_summary_row_*와 완전히
- * 동일한 패턴, CAM 노드만 필터링해서 보여줌 */
+/* 2026-09-08(카메라 팝업 추출 — 주화면 카메라판넬에 남는 목록) — CAM 노드만 필터링해서
+ * 보여줌 */
 static lv_obj_t *s_camera_dash_row_objs[ESP_NOW_HUB_MAX_NODES];
 static uint8_t   s_camera_dash_row_macs[ESP_NOW_HUB_MAX_NODES][6];
 static char      s_camera_dash_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
 static int       s_camera_dash_row_count = 0;
 static char      s_camera_dash_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
 static lv_obj_t *s_camera_dash_row_signal[ESP_NOW_HUB_MAX_NODES];
+
+/* 2026-09-08(연결 기능 주화면 이관) — Sensor 판넬에 남는 "연결됨" 목록, 카메라 대시 목록과
+ * 완전히 동일한 패턴 + 측정주기(개별설정값) 표시만 추가 */
+static lv_obj_t          *s_sensor_dash_list    = NULL;
+/* "연결됨"/"대기중" 소제목 4개(2026-09-08) — refresh_lang_texts에서 갱신하려면 전역이어야 함
+ * (s_stats_table_header_lbl과 동일 이유) */
+static lv_obj_t          *s_sensor_connected_lbl = NULL;
+static lv_obj_t          *s_sensor_pending_lbl   = NULL;
+static lv_obj_t          *s_camera_connected_lbl = NULL;
+static lv_obj_t          *s_camera_pending_lbl   = NULL;
+static lv_obj_t *s_sensor_dash_row_objs[ESP_NOW_HUB_MAX_NODES];
+static uint8_t   s_sensor_dash_row_macs[ESP_NOW_HUB_MAX_NODES][6];
+static char      s_sensor_dash_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
+static int       s_sensor_dash_row_count = 0;
+static char      s_sensor_dash_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
+static lv_obj_t *s_sensor_dash_row_signal[ESP_NOW_HUB_MAX_NODES];
 
 static uint8_t            s_selected_cam_mac[6];
 static bool               s_has_selected_cam = false;  /* 지금촬영/목록/삭제 등이 쏠 대상 —
@@ -171,6 +174,14 @@ static lv_obj_t *s_response_apply_lbl      = NULL;
 static lv_obj_t *s_response_help_label     = NULL;  /* 2026-08-10 — 드롭다운 선택값의 풀이
                                                         (즉시/빠름/균형/절전/최대절전 의미) */
 static int       s_response_interval_applied_idx = -1;
+
+/* 자동연결 스위치 2개(2026-09-08, 사용자 설계) — "신규 장치도 자동연결"이 켜지면 "이전 연결
+ * 장치 자동연결"을 사실상 포함하므로(사용자 지적), UI로 그 종속관계를 표현: new가 켜지면
+ * known은 강제로 켜진 채 비활성화(끌 수 없음) — cb_auto_connect_new_changed 참고 */
+static lv_obj_t *s_auto_connect_known_switch = NULL;
+static lv_obj_t *s_auto_connect_known_label  = NULL;
+static lv_obj_t *s_auto_connect_new_switch   = NULL;
+static lv_obj_t *s_auto_connect_new_label    = NULL;
 
 /* AGC/AEC On/Off(2026-08-21, 세로줄 노이즈 진단용) — 촬영주기와 같은 카메라별 설정이라
  * 같은 그룹박스(영상). 드롭다운+Apply 대신 스위치로 토글 즉시 반영(값이 불리언 하나뿐이라
@@ -234,6 +245,16 @@ static void cb_network_ctrl_tap(lv_event_t *e);
 static void build_camera_tab(void);
 static void teardown_camera_tab(void);
 static void cb_camera_btn_tap(lv_event_t *e);
+/* 2026-09-08(연결 기능 주화면 이관) — 연결된 장치 행 탭이 여는 개별설정 팝업. select_sensor()/
+ * s_sens_measure_dd 등 기존 측정주기 위젯/로직을 그대로 재사용(설정탭에서 이 팝업 안으로
+ * 옮겨오는 것뿐, 로직 자체는 안 바뀜)하므로 그보다 뒤에 정의되지만 여기서 fwd 필요 */
+static void build_device_popup(const uint8_t *mac, const char *name, bool is_sensor);
+static void teardown_device_popup(void);
+static void cb_camera_dash_row_clicked(lv_event_t *e);
+static void cb_sensor_dash_row_clicked(lv_event_t *e);
+/* 2026-09-08(연결 기능 주화면 이관) — Summary 실시간 순시치 블록(refresh_dashboard가 매 틱
+ * 호출), 정의는 아래(Summary 판넬 구성부 근처) */
+static void refresh_summary_live_values(const esp_now_hub_node_t *nodes, int count);
 
 /* 적응형 반응시간 행(2026-08-10) — 마지막 사용자 조작 후 이만큼 조용해야 CAM에 SLEEP_NOW.
  * CAM에는 전송 안 되는 Cntl 내부 판단값이라(esp_now_hub.c 참고), Apply해도 네트워크 왕복이
@@ -400,6 +421,18 @@ static lv_timer_t *s_stats_page_timer  = NULL;
  * 손댈 필요 없음 */
 static lv_obj_t   *s_camera_popup       = NULL;
 static lv_obj_t   *s_camera_popup_title = NULL;
+
+/* 2026-09-08(사용자 설계 — 연결 기능 주화면 이관) — 연결된 장치 행을 탭하면 뜨는 개별설정
+ * 팝업(Alias 편집 + [센서일 때만]측정주기 편집 + 연결끊기). s_device_popup_node는 static
+ * 싱글턴 하나뿐(모달은 한 번에 하나만 뜨는 이 앱의 기존 관례와 동일 — show_confirm_popup의
+ * ctx가 "Yes" 탭 시점까지 살아있어야 해서 스택 임시변수 대신 static 사용) */
+static lv_obj_t          *s_device_popup       = NULL;
+static lv_obj_t          *s_device_popup_title = NULL;
+static lv_obj_t          *s_device_alias_ta    = NULL;
+static lv_obj_t          *s_device_keyboard    = NULL;
+static lv_obj_t          *s_device_disconnect_btn = NULL;  /* 2026-09-08 — 웹 인젝션(ui_main_inject_disconnect)용 핸들 */
+static bool                s_device_popup_is_sensor = false;
+static esp_now_hub_node_t  s_device_popup_node;
 
 /* ds_cycle_count 하나만 비교하면 됨(2026-08-10) — 매 리포트가 항상 새 사이클이라 Light
  * Sleep 시절처럼 여러 필드를 같이 diff할 필요가 없어짐(단조증가 카운터) */
@@ -577,10 +610,12 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_dash_title[0], ui_str(STR_PANEL_SUMMARY));
     lv_label_set_text(s_dash_title[1], ui_str(STR_GROUP_SENSOR));
     lv_label_set_text(s_dash_title[2], ui_str(STR_GROUP_CAMERA));
-    lv_label_set_text(s_summary_empty, ui_str(STR_PANEL_NO_PAIRED_DEVICE));
     lv_label_set_text(s_sensor_empty, ui_str(STR_PANEL_NO_SENSOR));
-    lv_label_set_text(s_sensor_todo, ui_str(STR_PANEL_SENSOR_TODO));
     lv_label_set_text(s_camera_empty, ui_str(STR_PANEL_NO_CAMERA));
+    lv_label_set_text(s_sensor_connected_lbl, ui_str(STR_LABEL_CONNECTED));
+    lv_label_set_text(s_sensor_pending_lbl, ui_str(STR_LABEL_PENDING));
+    lv_label_set_text(s_camera_connected_lbl, ui_str(STR_LABEL_CONNECTED));
+    lv_label_set_text(s_camera_pending_lbl, ui_str(STR_LABEL_PENDING));
     /* 사진이 이미 도착해서 플레이스홀더 라벨이 지워졌으면(display_photo 참고) NULL —
      * 그 상태에서 그냥 호출하면 지워진 객체를 건드리게 됨 */
     if (s_camera_photo_label) lv_label_set_text(s_camera_photo_label, ui_str(STR_PANEL_NO_PHOTO_YET));
@@ -615,6 +650,8 @@ static void refresh_lang_texts(void)
         lv_label_set_text(s_time_label, ui_str(STR_LABEL_TIME));
         lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
         lv_label_set_text(s_network_label, ui_str(STR_LABEL_NETWORK));
+        lv_label_set_text(s_auto_connect_known_label, ui_str(STR_LABEL_AUTO_CONNECT_KNOWN));
+        lv_label_set_text(s_auto_connect_new_label, ui_str(STR_LABEL_AUTO_CONNECT_NEW));
         /* 2026-08-29 버그수정 — 캡션을 무조건 "찾기"로 덮어쓰면 연결된 상태(캡션=SSID)일 때
          * 언어 전환 시 SSID가 사라지고 "찾기"로 잘못 바뀜. 현재 상태 기준으로 다시 계산 */
         refresh_network_right_zone();
@@ -625,12 +662,6 @@ static void refresh_lang_texts(void)
         uint16_t capture_sel = lv_dropdown_get_selected(s_capture_interval_dd);
         lv_dropdown_set_options(s_capture_interval_dd, ui_str(STR_OPT_CAPTURE_INTERVAL_LIST));
         lv_dropdown_set_selected(s_capture_interval_dd, capture_sel);
-
-        uint16_t sens_measure_sel = lv_dropdown_get_selected(s_sens_measure_dd);
-        lv_dropdown_set_options(s_sens_measure_dd, ui_str(STR_OPT_SENS_MEASURE_INTERVAL_LIST));
-        lv_dropdown_set_selected(s_sens_measure_dd, sens_measure_sel);
-        lv_label_set_text(s_sens_measure_label, ui_str(STR_LABEL_SENS_MEASURE_INTERVAL));
-        lv_label_set_text(s_sens_measure_apply_lbl, ui_str(STR_BTN_APPLY));
 
         uint16_t xclk_sel = lv_dropdown_get_selected(s_xclk_dd);
         lv_dropdown_set_options(s_xclk_dd, ui_str(STR_OPT_XCLK_LIST));
@@ -656,6 +687,17 @@ static void refresh_lang_texts(void)
         uint16_t adaptive_sel = lv_dropdown_get_selected(s_adaptive_response_dd);
         lv_dropdown_set_options(s_adaptive_response_dd, ui_str(STR_OPT_ADAPTIVE_RESPONSE_LIST));
         lv_dropdown_set_selected(s_adaptive_response_dd, adaptive_sel);
+    }
+
+    /* 2026-09-08(연결 기능 주화면 이관) — 측정주기 위젯은 이제 개별설정 팝업(센서일 때만)
+     * 소유. s_option_tab_built와 별개 조건 — Settings가 닫혀있어도 이 팝업만 열려있을 수
+     * 있음 */
+    if (s_device_popup && s_device_popup_is_sensor && s_sens_measure_dd) {
+        uint16_t sens_measure_sel = lv_dropdown_get_selected(s_sens_measure_dd);
+        lv_dropdown_set_options(s_sens_measure_dd, ui_str(STR_OPT_SENS_MEASURE_INTERVAL_LIST));
+        lv_dropdown_set_selected(s_sens_measure_dd, sens_measure_sel);
+        lv_label_set_text(s_sens_measure_label, ui_str(STR_LABEL_SENS_MEASURE_INTERVAL));
+        lv_label_set_text(s_sens_measure_apply_lbl, ui_str(STR_BTN_APPLY));
     }
 
     if (s_log_tab_built) {
@@ -1044,13 +1086,14 @@ static bool node_display_equal(const esp_now_hub_node_t *a, const esp_now_hub_no
            strcmp(a->name, b->name) == 0;
 }
 
+/* 2026-09-08(연결 기능 주화면 이관) — 이 목록은 이제 "대기중"(WAITING) 전용이라(연결된
+ * 장치는 s_camera_dash_list로 이관, 탭하면 개별설정 팝업) 항상 페어링 확인만 뜸 */
 static void cb_camera_item_clicked(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
     esp_now_hub_node_t *node = (esp_now_hub_node_t *)lv_obj_get_user_data(btn);
     if (!node) return;
-    if (esp_now_hub_get_conn_state(node->mac) != HUB_CONN_STATE_WAITING) show_unpair_confirm_popup(node);
-    else                                                                 show_pair_confirm_popup(node);
+    show_pair_confirm_popup(node);
 }
 
 /* 행 텍스트만(WAITING/PAIRED/ACTIVE 상태문구) 매 틱 갱신 — 구조(행 개수/순서)는 안 건드림,
@@ -1074,14 +1117,26 @@ static void refresh_camera_list(lv_timer_t *t)
 {
     (void)t;
     if (!s_camera_nodes || !s_camera_nodes_prev) return;  /* PSRAM 할당 실패 시(극히 드묾) */
-    int count = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, s_camera_nodes, ESP_NOW_HUB_MAX_NODES);
+    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, s_camera_nodes, ESP_NOW_HUB_MAX_NODES);
+
+    /* 2026-09-08(연결 기능 주화면 이관) — 이 목록은 이제 "대기중"만 보여줌(연결된 장치는
+     * s_camera_dash_list로 이관). node_display_equal은 conn_state를 안 보므로(mac/kind/
+     * ever_paired/name만 비교) 대기중<->연결 전이만으로는 원본 노드 비교로 재생성이 안
+     * 트리거됨 — WAITING만 걸러낸 별도 스냅샷을 만들어 그걸로 비교해야 전이 시 행이
+     * 실제로 나타나거나 사라짐 */
+    esp_now_hub_node_t waiting[ESP_NOW_HUB_MAX_NODES];
+    int count = 0;
+    for (int i = 0; i < total; i++) {
+        if (esp_now_hub_get_conn_state(s_camera_nodes[i].mac) != HUB_CONN_STATE_WAITING) continue;
+        if (count < ESP_NOW_HUB_MAX_NODES) waiting[count++] = s_camera_nodes[i];
+    }
 
     bool changed = (count != s_camera_count_prev);
     for (int i = 0; !changed && i < count; i++) {
-        if (!node_display_equal(&s_camera_nodes[i], &s_camera_nodes_prev[i])) changed = true;
+        if (!node_display_equal(&waiting[i], &s_camera_nodes_prev[i])) changed = true;
     }
     if (changed) {
-        memcpy(s_camera_nodes_prev, s_camera_nodes, sizeof(esp_now_hub_node_t) * count);
+        memcpy(s_camera_nodes_prev, waiting, sizeof(esp_now_hub_node_t) * count);
         s_camera_count_prev = count;
 
         /* 그 순간 사용자가 행을 누르고 있는 중이면 LVGL 입력장치가 방금 지워진 객체를 계속
@@ -1101,12 +1156,15 @@ static void refresh_camera_list(lv_timer_t *t)
             for (int i = 0; i < count; i++) {
                 lv_obj_t *row = lv_list_add_button(s_camera_list, NULL, "");
                 lv_obj_set_style_text_font(row, ui_font_get(UI_FONT_SIZE_18), 0);
-                lv_obj_set_user_data(row, &s_camera_nodes[i]);
+                /* s_camera_nodes_prev는 위에서 이미 waiting[]을 memcpy해뒀으므로(영구 PSRAM
+                 * 버퍼) 그 요소를 가리킴 — waiting[]은 이 함수 지역 스택 배열이라 함수
+                 * 리턴 후 가리키면 안 됨(2026-09-08, 이관 중 바로잡음) */
+                lv_obj_set_user_data(row, &s_camera_nodes_prev[i]);
                 lv_obj_add_event_cb(row, cb_camera_item_clicked, LV_EVENT_CLICKED, NULL);
                 if (i < ESP_NOW_HUB_MAX_NODES) {
                     s_camera_row_objs[i] = row;
-                    memcpy(s_camera_row_macs[i], s_camera_nodes[i].mac, 6);
-                    strncpy(s_camera_row_names[i], s_camera_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
+                    memcpy(s_camera_row_macs[i], s_camera_nodes_prev[i].mac, 6);
+                    strncpy(s_camera_row_names[i], s_camera_nodes_prev[i].name, ESP_NOW_LINK_NAME_LEN - 1);
                     s_camera_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
                 }
             }
@@ -1158,16 +1216,17 @@ static void select_sensor(const uint8_t *mac)
     }
 }
 
+/* 2026-09-08(연결 기능 주화면 이관) — 이 목록은 이제 "대기중"(WAITING) 전용이라(연결된
+ * 장치는 s_sensor_dash_list로 이관, 탭하면 개별설정 팝업이 select_sensor()도 그때 대신
+ * 불러줌) 항상 페어링 확인만 뜸 — 예전의 "탭하면 조용히 측정주기 대상도 선택" 버그(사용자
+ * 지적: "지금도 안되잖아" — 탭할 때마다 연결해제 팝업까지 같이 떠서 대상만 조용히 바꾸는 게
+ * 사실상 불가능했음)는 개별설정 팝업으로 대체되며 자연히 해소됨 */
 static void cb_sensor_item_clicked(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
     esp_now_hub_node_t *node = (esp_now_hub_node_t *)lv_obj_get_user_data(btn);
     if (!node) return;
-    /* 2026-09-05(사용자 지시: "이미 있는 설정-측정기 목록 ... 선택된 센서의 값을 지정") —
-     * 페어링/해제 확인팝업은 그대로 뜨되, 탭한 행을 조용히 측정주기 Apply 대상으로도 선택 */
-    select_sensor(node->mac);
-    if (esp_now_hub_get_conn_state(node->mac) != HUB_CONN_STATE_WAITING) show_unpair_confirm_popup(node);
-    else                                                                 show_pair_confirm_popup(node);
+    show_pair_confirm_popup(node);
 }
 
 static char s_sensor_row_last_text[ESP_NOW_HUB_MAX_NODES][48];
@@ -1196,14 +1255,23 @@ static void refresh_sensor_list(lv_timer_t *t)
 {
     (void)t;
     if (!s_sensor_nodes || !s_sensor_nodes_prev) return;  /* PSRAM 할당 실패 시(극히 드묾) */
-    int count = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, s_sensor_nodes, ESP_NOW_HUB_MAX_NODES);
+    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, s_sensor_nodes, ESP_NOW_HUB_MAX_NODES);
+
+    /* 2026-09-08(연결 기능 주화면 이관) — refresh_camera_list와 동일 이유로 WAITING만 걸러낸
+     * 별도 스냅샷 사용(node_display_equal은 conn_state를 안 봄) */
+    esp_now_hub_node_t waiting[ESP_NOW_HUB_MAX_NODES];
+    int count = 0;
+    for (int i = 0; i < total; i++) {
+        if (esp_now_hub_get_conn_state(s_sensor_nodes[i].mac) != HUB_CONN_STATE_WAITING) continue;
+        if (count < ESP_NOW_HUB_MAX_NODES) waiting[count++] = s_sensor_nodes[i];
+    }
 
     bool changed = (count != s_sensor_count_prev);
     for (int i = 0; !changed && i < count; i++) {
-        if (!node_display_equal(&s_sensor_nodes[i], &s_sensor_nodes_prev[i])) changed = true;
+        if (!node_display_equal(&waiting[i], &s_sensor_nodes_prev[i])) changed = true;
     }
     if (changed) {
-        memcpy(s_sensor_nodes_prev, s_sensor_nodes, sizeof(esp_now_hub_node_t) * count);
+        memcpy(s_sensor_nodes_prev, waiting, sizeof(esp_now_hub_node_t) * count);
         s_sensor_count_prev = count;
 
         lv_indev_reset(NULL, s_sensor_list);
@@ -1217,12 +1285,14 @@ static void refresh_sensor_list(lv_timer_t *t)
             for (int i = 0; i < count; i++) {
                 lv_obj_t *row = lv_list_add_button(s_sensor_list, NULL, "");
                 lv_obj_set_style_text_font(row, ui_font_get(UI_FONT_SIZE_18), 0);
-                lv_obj_set_user_data(row, &s_sensor_nodes[i]);
+                /* s_sensor_nodes_prev(영구 PSRAM 버퍼)를 가리킴 — waiting[]은 지역 스택
+                 * 배열이라 함수 리턴 후 가리키면 안 됨(refresh_camera_list와 동일 수정) */
+                lv_obj_set_user_data(row, &s_sensor_nodes_prev[i]);
                 lv_obj_add_event_cb(row, cb_sensor_item_clicked, LV_EVENT_CLICKED, NULL);
                 if (i < ESP_NOW_HUB_MAX_NODES) {
                     s_sensor_row_objs[i] = row;
-                    memcpy(s_sensor_row_macs[i], s_sensor_nodes[i].mac, 6);
-                    strncpy(s_sensor_row_names[i], s_sensor_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
+                    memcpy(s_sensor_row_macs[i], s_sensor_nodes_prev[i].mac, 6);
+                    strncpy(s_sensor_row_names[i], s_sensor_nodes_prev[i].name, ESP_NOW_LINK_NAME_LEN - 1);
                     s_sensor_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
                     s_sensor_row_last_text[i][0] = '\0';  /* 새로 만든 라벨 — 다음 틱에 무조건 한 번은 채워지도록 */
                 }
@@ -2503,37 +2573,54 @@ static bool chan_type_to_strs(uint8_t chan_type, ui_str_id_t *label_id, ui_str_i
     }
 }
 
-/* 상황판-측정기 판넬 한 줄 — "{라벨} xx.yy {단위} (ID:nnn, Time: HH:MM:SS)"(사용자 설계).
- * %f 안 씀(newlib-nano+LVGL 전례) — 정수부/소수부로 미리 쪼갬. 여러 센서/채널이 있으면
- * appended_len을 계속 넘겨받아 buf 뒤에 이어붙임 */
-static int append_sensor_value_row(char *buf, size_t buf_size, int used,
-                                    const esp_now_hub_node_t *n, int chan_idx)
+/* 2026-09-08(연결 기능 주화면 이관, 사용자 설계 — "Summary는 시스템이 잘 돌고 있는지
+ * 보여주려는 의도") — Summary 실시간 순시치 블록. 통계 Overview와 채널 4개는 같지만
+ * 스케일/min/max/avg 없이 "지금 값"만 "라벨: 값 단위" 한 줄씩. 여러 센서가 같은 채널을
+ * 보고하면 먼저 찾은 것만 씀(챈널당 최대 하나만 표시하는 단순화 — 오늘은 센서가 1개뿐이라
+ * 실질적으로 문제 없음, 여러 센서 지원은 project_cntl_sensor_panel_needs_per_node_rows 범위) */
+static void refresh_summary_live_values(const esp_now_hub_node_t *nodes, int count)
 {
-    ui_str_id_t label_id, unit_id;
-    if (!chan_type_to_strs(n->chan_type[chan_idx], &label_id, &unit_id)) return used;
+    struct { uint8_t chan_type; lv_obj_t *label; } rows[] = {
+        { SENSOR_CHAN_TEMP_C,   s_summary_live_temp_label },
+        { SENSOR_CHAN_HUMI_PCT, s_summary_live_humi_label },
+        { SENSOR_CHAN_CO2_PPM,  s_summary_live_co2_label  },
+        { SENSOR_CHAN_NH3_PPM,  s_summary_live_nh3_label  },
+    };
+    static char s_last_text[4][96];
 
-    char line[96];
-    if (n->chan_ok[chan_idx] && n->chan_invalid[chan_idx]) {
-        snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_SENSOR_VALUE_INVALID));
-    } else if (!n->chan_ok[chan_idx]) {
-        snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_SENSOR_VALUE_PENDING));
-    } else {
-        float val = n->chan_val[chan_idx];
-        int scaled = (int)(val * 100.0f + 0.5f);
-        int whole = scaled / 100;
-        int frac  = scaled % 100;
-        struct tm tm_buf;
-        time_t update_t = (time_t)n->sensor_last_update_unix_time;
-        localtime_r(&update_t, &tm_buf);
-        snprintf(line, sizeof(line), ui_str(STR_SENSOR_VALUE_ROW_FMT),
-                 ui_str(label_id), whole, frac, ui_str(unit_id),
-                 (unsigned long)n->sensor_measurement_id,
-                 tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+    for (size_t r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
+        ui_str_id_t label_id, unit_id;
+        if (!chan_type_to_strs(rows[r].chan_type, &label_id, &unit_id)) continue;
+
+        char line[96];
+        bool found = false;
+        for (int i = 0; i < count && !found; i++) {
+            if (nodes[i].kind != HUB_NODE_KIND_SENS || !nodes[i].has_sensor_data) continue;
+            for (int c = 0; c < nodes[i].chan_count; c++) {
+                if (nodes[i].chan_type[c] != rows[r].chan_type) continue;
+                found = true;
+                if (nodes[i].chan_ok[c] && nodes[i].chan_invalid[c]) {
+                    snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_SENSOR_VALUE_INVALID));
+                } else if (!nodes[i].chan_ok[c]) {
+                    snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_SENSOR_VALUE_PENDING));
+                } else {
+                    float val = nodes[i].chan_val[c];
+                    int scaled = (int)(val * 100.0f + 0.5f);
+                    int whole = scaled / 100;
+                    int frac  = scaled % 100;
+                    snprintf(line, sizeof(line), "%s: %d.%02d %s", ui_str(label_id), whole, frac, ui_str(unit_id));
+                }
+                break;
+            }
+        }
+        if (!found) snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_STATS_OVERVIEW_NO_DATA));
+
+        if (strcmp(s_last_text[r], line) != 0) {
+            lv_label_set_text(rows[r].label, line);
+            strncpy(s_last_text[r], line, sizeof(s_last_text[r]) - 1);
+            s_last_text[r][sizeof(s_last_text[r]) - 1] = '\0';
+        }
     }
-
-    int n_written = snprintf(buf + used, (used < (int)buf_size) ? buf_size - (size_t)used : 0,
-                              "%s%s: %s", (used > 0) ? "\n" : "", n->name, line);
-    return (n_written > 0) ? used + n_written : used;
 }
 
 /* 2026-09-06(사용자 설계) — 통계탭 값 테이블 한 행의 mac -> 노드 이름. 언페어/이름변경 등으로
@@ -2874,19 +2961,34 @@ static void refresh_dashboard(lv_timer_t *t)
          * 한동안 "연결중"으로 보임) — conn_state 변화도 직접 비교해서 즉시 재생성 트리거 */
         else if (s_dash_nodes[i].conn_state != s_dash_nodes_prev[i].conn_state) dash_changed = true;
     }
+    /* 2026-09-08(연결 기능 주화면 이관) — Summary의 장치별 행(구 s_summary_list)은 없앰,
+     * Sensor/Camera 판넬로 이관. dash_changed/s_dash_nodes_prev/s_dash_count_prev 자체는
+     * 아래 Sensor/Camera 대시 목록 재생성 판단에 계속 씀 */
     if (dash_changed) {
         memcpy(s_dash_nodes_prev, s_dash_nodes, sizeof(esp_now_hub_node_t) * total);
         s_dash_count_prev = total;
+    }
 
-        int paired_count = 0;
-        lv_indev_reset(NULL, s_summary_list);  /* refresh_camera_list와 동일한 이유 */
-        lv_obj_clean(s_summary_list);
-        for (int i = 0; i < total; i++) {
-            if (esp_now_hub_get_conn_state(s_dash_nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
-            /* 2026-09-04(사용자 지시 — 우측에 신호세기 막대) — 라벨 하나였던 행을
-             * [라벨(이름+상태) + 신호막대] 가로 컨테이너로 바꿈, 막대는 SPACE_BETWEEN으로
-             * 우측 정렬 */
-            lv_obj_t *row = lv_obj_create(s_summary_list);
+    /* 판넬2: 측정기 — 2026-09-08(연결 기능 주화면 이관, 사용자 설계) — 값 표시(구
+     * append_sensor_value_row/s_sensor_todo)는 없애고 Summary의 실시간 순시치 블록이
+     * 대신 담당(아래 refresh_summary_live_values 참고). 여기는 카메라 판넬과 완전히 같은
+     * "연결됨" 장치행 목록만 */
+    esp_now_hub_node_t sens_nodes[ESP_NOW_HUB_MAX_NODES];
+    uint8_t             sens_macs[ESP_NOW_HUB_MAX_NODES][6];
+    int sens_count = 0;
+    for (int i = 0; i < total; i++) {
+        if (s_dash_nodes[i].kind != HUB_NODE_KIND_SENS) continue;
+        if (esp_now_hub_get_conn_state(s_dash_nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
+        sens_nodes[sens_count] = s_dash_nodes[i];
+        memcpy(sens_macs[sens_count], s_dash_nodes[i].mac, 6);
+        sens_count++;
+    }
+
+    if (dash_changed) {
+        lv_indev_reset(NULL, s_sensor_dash_list);
+        lv_obj_clean(s_sensor_dash_list);
+        for (int i = 0; i < sens_count && i < ESP_NOW_HUB_MAX_NODES; i++) {
+            lv_obj_t *row = lv_obj_create(s_sensor_dash_list);
             lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
             lv_obj_set_style_border_width(row, 0, 0);
             lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
@@ -2894,100 +2996,61 @@ static void refresh_dashboard(lv_timer_t *t)
             lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
             lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
             lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_user_data(row, (void *)(uintptr_t)i);
+            lv_obj_add_event_cb(row, cb_sensor_dash_row_clicked, LV_EVENT_CLICKED, NULL);
 
             lv_obj_t *label = lv_label_create(row);
             lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
 
             lv_obj_t *signal = create_signal_widget(row);
 
-            /* 상태문구(페어됨/통신 중)/신호세기는 매 틱 아래에서 따로 갱신 — 여기선 자리만
-             * 만듦. 행 객체+mac+이름을 기억해뒀다가 구조 재생성 없이 텍스트/막대만 갱신
-             * (2026-08-10, 사용자 지시 — 이 자리만 페어됨/통신 중을 세분화해서 보여줌) */
-            if (paired_count < ESP_NOW_HUB_MAX_NODES) {
-                s_summary_row_objs[paired_count] = label;
-                s_summary_row_signal[paired_count] = signal;
-                memcpy(s_summary_row_macs[paired_count], s_dash_nodes[i].mac, 6);
-                strncpy(s_summary_row_names[paired_count], s_dash_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
-                s_summary_row_names[paired_count][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
-                s_summary_row_last_text[paired_count][0] = '\0';  /* 새로 만든 라벨 — 다음 틱에 무조건 한 번은 채워지도록 */
-            }
-            paired_count++;
+            s_sensor_dash_row_objs[i] = label;
+            s_sensor_dash_row_signal[i] = signal;
+            memcpy(s_sensor_dash_row_macs[i], sens_macs[i], 6);
+            strncpy(s_sensor_dash_row_names[i], sens_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
+            s_sensor_dash_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
+            s_sensor_dash_row_last_text[i][0] = '\0';
         }
-        s_summary_row_count = (paired_count < ESP_NOW_HUB_MAX_NODES) ? paired_count : ESP_NOW_HUB_MAX_NODES;
-        /* 연결된 장치가 없을 때는 리스트 안에 문구를 넣는 대신(리스트 아이템 스타일이 입혀져서
-         * 측정기/카메라 판넬의 "없음" 라벨과 모양·색이 달라 보였음, 사용자 지적) 측정기/카메라
-         * 판넬과 똑같은 방식으로 별도의 일반 라벨(s_summary_empty)을 보여줌 */
-        if (paired_count == 0) {
-            lv_obj_add_flag(s_summary_list, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_summary_empty, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_remove_flag(s_summary_list, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(s_summary_empty, LV_OBJ_FLAG_HIDDEN);
-        }
+        s_sensor_dash_row_count = (sens_count < ESP_NOW_HUB_MAX_NODES) ? sens_count : ESP_NOW_HUB_MAX_NODES;
     }
-
-    /* 요약판넬 상태문구(페어됨/통신 중)는 dash_changed와 무관하게 매 틱 갱신 —
-     * 라디오 레벨 paired 토글만으로는 구조 재생성(dash_changed)을 안 트리거하므로
-     * (위 node_display_equal 참고), 문구만 따로 살아있게 갱신함(2026-08-10) */
-    for (int i = 0; i < s_summary_row_count; i++) {
-        hub_conn_state_t st = esp_now_hub_get_conn_state(s_summary_row_macs[i]);
+    for (int i = 0; i < s_sensor_dash_row_count; i++) {
+        hub_conn_state_t st = esp_now_hub_get_conn_state(s_sensor_dash_row_macs[i]);
         char buf[96];
-        int n = snprintf(buf, sizeof(buf), "%s (%s)", s_summary_row_names[i],
+        int n = snprintf(buf, sizeof(buf), "%s (%s)", s_sensor_dash_row_names[i],
                  ui_str(st == HUB_CONN_STATE_ACTIVE ? STR_STATUS_ACTIVE : STR_STATUS_PAIRED));
-
-        /* 2026-08-22 — 배터리 잔량(사용자 지시: 이 행 옆에 표시). 반응형 주기 리포트를
-         * 아직 한 번도 못 받았으면(has_deepsleep_stats==false, 막 페어링된 직후 등) 표시
-         * 안 함 — SENS는 아직 배터리 보고를 안 보내므로 이 조건이 자연스럽게 걸러줌 */
-        for (int j = 0; j < total; j++) {
-            if (memcmp(s_dash_nodes[j].mac, s_summary_row_macs[i], 6) != 0) continue;
-            if (s_dash_nodes[j].has_deepsleep_stats && n > 0 && (size_t)n < sizeof(buf)) {
+        /* 개별설정값(측정주기) — 사용자 설계: "연결된 목록에는 측정 값이 아니라, 개별
+         * 설정된 값이 보여야되" */
+        uint32_t interval_sec = device_config_get_sens_sample_interval_sec(s_sensor_dash_row_macs[i]);
+        if (interval_sec > 0 && n > 0 && (size_t)n < sizeof(buf)) {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " - %us", (unsigned)interval_sec);
+        }
+        for (int j = 0; j < sens_count; j++) {
+            if (memcmp(sens_macs[j], s_sensor_dash_row_macs[i], 6) != 0) continue;
+            if (sens_nodes[j].has_deepsleep_stats && n > 0 && (size_t)n < sizeof(buf)) {
                 char batt[32];
-                format_battery_display(batt, sizeof(batt), s_dash_nodes[j].battery_mv, s_dash_nodes[j].battery_pct);
+                format_battery_display(batt, sizeof(batt), sens_nodes[j].battery_mv, sens_nodes[j].battery_pct);
                 snprintf(buf + n, sizeof(buf) - (size_t)n, " - %s", batt);
             }
-            update_signal_widget(s_summary_row_signal[i], s_dash_nodes[j].has_rssi, s_dash_nodes[j].rssi);
+            update_signal_widget(s_sensor_dash_row_signal[i], sens_nodes[j].has_rssi, sens_nodes[j].rssi);
             break;
         }
-        /* 2026-09-06(실기 발견 — 위 s_summary_row_last_text 선언부 설명 참고) — 문구가 실제로
-         * 안 바뀌었으면 lv_label_set_text 자체를 안 부름(무조건 재할당+무효화 방지) */
-        if (strcmp(s_summary_row_last_text[i], buf) != 0) {
-            lv_label_set_text(s_summary_row_objs[i], buf);
-            strncpy(s_summary_row_last_text[i], buf, sizeof(s_summary_row_last_text[i]) - 1);
-            s_summary_row_last_text[i][sizeof(s_summary_row_last_text[i]) - 1] = '\0';
+        if (strcmp(s_sensor_dash_row_last_text[i], buf) != 0) {
+            lv_label_set_text(s_sensor_dash_row_objs[i], buf);
+            strncpy(s_sensor_dash_row_last_text[i], buf, sizeof(s_sensor_dash_row_last_text[i]) - 1);
+            s_sensor_dash_row_last_text[i][sizeof(s_sensor_dash_row_last_text[i]) - 1] = '\0';
         }
     }
 
-    /* 판넬2: 측정기 — 연결된 SENS 전부의 채널값을 한 줄씩(사용자 설계: "{라벨} xx.yy {단위}
-     * (ID:nnn, Time: HH:MM:SS)"), 없으면 없음 라벨 */
-    bool sensor_connected = false;
-    char sensor_values_buf[512];
-    int sensor_values_len = 0;
-    for (int i = 0; i < total; i++) {
-        if (s_dash_nodes[i].kind != HUB_NODE_KIND_SENS) continue;
-        if (esp_now_hub_get_conn_state(s_dash_nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
-        sensor_connected = true;
-        if (!s_dash_nodes[i].has_sensor_data) continue;
-        for (int c = 0; c < s_dash_nodes[i].chan_count; c++) {
-            sensor_values_len = append_sensor_value_row(sensor_values_buf, sizeof(sensor_values_buf),
-                                                          sensor_values_len, &s_dash_nodes[i], c);
-        }
-    }
+    bool sensor_connected = (sens_count > 0);
     if (sensor_connected) {
         lv_obj_add_flag(s_sensor_empty, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(s_sensor_todo, LV_OBJ_FLAG_HIDDEN);
-        /* 2026-09-06(실기 발견 — s_summary_row_last_text 선언부 설명 참고) — 센스가 같은
-         * 캐시값을 반복 재전송(중복 측정ID)할 때는 이 문구도 그대로라서 매 틱 재설정 생략 */
-        const char *new_text = (sensor_values_len > 0) ? sensor_values_buf : ui_str(STR_SENSOR_VALUE_PENDING);
-        static char s_sensor_todo_last_text[512];
-        if (strcmp(s_sensor_todo_last_text, new_text) != 0) {
-            lv_label_set_text(s_sensor_todo, new_text);
-            strncpy(s_sensor_todo_last_text, new_text, sizeof(s_sensor_todo_last_text) - 1);
-            s_sensor_todo_last_text[sizeof(s_sensor_todo_last_text) - 1] = '\0';
-        }
+        lv_obj_remove_flag(s_sensor_dash_list, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_remove_flag(s_sensor_empty, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_sensor_todo, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_sensor_dash_list, LV_OBJ_FLAG_HIDDEN);
     }
+    refresh_summary_live_values(s_dash_nodes, total);  /* 2026-09-08 — Summary 실시간 순시치 블록 */
 
     /* 판넬3: 카메라 — 페어링된 CAM을 전부 모아 드롭다운을 채우고, 지금 선택된 CAM이 여전히
      * 그 안에 있으면 유지·아니면 첫 번째로 자동 폴백(2026-08-05, 여러 CAM 동시 페어링 지원
@@ -3022,6 +3085,10 @@ static void refresh_dashboard(lv_timer_t *t)
             lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
             lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
             lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+            /* 2026-09-08(연결 기능 주화면 이관) — 탭하면 개별설정 팝업(Alias/연결끊기) */
+            lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_user_data(row, (void *)(uintptr_t)i);
+            lv_obj_add_event_cb(row, cb_camera_dash_row_clicked, LV_EVENT_CLICKED, NULL);
 
             lv_obj_t *label = lv_label_create(row);
             lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -3040,10 +3107,17 @@ static void refresh_dashboard(lv_timer_t *t)
     for (int i = 0; i < s_camera_dash_row_count; i++) {
         hub_conn_state_t st = esp_now_hub_get_conn_state(s_camera_dash_row_macs[i]);
         char buf[96];
-        snprintf(buf, sizeof(buf), "%s (%s)", s_camera_dash_row_names[i],
+        int n = snprintf(buf, sizeof(buf), "%s (%s)", s_camera_dash_row_names[i],
                  ui_str(st == HUB_CONN_STATE_ACTIVE ? STR_STATUS_ACTIVE : STR_STATUS_PAIRED));
         for (int j = 0; j < cam_count; j++) {
             if (memcmp(cam_macs[j], s_camera_dash_row_macs[i], 6) != 0) continue;
+            /* 2026-09-08(사용자 설계 — "센서, 캠 연결을 주화면에서 하면... Summary에 있던
+             * 배터리, 전계강도를 각 sensor, camera panel로 옮기고") */
+            if (cam_nodes[j].has_deepsleep_stats && n > 0 && (size_t)n < sizeof(buf)) {
+                char batt[32];
+                format_battery_display(batt, sizeof(batt), cam_nodes[j].battery_mv, cam_nodes[j].battery_pct);
+                snprintf(buf + n, sizeof(buf) - (size_t)n, " - %s", batt);
+            }
             update_signal_widget(s_camera_dash_row_signal[i], cam_nodes[j].has_rssi, cam_nodes[j].rssi);
             break;
         }
@@ -4343,6 +4417,33 @@ static void cb_aec_switch_changed(lv_event_t *e)
     }
 }
 
+static void cb_auto_connect_known_changed(lv_event_t *e)
+{
+    (void)e;
+    device_config_set_auto_connect_known(lv_obj_has_state(s_auto_connect_known_switch, LV_STATE_CHECKED));
+}
+
+/* new가 켜지면 known을 강제로 켠 채 비활성화(사용자 지적: "2번이면 1번을 만족시키는
+ * 조건이라 UI를 잘 만들어야지") — new가 꺼지면 known은 저장된 실제 값으로 되돌리고 다시
+ * 조작 가능하게 함 */
+static void cb_auto_connect_new_changed(lv_event_t *e)
+{
+    (void)e;
+    bool enable = lv_obj_has_state(s_auto_connect_new_switch, LV_STATE_CHECKED);
+    device_config_set_auto_connect_new(enable);
+    if (enable) {
+        lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_CHECKED);
+        lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_DISABLED);
+    } else {
+        lv_obj_clear_state(s_auto_connect_known_switch, LV_STATE_DISABLED);
+        if (device_config_get_auto_connect_known()) {
+            lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(s_auto_connect_known_switch, LV_STATE_CHECKED);
+        }
+    }
+}
+
 /* 페이지콘트롤 — 페이지탭 3개(상황판/통계/설정). 로고 + 상황판/통계 탭 내용(원래 데모의
  * Profile/Analytics 위젯)은 고치기 전 상태 그대로 활용 — 설정 탭만 새로 만든 그룹박스로 교체 */
 /* 2026-08-29 버그수정(사용자 리포트: "찾기" 팝업이 30초 넘게 "검색 중..."에 멈춤) — 원래
@@ -4494,16 +4595,29 @@ bool ui_main_inject_set_response_interval(uint32_t sec)
     return run_on_lvgl_task(inject_fn_set_response_interval, &sec_copy, 1000);
 }
 
+/* 2026-09-08(연결 기능 주화면 이관 — 이 함수 안전성을 위한 수정) — 연결된 카메라는 이제
+ * s_camera_row_*(대기중 전용)가 아니라 s_camera_dash_row_*(연결됨)에 있음. 행 라벨의
+ * 부모가 클릭 이벤트 리스너가 걸린 행 컨테이너(cb_camera_dash_row_clicked 참고) */
+static lv_obj_t *find_camera_dash_row_by_mac(const uint8_t *mac)
+{
+    for (int i = 0; i < s_camera_dash_row_count; i++) {
+        if (memcmp(s_camera_dash_row_macs[i], mac, 6) == 0) return lv_obj_get_parent(s_camera_dash_row_objs[i]);
+    }
+    return NULL;
+}
+
 static bool inject_fn_disconnect(void *arg)
 {
     const uint8_t *mac = (const uint8_t *)arg;
-    lv_obj_t *row = find_camera_row_by_mac(mac);
+    lv_obj_t *row = find_camera_dash_row_by_mac(mac);
     if (!row) return false;
-    lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_camera_item_clicked -> show_unpair_confirm_popup
-                                                     (show_confirm_popup 경유, 확인버튼은 공용 트램폴린) */
+    lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_camera_dash_row_clicked -> build_device_popup */
+    if (!s_device_disconnect_btn) return false;
+    lv_obj_send_event(s_device_disconnect_btn, LV_EVENT_CLICKED, NULL);  /* -> cb_device_disconnect_clicked ->
+                                                                             show_confirm_popup */
     lv_obj_t *confirm = find_widget_by_event_cb(s_last_modal, cb_confirm_yes_trampoline);
     if (!confirm) return false;
-    lv_obj_send_event(confirm, LV_EVENT_CLICKED, NULL);  /* -> cb_confirm_yes_trampoline -> cb_unpair_confirm */
+    lv_obj_send_event(confirm, LV_EVENT_CLICKED, NULL);  /* -> cb_confirm_yes_trampoline -> cb_device_disconnect_confirm */
     return true;
 }
 
@@ -4778,23 +4892,17 @@ void ui_init(void)
     s_mem_status_label = lv_label_create(summary_box);
     lv_obj_set_style_text_font(s_mem_status_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    /* lv_list는 카드 형태(회색 배경+테두리) 기본 스타일이 입혀져 있어서 측정기/카메라
-     * 판넬의 민무늬 라벨과 다르게 보였음(사용자 지적) — 리스트 위젯 대신 그냥 세로로 쌓는
-     * 빈 컨테이너를 쓰고, 각 항목은 일반 라벨(lv_label_create)로 채움 */
-    s_summary_list = lv_obj_create(summary_box);
-    lv_obj_set_size(s_summary_list, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(s_summary_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_border_width(s_summary_list, 0, 0);
-    lv_obj_set_style_bg_opa(s_summary_list, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(s_summary_list, 0, 0);
-    /* 2026-09-08(사용자 지적 — "Summary panel의 줄 간격과 Sensor의 줄 간격이 다른데") —
-     * pad_all(0)이 pad_row도 0으로 만들어서 Sensor 판넬(직접 자식이라 판넬의 pad_row=10을
-     * 그대로 받음)과 달라져 있었음 — 같은 값으로 맞춤 */
-    lv_obj_set_style_pad_row(s_summary_list, 10, 0);
-    lv_obj_add_flag(s_summary_list, LV_OBJ_FLAG_HIDDEN);  /* 초기값: 연결된 장치 없음 */
-    s_summary_empty = lv_label_create(summary_box);
-    lv_label_set_text(s_summary_empty, ui_str(STR_PANEL_NO_PAIRED_DEVICE));
-    lv_obj_set_style_text_font(s_summary_empty, ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 2026-09-08(연결 기능 주화면 이관, 사용자 설계) — 장치별 행은 전부 Sensor/Camera
+     * 판넬로 이관, Summary에는 대신 실시간 순시치(온도/습도/CO2/암모니아) 4줄만 —
+     * "Summary는 시스템이 잘 돌고 있는지 보여주려는 의도" */
+    s_summary_live_temp_label = lv_label_create(summary_box);
+    lv_obj_set_style_text_font(s_summary_live_temp_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_summary_live_humi_label = lv_label_create(summary_box);
+    lv_obj_set_style_text_font(s_summary_live_humi_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_summary_live_co2_label = lv_label_create(summary_box);
+    lv_obj_set_style_text_font(s_summary_live_co2_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_summary_live_nh3_label = lv_label_create(summary_box);
+    lv_obj_set_style_text_font(s_summary_live_nh3_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *sensor_box = create_dashboard_panel(dashboard_page, STR_GROUP_SENSOR, 1);
     /* 2026-09-08(사용자 지시 — "센서 판넬 제목 Sensor를... 역상으로", "센서 판넬 Sensor
@@ -4805,10 +4913,35 @@ void ui_init(void)
     s_sensor_empty = lv_label_create(sensor_box);
     lv_label_set_text(s_sensor_empty, ui_str(STR_PANEL_NO_SENSOR));
     lv_obj_set_style_text_font(s_sensor_empty, ui_font_get(UI_FONT_SIZE_18), 0);
-    s_sensor_todo = lv_label_create(sensor_box);
-    lv_label_set_text(s_sensor_todo, ui_str(STR_PANEL_SENSOR_TODO));
-    lv_obj_set_style_text_font(s_sensor_todo, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_add_flag(s_sensor_todo, LV_OBJ_FLAG_HIDDEN);
+
+    /* 2026-09-08(연결 기능 주화면 이관) — "연결됨" 목록(s_summary_list와 동일 스타일) */
+    s_sensor_connected_lbl = lv_label_create(sensor_box);
+    lv_label_set_text(s_sensor_connected_lbl, ui_str(STR_LABEL_CONNECTED));
+    lv_obj_set_style_text_font(s_sensor_connected_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_style(s_sensor_connected_lbl, &style_text_muted, 0);
+    s_sensor_dash_list = lv_obj_create(sensor_box);
+    lv_obj_set_size(s_sensor_dash_list, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_sensor_dash_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(s_sensor_dash_list, 0, 0);
+    lv_obj_set_style_bg_opa(s_sensor_dash_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_sensor_dash_list, 0, 0);
+    lv_obj_set_style_pad_row(s_sensor_dash_list, 10, 0);
+    lv_obj_add_flag(s_sensor_dash_list, LV_OBJ_FLAG_HIDDEN);  /* 초기값: 연결된 센서 없음 */
+
+    /* "대기중" 목록 — 설정탭 sensor_group_box에 있던 것을 그대로 이관(위젯/타이머/새로고침
+     * 함수 재사용, retarget만) */
+    lv_obj_t *sensor_pending_row = lv_obj_create(sensor_box);
+    lv_obj_set_size(sensor_pending_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(sensor_pending_row, 0, 0);
+    lv_obj_set_style_pad_all(sensor_pending_row, 0, 0);
+    s_sensor_pending_lbl = lv_label_create(sensor_pending_row);
+    lv_label_set_text(s_sensor_pending_lbl, ui_str(STR_LABEL_PENDING));
+    lv_obj_set_style_text_font(s_sensor_pending_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_style(s_sensor_pending_lbl, &style_text_muted, 0);
+    s_sensor_list = lv_list_create(sensor_box);
+    lv_obj_set_size(s_sensor_list, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_add_flag(s_sensor_list, LV_OBJ_FLAG_HIDDEN);
+    s_sensor_list_timer = lv_timer_create(refresh_sensor_list, 1000, NULL);
 
     lv_obj_t *camera_box = create_dashboard_panel(dashboard_page, STR_GROUP_CAMERA, 2);
     s_camera_box = camera_box;
@@ -4827,6 +4960,10 @@ void ui_init(void)
 
     /* 2026-09-08(카메라 팝업 추출) — 팝업이 닫혀있는 평상시 주화면에 남는 "연결된 카메라"
      * 목록. s_summary_list와 완전히 같은 스타일(요약판넬과 통일) */
+    s_camera_connected_lbl = lv_label_create(camera_box);
+    lv_label_set_text(s_camera_connected_lbl, ui_str(STR_LABEL_CONNECTED));
+    lv_obj_set_style_text_font(s_camera_connected_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_style(s_camera_connected_lbl, &style_text_muted, 0);
     s_camera_dash_list = lv_obj_create(camera_box);
     lv_obj_set_size(s_camera_dash_list, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(s_camera_dash_list, LV_FLEX_FLOW_COLUMN);
@@ -4835,6 +4972,21 @@ void ui_init(void)
     lv_obj_set_style_pad_all(s_camera_dash_list, 0, 0);
     lv_obj_set_style_pad_row(s_camera_dash_list, 10, 0);
     lv_obj_add_flag(s_camera_dash_list, LV_OBJ_FLAG_HIDDEN);  /* 초기값: 연결된 CAM 없음 */
+
+    /* 2026-09-08(연결 기능 주화면 이관) — "대기중" 목록, 설정탭 camera_group_box에 있던
+     * 것을 그대로 이관(위젯/타이머/새로고침 함수 재사용, retarget만) */
+    lv_obj_t *camera_pending_row = lv_obj_create(camera_box);
+    lv_obj_set_size(camera_pending_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(camera_pending_row, 0, 0);
+    lv_obj_set_style_pad_all(camera_pending_row, 0, 0);
+    s_camera_pending_lbl = lv_label_create(camera_pending_row);
+    lv_label_set_text(s_camera_pending_lbl, ui_str(STR_LABEL_PENDING));
+    lv_obj_set_style_text_font(s_camera_pending_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_style(s_camera_pending_lbl, &style_text_muted, 0);
+    s_camera_list = lv_list_create(camera_box);
+    lv_obj_set_size(s_camera_list, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_add_flag(s_camera_list, LV_OBJ_FLAG_HIDDEN);
+    s_camera_list_timer = lv_timer_create(refresh_camera_list, 1000, NULL);
 
     /* 상단 툴바 — 지금촬영/목록갱신 외에 나중에 다른 컨트롤도 여기 추가될 예정, 그래서
      * 목록/사진 판넬보다 위에 별도 행으로 둠. camera_box의 직접 자식(예전엔 s_camera_content라는
@@ -5357,6 +5509,194 @@ static void teardown_camera_tab(void)
              (int)heap_after_close - (int)heap_before_close);
 }
 
+/* ════════════════════════════════════════════════════════════
+ * 개별설정 팝업(2026-09-08, 사용자 설계 — 연결 기능 주화면 이관) — 연결된 장치 행 탭.
+ * Alias 편집 + [센서만]측정주기 편집 + 연결끊기. 측정주기 위젯/로직(select_sensor,
+ * s_sens_measure_dd, cb_apply_sens_measure_interval 등)은 예전 설정탭 것을 그대로 재사용 —
+ * 여기로 옮겨 지어질 뿐 아무 로직도 안 바뀜.
+ * ════════════════════════════════════════════════════════════ */
+static void cb_device_keyboard_hide(lv_event_t *e)
+{
+    (void)e;
+    if (s_device_keyboard) lv_obj_add_flag(s_device_keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void cb_device_alias_ta_focused(lv_event_t *e)
+{
+    (void)e;
+    if (!s_device_keyboard) return;
+    lv_obj_remove_flag(s_device_keyboard, LV_OBJ_FLAG_HIDDEN);
+    lv_keyboard_set_textarea(s_device_keyboard, s_device_alias_ta);
+}
+
+/* 포커스 해제(키보드 다음 탭으로 넘어가거나 팝업 닫기 등)될 때 저장 — 값이 실제로 안
+ * 바뀌었으면 device_config_save()를 부르는 device_config_set_alias 자체가 매번 호출되긴
+ * 하지만(불필요한 flash write 한 번 정도는 알리아스 편집처럼 드문 조작에서 문제 아님) */
+static void cb_device_alias_ta_defocused(lv_event_t *e)
+{
+    (void)e;
+    if (!s_device_alias_ta) return;
+    const char *text = lv_textarea_get_text(s_device_alias_ta);
+    device_config_set_alias(s_device_popup_node.mac, text);
+    if (s_device_popup_title) {
+        lv_label_set_text(s_device_popup_title, (text[0] != '\0') ? text : s_device_popup_node.name);
+    }
+}
+
+static void cb_device_disconnect_confirm(void *ctx)
+{
+    esp_now_hub_node_t *node = (esp_now_hub_node_t *)ctx;
+    esp_now_hub_unpair(node->mac);
+    teardown_device_popup();
+}
+
+static void cb_device_disconnect_clicked(lv_event_t *e)
+{
+    (void)e;
+    char msg[64];
+    snprintf(msg, sizeof(msg), "%s\n%s", s_device_popup_node.name, ui_str(STR_MSG_UNPAIR_CONFIRM));
+    show_confirm_popup(msg, cb_device_disconnect_confirm, &s_device_popup_node);
+}
+
+static void cb_close_device_popup(lv_event_t *e)
+{
+    (void)e;
+    teardown_device_popup();
+}
+
+/* 2026-09-08(연결 기능 주화면 이관) — "연결됨" 대시 목록 행 탭 -> 개별설정 팝업. user_data는
+ * 그 rebuild 세대의 행 인덱스(refresh_dashboard 참고) — s_*_dash_row_count 범위 밖이면
+ * 이미 재생성된 뒤라 무시(방어) */
+static void cb_camera_dash_row_clicked(lv_event_t *e)
+{
+    lv_obj_t *row = lv_event_get_target(e);
+    uintptr_t idx = (uintptr_t)lv_obj_get_user_data(row);
+    if ((int)idx >= s_camera_dash_row_count) return;
+    build_device_popup(s_camera_dash_row_macs[idx], s_camera_dash_row_names[idx], false);
+}
+
+static void cb_sensor_dash_row_clicked(lv_event_t *e)
+{
+    lv_obj_t *row = lv_event_get_target(e);
+    uintptr_t idx = (uintptr_t)lv_obj_get_user_data(row);
+    if ((int)idx >= s_sensor_dash_row_count) return;
+    build_device_popup(s_sensor_dash_row_macs[idx], s_sensor_dash_row_names[idx], true);
+}
+
+static void teardown_device_popup(void)
+{
+    if (!s_device_popup) return;
+    lv_obj_delete(s_device_popup);
+    s_device_popup = NULL;
+    s_device_popup_title = NULL;
+    s_device_alias_ta = NULL;
+    /* 2026-09-08 — 측정주기 위젯도 이 팝업 자식이라 팝업과 함께 사라짐, 핸들 NULL로
+     * 정리(build_option_tab 등 다른 곳의 기존 teardown 패턴과 동일) */
+    s_sens_measure_dd = NULL;
+    s_sens_measure_apply_btn = NULL;
+    s_sens_measure_label = NULL;
+    s_sens_measure_apply_lbl = NULL;
+    s_sens_measure_applied_idx = -1;
+    s_device_disconnect_btn = NULL;
+    /* 다음에 팝업이 다시 열릴 때(같은 mac이라도) select_sensor()가 무조건 새 위젯을
+     * 다시 동기화하도록 강제 — 아래 build_device_popup() 참고 */
+    s_has_selected_sensor = false;
+}
+
+static void build_device_popup(const uint8_t *mac, const char *name, bool is_sensor)
+{
+    if (s_device_popup) return;  /* 이미 열려있음 */
+
+    memcpy(s_device_popup_node.mac, mac, 6);
+    strncpy(s_device_popup_node.name, name ? name : "", sizeof(s_device_popup_node.name) - 1);
+    s_device_popup_node.name[sizeof(s_device_popup_node.name) - 1] = '\0';
+    s_device_popup_is_sensor = is_sensor;
+
+    lv_obj_t *popup = create_page_popup();
+    s_device_popup = popup;
+    const char *alias = device_config_get_alias(mac);
+    add_page_popup_header(popup, (alias[0] != '\0') ? alias : s_device_popup_node.name,
+                           cb_close_device_popup, &s_device_popup_title);
+    lv_obj_set_style_pad_hor(popup, 12, 0);
+
+    /* Alias 행 — [라벨][원래이름(회색, 참고용)] 위에, 입력창은 그 아래 한 줄 전체폭
+     * (2026-09-08, 사용자 설계: "Alias로 표기한다면 원래 이름[도 같이 보여야]") */
+    lv_obj_t *alias_orig_row = lv_obj_create(popup);
+    lv_obj_set_size(alias_orig_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(alias_orig_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(alias_orig_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(alias_orig_row, 0, 0);
+    lv_obj_set_style_pad_all(alias_orig_row, 0, 0);
+
+    lv_obj_t *alias_lbl = lv_label_create(alias_orig_row);
+    lv_label_set_text(alias_lbl, ui_str(STR_LABEL_ALIAS));
+    lv_obj_set_style_text_font(alias_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    lv_obj_t *orig_name_lbl = lv_label_create(alias_orig_row);
+    lv_label_set_text(orig_name_lbl, s_device_popup_node.name);
+    lv_obj_set_style_text_font(orig_name_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_color(orig_name_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
+
+    s_device_alias_ta = lv_textarea_create(popup);
+    lv_textarea_set_one_line(s_device_alias_ta, true);
+    lv_textarea_set_max_length(s_device_alias_ta, DEVICE_CONFIG_ALIAS_MAX_LEN - 1);
+    lv_textarea_set_placeholder_text(s_device_alias_ta, s_device_popup_node.name);
+    if (alias[0] != '\0') lv_textarea_set_text(s_device_alias_ta, alias);
+    lv_obj_set_width(s_device_alias_ta, LV_PCT(100));
+    lv_obj_set_style_text_font(s_device_alias_ta, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_device_alias_ta, cb_device_alias_ta_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(s_device_alias_ta, cb_device_alias_ta_defocused, LV_EVENT_DEFOCUSED, NULL);
+
+    if (!s_device_keyboard) {
+        s_device_keyboard = lv_keyboard_create(lv_screen_active());
+        lv_obj_add_event_cb(s_device_keyboard, cb_device_keyboard_hide, LV_EVENT_READY, NULL);
+        lv_obj_add_event_cb(s_device_keyboard, cb_device_keyboard_hide, LV_EVENT_CANCEL, NULL);
+    }
+    lv_obj_add_flag(s_device_keyboard, LV_OBJ_FLAG_HIDDEN);  /* 텍스트박스 포커스 전까진 숨김 */
+
+    /* 측정주기 행(센서만) — 예전 설정탭 sens_measure_row와 완전히 동일한 위젯 구성/이벤트,
+     * 자리만 이 팝업 안으로 옮김 */
+    if (is_sensor) {
+        lv_obj_t *sens_measure_row = lv_obj_create(popup);
+        lv_obj_set_size(sens_measure_row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(sens_measure_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(sens_measure_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(sens_measure_row, 0, 0);
+        lv_obj_set_style_pad_all(sens_measure_row, 0, 0);
+
+        s_sens_measure_label = lv_label_create(sens_measure_row);
+        lv_label_set_text(s_sens_measure_label, ui_str(STR_LABEL_SENS_MEASURE_INTERVAL));
+        lv_obj_set_style_text_font(s_sens_measure_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+        lv_obj_t *sens_measure_right = create_row_right_cluster(sens_measure_row);
+
+        s_sens_measure_dd = lv_dropdown_create(sens_measure_right);
+        lv_obj_set_style_pad_ver(s_sens_measure_dd, 7, 0);
+        lv_dropdown_set_options(s_sens_measure_dd, ui_str(STR_OPT_SENS_MEASURE_INTERVAL_LIST));
+        lv_obj_set_style_text_font(s_sens_measure_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_set_style_text_font(lv_dropdown_get_list(s_sens_measure_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_add_event_cb(s_sens_measure_dd, cb_sens_measure_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+        s_sens_measure_apply_btn = lv_button_create(sens_measure_right);
+        lv_obj_add_event_cb(s_sens_measure_apply_btn, cb_apply_sens_measure_interval, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_state(s_sens_measure_apply_btn, LV_STATE_DISABLED);
+        s_sens_measure_apply_lbl = lv_label_create(s_sens_measure_apply_btn);
+        lv_label_set_text(s_sens_measure_apply_lbl, ui_str(STR_BTN_APPLY));
+        lv_obj_set_style_text_font(s_sens_measure_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+        select_sensor(mac);  /* s_has_selected_sensor가 teardown에서 false로 리셋돼있어 항상 재동기화 */
+    }
+
+    /* 연결끊기 버튼 — 맨 아래, 위험한 조작이라 확인팝업 거침(cb_device_disconnect_clicked) */
+    lv_obj_t *disconnect_btn = lv_button_create(popup);
+    s_device_disconnect_btn = disconnect_btn;
+    lv_obj_set_style_bg_color(disconnect_btn, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_add_event_cb(disconnect_btn, cb_device_disconnect_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *disconnect_lbl = lv_label_create(disconnect_btn);
+    lv_label_set_text(disconnect_lbl, ui_str(STR_BTN_DISCONNECT));
+    lv_obj_set_style_text_font(disconnect_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+}
+
 /* 2026-09-08(재설계) — 설정 콘텐츠만 지움(s_option_content 안 자식들, lv_obj_clean) — 팝업
  * 자체(s_option_popup)는 안 건드림(로그로 바꿔치기할 때도 씀). 카메라/센서 연결목록의
  * 캐시(행 개수/오브젝트배열)도 같이 리셋 — 안 그러면 웹 인젝션(find_camera_row_by_mac 등)이
@@ -5364,12 +5704,9 @@ static void teardown_camera_tab(void)
 static void teardown_option_tab(void)
 {
     size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    if (s_camera_list_timer) { lv_timer_delete(s_camera_list_timer); s_camera_list_timer = NULL; }
-    if (s_sensor_list_timer) { lv_timer_delete(s_sensor_list_timer); s_sensor_list_timer = NULL; }
-    s_camera_row_count = 0;
-    s_sensor_row_count = 0;
-    s_camera_count_prev = -1;
-    s_sensor_count_prev = -1;
+    /* 2026-09-08(연결 기능 주화면 이관) — s_camera_list_timer/s_sensor_list_timer와 그
+     * 대상(s_camera_list/s_sensor_list, 이제 "대기중" 목록)은 더 이상 이 팝업 소유가
+     * 아니라 주화면에 상주(ui_init()에서 한 번만 생성, 여기서 손 안 댐) */
     lv_obj_clean(s_option_content);
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGW(TAG, "MEMDIAG 설정 콘텐츠 지움: internal %u -> %u (회수 %d bytes)",
@@ -5379,8 +5716,6 @@ static void teardown_option_tab(void)
     s_lang_label = NULL;
     s_btn_ko = NULL;
     s_btn_en = NULL;
-    s_camera_list = NULL;
-    s_sensor_list = NULL;
     s_capture_interval_label = NULL;
     s_capture_interval_dd = NULL;
     s_capture_apply_btn = NULL;
@@ -5413,10 +5748,10 @@ static void teardown_option_tab(void)
     s_network_right_label = NULL;
     s_network_find_btn = NULL;
     s_network_find_lbl = NULL;
-    s_sens_measure_label = NULL;
-    s_sens_measure_dd = NULL;
-    s_sens_measure_apply_btn = NULL;
-    s_sens_measure_apply_lbl = NULL;
+    s_auto_connect_known_switch = NULL;
+    s_auto_connect_known_label = NULL;
+    s_auto_connect_new_switch = NULL;
+    s_auto_connect_new_label = NULL;
 }
 
 /* 2026-09-08(재설계) — s_option_content(설정 팝업의 헤더 아래 콘텐츠 영역) 안에 설정
@@ -5573,54 +5908,13 @@ static void build_option_tab(void)
 
     refresh_network_right_zone();  /* 부팅 직후 현재 상태 즉시 반영(빈 채로 안 보이게) */
 
-    /* 측정기(Sensor) 그룹박스 — 발견된 SENS 리스트(대기중/연결됨), 1초마다 갱신.
-     * 카메라 그룹박스와 완전히 같은 패턴(2026-09-05, 사용자 지시) */
-    lv_obj_t *sensor_group_box = create_group_box(option_page, STR_GROUP_SENSOR);
-    s_sensor_list = lv_list_create(sensor_group_box);
-    lv_obj_set_size(s_sensor_list, LV_PCT(100), LV_SIZE_CONTENT);
-    s_sensor_list_timer = lv_timer_create(refresh_sensor_list, 1000, NULL);
+    /* 2026-09-08(연결 기능 주화면 이관) — 측정기(Sensor) 그룹박스 자체를 제거함. 대기중/
+     * 연결됨 리스트와 측정주기 행 둘 다 주화면(Sensor 판넬)+개별설정 팝업으로 이관돼서 이
+     * 그룹박스엔 남는 내용이 없었음 */
 
-    /* 측정 주기 행(2026-09-05, 사용자 설계) — [라벨][드롭다운][Apply], 촬영주기와 동일
-     * 패턴이지만 대상이 위 목록에서 탭으로 선택된 센서(select_sensor() 참고) */
-    lv_obj_t *sens_measure_row = lv_obj_create(sensor_group_box);
-    lv_obj_set_size(sens_measure_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(sens_measure_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(sens_measure_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(sens_measure_row, 0, 0);
-    lv_obj_set_style_pad_hor(sens_measure_row, 12, 0);
-    lv_obj_set_style_pad_ver(sens_measure_row, 0, 0);
-
-    s_sens_measure_label = lv_label_create(sens_measure_row);
-    lv_label_set_text(s_sens_measure_label, ui_str(STR_LABEL_SENS_MEASURE_INTERVAL));
-    lv_obj_set_style_text_font(s_sens_measure_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    lv_obj_t *sens_measure_right = create_row_right_cluster(sens_measure_row);
-
-    s_sens_measure_dd = lv_dropdown_create(sens_measure_right);
-    lv_obj_set_style_pad_ver(s_sens_measure_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
-    lv_dropdown_set_options(s_sens_measure_dd, ui_str(STR_OPT_SENS_MEASURE_INTERVAL_LIST));
-    lv_dropdown_set_selected(s_sens_measure_dd, 0);  /* 아직 선택된 센서 없음 — select_sensor()가
-                                                         첫 선택 때 실제 저장값으로 다시 맞춤 */
-    lv_obj_set_style_text_font(s_sens_measure_dd, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_style_text_font(lv_dropdown_get_list(s_sens_measure_dd), ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_add_event_cb(s_sens_measure_dd, cb_sens_measure_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-    s_sens_measure_apply_btn = lv_button_create(sens_measure_right);
-    lv_obj_add_event_cb(s_sens_measure_apply_btn, cb_apply_sens_measure_interval, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_state(s_sens_measure_apply_btn, LV_STATE_DISABLED);  /* 선택된 센서 없이는 항상 비활성 */
-    s_sens_measure_apply_lbl = lv_label_create(s_sens_measure_apply_btn);
-    lv_label_set_text(s_sens_measure_apply_lbl, ui_str(STR_BTN_APPLY));
-    /* 2026-09-07 버그수정(사용자 지적 — "한글에서 깨져서 나와") — 다른 Apply 라벨들(촬영주기/
-     * 응답성/xclk/적응형)은 전부 이 폰트 지정 줄이 있는데 이것만 빠져있었음. 지정 없으면
-     * 한글 글리프 없는 기본폰트로 떨어져서 한글모드에서 네모박스로 깨짐 */
-    lv_obj_set_style_text_font(s_sens_measure_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    /* 영상(Camera) 그룹박스 — 발견된 CAM 리스트(연결중/연결됨), 1초마다 갱신.
-     * 자식이 리스트 하나뿐이라 별도 content 래퍼 없이 box 직접 자식으로 둠 */
+    /* 영상(Camera) 그룹박스 — 대기중/연결됨 리스트는 주화면으로 이관, 여기는 공통설정만
+     * 유지(촬영주기도 공통 — 사용자 지시: "카메라는 촬영 주기도 공통이야") */
     lv_obj_t *camera_group_box = create_group_box(option_page, STR_GROUP_CAMERA);
-    s_camera_list = lv_list_create(camera_group_box);
-    lv_obj_set_size(s_camera_list, LV_PCT(100), LV_SIZE_CONTENT);
-    s_camera_list_timer = lv_timer_create(refresh_camera_list, 1000, NULL);
 
     /* 촬영주기 행(2026-08-08, 사용자 설계) — [라벨][드롭다운][Apply] 한 줄. 카메라별 설정이라
      * 이 그룹박스(영상)에 유지, 응답성은 시스템 공통이라 아래 STR_GROUP_SYSTEM으로 이동 */
@@ -5740,6 +6034,44 @@ static void build_option_tab(void)
     /* 시스템(System) 그룹박스 — 응답성(연결성/절전, 전체 공통 하나) 행. 촬영주기와 같은
      * [라벨][드롭다운][Apply] 인라인 레이아웃 */
     lv_obj_t *system_group_box = create_group_box(option_page, STR_GROUP_SYSTEM);
+
+    /* 자동연결 스위치 2개(2026-09-08, 사용자 설계 — 연결 기능 주화면 이관) */
+    lv_obj_t *auto_known_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(auto_known_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(auto_known_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(auto_known_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(auto_known_row, 0, 0);
+    lv_obj_set_style_pad_hor(auto_known_row, 12, 0);
+    lv_obj_set_style_pad_ver(auto_known_row, 0, 0);
+
+    s_auto_connect_known_label = lv_label_create(auto_known_row);
+    lv_label_set_text(s_auto_connect_known_label, ui_str(STR_LABEL_AUTO_CONNECT_KNOWN));
+    lv_obj_set_style_text_font(s_auto_connect_known_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_auto_connect_known_switch = lv_switch_create(auto_known_row);
+    if (device_config_get_auto_connect_known()) lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_CHECKED);
+    if (device_config_get_auto_connect_new()) {
+        lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_CHECKED);
+        lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_DISABLED);
+    }
+    lv_obj_add_event_cb(s_auto_connect_known_switch, cb_auto_connect_known_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *auto_new_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(auto_new_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(auto_new_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(auto_new_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(auto_new_row, 0, 0);
+    lv_obj_set_style_pad_hor(auto_new_row, 12, 0);
+    lv_obj_set_style_pad_ver(auto_new_row, 0, 0);
+
+    s_auto_connect_new_label = lv_label_create(auto_new_row);
+    lv_label_set_text(s_auto_connect_new_label, ui_str(STR_LABEL_AUTO_CONNECT_NEW));
+    lv_obj_set_style_text_font(s_auto_connect_new_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_auto_connect_new_switch = lv_switch_create(auto_new_row);
+    if (device_config_get_auto_connect_new()) lv_obj_add_state(s_auto_connect_new_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(s_auto_connect_new_switch, cb_auto_connect_new_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
     lv_obj_t *response_row = lv_obj_create(system_group_box);
     lv_obj_set_size(response_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(response_row, LV_FLEX_FLOW_ROW);

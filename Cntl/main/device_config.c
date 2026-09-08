@@ -10,9 +10,10 @@
 static const char *TAG = "device_config";
 
 #define DEVICE_CONFIG_PATH    FS_MOUNT_POINT "/device_config.bin"
-#define DEVICE_CONFIG_VERSION 7  /* 2026-09-05: sens_intervals[] 슬롯 배열 추가(노드별 샘플주기,
-                                    사용자 지시)로 6->7 (구버전 파일은 버전 불일치로 기본값으로
-                                    자연 폴백 — UI_ERR_CONFIG_FILE_MISMATCH로 화면에도 보임,
+#define DEVICE_CONFIG_VERSION 8  /* 2026-09-08: aliases[] 슬롯 배열 + auto_connect_known/new
+                                    플래그 추가(연결 기능 주화면 이관, 사용자 설계)로 7->8
+                                    (구버전 파일은 버전 불일치로 기본값으로 자연 폴백 —
+                                    UI_ERR_CONFIG_FILE_MISMATCH로 화면에도 보임,
                                     device_config_load 참고) */
 
 /* 2026-08-29(사용자 지시: "여러 개 비번 저장 가능하지?") — SSID별로 비밀번호를 기억. 슬롯[0]이
@@ -37,6 +38,17 @@ typedef struct __attribute__((packed)) {
     uint32_t sample_interval_sec;
 } sens_interval_entry_t;
 
+/* 2026-09-08(사용자 설계 — 연결 기능 주화면 이관) — Alias 슬롯. sens_intervals와 같은 mac 키
+ * 슬롯 배열 패턴. 슬롯 존재 자체가 "예전에 페어링 성공한 적 있는 장치"의 기록도 겸함 —
+ * alias 문자열이 비어있어도(사용자가 아직 안 지음) 슬롯은 있을 수 있음 */
+#define ALIAS_SLOTS 8
+
+typedef struct __attribute__((packed)) {
+    uint8_t mac[6];
+    uint8_t in_use;
+    char    alias[DEVICE_CONFIG_ALIAS_MAX_LEN];
+} alias_entry_t;
+
 #define CAM_CAPTURE_INTERVAL_SEC_DEFAULT 1800  /* CAM Kconfig 기본(30분)과 동일 */
 #define RESPONSE_INTERVAL_SEC_DEFAULT    2
 #define ADAPTIVE_RESPONSE_SEC_DEFAULT    10    /* 적응형 반응시간(2026-08-10) — 마지막 사용자
@@ -57,8 +69,11 @@ typedef struct __attribute__((packed)) {
     uint8_t  aec_enable;
     uint8_t  xclk_mhz;
     uint8_t  wifi_ap_mode;
+    uint8_t  auto_connect_known;
+    uint8_t  auto_connect_new;
     sta_credential_t sta_credentials[STA_CREDENTIAL_SLOTS];
     sens_interval_entry_t sens_intervals[SENS_INTERVAL_SLOTS];
+    alias_entry_t aliases[ALIAS_SLOTS];
 } device_config_file_t;
 
 static uint32_t s_cam_capture_interval_sec = CAM_CAPTURE_INTERVAL_SEC_DEFAULT;
@@ -68,12 +83,17 @@ static bool     s_agc_enable               = AGC_ENABLE_DEFAULT;
 static bool     s_aec_enable               = AEC_ENABLE_DEFAULT;
 static uint8_t  s_xclk_mhz                 = XCLK_MHZ_DEFAULT;
 static bool     s_wifi_ap_mode             = false;
+/* 2026-09-08(사용자 설계) — 기본값 false: 기존처럼 대기중 장치는 수동 확인이 필요한 채로
+ * 시작(자동연결은 사용자가 설정탭에서 켜야 함) */
+static bool     s_auto_connect_known       = false;
+static bool     s_auto_connect_new         = false;
 
 /* 2026-08-29(사용자 지시: "PSRAM도 133KB밖에 안남았지만, 최대한 몰아 넣어") — 내부 RAM이
  * 오늘 12K->1.7K로 급감한 것 때문에, 새로 늘어나는 저장공간(8슬롯 x 98B=784B)은 처음부터
  * 내부 .bss가 아니라 PSRAM에 할당. device_config_load()에서 최초 1회 할당 */
 static sta_credential_t *s_sta_credentials = NULL;
 static sens_interval_entry_t *s_sens_intervals = NULL;
+static alias_entry_t *s_aliases = NULL;
 
 /* 2026-08-30 — device_config.bin 암호화(assets 파일 업로드/다운로드 엔드포인트로 평문 WiFi
  * 비번이 노출되는 문제 대비) 시도했으나, 이 ESP-IDF의 mbedtls가 aes.h를 공개 API에서 제거하고
@@ -96,9 +116,12 @@ static void device_config_save(void)
         .aec_enable              = s_aec_enable ? 1 : 0,
         .xclk_mhz                = s_xclk_mhz,
         .wifi_ap_mode            = s_wifi_ap_mode ? 1 : 0,
+        .auto_connect_known      = s_auto_connect_known ? 1 : 0,
+        .auto_connect_new        = s_auto_connect_new ? 1 : 0,
     };
     memcpy(s.sta_credentials, s_sta_credentials, sizeof(s.sta_credentials));
     memcpy(s.sens_intervals, s_sens_intervals, sizeof(s.sens_intervals));
+    memcpy(s.aliases, s_aliases, sizeof(s.aliases));
     fwrite(&s, sizeof(s), 1, f);
     fclose(f);
 }
@@ -117,6 +140,13 @@ void device_config_load(void)
         s_sens_intervals = heap_caps_calloc(SENS_INTERVAL_SLOTS, sizeof(sens_interval_entry_t), MALLOC_CAP_SPIRAM);
         if (!s_sens_intervals) {
             ESP_LOGE(TAG, "Sens 주기 슬롯 PSRAM 할당 실패");
+            return;
+        }
+    }
+    if (!s_aliases) {
+        s_aliases = heap_caps_calloc(ALIAS_SLOTS, sizeof(alias_entry_t), MALLOC_CAP_SPIRAM);
+        if (!s_aliases) {
+            ESP_LOGE(TAG, "Alias 슬롯 PSRAM 할당 실패");
             return;
         }
     }
@@ -150,12 +180,18 @@ void device_config_load(void)
     s_aec_enable                = s.aec_enable != 0;
     s_xclk_mhz                  = s.xclk_mhz ? s.xclk_mhz : XCLK_MHZ_DEFAULT;
     s_wifi_ap_mode               = s.wifi_ap_mode != 0;
+    s_auto_connect_known         = s.auto_connect_known != 0;
+    s_auto_connect_new           = s.auto_connect_new != 0;
     for (int i = 0; i < STA_CREDENTIAL_SLOTS; i++) {
         s.sta_credentials[i].ssid[sizeof(s.sta_credentials[i].ssid) - 1]         = '\0';
         s.sta_credentials[i].password[sizeof(s.sta_credentials[i].password) - 1] = '\0';
     }
+    for (int i = 0; i < ALIAS_SLOTS; i++) {
+        s.aliases[i].alias[sizeof(s.aliases[i].alias) - 1] = '\0';
+    }
     memcpy(s_sta_credentials, s.sta_credentials, sizeof(s.sta_credentials));
     memcpy(s_sens_intervals, s.sens_intervals, sizeof(s.sens_intervals));
+    memcpy(s_aliases, s.aliases, sizeof(s.aliases));
     ESP_LOGI(TAG, "설정 복원: CAM촬영주기=%us 응답성=%us 적응형반응=%us AGC=%d AEC=%d XCLK=%uMHz "
              "WiFi=%s SSID=%s",
              (unsigned)s_cam_capture_interval_sec, (unsigned)s_response_interval_sec,
@@ -291,5 +327,71 @@ void device_config_set_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec
     memcpy(s_sens_intervals[slot].mac, mac, 6);
     s_sens_intervals[slot].in_use = 1;
     s_sens_intervals[slot].sample_interval_sec = sec;
+    device_config_save();
+}
+
+static alias_entry_t *find_alias_slot(const uint8_t *mac)
+{
+    if (!s_aliases || !mac) return NULL;
+    for (int i = 0; i < ALIAS_SLOTS; i++) {
+        if (s_aliases[i].in_use && memcmp(s_aliases[i].mac, mac, 6) == 0) return &s_aliases[i];
+    }
+    return NULL;
+}
+
+/* 없으면(슬롯 자체가 없거나, 슬롯은 있는데 아직 alias를 안 지음) 빈 문자열 — 호출부가 기본
+ * 이름("Sens xxxxxx" 등)으로 폴백 */
+const char *device_config_get_alias(const uint8_t *mac)
+{
+    alias_entry_t *e = find_alias_slot(mac);
+    return e ? e->alias : "";
+}
+
+void device_config_set_alias(const uint8_t *mac, const char *alias)
+{
+    if (!s_aliases || !mac) return;
+    alias_entry_t *e = find_alias_slot(mac);
+    if (!e) {
+        for (int i = 0; i < ALIAS_SLOTS; i++) {
+            if (!s_aliases[i].in_use) { e = &s_aliases[i]; break; }
+        }
+    }
+    if (!e) {
+        ESP_LOGW(TAG, "Alias 슬롯 꽉 참(%d개) — 저장 못 함", ALIAS_SLOTS);
+        return;
+    }
+    memcpy(e->mac, mac, 6);
+    e->in_use = 1;
+    strncpy(e->alias, alias ? alias : "", sizeof(e->alias) - 1);
+    e->alias[sizeof(e->alias) - 1] = '\0';
+    device_config_save();
+}
+
+bool device_config_is_known_device(const uint8_t *mac)
+{
+    return find_alias_slot(mac) != NULL;
+}
+
+/* 페어링 성공 시 esp_now_hub가 호출 — 이미 슬롯이 있으면(기존 alias 보존) 아무 것도 안 하고
+ * 저장도 안 함(매 페어링마다 불필요한 flash write 방지), 없을 때만 빈 alias로 새로 만듦 */
+void device_config_mark_known_device(const uint8_t *mac)
+{
+    if (find_alias_slot(mac)) return;
+    device_config_set_alias(mac, "");
+}
+
+bool device_config_get_auto_connect_known(void) { return s_auto_connect_known; }
+
+void device_config_set_auto_connect_known(bool enable)
+{
+    s_auto_connect_known = enable;
+    device_config_save();
+}
+
+bool device_config_get_auto_connect_new(void) { return s_auto_connect_new; }
+
+void device_config_set_auto_connect_new(bool enable)
+{
+    s_auto_connect_new = enable;
     device_config_save();
 }

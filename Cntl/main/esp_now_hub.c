@@ -417,7 +417,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 증거인데, 과거 언젠가의 user_unpaired 이력(예: 다른 세션/재시작 이전)이 이걸 막아
          * 캠은 계속 미페어링으로 광고만 반복하고 Cntl은 재요청을 안 보내는 교착이 실기로
          * 발생했음(사용자 지적) */
-        if (was_paired || (ever_paired && !was_user_unpaired) || user_pair_wanted) {
+        /* 2026-09-08(사용자 설계 — 연결 기능 주화면 이관) — 설정의 자동연결 토글. "새로
+         * 연결시도하는 장치도 자동연결"이 켜지면 미지의 장치까지 포함하므로 "이미 연결된 적
+         * 있는 장치만 자동연결"을 사실상 포함하는 관계(사용자 지적) — 둘 다 was_user_unpaired는
+         * 그대로 존중(사용자가 이번 세션에 명시적으로 끊은 장치는 자동연결 대상에서 제외,
+         * was_paired/ever_paired 재연결 조건과 동일 원칙) */
+        bool auto_connect_wanted = !was_user_unpaired &&
+            (device_config_get_auto_connect_new() ||
+             (device_config_get_auto_connect_known() && device_config_is_known_device(mac_copy)));
+        if (was_paired || (ever_paired && !was_user_unpaired) || user_pair_wanted || auto_connect_wanted) {
             esp_now_hub_pair(mac_copy);
         }
 
@@ -491,6 +499,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (became_paired) {
             fire_connect_event();  /* 2026-09-04 — 웹/앱 대기자 통지 */
             ESP_LOGI(TAG, "페어링 완료: %s", name_copy);
+            /* 2026-09-08(사용자 설계 — 연결 기능 주화면 이관) — 이 mac을 "알고 있는 장치"로
+             * 영구 기록(이미 있으면 손 안 댐, alias 보존) — auto_connect_known 판단 근거이자
+             * Alias 슬롯 그 자체 */
+            device_config_mark_known_device(info->src_addr);
             /* 2026-08-10 — "최초 페어링"과 "단순 생존확인 재페어링"을 구분(사용자 지적으로
              * 재설계). 처음엔 모든 became_paired에서 이 리셋을 했는데, 그러면 페어링(=CAM이
              * "할 일 있어요?" 확인하러 온 것뿐, 진짜 사용자 조작 아님) 자체가 매 사이클

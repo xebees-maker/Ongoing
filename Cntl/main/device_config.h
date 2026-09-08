@@ -85,6 +85,28 @@ uint8_t device_config_get_nack_max_rounds(void);
 uint32_t device_config_get_sens_sample_interval_sec(const uint8_t *mac);
 void     device_config_set_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec);
 
+/* Alias(2026-09-08, 사용자 설계) — 장치별 사용자 지정 표시 이름("Sens xxxxxx" 대신 임의
+ * 문자열). sens_interval과 같은 mac 키 슬롯 배열이지만 이 슬롯의 존재 자체가 "이번에 처음이
+ * 아니라 예전에 한 번이라도 페어링에 성공한 적 있는 장치"라는 의미도 겸함(get_alias는
+ * 빈 문자열이면 미설정 — 호출부가 기본 이름으로 폴백, is_known_device로 슬롯 유무만 별도
+ * 확인 가능) */
+#define DEVICE_CONFIG_ALIAS_MAX_LEN 32
+const char *device_config_get_alias(const uint8_t *mac);
+void        device_config_set_alias(const uint8_t *mac, const char *alias);
+bool        device_config_is_known_device(const uint8_t *mac);
+/* 페어링 성공 시 esp_now_hub가 호출 — 슬롯이 없으면 alias 빈 문자열로 새로 만듦(이미 있으면
+ * 손 안 댐, 기존 alias 보존) */
+void        device_config_mark_known_device(const uint8_t *mac);
+
+/* 자동연결(2026-09-08, 사용자 설계) — 대기중 장치를 수동 확인 없이 즉시 페어링.
+ * auto_connect_new가 켜지면 처음 보는 장치까지 포함하므로 auto_connect_known을 사실상
+ * 포함하는 관계 — UI에서 이 종속관계를 표현할 것. 둘 다 기본값 false(기존 수동 확인 동작과
+ * 동일하게 유지) */
+bool device_config_get_auto_connect_known(void);
+void device_config_set_auto_connect_known(bool enable);
+bool device_config_get_auto_connect_new(void);
+void device_config_set_auto_connect_new(bool enable);
+
 #ifdef __cplusplus
 }
 #endif
