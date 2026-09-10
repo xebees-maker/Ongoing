@@ -4,6 +4,7 @@
 #include "esp_now_hub.h"
 #include "device_config.h"
 #include "stats_store.h"
+#include "sd_storage.h"
 #include "esp_now_photo.h"
 #include "ui_log.h"
 #include "rtc_sync.h"
@@ -15,6 +16,9 @@
 #include "esp_lv_adapter.h"
 #include "lvgl.h"
 #include "misc/cache/instance/lv_image_cache.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -73,7 +77,10 @@ static lv_obj_t *s_group_title[STR_GROUP_SYSTEM - STR_GROUP_CNTL + 1];
 static lv_obj_t          *s_dash_title[3];  /* 0=요약, 1=측정기, 2=카메라 */
 static bool               s_camera_title_enabled_prev = false;  /* 2026-09-08 — Camera 역상 회색/흰색 전환용 */
 static lv_obj_t          *s_web_url_label       = NULL;  /* 2026-08-21 — 요약 맨 윗줄, 웹 대시보드 접속 URL(사용자 지시) */
+static lv_obj_t          *s_web_row             = NULL;  /* 2026-09-09 — "Web " 접두문구+URL 둘로 분리(접두문구는 밑줄 없음) 위 행 래퍼 */
+static lv_obj_t          *s_web_prefix_label    = NULL;
 static lv_obj_t          *s_mem_status_label    = NULL;  /* 2026-08-21 — 요약 둘째줄, 여유 메모리 상시 표시(사용자 지시) */
+static lv_obj_t          *s_storage_status_label = NULL;  /* 2026-09-10 — 메모리 줄 바로 아래, SD Storage(Picture/Measure/Total) 상시 표시(사용자 설계) */
 /* 2026-09-08(연결 기능 주화면 이관, 사용자 설계) — Summary 실시간 순시치 블록. 통계
  * Overview와 같은 채널 4개(온도/습도/CO2/암모니아)지만 스케일/min/max/avg 없이 그냥
  * "지금 값"만 — 여러 센서가 같은 채널을 보고하면 첫 번째로 찾은 것만 씀(오늘은 센서
@@ -114,7 +121,11 @@ static int                s_dash_count_prev = -1;  /* -1: 아직 비교 대상 �
  * 보여줌 */
 static lv_obj_t *s_camera_dash_row_objs[ESP_NOW_HUB_MAX_NODES];
 static uint8_t   s_camera_dash_row_macs[ESP_NOW_HUB_MAX_NODES][6];
-static char      s_camera_dash_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
+static char      s_camera_dash_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];  /* 항상 진짜 장치명(ID) */
+/* 2026-09-09(사용자 설계 — "장치명 배열에 Alias field를 추가하는 게 맞아보이는데") — name과
+ * 나란히, 같은 dash_changed 시점에 채워지는 표시용 Alias(없으면 빈 문자열). name을 절대
+ * 덮어쓰지 않음 — build_device_popup() 등 ID가 필요한 곳은 항상 name을 씀 */
+static char      s_camera_dash_row_alias[ESP_NOW_HUB_MAX_NODES][DEVICE_CONFIG_ALIAS_MAX_LEN];
 static int       s_camera_dash_row_count = 0;
 static char      s_camera_dash_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
 static lv_obj_t *s_camera_dash_row_signal[ESP_NOW_HUB_MAX_NODES];
@@ -122,15 +133,15 @@ static lv_obj_t *s_camera_dash_row_signal[ESP_NOW_HUB_MAX_NODES];
 /* 2026-09-08(연결 기능 주화면 이관) — Sensor 판넬에 남는 "연결됨" 목록, 카메라 대시 목록과
  * 완전히 동일한 패턴 + 측정주기(개별설정값) 표시만 추가 */
 static lv_obj_t          *s_sensor_dash_list    = NULL;
-/* "연결됨"/"대기중" 소제목 4개(2026-09-08) — refresh_lang_texts에서 갱신하려면 전역이어야 함
- * (s_stats_table_header_lbl과 동일 이유) */
-static lv_obj_t          *s_sensor_connected_lbl = NULL;
+/* "대기중" 소제목 2개(2026-09-08) — refresh_lang_texts에서 갱신하려면 전역이어야 함
+ * (s_stats_table_header_lbl과 동일 이유). 2026-09-09(사용자 지시 — "connected 표기는
+ * 필요 없어 보여") — "연결됨" 표제는 제거, 목록 자체로 충분 */
 static lv_obj_t          *s_sensor_pending_lbl   = NULL;
-static lv_obj_t          *s_camera_connected_lbl = NULL;
 static lv_obj_t          *s_camera_pending_lbl   = NULL;
 static lv_obj_t *s_sensor_dash_row_objs[ESP_NOW_HUB_MAX_NODES];
 static uint8_t   s_sensor_dash_row_macs[ESP_NOW_HUB_MAX_NODES][6];
-static char      s_sensor_dash_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
+static char      s_sensor_dash_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];  /* 항상 진짜 장치명(ID) */
+static char      s_sensor_dash_row_alias[ESP_NOW_HUB_MAX_NODES][DEVICE_CONFIG_ALIAS_MAX_LEN];  /* 표시용, name과 별도(위 카메라 배열 주석 참고) */
 static int       s_sensor_dash_row_count = 0;
 static char      s_sensor_dash_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
 static lv_obj_t *s_sensor_dash_row_signal[ESP_NOW_HUB_MAX_NODES];
@@ -224,6 +235,7 @@ static lv_obj_t *s_network_right_label = NULL;  /* AP모드: IP, STA모드+연�
 static lv_obj_t *s_network_find_btn   = NULL;   /* STA모드+미연결일 때만 보임 */
 static lv_obj_t *s_network_find_lbl   = NULL;
 static void refresh_network_right_zone(void);  /* fwd — refresh_dashboard(위쪽)와 행 생성부(아래쪽) 둘 다에서 씀 */
+static lv_obj_t *create_row_right_cluster(lv_obj_t *row);  /* fwd — refresh_dashboard(위쪽, 대시 목록 행 화살표)와 정의부(아래쪽) 둘 다에서 씀 */
 
 /* 2026-09-08(사용자 재설계 — "UI를 완전히 바꾸려고 해... 단일 화면") — 통계/설정은 상단바
  * 버튼이 여는 전체화면 팝업, 로그는 설정 팝업 안에 중첩(콘텐츠 바꿔치기). 상단바 버튼
@@ -406,6 +418,46 @@ static lv_obj_t *s_stats_graph_view  = NULL;
 static lv_obj_t *s_stats_delete_btn  = NULL;
 static lv_obj_t *s_stats_delete_lbl  = NULL;
 
+/* 2026-09-10(사용자 설계 — "라인+도트", "계열 4개 선택 표시", "탭하면 값", "청록/빨강/파랑/
+ * 까망") — 그래프 실제 구현. 계열 순서 고정: 0=온도(빨강) 1=습도(파랑) 2=CO2(까망)
+ * 3=암모니아(짙은 노랑 — 2026-09-10 사용자 지시로 청록에서 변경). 계열마다 실제 단위/범위가
+ * 달라서(온도 vs CO2 등) 화면엔 각 계열을 자기 자신의 기간 내 최소~최대 기준으로 0~100
+ * 정규화해서 그리고, 탭하면 정규화 전 실제 값을 보여줌(s_stats_chart_real_values에 원본 보관) */
+#define STATS_GRAPH_POINT_COUNT      60   /* 기본값 — 팝업 열 때마다 이 값으로 리셋 */
+#define STATS_GRAPH_POINT_COUNT_MAX  480  /* 아래 임시 디버그 드롭다운의 최댓값 */
+#define STATS_GRAPH_SERIES_COUNT  4
+static lv_obj_t          *s_stats_chart               = NULL;
+static lv_chart_series_t *s_stats_chart_series[STATS_GRAPH_SERIES_COUNT];
+static lv_obj_t          *s_stats_chart_checkbox[STATS_GRAPH_SERIES_COUNT];
+static lv_obj_t          *s_stats_chart_tap_label      = NULL;
+/* 2026-09-10(임시 디버그 기능 — 사용자 지시: "스케일 왼쪽에 60/120/240/480 드랍다운으로 라인
+ * 수를 조정할 수 있게 하고, 남은 Internal memory를 overview 옆에 주화면처럼 표기해" — 점
+ * 개수를 늘렸을 때 실제 내부메모리 비용이 얼마인지 화면에서 직접 보면서 정하기 위한 임시
+ * 도구. 그래서 원래 STATS_GRAPH_POINT_COUNT 고정 배열이던 아래 3개를 힙 할당+런타임
+ * 리사이즈로 바꿈. 적당한 값이 정해지면 드롭다운/메모리라벨/리사이즈 로직은 걷어내고 다시
+ * 고정 배열로 되돌릴 예정 */
+static uint32_t         s_stats_graph_point_cap    = STATS_GRAPH_POINT_COUNT;
+static float            *s_stats_chart_real_values = NULL;  /* [s*cap+i], MALLOC_CAP_INTERNAL */
+static bool              *s_stats_chart_has_value   = NULL;  /* [s*cap+i] */
+static stats_record_t    *s_stats_graph_read_buf    = NULL;  /* refresh_stats_graph() SD읽기 스크래치, [s*cap+i] */
+static uint32_t            s_stats_chart_shown_points  = 0;  /* 이번에 실제로 그려진 포인트 수(<=s_stats_graph_point_cap) */
+static lv_obj_t          *s_stats_point_count_dd    = NULL;  /* 임시 디버그용(위 주석) */
+static lv_obj_t          *s_stats_graph_mem_label   = NULL;  /* 임시 디버그용 — 남은 Internal memory 표시 */
+
+/* 임시 디버그 기능(위 주석) — new_cap으로 그래프 관련 힙 버퍼 3종을 재할당하고 차트
+ * point_count도 맞춤. s_stats_chart가 만들어진 뒤(build_stats_tab 안)에만 호출됨 */
+static void resize_stats_graph_buffers(uint32_t new_cap)
+{
+    heap_caps_free(s_stats_chart_real_values);
+    heap_caps_free(s_stats_chart_has_value);
+    heap_caps_free(s_stats_graph_read_buf);
+    s_stats_chart_real_values = heap_caps_malloc(sizeof(float) * STATS_GRAPH_SERIES_COUNT * new_cap, MALLOC_CAP_INTERNAL);
+    s_stats_chart_has_value   = heap_caps_calloc(STATS_GRAPH_SERIES_COUNT * new_cap, sizeof(bool), MALLOC_CAP_INTERNAL);
+    s_stats_graph_read_buf    = heap_caps_malloc(sizeof(stats_record_t) * STATS_GRAPH_SERIES_COUNT * new_cap, MALLOC_CAP_INTERNAL);
+    s_stats_graph_point_cap = new_cap;
+    if (s_stats_chart) lv_chart_set_point_count(s_stats_chart, new_cap);
+}
+
 /* 2026-09-08(재설계 — 단일화면+전체화면 팝업) — 통계는 상단바 버튼이 여는 전체화면 팝업.
  * s_stats_popup은 create_page_popup()이 만든 오버레이 루트(열려있을 때만 존재),
  * s_stats_tab_built는 지금 내용이 지어져 있는지 — refresh_lang_texts()가 이 플래그로
@@ -431,6 +483,11 @@ static lv_obj_t          *s_device_popup_title = NULL;
 static lv_obj_t          *s_device_alias_ta    = NULL;
 static lv_obj_t          *s_device_keyboard    = NULL;
 static lv_obj_t          *s_device_disconnect_btn = NULL;  /* 2026-09-08 — 웹 인젝션(ui_main_inject_disconnect)용 핸들 */
+/* 2026-09-09(사용자 설계 — "Alias도 Apply 버튼 넣고, 눌렀을 때만 적용, 안 누르고 닫으면
+ * 적용 안 되게") — 측정주기/촬영주기와 동일한 [값][Apply] 패턴. applied_text는 "마지막으로
+ * 저장(Apply)된 값" — 지금 입력창 텍스트와 다를 때만 Apply 버튼 활성화 */
+static lv_obj_t          *s_device_alias_apply_btn = NULL;
+static char               s_device_alias_applied_text[DEVICE_CONFIG_ALIAS_MAX_LEN];
 static bool                s_device_popup_is_sensor = false;
 static esp_now_hub_node_t  s_device_popup_node;
 
@@ -612,9 +669,8 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_dash_title[2], ui_str(STR_GROUP_CAMERA));
     lv_label_set_text(s_sensor_empty, ui_str(STR_PANEL_NO_SENSOR));
     lv_label_set_text(s_camera_empty, ui_str(STR_PANEL_NO_CAMERA));
-    lv_label_set_text(s_sensor_connected_lbl, ui_str(STR_LABEL_CONNECTED));
+    lv_label_set_text_fmt(s_web_prefix_label, "%s: ", ui_str(STR_LABEL_WEB));
     lv_label_set_text(s_sensor_pending_lbl, ui_str(STR_LABEL_PENDING));
-    lv_label_set_text(s_camera_connected_lbl, ui_str(STR_LABEL_CONNECTED));
     lv_label_set_text(s_camera_pending_lbl, ui_str(STR_LABEL_PENDING));
     /* 사진이 이미 도착해서 플레이스홀더 라벨이 지워졌으면(display_photo 참고) NULL —
      * 그 상태에서 그냥 호출하면 지워진 객체를 건드리게 됨 */
@@ -878,6 +934,58 @@ static void cb_error_warn_list_close(lv_event_t *e)
     resume_bg_timers();
 }
 
+/* 2026-09-09(사용자 지적 — "E0007 과 그 뒤의 깨진 글자") — ui_log.c의 ui_log_err_desc()는
+ * s_err_table이 하드코딩 한글 문자열이라(이번 세션 영문화 작업에서 빠뜨림) 비트맵 폰트로는
+ * 깨져 보였고, 게다가 코드 4개가 테이블에 아예 없어서 "알 수 없는 에러" 폴백으로 떨어졌음
+ * (device_config 버전업으로 부팅 때마다 뜨는 5007 CONFIG_FILE_MISMATCH가 바로 이 경우).
+ * ui_log.c는 esp_now_photo.c 같은 하위 모듈에서도 쓰는 저수준 모듈이라 ui_strings 의존을
+ * 새로 얹지 않고, ui_str()을 이미 쓰는 이 파일(ui_main.c)에 매핑을 둠 — ui_log.h의
+ * UI_ERR_* 순서와 1:1 대응 */
+static ui_str_id_t err_code_to_desc_str(int code)
+{
+    switch (code) {
+        case UI_ERR_CACHE_TOO_BIG:         return STR_ERR_DESC_CACHE_TOO_BIG;
+        case UI_ERR_CACHE_NO_BUF:          return STR_ERR_DESC_CACHE_NO_BUF;
+        case UI_ERR_RECV_BUF_ALLOC:        return STR_ERR_DESC_RECV_BUF_ALLOC;
+        case UI_ERR_CACHE_SLOT_ALLOC:      return STR_ERR_DESC_CACHE_SLOT_ALLOC;
+        case UI_ERR_PANEL_BUF_ALLOC:       return STR_ERR_DESC_PANEL_BUF_ALLOC;
+        case UI_ERR_STA_CRED_ALLOC:        return STR_ERR_DESC_STA_CRED_ALLOC;
+        case UI_ERR_SEND_PHOTO_REQ:        return STR_ERR_DESC_SEND_PHOTO_REQ;
+        case UI_ERR_SEND_CAPTURE_REQ:      return STR_ERR_DESC_SEND_CAPTURE_REQ;
+        case UI_ERR_SEND_LIST_REQ:         return STR_ERR_DESC_SEND_LIST_REQ;
+        case UI_ERR_SEND_DELETE_REQ:       return STR_ERR_DESC_SEND_DELETE_REQ;
+        case UI_ERR_SEND_DELETE_ALL_REQ:   return STR_ERR_DESC_SEND_DELETE_ALL_REQ;
+        case UI_ERR_REQUEST_BUSY:          return STR_ERR_DESC_REQUEST_BUSY;
+        case UI_ERR_NOT_PAIRED:            return STR_ERR_DESC_NOT_PAIRED;
+        case UI_ERR_TX_QUEUE_FULL:         return STR_ERR_DESC_TX_QUEUE_FULL;
+        case UI_ERR_META_TOO_BIG:          return STR_ERR_DESC_META_TOO_BIG;
+        case UI_ERR_CHUNK_MISSING:         return STR_ERR_DESC_CHUNK_MISSING;
+        case UI_ERR_CRC_MISMATCH:          return STR_ERR_DESC_CRC_MISMATCH;
+        case UI_ERR_DECODE_FAIL:           return STR_ERR_DESC_DECODE_FAIL;
+        case UI_ERR_LIST_COUNT_MISMATCH:   return STR_ERR_DESC_LIST_COUNT_MISMATCH;
+        case UI_ERR_FETCH_NORESPONSE:      return STR_ERR_DESC_FETCH_NORESPONSE;
+        case UI_ERR_LIST_NORESPONSE:       return STR_ERR_DESC_LIST_NORESPONSE;
+        case UI_ERR_PHOTO_SELECTION_STALE: return STR_ERR_DESC_PHOTO_SELECTION_STALE;
+        case UI_ERR_DELETE_FAILED:         return STR_ERR_DESC_DELETE_FAILED;
+        case UI_ERR_DELETE_ALL_FAILED:     return STR_ERR_DESC_DELETE_ALL_FAILED;
+        case UI_ERR_CAPTURE_FAILED:        return STR_ERR_DESC_CAPTURE_FAILED;
+        case UI_ERR_CAPTURE_NORESPONSE:    return STR_ERR_DESC_CAPTURE_NORESPONSE;
+        case UI_ERR_CONFIG_NORESPONSE:     return STR_ERR_DESC_CONFIG_NORESPONSE;
+        case UI_ERR_DELETE_ALL_NORESPONSE: return STR_ERR_DESC_DELETE_ALL_NORESPONSE;
+        case UI_ERR_DELETE_ALL_STOPPED:    return STR_ERR_DESC_DELETE_ALL_STOPPED;
+        case UI_ERR_SET_TIME_NORESPONSE:   return STR_ERR_DESC_SET_TIME_NORESPONSE;
+        case UI_ERR_FONT_FILE_MISSING:     return STR_ERR_DESC_FONT_FILE_MISSING;
+        case UI_ERR_FONT_BUF_ALLOC:        return STR_ERR_DESC_FONT_BUF_ALLOC;
+        case UI_ERR_FONT_FILE_OPEN:        return STR_ERR_DESC_FONT_FILE_OPEN;
+        case UI_ERR_FONT_CREATE:           return STR_ERR_DESC_FONT_CREATE;
+        case UI_ERR_HTTPD_START:           return STR_ERR_DESC_HTTPD_START;
+        case UI_ERR_RTC_SET_FAILED:        return STR_ERR_DESC_RTC_SET_FAILED;
+        case UI_ERR_CONFIG_FILE_MISMATCH:  return STR_ERR_DESC_CONFIG_FILE_MISMATCH;
+        case UI_ERR_SD_MOUNT_FAILED:       return STR_ERR_DESC_SD_MOUNT_FAILED;
+        default:                           return STR_ERR_DESC_UNKNOWN;
+    }
+}
+
 /* 경고 로고 탭 — 지금까지 쌓인 에러+워닝 코드를 전부 목록으로 보여줌(2026-08-01, 사용자
  * 지시: "로고를 찍으면 error code를 보여주는 팝업... 누적된 게 있으면 여러 개를
  * 보여줄 수도"). 에러는 "Exxxx"(빨강), 워닝은 "Wxxxx"(어두운 노랑 — 팝업 배경이 밝아서
@@ -904,7 +1012,7 @@ static void cb_logo_warning_tap(lv_event_t *e)
     } else {
         for (int i = 0; i < err_n; i++) {
             char buf[160];
-            snprintf(buf, sizeof(buf), "E%04d %s", err_codes[i], ui_log_err_desc(err_codes[i]));
+            snprintf(buf, sizeof(buf), "E%04d %s", err_codes[i], ui_str(err_code_to_desc_str(err_codes[i])));
             lv_obj_t *lbl = lv_label_create(box);
             lv_label_set_text(lbl, buf);
             lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -1002,6 +1110,23 @@ static void show_confirm_popup(const char *message, confirm_yes_fn_t on_yes, voi
     lv_obj_t *btn_row = create_modal_btn_row(box);
     add_modal_button(btn_row, STR_BTN_YES, cb_confirm_yes_trampoline, &s_confirm_state);
     add_modal_button(btn_row, STR_BTN_CANCEL, cb_modal_close, NULL);
+}
+
+/* 2026-09-10(사용자 설계 — "할당된 용량의 90%가 될 때 10%만큼 오래된 걸 지우겠다는 팝업을
+ * 띄운다") — 확인/취소가 아니라 이미 실행된 정리를 알리는 안내뿐(show_confirm_popup과
+ * 달리 버튼 하나, QR팝업과 동일 패턴) */
+static void show_storage_cleanup_popup(const char *category_name, uint32_t deleted_count)
+{
+    lv_obj_t *box = create_modal();
+
+    lv_obj_t *msg = lv_label_create(box);
+    lv_label_set_text_fmt(msg, ui_str(STR_MSG_STORAGE_CLEANUP), category_name, (unsigned)deleted_count);
+    lv_obj_set_width(msg, LV_PCT(100));
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_modal_close, NULL);
 }
 
 /* 아래에서 씀 — 정의는 판넬 표시 코드 근처(display_photo 옆) */
@@ -1151,8 +1276,11 @@ static void refresh_camera_list(lv_timer_t *t)
          * 보이는 컨트롤이라 "없음" 메시지 자체가 나올 상황이 아님(사용자 확인) */
         if (count == 0) {
             lv_obj_add_flag(s_camera_list, LV_OBJ_FLAG_HIDDEN);
+            /* 2026-09-09(사용자 지시 — "Pending 보여줄 필요 없어" [비어있을 때]) */
+            lv_obj_add_flag(s_camera_pending_lbl, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(s_camera_list, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_camera_pending_lbl, LV_OBJ_FLAG_HIDDEN);
             for (int i = 0; i < count; i++) {
                 lv_obj_t *row = lv_list_add_button(s_camera_list, NULL, "");
                 lv_obj_set_style_text_font(row, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -1280,8 +1408,10 @@ static void refresh_sensor_list(lv_timer_t *t)
 
         if (count == 0) {
             lv_obj_add_flag(s_sensor_list, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_sensor_pending_lbl, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(s_sensor_list, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(s_sensor_pending_lbl, LV_OBJ_FLAG_HIDDEN);
             for (int i = 0; i < count; i++) {
                 lv_obj_t *row = lv_list_add_button(s_sensor_list, NULL, "");
                 lv_obj_set_style_text_font(row, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -2512,11 +2642,17 @@ static void cb_camera_select_changed(lv_event_t *e)
  * 동시에 s_cam_dd_macs(인덱스->mac 매핑)도 같이 갱신 */
 static void rebuild_camera_dropdown_if_changed(const esp_now_hub_node_t *nodes, const uint8_t macs[][6], int count)
 {
-    char options[ESP_NOW_HUB_MAX_NODES * (ESP_NOW_LINK_NAME_LEN + 1)];
+    /* 2026-09-10(사용자 지시 — "카메라 팝업에서 카메라 목록 선택을 alias로 바꿈") — 대시보드
+     * 행(3351/3469줄)과 동일한 alias-or-name 패턴. 버퍼는 alias가 name보다 길 수 있어서
+     * DEVICE_CONFIG_ALIAS_MAX_LEN 기준으로 잡음(예전엔 ESP_NOW_LINK_NAME_LEN 기준이라 alias
+     * 적용 시 넘칠 수 있었음) */
+    char options[ESP_NOW_HUB_MAX_NODES * (DEVICE_CONFIG_ALIAS_MAX_LEN + 1)];
     size_t off = 0;
     for (int i = 0; i < count; i++) {
+        const char *alias = device_config_get_alias(macs[i]);
+        const char *display_name = (alias[0] != '\0') ? alias : nodes[i].name;
         int n = snprintf(options + off, sizeof(options) - off, "%s%s",
-                          i > 0 ? "\n" : "", nodes[i].name);
+                          i > 0 ? "\n" : "", display_name);
         if (n < 0 || (size_t)n >= sizeof(options) - off) break;
         off += (size_t)n;
     }
@@ -2555,7 +2691,10 @@ static void format_bytes_human(uint32_t bytes, char *buf, size_t buf_size)
  * mV/%%를 얻는 방식(CAM=I2C 익스팬더, Sens=직접 GPIO ADC)은 다르지만 표시 포맷은 공통 */
 static void format_battery_display(char *buf, size_t buf_size, uint16_t battery_mv, uint8_t battery_pct)
 {
-    snprintf(buf, buf_size, "%s: %d.%02d V (%u%%)", ui_str(STR_LABEL_BATTERY),
+    /* 2026-09-09(사용자 지적 — "배터리만 Battery : 4.32V (100%) 로 길게 나와") — 연결됨
+     * 행에서 다른 항목(예: "Measure 10s")과 나란히 " / "로 이어붙는 짧은 형식이라, 콜론+
+     * "V" 앞 공백을 빼서 통일감 있게 함(이 함수는 지금 그 행 표시 용도로만 씀) */
+    snprintf(buf, buf_size, "%s %d.%02dV (%u%%)", ui_str(STR_LABEL_BATTERY),
              battery_mv / 1000, (battery_mv % 1000) / 10, (unsigned)battery_pct);
 }
 
@@ -2643,7 +2782,55 @@ static void find_node_name_by_mac(const uint8_t mac[6], char *out, size_t out_ca
  * "스케일마다 계산해야되"). Max/Min/Average 범례는 제목(STR_PANEL_STATS_OVERVIEW)에
  * 한 번만 있고, 각 줄은 "라벨[단위]: 값 / 값 / 값"만(사용자 재지시 — 이산화탄소처럼
  * 긴 값이 X/N/A 반복으로 줄바꿈되던 문제 해결) */
-static void refresh_stats_overview_panel(void)
+/* 2026-09-10(임시 진단으로 발견 — "2009가 한번 나면 계속 나네", refresh_stats_page timing
+ * 실측: graph만 매번 ~100ms, 개괄판넬과 그래프가 채널당 min/max/avg를 각자 또 계산해서
+ * SD 스캔이 중복됨) — 개괄판넬이 계산한 걸 여기 캐시에 남겨서 refresh_stats_graph()가
+ * 재사용하게 함(같은 tick 안에서 순서 보장: refresh_stats_page()가 overview -> graph 순).
+ * 채널 순서는 STATS_GRAPH_SERIES_COUNT 순서(온도/습도/CO2/암모니아)와 동일 */
+static float s_stats_minmax_cache_mn[STATS_GRAPH_SERIES_COUNT];
+static float s_stats_minmax_cache_mx[STATS_GRAPH_SERIES_COUNT];
+static bool  s_stats_minmax_cache_valid[STATS_GRAPH_SERIES_COUNT];
+
+/* 2026-09-10(재설계 — 사용자 지시: SD I/O가 태스크 워치독 exception을 일으키는 걸 태스크
+ * 격리로 막음, [[feedback_design_for_exceptions_not_just_fails]]) — 통계탭 SD 조회(overview/
+ * table/graph)를 LVGL 태스크에서 완전히 떼어내 별도 태스크(stats_io_worker_task)로 옮김.
+ *
+ * 원칙: SD 읽기 자체는 뮤텍스를 절대 안 잡은 채로 함(몇 초가 걸리든 LVGL 태스크는 전혀
+ * 영향 안 받아야 하므로). 다 읽은 뒤 "결과를 스냅샷/공유배열에 복사"하는 딱 그 짧은
+ * 순간에만 s_stats_io_mutex를 잡음. LVGL 쪽(refresh_stats_page, 여전히 2초 타이머)은 그
+ * 스냅샷을 읽어서 화면만 그리고, SD는 절대 직접 안 만짐 — SD가 아무리 느려도(지금처럼
+ * 반복 실패해도) UI는 안 막힘.
+ *
+ * 팝업 열릴 때(build_stats_tab) 태스크 생성, 닫힐 때(teardown_stats_tab) stop 플래그로
+ * "안전한 지점(루프 맨 위, SD 호출 도중이 아닌 곳)"에서만 스스로 종료 — 절대 밖에서
+ * 강제로 vTaskDelete 안 함(SD I/O 도중 강제종료하면 FatFs 내부 리엔트런트 뮤텍스가 영원히
+ * 잠긴 채 남아 이후 모든 파일접근이 막히는 훨씬 심각한 문제가 생길 수 있음). 그래프용 힙
+ * 버퍼(s_stats_chart_real_values 등)도 워커 자신이 종료 직전에 스스로 해제 — teardown이
+ * 즉시 해제하면, 그 순간 워커가 아직 그 버퍼를 쓰고 있을 수 있어(use-after-free) 안 됨 */
+typedef struct {
+    bool     ov_valid[STATS_GRAPH_SERIES_COUNT];
+    float    ov_mn[STATS_GRAPH_SERIES_COUNT];
+    float    ov_mx[STATS_GRAPH_SERIES_COUNT];
+    float    ov_avg[STATS_GRAPH_SERIES_COUNT];
+
+    uint32_t tb_page_index;
+    uint32_t tb_got;
+    uint32_t tb_total_pages;
+    stats_record_t tb_recs[STATS_STORE_PAGE_SIZE];
+
+    uint32_t gr_got[STATS_GRAPH_SERIES_COUNT];
+    uint32_t gr_max_got;
+} stats_io_snapshot_t;
+
+static stats_io_snapshot_t   s_stats_snap;
+static SemaphoreHandle_t     s_stats_io_mutex        = NULL;  /* 스냅샷 + real_values/has_value 보호 */
+static SemaphoreHandle_t     s_stats_graph_buf_mutex = NULL;  /* s_stats_graph_read_buf/point_cap 보호(리사이즈용) */
+static SemaphoreHandle_t     s_stats_io_exited_sem   = NULL;  /* 워커가 완전히 끝났음을 teardown에 알림 */
+static TaskHandle_t          s_stats_io_task         = NULL;
+static volatile bool         s_stats_io_stop         = false;
+static uint32_t              s_graph_worker_tick     = 0;     /* 워커 자신의 3틱당 1회 그래프 스로틀 */
+
+static void stats_io_compute_overview(void)
 {
     uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
     uint32_t scale_sec = (idx < (sizeof(s_stats_scale_values) / sizeof(s_stats_scale_values[0])))
@@ -2651,22 +2838,53 @@ static void refresh_stats_overview_panel(void)
     uint32_t now = rtc_sync_get_unix_time();
     uint32_t cutoff = (now > scale_sec) ? now - scale_sec : 0;
 
+    static const uint8_t chan_types[STATS_GRAPH_SERIES_COUNT] = {
+        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM
+    };
+    bool  valid[STATS_GRAPH_SERIES_COUNT];
+    float mn[STATS_GRAPH_SERIES_COUNT], mx[STATS_GRAPH_SERIES_COUNT], avg[STATS_GRAPH_SERIES_COUNT];
+    for (int i = 0; i < STATS_GRAPH_SERIES_COUNT; i++) {
+        valid[i] = stats_store_get_min_max_avg_since(cutoff, chan_types[i], &mn[i], &mx[i], &avg[i]);
+    }
+
+    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
+    memcpy(s_stats_snap.ov_valid, valid, sizeof(valid));
+    memcpy(s_stats_snap.ov_mn, mn, sizeof(mn));
+    memcpy(s_stats_snap.ov_mx, mx, sizeof(mx));
+    memcpy(s_stats_snap.ov_avg, avg, sizeof(avg));
+    /* 그래프 계산(같은 워커 루프 안에서 뒤이어 돔)이 이 min/max를 그대로 재사용 —
+     * 채널당 SD 스캔을 두 번에서 한 번으로 줄임(2026-09-10 원래 설계 그대로 유지) */
+    memcpy(s_stats_minmax_cache_valid, valid, sizeof(valid));
+    memcpy(s_stats_minmax_cache_mn, mn, sizeof(mn));
+    memcpy(s_stats_minmax_cache_mx, mx, sizeof(mx));
+    xSemaphoreGive(s_stats_io_mutex);
+}
+
+static void stats_io_render_overview(void)
+{
     struct { uint8_t chan_type; lv_obj_t *label; } rows[] = {
         { SENSOR_CHAN_TEMP_C,   s_overview_temp_label },
         { SENSOR_CHAN_HUMI_PCT, s_overview_humi_label },
         { SENSOR_CHAN_CO2_PPM,  s_overview_co2_label  },
         { SENSOR_CHAN_NH3_PPM,  s_overview_nh3_label  },
     };
+    bool  valid[STATS_GRAPH_SERIES_COUNT];
+    float mn[STATS_GRAPH_SERIES_COUNT], mx[STATS_GRAPH_SERIES_COUNT], avg[STATS_GRAPH_SERIES_COUNT];
+    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
+    memcpy(valid, s_stats_snap.ov_valid, sizeof(valid));
+    memcpy(mn, s_stats_snap.ov_mn, sizeof(mn));
+    memcpy(mx, s_stats_snap.ov_mx, sizeof(mx));
+    memcpy(avg, s_stats_snap.ov_avg, sizeof(avg));
+    xSemaphoreGive(s_stats_io_mutex);
+
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
         ui_str_id_t label_id, unit_id;
         if (!chan_type_to_strs(rows[i].chan_type, &label_id, &unit_id)) continue;
-
         char line[128];
-        float mn, mx, avg;
-        if (stats_store_get_min_max_avg_since(cutoff, rows[i].chan_type, &mn, &mx, &avg)) {
-            int mx_s = (int)(mx * 100.0f + 0.5f);
-            int mn_s = (int)(mn * 100.0f + 0.5f);
-            int avg_s = (int)(avg * 100.0f + 0.5f);
+        if (valid[i]) {
+            int mx_s = (int)(mx[i] * 100.0f + 0.5f);
+            int mn_s = (int)(mn[i] * 100.0f + 0.5f);
+            int avg_s = (int)(avg[i] * 100.0f + 0.5f);
             snprintf(line, sizeof(line), ui_str(STR_STATS_OVERVIEW_ROW_FMT), ui_str(label_id), ui_str(unit_id),
                      mx_s / 100, mx_s % 100,
                      mn_s / 100, mn_s % 100,
@@ -2678,24 +2896,44 @@ static void refresh_stats_overview_panel(void)
     }
 }
 
-static void cb_stats_scale_changed(lv_event_t *e) { (void)e; refresh_stats_overview_panel(); }
-
-/* 통계탭 값 테이블 — page_size(20)줄 고정 페이지네이션(2026-09-06 설계, 웹 스타일 —
- * 무한스크롤 아님). stats_store_read_page()가 파일오프셋 직접계산으로 이 페이지분만
- * 읽어오므로, 저장된 기록이 아무리 많아도(1년치) 여기서 읽는 양은 항상 20줄 고정 */
-static void refresh_stats_table(void)
+/* Scale 변경/페이지이동/삭제처럼 "지금 바로 반영돼야 하는" 이벤트는 워커를 깨워서(kick)
+ * 다음 대기(ulTaskNotifyTake)에서 바로 일어나 재계산하게 함 — 직접 SD를 부르지 않음 */
+static void kick_stats_io_worker(void)
 {
+    if (s_stats_io_task) xTaskNotifyGive(s_stats_io_task);
+}
+
+static void cb_stats_scale_changed(lv_event_t *e) { (void)e; kick_stats_io_worker(); }
+
+static void stats_io_compute_table(void)
+{
+    uint32_t page_index = s_stats_page_index;  /* 워커가 읽는 순간 값 — 살짝 stale해도 다음 사이클에 스스로 보정 */
     stats_record_t recs[STATS_STORE_PAGE_SIZE];
-    uint32_t got = stats_store_read_page(s_stats_page_index, STATS_STORE_PAGE_SIZE,
-                                          recs, STATS_STORE_PAGE_SIZE);
+    uint32_t got = stats_store_read_page(page_index, STATS_STORE_PAGE_SIZE, recs, STATS_STORE_PAGE_SIZE);
     uint32_t total = stats_store_get_count();
     uint32_t total_pages = (total + STATS_STORE_PAGE_SIZE - 1) / STATS_STORE_PAGE_SIZE;
     if (total_pages == 0) total_pages = 1;
 
-    /* 2026-09-07 — 헤더(항목/값/시간)는 이제 테이블 밖(stats_table_header_row)에 고정으로
-     * 따로 그림(사용자 지시: "스크롤 안되야되"), 테이블 자신은 데이터 행만 채움 */
-    lv_table_set_row_count(s_stats_table, got > 0 ? got : 1);
+    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
+    s_stats_snap.tb_page_index  = page_index;
+    s_stats_snap.tb_got         = got;
+    s_stats_snap.tb_total_pages = total_pages;
+    memcpy(s_stats_snap.tb_recs, recs, sizeof(recs));
+    xSemaphoreGive(s_stats_io_mutex);
+}
 
+static void stats_io_render_table(void)
+{
+    uint32_t page_index, got, total_pages;
+    stats_record_t recs[STATS_STORE_PAGE_SIZE];
+    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
+    page_index  = s_stats_snap.tb_page_index;
+    got         = s_stats_snap.tb_got;
+    total_pages = s_stats_snap.tb_total_pages;
+    memcpy(recs, s_stats_snap.tb_recs, sizeof(recs));
+    xSemaphoreGive(s_stats_io_mutex);
+
+    lv_table_set_row_count(s_stats_table, got > 0 ? got : 1);
     if (got == 0) {
         lv_table_set_cell_value(s_stats_table, 0, 0, ui_str(STR_STATS_TABLE_EMPTY));
         lv_table_set_cell_value(s_stats_table, 0, 1, "");
@@ -2736,14 +2974,14 @@ static void refresh_stats_table(void)
         }
     }
 
-    uint32_t displayed_page = s_stats_page_index + 1;
+    uint32_t displayed_page = page_index + 1;
     char page_buf[32];
     snprintf(page_buf, sizeof(page_buf), ui_str(STR_STATS_PAGE_FMT),
              (unsigned long)displayed_page, (unsigned long)total_pages);
     lv_label_set_text(s_stats_page_label, page_buf);
 
-    bool can_prev = (s_stats_page_index + 1) < total_pages;  /* 더 오래된 페이지 있음 */
-    bool can_next = (s_stats_page_index > 0);                /* 더 최신 페이지 있음 */
+    bool can_prev = (page_index + 1) < total_pages;  /* 더 오래된 페이지 있음 */
+    bool can_next = (page_index > 0);                /* 더 최신 페이지 있음 */
     if (can_prev) lv_obj_remove_state(s_stats_prev_btn, LV_STATE_DISABLED);
     else          lv_obj_add_state(s_stats_prev_btn, LV_STATE_DISABLED);
     if (can_next) lv_obj_remove_state(s_stats_next_btn, LV_STATE_DISABLED);
@@ -2754,23 +2992,252 @@ static void refresh_stats_table(void)
     else          lv_obj_add_state(s_stats_jump_next_btn, LV_STATE_DISABLED);
 }
 
-/* 2026-09-07(임시 진단 — 사용자 지시: "지속적으로 감소하는 메모리 소모 위치를 파악해") —
- * 이 타이머는 2초마다 연결여부 무관하게 항상 도는데(개괄판넬 4채널 조회+테이블 페이지
- * 조회, 전부 SD fopen/fread/fclose), "연결도 없는데 감소한다"는 관찰과 정확히 맞아떨어져서
- * 유력 후보로 봄 — 이 한 사이클 전체의 내부RAM 비용을 통째로 재서 확인 */
+/* 2026-09-10(사용자 설계 — 라인그래프, 계열 4개 온도/습도/CO2/암모니아, Scale 판넬과 공유) —
+ * 계열마다 실제 단위/범위가 달라서(온도 vs CO2 등 같은 축에 그대로 그리면 한쪽이 눌려버림)
+ * 각 계열을 자기 자신의 기간 내 최소~최대 기준 0~100으로 정규화해서 그림. 실제 값은
+ * s_stats_chart_real_values에 원본 그대로 보관해서 탭했을 때 진짜 값을 보여줌. 그래프뷰가
+ * 숨겨져 있어도(테이블 보는 중) 워커는 계속 계산은 해둠 — 어차피 SD 읽기는 더 이상 LVGL
+ * 태스크를 안 막으므로 아낄 필요가 없어짐(예전엔 이게 LVGL 부담이라 뷰 숨김 시 생략했었음) */
+static void stats_io_compute_graph(void)
+{
+    if ((s_graph_worker_tick++ % 3) != 0) return;  /* 워커 루프 3회(약 6초)당 1번만 SD 읽음 */
+    if (!s_stats_graph_read_buf) return;            /* 리사이즈 경합 등으로 아직 없으면 이번 사이클 건너뜀 */
+
+    uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
+    uint32_t scale_sec = (idx < (sizeof(s_stats_scale_values) / sizeof(s_stats_scale_values[0])))
+                         ? s_stats_scale_values[idx] : s_stats_scale_values[0];
+    uint32_t now = rtc_sync_get_unix_time();
+    uint32_t cutoff = (now > scale_sec) ? now - scale_sec : 0;
+
+    static const uint8_t chan_types[STATS_GRAPH_SERIES_COUNT] = {
+        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM
+    };
+
+    /* s_stats_graph_read_buf/s_stats_graph_point_cap 전용 뮤텍스 — 이 구간(SD 읽기 포함) 내내
+     * 잡고 있음. 이걸 기다릴 수 있는 건 리사이즈(cb_stats_point_count_changed, 드물게 발생하는
+     * 디버그 조작)뿐이라 LVGL 렌더 경로엔 전혀 영향 없음 */
+    xSemaphoreTake(s_stats_graph_buf_mutex, portMAX_DELAY);
+    uint32_t cap = s_stats_graph_point_cap;
+    uint32_t got[STATS_GRAPH_SERIES_COUNT];
+    uint32_t max_got = 0;
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        got[s] = stats_store_read_since(cutoff, chan_types[s], &s_stats_graph_read_buf[(size_t)s * cap], cap);
+        if (got[s] > max_got) max_got = got[s];
+    }
+    if (max_got == 0) max_got = 1;
+
+    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        for (uint32_t i = 0; i < max_got; i++) {
+            if (i < got[s]) {
+                s_stats_chart_real_values[(size_t)s * cap + i] = s_stats_graph_read_buf[(size_t)s * cap + i].value;
+                s_stats_chart_has_value[(size_t)s * cap + i] = true;
+            } else {
+                s_stats_chart_has_value[(size_t)s * cap + i] = false;
+            }
+        }
+        s_stats_snap.gr_got[s] = got[s];
+    }
+    s_stats_snap.gr_max_got = max_got;
+    xSemaphoreGive(s_stats_io_mutex);
+    xSemaphoreGive(s_stats_graph_buf_mutex);
+}
+
+static void stats_io_render_graph(void)
+{
+    if (!s_stats_chart) return;
+    if (lv_obj_has_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN)) return;
+
+    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
+    uint32_t got[STATS_GRAPH_SERIES_COUNT];
+    memcpy(got, s_stats_snap.gr_got, sizeof(got));
+    uint32_t max_got = s_stats_snap.gr_max_got;
+    bool  ov_valid[STATS_GRAPH_SERIES_COUNT];
+    float ov_mn[STATS_GRAPH_SERIES_COUNT], ov_mx[STATS_GRAPH_SERIES_COUNT];
+    memcpy(ov_valid, s_stats_snap.ov_valid, sizeof(ov_valid));
+    memcpy(ov_mn, s_stats_snap.ov_mn, sizeof(ov_mn));
+    memcpy(ov_mx, s_stats_snap.ov_mx, sizeof(ov_mx));
+    uint32_t cap = s_stats_graph_point_cap;  /* real_values/has_value 인덱싱과 정합성 맞춰 같은 락 안에서 읽음 */
+
+    if (max_got == 0) { xSemaphoreGive(s_stats_io_mutex); return; }  /* 워커가 아직 한 번도 안 돎 */
+    s_stats_chart_shown_points = max_got;
+    lv_chart_set_point_count(s_stats_chart, max_got);
+
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        bool have_range = ov_valid[s];
+        float mn = ov_mn[s];
+        float mx = ov_mx[s];
+        float span = (have_range && mx > mn) ? (mx - mn) : 0.0f;
+
+        int32_t norm_vals[STATS_GRAPH_POINT_COUNT_MAX];
+        for (uint32_t i = 0; i < max_got; i++) {
+            if (i < got[s]) {
+                float v = s_stats_chart_real_values[(size_t)s * cap + i];
+                norm_vals[i] = (span > 0.0f) ? (int32_t)(((v - mn) / span) * 100.0f + 0.5f) : 50;
+            } else {
+                norm_vals[i] = LV_CHART_POINT_NONE;
+            }
+        }
+        lv_chart_set_series_values(s_stats_chart, s_stats_chart_series[s], norm_vals, max_got);
+    }
+    xSemaphoreGive(s_stats_io_mutex);
+}
+
+static void stats_io_worker_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        if (s_stats_io_stop) break;
+        stats_io_compute_overview();
+        if (s_stats_io_stop) break;
+        stats_io_compute_table();
+        if (s_stats_io_stop) break;
+        stats_io_compute_graph();
+        if (s_stats_io_stop) break;
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));  /* 2초 주기, kick_stats_io_worker()로 즉시 깨울 수 있음 */
+    }
+    /* 종료 직전, 이 팝업 세션 동안 쓰던 그래프 힙 버퍼를 스스로 해제 — teardown이 즉시
+     * 해제하면 그 순간 이 워커가 아직 쓰고 있을 수 있어 위험함(use-after-free). 리사이즈
+     * (cb_stats_point_count_changed)와 같은 뮤텍스로 보호해서 서로 안 겹치게 함 */
+    xSemaphoreTake(s_stats_graph_buf_mutex, portMAX_DELAY);
+    heap_caps_free(s_stats_chart_real_values); s_stats_chart_real_values = NULL;
+    heap_caps_free(s_stats_chart_has_value);   s_stats_chart_has_value = NULL;
+    heap_caps_free(s_stats_graph_read_buf);    s_stats_graph_read_buf = NULL;
+    s_stats_graph_point_cap = STATS_GRAPH_POINT_COUNT;
+    xSemaphoreGive(s_stats_graph_buf_mutex);
+    s_stats_io_task = NULL;
+    if (s_stats_io_exited_sem) xSemaphoreGive(s_stats_io_exited_sem);
+    vTaskDelete(NULL);
+}
+
+/* 2026-09-10(임시 디버그 콜백 — 위 STATS_GRAPH_POINT_COUNT_MAX 주석 참고) — 점 개수
+ * 드롭다운이 바뀌면 버퍼를 새 크기로 재할당. s_stats_graph_buf_mutex로 워커의
+ * stats_io_compute_graph()와 경합(같은 포인터/cap을 동시에 못 건드리게)을 막음.
+ * 리사이즈는 드문 디버그 조작이라 워커가 마침 SD 읽는 중이면 그게 끝날 때까지 잠깐
+ * 기다릴 수 있음(최대 몇 초) — 이건 LVGL 렌더 경로와 무관한 뮤텍스라 화면은 안 막힘 */
+static void cb_stats_point_count_changed(lv_event_t *e)
+{
+    (void)e;
+    static const uint32_t opts[] = { 60, 120, 240, 480 };
+    uint16_t idx = lv_dropdown_get_selected(s_stats_point_count_dd);
+    uint32_t new_cap = (idx < (sizeof(opts) / sizeof(opts[0]))) ? opts[idx] : 60;
+    xSemaphoreTake(s_stats_graph_buf_mutex, portMAX_DELAY);
+    resize_stats_graph_buffers(new_cap);
+    xSemaphoreGive(s_stats_graph_buf_mutex);
+    s_graph_worker_tick = 0;
+    kick_stats_io_worker();
+}
+
+static void cb_stats_chart_series_toggle(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    bool checked = lv_obj_has_state(s_stats_chart_checkbox[idx], LV_STATE_CHECKED);
+    lv_chart_hide_series(s_stats_chart, s_stats_chart_series[idx], !checked);
+}
+
+/* 2026-09-10(사용자 지시 — "탭하면 값이 나타나는 것") — 탭 x좌표로 가장 가까운 인덱스를
+ * 찾고(보이는 계열 중 하나 기준, x좌표는 계열 무관하게 공통), 그 인덱스에서 탭 y좌표와
+ * 가장 가까운 보이는 계열 하나를 골라 실제 값을 표시(사용자 지시: "가장 가까운 점") */
+static void cb_stats_chart_tap(lv_event_t *e)
+{
+    (void)e;
+    lv_indev_t *indev = lv_indev_active();
+    if (!indev) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+
+    uint32_t point_count = s_stats_chart_shown_points;
+    if (point_count == 0) return;
+
+    int ref_series = -1;
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        if (lv_obj_has_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED)) { ref_series = s; break; }
+    }
+    if (ref_series < 0) return;
+
+    lv_area_t chart_coords;
+    lv_obj_get_coords(s_stats_chart, &chart_coords);
+
+    uint32_t nearest_idx = 0;
+    int32_t best_dist = INT32_MAX;
+    for (uint32_t i = 0; i < point_count; i++) {
+        lv_point_t pp;
+        lv_chart_get_point_pos_by_id(s_stats_chart, s_stats_chart_series[ref_series], i, &pp);
+        int32_t px = chart_coords.x1 + pp.x;
+        int32_t dist = (p.x > px) ? (p.x - px) : (px - p.x);
+        if (dist < best_dist) { best_dist = dist; nearest_idx = i; }
+    }
+
+    static const uint8_t chan_types[STATS_GRAPH_SERIES_COUNT] = {
+        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM
+    };
+    /* 2026-09-10(태스크 격리 재설계) — real_values/has_value는 이제 워커 태스크도 같이
+     * 건드리는 공유 배열이라 s_stats_io_mutex로 보호해서 읽음(짧은 CPU 작업이라 잠깐
+     * 잡아도 워커의 SD I/O와는 안 겹침 — 워커는 이 뮤텍스를 I/O 중엔 안 잡으므로) */
+    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
+    int chosen_series = -1;
+    int32_t best_y_dist = INT32_MAX;
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        if (!lv_obj_has_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED)) continue;
+        if (!s_stats_chart_has_value[(size_t)s * s_stats_graph_point_cap + nearest_idx]) continue;
+        lv_point_t pp;
+        lv_chart_get_point_pos_by_id(s_stats_chart, s_stats_chart_series[s], nearest_idx, &pp);
+        int32_t py = chart_coords.y1 + pp.y;
+        int32_t dist = (p.y > py) ? (p.y - py) : (py - p.y);
+        if (dist < best_y_dist) { best_y_dist = dist; chosen_series = s; }
+    }
+    if (chosen_series < 0) { xSemaphoreGive(s_stats_io_mutex); return; }
+    float v = s_stats_chart_real_values[(size_t)chosen_series * s_stats_graph_point_cap + nearest_idx];
+    xSemaphoreGive(s_stats_io_mutex);
+
+    ui_str_id_t label_id, unit_id;
+    if (!chan_type_to_strs(chan_types[chosen_series], &label_id, &unit_id)) return;
+    int scaled = (int)(v * 100.0f + 0.5f);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%s: %d.%02d%s", ui_str(label_id), scaled / 100, scaled % 100, ui_str(unit_id));
+    lv_label_set_text(s_stats_chart_tap_label, buf);
+}
+
+/* 2026-09-10(재설계 — SD I/O를 stats_io_worker_task로 격리) — 이 타이머는 이제 SD를 전혀
+ * 안 건드림(순수 렌더). 예전엔 여기서 SD fopen/fread/fclose가 직접 일어나서 SD 장애 시
+ * 몇 초씩 LVGL 태스크를 막아 태스크워치독까지 발동시켰음
+ * ([[feedback_design_for_exceptions_not_just_fails]]) — 그 SD 접근은 전부 워커로 옮기고,
+ * 여기는 워커가 미리 계산해둔 스냅샷을 읽어 화면만 그림. 타이밍 로그는 "렌더가 실제로
+ * 빨라졌는지"를 원복 전/후 비교할 수 있게 그대로 유지 */
 static void refresh_stats_page(lv_timer_t *t)
 {
     (void)t;
     size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    refresh_stats_overview_panel();
-    refresh_stats_table();
+    uint32_t t0 = lv_tick_get();
+    stats_io_render_overview();
+    uint32_t t1 = lv_tick_get();
+    stats_io_render_table();
+    uint32_t t2 = lv_tick_get();
+    stats_io_render_graph();
+    uint32_t t3 = lv_tick_get();
+    if ((t3 - t0) > 50) {  /* 50ms 이상 걸린 사이클만 로그(매번 찍으면 스팸) */
+        ESP_LOGW(TAG, "MEMDIAG refresh_stats_page(render) timing: overview=%ums table=%ums graph=%ums total=%ums",
+                 (unsigned)(t1 - t0), (unsigned)(t2 - t1), (unsigned)(t3 - t2), (unsigned)(t3 - t0));
+    }
     size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     if (before != after) {
         ESP_LOGW(TAG, "MEMDIAG refresh_stats_page: internal %u -> %u (delta=%d)",
                  (unsigned)before, (unsigned)after, (int)before - (int)after);
     }
+    /* 2026-09-10(임시 디버그 — 사용자 지시: "남은 Internal memory를 overview 옆에
+     * 주화면처럼 표기해") — 이미 위에서 잰 after를 그대로 재사용, 추가 조회 없음 */
+    if (s_stats_graph_mem_label) {
+        char mem_i[16];
+        format_bytes_human((uint32_t)after, mem_i, sizeof(mem_i));
+        lv_label_set_text_fmt(s_stats_graph_mem_label, "I = %s", mem_i);
+    }
 }
 
+/* 2026-09-10(태스크 격리 재설계) — 예전엔 여기서 바로 refresh_stats_table()을 불러 즉시
+ * 반영했는데, 이제 그 함수(SD 읽기 포함)가 워커 태스크로 옮겨져서 여기선 페이지 인덱스만
+ * 바꾸고 워커를 깨움(kick) — 화면 반영은 다음 refresh_stats_page 틱(최대 2초)에 이뤄짐.
+ * 약간의 지연이 생기지만, 이 버튼들이 SD 스캔을 직접 다시 하지 않으므로 LVGL 태스크가
+ * 절대 안 막힌다는 이득이 더 큼 */
 static void stats_prev_page_cb(lv_event_t *e)
 {
     (void)e;
@@ -2778,14 +3245,14 @@ static void stats_prev_page_cb(lv_event_t *e)
     uint32_t total_pages = (total + STATS_STORE_PAGE_SIZE - 1) / STATS_STORE_PAGE_SIZE;
     if (total_pages == 0) total_pages = 1;
     if (s_stats_page_index + 1 < total_pages) s_stats_page_index++;
-    refresh_stats_table();
+    kick_stats_io_worker();
 }
 
 static void stats_next_page_cb(lv_event_t *e)
 {
     (void)e;
     if (s_stats_page_index > 0) s_stats_page_index--;
-    refresh_stats_table();
+    kick_stats_io_worker();
 }
 
 /* 2026-09-07(사용자 지시 — "10개씩 이동 단추도 있으면") — 1칸 이동과 동일 원칙, 그냥
@@ -2798,14 +3265,14 @@ static void stats_jump_prev_page_cb(lv_event_t *e)
     if (total_pages == 0) total_pages = 1;
     s_stats_page_index += STATS_JUMP_PAGE_COUNT;
     if (s_stats_page_index + 1 > total_pages) s_stats_page_index = total_pages - 1;
-    refresh_stats_table();
+    kick_stats_io_worker();
 }
 
 static void stats_jump_next_page_cb(lv_event_t *e)
 {
     (void)e;
     s_stats_page_index = (s_stats_page_index > STATS_JUMP_PAGE_COUNT) ? s_stats_page_index - STATS_JUMP_PAGE_COUNT : 0;
-    refresh_stats_table();
+    kick_stats_io_worker();
 }
 
 /* 2026-09-07(사용자 지시 — "저장값 지우기 기능도", "지울때 확인 팝업도") — Yes/Cancel
@@ -2815,8 +3282,7 @@ static void cb_delete_stats_confirmed(void *ctx)
     (void)ctx;
     stats_store_delete_all();
     s_stats_page_index = 0;
-    refresh_stats_table();
-    refresh_stats_overview_panel();
+    kick_stats_io_worker();
 }
 
 static void cb_delete_stats_tap(lv_event_t *e)
@@ -2924,10 +3390,10 @@ static void refresh_dashboard(lv_timer_t *t)
      * 매 틱 다시 읽음(가벼운 문자열 비교라 비용 무시 가능) — 없으면(빈 문자열) 숨김 */
     const char *ip = esp_now_hub_get_own_ip_str();
     if (ip[0] != '\0') {
-        lv_label_set_text_fmt(s_web_url_label, "%s http://%s:80", ui_str(STR_LABEL_WEB), ip);
-        lv_obj_remove_flag(s_web_url_label, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text_fmt(s_web_url_label, "http://%s:80", ip);
+        lv_obj_remove_flag(s_web_row, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_add_flag(s_web_url_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_web_row, LV_OBJ_FLAG_HIDDEN);
     }
 
     refresh_network_right_zone();  /* 2026-08-29 — 설정탭 네트워크 행의 우측(IP/SSID/찾기) */
@@ -2937,7 +3403,59 @@ static void refresh_dashboard(lv_timer_t *t)
     uint32_t free_internal_now = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     format_bytes_human(free_internal_now, mem_i, sizeof(mem_i));
     format_bytes_human((uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), mem_p, sizeof(mem_p));
-    lv_label_set_text_fmt(s_mem_status_label, "%s : I = %s / P = %s", ui_str(STR_LABEL_MEMORY), mem_i, mem_p);
+    /* 2026-09-09(사용자 지시 — "항목 표기에 콜론이 어떤건 붙고 어떤 건 안 붙어있어, 다
+     * 붙여줘") — 콜론 앞 공백 제거, 다른 라벨들("%s: ...")과 통일 */
+    lv_label_set_text_fmt(s_mem_status_label, "%s: I = %s / P = %s", ui_str(STR_LABEL_MEMORY), mem_i, mem_p);
+
+    /* 2026-09-10(사용자 설계 — "CNTL 메모리 밑에 SD 용량도 표시... 9:1 비율... 90%가 될 때
+     * 10%만큼 오래된 걸 지운다") — SD 원격 조회는 매 틱(1초)마다 하기엔 낭비라 5초마다만.
+     * Picture는 캠 사진저장 자체가 아직 미구현(미정)이라 항상 0 사용(예산은 그대로 계산돼
+     * 표시됨) */
+    static int s_storage_check_tick = 0;
+    if (++s_storage_check_tick >= 5) {
+        s_storage_check_tick = 0;
+        uint64_t sd_total = 0, sd_free = 0;
+        if (s_storage_status_label && sd_storage_get_capacity(&sd_total, &sd_free) && sd_total > 0) {
+            uint64_t picture_budget = sd_total * 9 / 10;
+            uint64_t measure_budget = sd_total / 10;
+            uint64_t picture_used = 0;  /* TODO(미정): 캠 사진 저장 구현되면 폴더 크기 합산으로 교체 */
+            uint64_t measure_used = stats_store_get_used_bytes();
+            /* 2026-09-10(임시 진단 — "지금 1주일치가 아니지, 몇시간 정도일 뿐이야" 정확한
+             * 수치 확인용, 확인 후 제거) */
+            {
+                uint64_t recs = measure_used / sizeof(stats_record_t);
+                double hours = (double)recs / 4.0 * 30.0 / 3600.0;
+                ESP_LOGW(TAG, "MEMDIAG stats_store: used=%llu bytes records=%llu (~%.2fh, 30s/4ch 가정)",
+                         (unsigned long long)measure_used, (unsigned long long)recs, hours);
+            }
+            uint64_t picture_used_clamped = (picture_used > picture_budget) ? picture_budget : picture_used;
+            uint64_t measure_used_clamped = (measure_used > measure_budget) ? measure_budget : measure_used;
+
+            uint32_t picture_pct = (uint32_t)(picture_used * 100 / picture_budget);
+            uint32_t measure_pct = (uint32_t)(measure_used * 100 / measure_budget);
+            uint32_t total_pct   = (uint32_t)((sd_total - sd_free) * 100 / sd_total);
+            uint32_t picture_remain_mb = (uint32_t)((picture_budget - picture_used_clamped) / (1024 * 1024));
+            uint32_t measure_remain_mb = (uint32_t)((measure_budget - measure_used_clamped) / (1024 * 1024));
+            uint32_t total_remain_mb   = (uint32_t)(sd_free / (1024 * 1024));
+
+            lv_label_set_text_fmt(s_storage_status_label, "%s[%%(Remain MB)]: %s %u(%u) / %s %u(%u) / %s %u(%u)",
+                ui_str(STR_LABEL_STORAGE),
+                ui_str(STR_LABEL_PICTURE), (unsigned)picture_pct, (unsigned)picture_remain_mb,
+                ui_str(STR_LABEL_MEASURE_SHORT), (unsigned)measure_pct, (unsigned)measure_remain_mb,
+                ui_str(STR_LABEL_TOTAL), (unsigned)total_pct, (unsigned)total_remain_mb);
+
+            /* 정리 트리거 — Measure가 자기 예산의 90% 이상이면 80%까지 삭제. Picture는
+             * 실사용 0이라 지금은 절대 안 걸림(사진저장 구현 후 동일 패턴으로 확장 예정) */
+            if (measure_used * 100 / measure_budget >= 90) {
+                uint32_t deleted = stats_store_trim_to(measure_budget * 80 / 100);
+                if (deleted > 0) {
+                    show_storage_cleanup_popup(ui_str(STR_LABEL_MEASURE_SHORT), deleted);
+                }
+            }
+        } else if (s_storage_status_label) {
+            lv_label_set_text(s_storage_status_label, "");
+        }
+    }
     /* 2026-09-07(임시 진단 — 내부RAM 서서히 감소 원인 추적) — 10초마다(이 틱이 1초 주기라
      * 10번째마다) 전체 추이를 로그로 남김. stats_store_append() 안쪽 진단과 대조용 */
     static int s_mem_log_tick = 0;
@@ -2993,23 +3511,49 @@ static void refresh_dashboard(lv_timer_t *t)
             lv_obj_set_style_border_width(row, 0, 0);
             lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
             lv_obj_set_style_pad_all(row, 0, 0);
+            /* 2026-09-09(사용자 발견 — PRESSED 하이라이트를 넣고 보니 "탭 가능 영역이 딱
+             * 글씨 높이만큼이었어") — 행 사이 간격(pad_row, 리스트 쪽)은 그대로 두고 행
+             * 자신의 상하 패딩만 최대한 키워서 탭 영역을 넓힘("최대한 넓혀") */
+            lv_obj_set_style_pad_ver(row, 16, 0);
             lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            /* 2026-09-09(사용자 재설계 — "전계강도를 가장 왼쪽으로... 전계강도+공백1칸+
+             * 장치명...+> 표시는 우측 정렬") — SPACE_BETWEEN을 버리고 순서(signal->label->
+             * chevron)+label의 flex_grow(1)로 배치: signal-label 사이는 pad_column의 좁은
+             * 고정 간격, label이 남는 폭을 다 먹어서 chevron이 자동으로 행 오른쪽 끝에 붙음 */
+            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_pad_column(row, 8, 0);
             lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_set_user_data(row, (void *)(uintptr_t)i);
             lv_obj_add_event_cb(row, cb_sensor_dash_row_clicked, LV_EVENT_CLICKED, NULL);
-
-            lv_obj_t *label = lv_label_create(row);
-            lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
+            /* 2026-09-09(사용자 설계 — "탭 가능한건지, 눌리긴 했는지 확인할 방법") — 눌리는
+             * 순간 배경 하이라이트(별도 이벤트 코드 없이 LVGL PRESSED 상태 스타일만) */
+            lv_obj_set_style_bg_color(row, lv_palette_main(LV_PALETTE_GREY), LV_STATE_PRESSED);
+            lv_obj_set_style_bg_opa(row, LV_OPA_30, LV_STATE_PRESSED);
 
             lv_obj_t *signal = create_signal_widget(row);
+
+            lv_obj_t *label = lv_label_create(row);
+            lv_obj_set_flex_grow(label, 1);
+            lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+            lv_obj_t *chevron = lv_label_create(row);
+            lv_label_set_text(chevron, ">");
+            lv_obj_set_style_text_font(chevron, ui_font_get(UI_FONT_SIZE_18), 0);
+            lv_obj_add_style(chevron, &style_text_muted, 0);
 
             s_sensor_dash_row_objs[i] = label;
             s_sensor_dash_row_signal[i] = signal;
             memcpy(s_sensor_dash_row_macs[i], sens_macs[i], 6);
+            /* 2026-09-09(사용자 설계 — "장치명은 접속해온 장치가 제시하는 이름... 코드
+             * 내에서는 항상 장치명을 ID로 사용... Alias는 표기용... 지정돼 있으면 Alias를
+             * 쓰고 지정 안 돼있으면 장치명을 씀") — name은 절대 안 건드리고 항상 진짜
+             * 장치명, alias는 표시용으로만 쓰는 별도 필드(빈 문자열=미지정) */
             strncpy(s_sensor_dash_row_names[i], sens_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
             s_sensor_dash_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
+            strncpy(s_sensor_dash_row_alias[i], device_config_get_alias(sens_macs[i]),
+                    sizeof(s_sensor_dash_row_alias[i]) - 1);
+            s_sensor_dash_row_alias[i][sizeof(s_sensor_dash_row_alias[i]) - 1] = '\0';
             s_sensor_dash_row_last_text[i][0] = '\0';
         }
         s_sensor_dash_row_count = (sens_count < ESP_NOW_HUB_MAX_NODES) ? sens_count : ESP_NOW_HUB_MAX_NODES;
@@ -3017,20 +3561,25 @@ static void refresh_dashboard(lv_timer_t *t)
     for (int i = 0; i < s_sensor_dash_row_count; i++) {
         hub_conn_state_t st = esp_now_hub_get_conn_state(s_sensor_dash_row_macs[i]);
         char buf[96];
-        int n = snprintf(buf, sizeof(buf), "%s (%s)", s_sensor_dash_row_names[i],
+        /* 표시용으로만 여기서 alias-or-name 선택(지역 변수) — name 필드 자체는 절대 안 바뀜 */
+        const char *display_name = (s_sensor_dash_row_alias[i][0] != '\0')
+                                    ? s_sensor_dash_row_alias[i] : s_sensor_dash_row_names[i];
+        int n = snprintf(buf, sizeof(buf), "%s (%s)", display_name,
                  ui_str(st == HUB_CONN_STATE_ACTIVE ? STR_STATUS_ACTIVE : STR_STATUS_PAIRED));
         /* 개별설정값(측정주기) — 사용자 설계: "연결된 목록에는 측정 값이 아니라, 개별
-         * 설정된 값이 보여야되" */
+         * 설정된 값이 보여야되". 2026-09-09(사용자 지적 — "그냥 10s로 나오고... Measure 10S
+         * 형식이 좋고, 항목간 대시(-)보다 (/)가 좋아") — 라벨 접두 추가, 구분자 " / "로 통일 */
         uint32_t interval_sec = device_config_get_sens_sample_interval_sec(s_sensor_dash_row_macs[i]);
         if (interval_sec > 0 && n > 0 && (size_t)n < sizeof(buf)) {
-            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " - %us", (unsigned)interval_sec);
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %us",
+                          ui_str(STR_LABEL_MEASURE_SHORT), (unsigned)interval_sec);
         }
         for (int j = 0; j < sens_count; j++) {
             if (memcmp(sens_macs[j], s_sensor_dash_row_macs[i], 6) != 0) continue;
             if (sens_nodes[j].has_deepsleep_stats && n > 0 && (size_t)n < sizeof(buf)) {
                 char batt[32];
                 format_battery_display(batt, sizeof(batt), sens_nodes[j].battery_mv, sens_nodes[j].battery_pct);
-                snprintf(buf + n, sizeof(buf) - (size_t)n, " - %s", batt);
+                snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", batt);
             }
             update_signal_widget(s_sensor_dash_row_signal[i], sens_nodes[j].has_rssi, sens_nodes[j].rssi);
             break;
@@ -3047,7 +3596,12 @@ static void refresh_dashboard(lv_timer_t *t)
         lv_obj_add_flag(s_sensor_empty, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_sensor_dash_list, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_remove_flag(s_sensor_empty, LV_OBJ_FLAG_HIDDEN);
+        /* 2026-09-09(사용자 지적 — "No xxx device는... 대기 중인 것도 없고 연결된 것도
+         * 없을 때만 이게 보여") — 대기중 목록(s_sensor_row_count, refresh_sensor_list의
+         * 자체 1초 타이머가 관리하는 전역 변수)까지 같이 봐서 정말 아무 것도 없을 때만
+         * "없음" 문구를 보여줌 */
+        if (s_sensor_row_count == 0) lv_obj_remove_flag(s_sensor_empty, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_sensor_empty, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_sensor_dash_list, LV_OBJ_FLAG_HIDDEN);
     }
     refresh_summary_live_values(s_dash_nodes, total);  /* 2026-09-08 — Summary 실시간 순시치 블록 */
@@ -3082,24 +3636,43 @@ static void refresh_dashboard(lv_timer_t *t)
             lv_obj_set_style_border_width(row, 0, 0);
             lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
             lv_obj_set_style_pad_all(row, 0, 0);
+            /* 2026-09-09(사용자 발견 — "탭 가능 영역이 딱 글씨 높이만큼이었어") — 센서
+             * 목록과 동일 이유로 행 자신의 상하 패딩만 최대한 키움 */
+            lv_obj_set_style_pad_ver(row, 16, 0);
             lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            /* 2026-09-09(사용자 재설계 — 센서 목록과 동일 원칙, "전계강도를 가장 왼쪽으로") */
+            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_pad_column(row, 8, 0);
             lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
             /* 2026-09-08(연결 기능 주화면 이관) — 탭하면 개별설정 팝업(Alias/연결끊기) */
             lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_set_user_data(row, (void *)(uintptr_t)i);
             lv_obj_add_event_cb(row, cb_camera_dash_row_clicked, LV_EVENT_CLICKED, NULL);
-
-            lv_obj_t *label = lv_label_create(row);
-            lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
+            /* 2026-09-09(사용자 설계 — "탭 가능한건지, 눌리긴 했는지 확인할 방법") */
+            lv_obj_set_style_bg_color(row, lv_palette_main(LV_PALETTE_GREY), LV_STATE_PRESSED);
+            lv_obj_set_style_bg_opa(row, LV_OPA_30, LV_STATE_PRESSED);
 
             lv_obj_t *signal = create_signal_widget(row);
+
+            lv_obj_t *label = lv_label_create(row);
+            lv_obj_set_flex_grow(label, 1);
+            lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+            lv_obj_t *chevron = lv_label_create(row);
+            lv_label_set_text(chevron, ">");
+            lv_obj_set_style_text_font(chevron, ui_font_get(UI_FONT_SIZE_18), 0);
+            lv_obj_add_style(chevron, &style_text_muted, 0);
 
             s_camera_dash_row_objs[i] = label;
             s_camera_dash_row_signal[i] = signal;
             memcpy(s_camera_dash_row_macs[i], cam_macs[i], 6);
+            /* 2026-09-09(사용자 설계 — 센서 목록과 동일 원칙) — name은 항상 진짜 장치명(ID),
+             * alias는 표시용 별도 필드 */
             strncpy(s_camera_dash_row_names[i], cam_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
             s_camera_dash_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
+            strncpy(s_camera_dash_row_alias[i], device_config_get_alias(cam_macs[i]),
+                    sizeof(s_camera_dash_row_alias[i]) - 1);
+            s_camera_dash_row_alias[i][sizeof(s_camera_dash_row_alias[i]) - 1] = '\0';
             s_camera_dash_row_last_text[i][0] = '\0';
         }
         s_camera_dash_row_count = (cam_count < ESP_NOW_HUB_MAX_NODES) ? cam_count : ESP_NOW_HUB_MAX_NODES;
@@ -3107,7 +3680,9 @@ static void refresh_dashboard(lv_timer_t *t)
     for (int i = 0; i < s_camera_dash_row_count; i++) {
         hub_conn_state_t st = esp_now_hub_get_conn_state(s_camera_dash_row_macs[i]);
         char buf[96];
-        int n = snprintf(buf, sizeof(buf), "%s (%s)", s_camera_dash_row_names[i],
+        const char *display_name = (s_camera_dash_row_alias[i][0] != '\0')
+                                    ? s_camera_dash_row_alias[i] : s_camera_dash_row_names[i];
+        int n = snprintf(buf, sizeof(buf), "%s (%s)", display_name,
                  ui_str(st == HUB_CONN_STATE_ACTIVE ? STR_STATUS_ACTIVE : STR_STATUS_PAIRED));
         for (int j = 0; j < cam_count; j++) {
             if (memcmp(cam_macs[j], s_camera_dash_row_macs[i], 6) != 0) continue;
@@ -3116,7 +3691,7 @@ static void refresh_dashboard(lv_timer_t *t)
             if (cam_nodes[j].has_deepsleep_stats && n > 0 && (size_t)n < sizeof(buf)) {
                 char batt[32];
                 format_battery_display(batt, sizeof(batt), cam_nodes[j].battery_mv, cam_nodes[j].battery_pct);
-                snprintf(buf + n, sizeof(buf) - (size_t)n, " - %s", batt);
+                snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", batt);
             }
             update_signal_widget(s_camera_dash_row_signal[i], cam_nodes[j].has_rssi, cam_nodes[j].rssi);
             break;
@@ -3157,7 +3732,10 @@ static void refresh_dashboard(lv_timer_t *t)
             lv_obj_remove_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
         }
     } else {
-        lv_obj_remove_flag(s_camera_empty, LV_OBJ_FLAG_HIDDEN);
+        /* 2026-09-09(사용자 지적) — 센서 판넬과 동일 원칙: 대기중(s_camera_row_count)까지
+         * 없을 때만 "없음" 표시 */
+        if (s_camera_row_count == 0) lv_obj_remove_flag(s_camera_empty, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_camera_empty, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_camera_dash_list, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
@@ -3705,12 +4283,13 @@ static wifi_ap_record_t *s_wifi_scan_records = NULL;
 static int  s_wifi_scan_count = 0;
 static char s_wifi_selected_ssid[33] = "";
 
+/* 2026-09-09(사용자 지적) — refresh_network_right_zone()와 동일 이유로 device_config_get_sta_ssid()
+ * 게이트 제거, 실제 연결 여부(ip 유무)만으로 판단 */
 static void update_wifi_status_label(void)
 {
     if (!s_wifi_status_lbl) return;
-    const char *saved_ssid = device_config_get_sta_ssid();
     const char *ip = esp_now_hub_get_own_ip_str();
-    if (saved_ssid[0] != '\0' && ip[0] != '\0') {
+    if (ip[0] != '\0') {
         lv_label_set_text_fmt(s_wifi_status_lbl, "%s: %s", ui_str(STR_STATUS_CONNECTED),
                                esp_now_hub_get_active_sta_ssid());
     } else {
@@ -4123,14 +4702,15 @@ static void refresh_network_right_zone(void)
         /* STA 모드는 항상 버튼 하나 — 연결 안 됐으면 캡션 "찾기", 연결됐으면 캡션이 SSID로
          * 바뀔 뿐 여전히 같은 버튼(눌러서 다른 AP로 재검색 가능, 2026-08-29 사용자 지적:
          * "연결된 AP가 있을 때 바꿀 방법이 없다" + "레이블이 단추 캡션이어야").
-         * 2026-08-29 추가수정(사용자 지시) — "찾기"로 저장한 SSID가 없으면 실제로는
-         * 하드코딩 폴백(esp_now_hub.c의 WIFI_SSID)에 연결돼있어도 무조건 "찾기"로 표시.
-         * 이 행은 사용자가 "찾기"로 직접 고른 네트워크만 보여줘야 하고, 하드코딩 값은
-         * 이 기능 관점에서 존재하지 않는 것처럼 취급 */
-        const char *saved_ssid = device_config_get_sta_ssid();
+         * 2026-09-09(사용자 지적 — "상단바에는 연결된 AP SSID가 이미 보이고 있으니까
+         * 내가 지적한 2군데는 버그야") — 2026-08-29엔 "찾기로 저장한 SSID 없으면 하드코딩
+         * 폴백이어도 무조건 찾기로 표시"가 의도적 설계였지만, 이 설계 자체가 실제 연결
+         * 정보가 있는데도 안 보여주는 버그로 재판정됨 — 상단바(esp_now_hub_get_active_sta_ssid
+         * 그대로 사용)와 똑같이 "진짜 연결됐는지"(ip 유무)만으로 판단하도록 정정.
+         * device_config_get_sta_ssid() 게이트 제거 */
         lv_obj_add_flag(s_network_right_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_network_find_btn, LV_OBJ_FLAG_HIDDEN);
-        if (saved_ssid[0] != '\0' && ip[0] != '\0') {
+        if (ip[0] != '\0') {
             lv_label_set_text(s_network_find_lbl, esp_now_hub_get_active_sta_ssid());
         } else {
             lv_label_set_text(s_network_find_lbl, ui_str(STR_BTN_FIND));
@@ -4793,6 +5373,17 @@ void ui_init(void)
     style_inverted_control(s_time_ctrl_label);
     lv_obj_add_flag(s_time_ctrl_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_time_ctrl_label, cb_settime_btn, LV_EVENT_CLICKED, NULL);
+    /* 2026-09-09(사용자 지적 — "시간표시 역상 크기가 시간 숫자에 따라 크기가 변하지
+     * 않게") — Montserrat 숫자는 자간이 고정폭이 아니라("1"이 "8"보다 좁음), 매초 자릿수
+     * 조합이 바뀌면서 라벨(자동폭)이 미세하게 늘었다 줄었다 함. "8"이 숫자 중 가장 넓은
+     * 편이라("88:88:88") 그걸로 실측해서 그 폭으로 고정 + 가운데 정렬(실제 표시는 다음
+     * refresh_clock() 틱에서 바로 진짜 시각으로 덮어써짐) */
+    lv_label_set_text(s_time_ctrl_label, "88:88:88");
+    lv_obj_update_layout(s_time_ctrl_label);
+    /* 2026-09-09(사용자 지적 — "22:45:00 쯤이 되면 폭을 넘어서 가끔 두줄로 나옴") — 실측폭
+     * 그대로 쓰면 특정 자릿수 조합에서 여유가 없어 순간적으로 줄바꿈됨. 여유값 추가 */
+    lv_obj_set_width(s_time_ctrl_label, lv_obj_get_width(s_time_ctrl_label) + 12);
+    lv_obj_set_style_text_align(s_time_ctrl_label, LV_TEXT_ALIGN_CENTER, 0);
 
     /* 네트워크 컨트롤 — AP/STA + SSID(가능하면), 탭하면: STA=WiFi 스캔 직접, AP=설정 팝업.
      * 2026-09-08(사용자 지시 — 폭 부족 대비) — 긴 SSID는 말줄임 */
@@ -4833,9 +5424,18 @@ void ui_init(void)
     lv_obj_set_style_text_font(s_status_warning, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(s_status_warning, lv_color_hex(0xFFCC00), 0);
 
+    /* 2026-09-09(사용자 지적 — "아이콘이 왜 이리 작아") — 원래 의도("크기는 경고/에러
+     * 아이콘과 동일하게", 위 주석)와 다르게 원(24x24)과 안쪽 X(14pt)가 둘 다 Normal/Warning
+     * 글리프(24pt, 32x32 박스)보다 작았음 — 박스/글리프 크기를 맞춤 */
     s_status_error = lv_obj_create(status_icon_box);
     lv_obj_remove_style_all(s_status_error);
-    lv_obj_set_size(s_status_error, 24, 24);
+    /* 2026-09-09(사용자 지적 — "에러 상태에서 에러 단추 안눌려") — lv_obj_create()는 기본
+     * CLICKABLE이라 여기서 터치를 가로챈 뒤(LVGL은 기본적으로 이벤트 버블링을 안 함)
+     * status_icon_box에 걸린 cb_logo_warning_tap까지 안 올라갔음. Normal/Warning은
+     * 라벨(기본 비클릭)이라 자연스럽게 부모가 처리했던 것과 대비됨 — 이 원도 비클릭으로
+     * 만들어 나머지 둘과 동일하게 부모가 처리하게 함 */
+    lv_obj_remove_flag(s_status_error, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(s_status_error, 32, 32);
     lv_obj_center(s_status_error);
     lv_obj_add_flag(s_status_error, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_radius(s_status_error, LV_RADIUS_CIRCLE, 0);
@@ -4844,7 +5444,7 @@ void ui_init(void)
     lv_obj_t *status_error_lbl = lv_label_create(s_status_error);
     lv_obj_center(status_error_lbl);
     lv_label_set_text(status_error_lbl, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_font(status_error_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(status_error_lbl, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(status_error_lbl, lv_color_white(), 0);
 
     s_settings_btn = lv_button_create(top_bar_right);
@@ -4876,32 +5476,117 @@ void ui_init(void)
 
     lv_obj_t *summary_box = create_dashboard_panel(dashboard_page, STR_PANEL_SUMMARY, 0);
     /* 2026-08-21 — 요약 맨 윗줄에 웹 대시보드 접속 URL(사용자 지시). IP를 아직 못 받았으면
-     * refresh_dashboard()가 숨김 처리함(빈 문자열 반환 시) */
-    s_web_url_label = lv_label_create(summary_box);
-    lv_obj_set_style_text_font(s_web_url_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_add_flag(s_web_url_label, LV_OBJ_FLAG_HIDDEN);
+     * refresh_dashboard()가 숨김 처리함(빈 문자열 반환 시).
+     * 2026-09-09(사용자 지적 — "Web : 까지는 밑줄 치지 마") — "Web " 접두문구와 URL을
+     * 별도 라벨로 분리, 접두문구는 평범한 텍스트로 두고 URL 라벨에만 파란색+밑줄+클릭 적용 */
+    /* 2026-09-09(사용자 지시 — "웹과 메모리도 한 줄로 넣을 수 있으면") — Web(조건부 숨김)과
+     * Memory(항상 표시)를 한 줄에 나란히. Web 부분만 숨겨야 하므로 s_web_row는 그대로
+     * 유지하고, 이걸 감싸는 상위 row(summary_top_row)에 Memory 라벨을 형제로 추가 —
+     * s_web_row가 숨겨져도(IP 없음) flex가 그 공간을 안 차지해서 Memory만 남음 */
+    /* 2026-09-10(사용자 지시 — "웹, 스토리지를 하나의 박스로 감싸는 게 낫겠다" ->
+     * "웹 메모리(1줄) 스토리지(1줄)") — Web/Memory 행과 Storage 행을 한 박스(세로 2줄)로
+     * 묶음. pad_all(10)을 이 바깥 박스로 옮기고, 안쪽 summary_top_row는 pad_all(0)+
+     * pad_column(12)만 유지 — Memory/humidity 정렬 계산(바깥+안쪽 pad_all 합 = 기존 10)은
+     * 그대로 보존됨 */
+    lv_obj_t *summary_top_box = lv_obj_create(summary_box);
+    lv_obj_set_size(summary_top_box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(summary_top_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(summary_top_box, 0, 0);
+    lv_obj_set_style_pad_all(summary_top_box, 10, 0);
+
+    lv_obj_t *summary_top_row = lv_obj_create(summary_top_box);
+    lv_obj_set_size(summary_top_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(summary_top_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_border_width(summary_top_row, 0, 0);
+    lv_obj_set_style_pad_all(summary_top_row, 0, 0);
+    lv_obj_set_style_pad_column(summary_top_row, 12, 0);
+
+    /* 2026-09-09 — 예전엔 Web 텍스트 길이와 무관하게 Memory가 절반 지점부터 시작하도록 고정
+     * 50% 폭을 썼는데, summary_sub_row의 두 박스는 flex_grow(1)이라 폭 계산 방식이 달라서
+     * (flex_grow는 간격을 뺀 나머지를 반으로 나눔, 고정 50%는 간격을 안 뺌) 미세하게
+     * 어긋났음. summary_sub_row와 동일하게 flex_grow(1)로 바꿔 정렬 기준을 통일 */
+    s_web_row = lv_obj_create(summary_top_row);
+    lv_obj_set_height(s_web_row, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(s_web_row, 1);
+    lv_obj_set_flex_flow(s_web_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_border_width(s_web_row, 0, 0);
+    lv_obj_set_style_pad_all(s_web_row, 0, 0);
+    lv_obj_add_flag(s_web_row, LV_OBJ_FLAG_HIDDEN);
+
+    s_web_prefix_label = lv_label_create(s_web_row);
+    lv_obj_set_style_text_font(s_web_prefix_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 2026-09-09(사용자 지적 — "Web에는 콜론이 빠졌어") — 여기(부팅 시 실제로 그려지는
+     * 곳)를 안 고치고 refresh_lang_texts() 쪽만 고쳤던 실수. 두 곳 다 동일 포맷이어야 함 */
+    lv_label_set_text_fmt(s_web_prefix_label, "%s: ", ui_str(STR_LABEL_WEB));
+
     /* 2026-09-08(사용자 재설계 — "요약의 웹 주소를 링크표시(파란색, 밑줄)로 바꿔서 클릭하면
      * 뜨게 해") — 로고가 없어지면서 QR 팝업 트리거를 여기로 옮김(cb_logo_title_tap 재사용) */
+    s_web_url_label = lv_label_create(s_web_row);
+    lv_obj_set_style_text_font(s_web_url_label, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_color(s_web_url_label, lv_palette_main(LV_PALETTE_BLUE), 0);
     lv_obj_set_style_text_decor(s_web_url_label, LV_TEXT_DECOR_UNDERLINE, 0);
     lv_obj_add_flag(s_web_url_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_web_url_label, cb_logo_title_tap, LV_EVENT_CLICKED, NULL);
 
-    /* 2026-08-21 — 요약 둘째줄, 여유 메모리 상시 표시(사용자 지시) — refresh_dashboard()가
-     * 매 틱 텍스트를 채움, 웹 URL줄과 달리 항상 값이 있어서 숨김 처리 없음 */
-    s_mem_status_label = lv_label_create(summary_box);
+    /* 2026-08-21 — 여유 메모리 상시 표시(사용자 지시) — refresh_dashboard()가 매 틱 텍스트를
+     * 채움, 웹 URL과 달리 항상 값이 있어서 숨김 처리 없음. 2026-09-09부터 Web과 한 줄
+     * (summary_top_row의 형제) */
+    s_mem_status_label = lv_label_create(summary_top_row);
+    lv_obj_set_flex_grow(s_mem_status_label, 1);
     lv_obj_set_style_text_font(s_mem_status_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
+    /* 2026-09-10(사용자 설계 — "CNTL 메모리 밑에 SD 용량도 표시... Storage[%(Remain MB)]:
+     * Picture xx(yy) / Measure zz(kk) / Total aa(bb)") — Memory 바로 아래 새 줄. 단위(%,
+     * MB)는 앞 괄호 라벨 한 번만 쓰고 값 뒤에는 반복 안 함(사용자 지시).
+     * 2026-09-10(사용자 지시 — "웹 메모리(1줄) 스토리지(1줄)") — summary_top_box의 둘째 줄
+     * (summary_top_row의 형제) */
+    s_storage_status_label = lv_label_create(summary_top_box);
+    lv_obj_set_style_text_font(s_storage_status_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_storage_status_label, "");
+
     /* 2026-09-08(연결 기능 주화면 이관, 사용자 설계) — 장치별 행은 전부 Sensor/Camera
-     * 판넬로 이관, Summary에는 대신 실시간 순시치(온도/습도/CO2/암모니아) 4줄만 —
-     * "Summary는 시스템이 잘 돌고 있는지 보여주려는 의도" */
-    s_summary_live_temp_label = lv_label_create(summary_box);
+     * 판넬로 이관, Summary에는 대신 실시간 순시치(온도/습도/CO2/암모니아)만 —
+     * "Summary는 시스템이 잘 돌고 있는지 보여주려는 의도". 2026-09-09(사용자 지시 —
+     * "통계처럼 보이길 바래 (두 줄로)") — 통계 Overview 판넬과 동일한 좌우 2열 구조(좌=온도/
+     * CO2, 우=습도/암모니아)로, 4줄 세로나열 대신 2줄로 */
+    lv_obj_t *summary_sub_row = lv_obj_create(summary_box);
+    lv_obj_set_size(summary_sub_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(summary_sub_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_border_width(summary_sub_row, 0, 0);
+    /* 2026-09-09(사용자 지시 — "4개 항목을 한 박스 안에 보이게") — 온도/습도/CO2/암모니아를
+     * 감싸는 이 컨테이너 자체에 연한 회색 배경+둥근모서리+패딩("좋아", 사용자 승인) */
+    lv_obj_set_style_bg_color(summary_sub_row, lv_palette_lighten(LV_PALETTE_GREY, 3), 0);
+    lv_obj_set_style_bg_opa(summary_sub_row, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(summary_sub_row, 8, 0);
+    lv_obj_set_style_pad_all(summary_sub_row, 10, 0);
+    lv_obj_set_style_pad_column(summary_sub_row, 12, 0);
+
+    lv_obj_t *summary_left_box = lv_obj_create(summary_sub_row);
+    lv_obj_set_flex_grow(summary_left_box, 1);
+    lv_obj_set_height(summary_left_box, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(summary_left_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(summary_left_box, 0, 0);
+    lv_obj_set_style_pad_all(summary_left_box, 0, 0);
+    /* 2026-09-09(사용자 지적 — "글씨배경은 여전히 흰색") — 기본 테마가 이 박스에 불투명
+     * 흰색을 칠해서 부모(summary_sub_row)의 회색이 안 보였음 */
+    lv_obj_set_style_bg_opa(summary_left_box, LV_OPA_TRANSP, 0);
+
+    s_summary_live_temp_label = lv_label_create(summary_left_box);
     lv_obj_set_style_text_font(s_summary_live_temp_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    s_summary_live_humi_label = lv_label_create(summary_box);
-    lv_obj_set_style_text_font(s_summary_live_humi_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    s_summary_live_co2_label = lv_label_create(summary_box);
+    s_summary_live_co2_label = lv_label_create(summary_left_box);
     lv_obj_set_style_text_font(s_summary_live_co2_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    s_summary_live_nh3_label = lv_label_create(summary_box);
+
+    lv_obj_t *summary_right_box = lv_obj_create(summary_sub_row);
+    lv_obj_set_flex_grow(summary_right_box, 1);
+    lv_obj_set_height(summary_right_box, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(summary_right_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(summary_right_box, 0, 0);
+    lv_obj_set_style_pad_all(summary_right_box, 0, 0);
+    lv_obj_set_style_bg_opa(summary_right_box, LV_OPA_TRANSP, 0);
+
+    s_summary_live_humi_label = lv_label_create(summary_right_box);
+    lv_obj_set_style_text_font(s_summary_live_humi_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_summary_live_nh3_label = lv_label_create(summary_right_box);
     lv_obj_set_style_text_font(s_summary_live_nh3_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *sensor_box = create_dashboard_panel(dashboard_page, STR_GROUP_SENSOR, 1);
@@ -4914,11 +5599,9 @@ void ui_init(void)
     lv_label_set_text(s_sensor_empty, ui_str(STR_PANEL_NO_SENSOR));
     lv_obj_set_style_text_font(s_sensor_empty, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    /* 2026-09-08(연결 기능 주화면 이관) — "연결됨" 목록(s_summary_list와 동일 스타일) */
-    s_sensor_connected_lbl = lv_label_create(sensor_box);
-    lv_label_set_text(s_sensor_connected_lbl, ui_str(STR_LABEL_CONNECTED));
-    lv_obj_set_style_text_font(s_sensor_connected_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_add_style(s_sensor_connected_lbl, &style_text_muted, 0);
+    /* 2026-09-08(연결 기능 주화면 이관) — "연결됨" 목록(s_summary_list와 동일 스타일).
+     * 2026-09-09(사용자 지시 — "connected 표기는 필요 없어 보여") — 표제 라벨 제거, 목록
+     * 자체(이름+상태+신호+배터리 행)만으로 충분 */
     s_sensor_dash_list = lv_obj_create(sensor_box);
     lv_obj_set_size(s_sensor_dash_list, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(s_sensor_dash_list, LV_FLEX_FLOW_COLUMN);
@@ -4938,6 +5621,7 @@ void ui_init(void)
     lv_label_set_text(s_sensor_pending_lbl, ui_str(STR_LABEL_PENDING));
     lv_obj_set_style_text_font(s_sensor_pending_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_style(s_sensor_pending_lbl, &style_text_muted, 0);
+    lv_obj_add_flag(s_sensor_pending_lbl, LV_OBJ_FLAG_HIDDEN);  /* 초기값: 대기중인 센서 없음 */
     s_sensor_list = lv_list_create(sensor_box);
     lv_obj_set_size(s_sensor_list, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_add_flag(s_sensor_list, LV_OBJ_FLAG_HIDDEN);
@@ -4959,11 +5643,8 @@ void ui_init(void)
     lv_obj_set_style_text_font(s_camera_empty, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 2026-09-08(카메라 팝업 추출) — 팝업이 닫혀있는 평상시 주화면에 남는 "연결된 카메라"
-     * 목록. s_summary_list와 완전히 같은 스타일(요약판넬과 통일) */
-    s_camera_connected_lbl = lv_label_create(camera_box);
-    lv_label_set_text(s_camera_connected_lbl, ui_str(STR_LABEL_CONNECTED));
-    lv_obj_set_style_text_font(s_camera_connected_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_add_style(s_camera_connected_lbl, &style_text_muted, 0);
+     * 목록. s_summary_list와 완전히 같은 스타일(요약판넬과 통일).
+     * 2026-09-09(사용자 지시 — "connected 표기는 필요 없어 보여") — 표제 라벨 제거 */
     s_camera_dash_list = lv_obj_create(camera_box);
     lv_obj_set_size(s_camera_dash_list, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(s_camera_dash_list, LV_FLEX_FLOW_COLUMN);
@@ -4983,6 +5664,7 @@ void ui_init(void)
     lv_label_set_text(s_camera_pending_lbl, ui_str(STR_LABEL_PENDING));
     lv_obj_set_style_text_font(s_camera_pending_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_style(s_camera_pending_lbl, &style_text_muted, 0);
+    lv_obj_add_flag(s_camera_pending_lbl, LV_OBJ_FLAG_HIDDEN);  /* 초기값: 대기중인 CAM 없음 */
     s_camera_list = lv_list_create(camera_box);
     lv_obj_set_size(s_camera_list, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_add_flag(s_camera_list, LV_OBJ_FLAG_HIDDEN);
@@ -5167,6 +5849,21 @@ static void cb_close_stats_popup(lv_event_t *e)
 static void teardown_stats_tab(void)
 {
     size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
+    /* 2026-09-10(태스크 격리 재설계 -> 같은 날 버그 수정: "여닫는데 수초 걸려") — 워커에게
+     * 정지 요청 + 깨우기만 하고 절대 기다리지 않음. 처음엔 여기서 워커 종료를 최대 1.5초
+     * 기다렸었는데, SD가 막혀있는 동안은 매번 그 1.5초를 꽉 채워서 LVGL 태스크를 붙잡아버려서
+     * — 정확히 이 재설계로 없애려던 그 문제(LVGL 태스크가 SD 때문에 멈춤)를 닫기 경로에서
+     * 다시 만든 꼴이었음. 이제 팝업 UI는 워커 상태와 완전히 무관하게 즉시 닫힘 — 워커는
+     * 백그라운드에서 자기 페이스대로(안전한 지점에서만) 정리하고 사라짐. 절대 vTaskDelete로
+     * 강제종료 안 함(SD I/O 도중이면 FatFs 내부 뮤텍스가 영원히 잠길 위험,
+     * [[feedback_design_for_exceptions_not_just_fails]]). 그래프 힙 버퍼(s_stats_chart_
+     * real_values 등)는 절대 여기서 손 안 댐, 오직 그 워커 자신만 마지막에 정리함(교차
+     * 소유로 인한 use-after-free 방지) — build_stats_tab()이 재오픈 시 이 워커가 아직
+     * 안 끝났으면 그건 그쪽에서 따로 처리 */
+    s_stats_io_stop = true;
+    kick_stats_io_worker();
+
     if (s_stats_page_timer) { lv_timer_delete(s_stats_page_timer); s_stats_page_timer = NULL; }
     lv_obj_delete(s_stats_popup);
     s_stats_popup = NULL;
@@ -5178,6 +5875,8 @@ static void teardown_stats_tab(void)
              (int)heap_after_close - (int)heap_before_close);
     s_stats_overview_title = NULL;
     s_stats_scale_dd = NULL;
+    s_stats_point_count_dd = NULL;
+    s_stats_graph_mem_label = NULL;
     s_overview_temp_label = NULL;
     s_overview_humi_label = NULL;
     s_overview_co2_label = NULL;
@@ -5204,6 +5903,28 @@ static void teardown_stats_tab(void)
 static void build_stats_tab(void)
 {
     if (s_stats_tab_built) return;  /* 이미 열려있음 */
+
+    /* 2026-09-10(태스크 격리 재설계) — 뮤텍스/세마포어는 프로세스 수명 내내 한 번만 만들고
+     * 절대 안 지움(만들 때마다/지울 때마다의 경합을 원천봉쇄, 어차피 비용은 무시할 수준) */
+    if (!s_stats_io_mutex)        s_stats_io_mutex        = xSemaphoreCreateMutex();
+    if (!s_stats_graph_buf_mutex) s_stats_graph_buf_mutex = xSemaphoreCreateMutex();
+    if (!s_stats_io_exited_sem)   s_stats_io_exited_sem   = xSemaphoreCreateBinary();
+
+    /* 2026-09-10(버그 수정 — "여닫는데 수초 걸려") — teardown이 더 이상 워커 종료를 안
+     * 기다리므로(위 teardown_stats_tab 주석 참고), 빨리 닫았다 다시 열면 직전 워커가 아직
+     * 살아있을 수 있음(특히 SD가 막혀있는 동안엔 거의 항상). 이것도 오래 기다리면 열기
+     * 자체가 느려지므로 아주 짧게(50ms, 그냥 "이미 끝났으면 공짜로 알아채자" 정도)만
+     * 확인하고, 그래도 살아있으면 그냥 이번엔 그래프 워커를 새로 안 만듦(개괄/테이블은
+     * 직전 워커가 마저 정리되기 전까지 남겨둔 마지막 값을 그대로 보여줌 — 화면 자체는
+     * 항상 즉시 뜸) */
+    bool worker_ready = true;
+    if (s_stats_io_task) {
+        worker_ready = (xSemaphoreTake(s_stats_io_exited_sem, pdMS_TO_TICKS(50)) == pdTRUE);
+        if (!worker_ready) {
+            ESP_LOGW(TAG, "이전 통계 SD 워커가 아직 안 끝남 — 이번엔 그래프 워커 생성 생략");
+        }
+    }
+
     s_stats_tab_built = true;
 
     lv_obj_t *stats_page = create_page_popup();
@@ -5237,9 +5958,23 @@ static void build_stats_tab(void)
     lv_obj_set_style_border_width(overview_header_row, 0, 0);
     lv_obj_set_style_pad_all(overview_header_row, 0, 0);
 
-    s_stats_overview_title = lv_label_create(overview_header_row);
+    /* 2026-09-10(임시 디버그 — 사용자 지시: "남은 Internal memory를 overview() 옆에
+     * 주화면처럼 표기해") — 제목을 단독으로 두지 않고 왼쪽 묶음으로 감싸서 그 옆에 메모리
+     * 라벨을 붙임(아래 overview_header_right와 대칭되는 패턴) */
+    lv_obj_t *overview_header_left = lv_obj_create(overview_header_row);
+    lv_obj_set_size(overview_header_left, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_header_left, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(overview_header_left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(overview_header_left, 0, 0);
+    lv_obj_set_style_pad_column(overview_header_left, 8, 0);
+    lv_obj_set_style_border_width(overview_header_left, 0, 0);
+
+    s_stats_overview_title = lv_label_create(overview_header_left);
     lv_label_set_text(s_stats_overview_title, ui_str(STR_PANEL_STATS_OVERVIEW));
     lv_obj_set_style_text_font(s_stats_overview_title, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_stats_graph_mem_label = lv_label_create(overview_header_left);  /* 임시 디버그용, 위 주석 참고 */
+    lv_obj_set_style_text_font(s_stats_graph_mem_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 2026-09-07(사용자 지시 — "Overview(좌정렬) - 공간 - 우정렬 드랍다운, 모두지우기") —
      * 3개를 그냥 SPACE_BETWEEN에 나란히 두면 Scale이 가운데 어중간한 자리에 뜸. Scale+삭제를
@@ -5252,6 +5987,16 @@ static void build_stats_tab(void)
     lv_obj_set_style_pad_all(overview_header_right, 0, 0);
     lv_obj_set_style_pad_column(overview_header_right, 8, 0);
     lv_obj_set_style_border_width(overview_header_right, 0, 0);
+
+    /* 2026-09-10(임시 디버그 — 사용자 지시: "스케일 왼쪽에 드랍다운(60/120/240/480)을
+     * 선택해서 라인 수를 조정할 수 있게") — 값이 정해지면 이 드롭다운째로 제거 예정 */
+    s_stats_point_count_dd = lv_dropdown_create(overview_header_right);
+    lv_dropdown_set_options(s_stats_point_count_dd, "60\n120\n240\n480");
+    lv_dropdown_set_selected(s_stats_point_count_dd, 0);
+    lv_obj_set_style_pad_ver(s_stats_point_count_dd, 7, 0);
+    lv_obj_set_style_text_font(s_stats_point_count_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_stats_point_count_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_stats_point_count_dd, cb_stats_point_count_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     s_stats_scale_dd = lv_dropdown_create(overview_header_right);
     lv_dropdown_set_options(s_stats_scale_dd, ui_str(STR_STATS_SCALE_OPTIONS));
@@ -5413,20 +6158,79 @@ static void build_stats_tab(void)
     lv_label_set_text(table_to_graph_lbl, "<<");
     lv_obj_set_style_text_font(table_to_graph_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    /* 그래프 뼈대(2026-09-07, 사용자 지시: "그래프 자체는 나중에 구현하더라도... 틀은
-     * 만들어 놔") — lv_chart 내용은 다음 단계, 지금은 전환+자리만 */
+    /* 2026-09-10(사용자 설계 — "라인+도트", "계열 4개 선택 표시", "탭하면 값") — 실제
+     * lv_chart. 계열 순서 고정: 0=온도(빨강) 1=습도(파랑) 2=CO2(까망) 3=암모니아(청록) */
     s_stats_graph_view = lv_obj_create(s_stats_pager);
     lv_obj_set_size(s_stats_graph_view, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_flex_flow(s_stats_graph_view, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_border_width(s_stats_graph_view, 0, 0);
+    lv_obj_set_style_pad_all(s_stats_graph_view, 4, 0);
+    lv_obj_set_style_pad_row(s_stats_graph_view, 4, 0);
     lv_obj_add_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(s_stats_graph_view, cb_stats_graph_gesture, LV_EVENT_GESTURE, NULL);
 
-    lv_obj_t *graph_placeholder_lbl = lv_label_create(s_stats_graph_view);
-    lv_label_set_text(graph_placeholder_lbl, ui_str(STR_LABEL_GRAPH_PLACEHOLDER));
-    lv_obj_set_style_text_font(graph_placeholder_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_center(graph_placeholder_lbl);
+    lv_color_t chart_colors[STATS_GRAPH_SERIES_COUNT] = {
+        lv_palette_main(LV_PALETTE_RED), lv_palette_main(LV_PALETTE_BLUE),
+        lv_color_black(), lv_palette_darken(LV_PALETTE_YELLOW, 2)  /* 짙은 노랑, 2026-09-10 사용자 지시로 청록에서 변경 */
+    };
+    ui_str_id_t series_label_ids[STATS_GRAPH_SERIES_COUNT] = {
+        STR_CHAN_LABEL_TEMP_C, STR_CHAN_LABEL_HUMI_PCT, STR_CHAN_LABEL_CO2_PPM, STR_CHAN_LABEL_NH3_PPM
+    };
+
+    lv_obj_t *chart_checkbox_row = lv_obj_create(s_stats_graph_view);
+    lv_obj_set_size(chart_checkbox_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(chart_checkbox_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_border_width(chart_checkbox_row, 0, 0);
+    lv_obj_set_style_pad_all(chart_checkbox_row, 0, 0);
+    lv_obj_set_style_pad_column(chart_checkbox_row, 8, 0);
+
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        s_stats_chart_checkbox[s] = lv_checkbox_create(chart_checkbox_row);
+        lv_checkbox_set_text(s_stats_chart_checkbox[s], ui_str(series_label_ids[s]));
+        lv_obj_add_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED);
+        lv_obj_set_style_text_font(s_stats_chart_checkbox[s], ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_set_style_text_color(s_stats_chart_checkbox[s], chart_colors[s], LV_PART_INDICATOR | LV_STATE_CHECKED);
+        lv_obj_set_style_bg_color(s_stats_chart_checkbox[s], chart_colors[s], LV_PART_INDICATOR | LV_STATE_CHECKED);
+        lv_obj_add_event_cb(s_stats_chart_checkbox[s], cb_stats_chart_series_toggle, LV_EVENT_VALUE_CHANGED,
+                             (void *)(intptr_t)s);
+    }
+
+    s_stats_chart = lv_chart_create(s_stats_graph_view);
+    lv_obj_set_size(s_stats_chart, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(s_stats_chart, 1);
+    lv_chart_set_type(s_stats_chart, LV_CHART_TYPE_LINE);
+    if (worker_ready) {
+        xSemaphoreTake(s_stats_graph_buf_mutex, portMAX_DELAY);
+        resize_stats_graph_buffers(STATS_GRAPH_POINT_COUNT);  /* 2026-09-10 임시 디버그 — 위 주석 참고, lv_chart_set_point_count도 여기서 같이 함 */
+        xSemaphoreGive(s_stats_graph_buf_mutex);
+    } else {
+        lv_chart_set_point_count(s_stats_chart, STATS_GRAPH_POINT_COUNT);  /* 워커 없이(그래프 빈 채로) 최소한 팝업은 정상 동작 */
+    }
+    lv_chart_set_axis_range(s_stats_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    lv_chart_set_div_line_count(s_stats_chart, 3, 0);
+    lv_obj_add_event_cb(s_stats_chart, cb_stats_chart_tap, LV_EVENT_CLICKED, NULL);
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        s_stats_chart_series[s] = lv_chart_add_series(s_stats_chart, chart_colors[s], LV_CHART_AXIS_PRIMARY_Y);
+    }
+
+    /* 2026-09-10(사용자 지시 — "탭하면 값이 나타나는 것", 이어서 "그래프 위에 직접 그려
+     * (오버레이로)") — 별도 줄이 아니라 차트 자식으로 만들어 IGNORE_LAYOUT+좌상단 정렬,
+     * 차트 선 위에서도 읽히게 배경 박스 추가. 결과적으로 차트가 남는 공간을 전부 차지 */
+    s_stats_chart_tap_label = lv_label_create(s_stats_chart);
+    lv_obj_add_flag(s_stats_chart_tap_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_style_text_font(s_stats_chart_tap_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_bg_color(s_stats_chart_tap_label, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_stats_chart_tap_label, LV_OPA_80, 0);
+    lv_obj_set_style_pad_all(s_stats_chart_tap_label, 4, 0);
+    lv_obj_set_style_radius(s_stats_chart_tap_label, 4, 0);
+    lv_obj_align(s_stats_chart_tap_label, LV_ALIGN_TOP_LEFT, 4, 4);
+    lv_label_set_text(s_stats_chart_tap_label, "");
 
     lv_obj_t *graph_to_table_btn = lv_button_create(s_stats_graph_view);
+    /* 2026-09-10(사용자 지적 — "그래프 아래 좌측에 있어... 우측 가운데로 옮겨") — 그래프뷰가
+     * 체크박스행+차트+탭라벨 때문에 COLUMN flex가 됐는데, 이 버튼은 IGNORE_LAYOUT 없이
+     * lv_obj_align()만 줘서 flex가 정렬을 덮어씀(테이블 쪽 "<<" 버튼과 동일하게 고쳐야 함) */
+    lv_obj_add_flag(graph_to_table_btn, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_align(graph_to_table_btn, LV_ALIGN_RIGHT_MID, -2, 0);
     lv_obj_add_event_cb(graph_to_table_btn, cb_switch_to_table_tap, LV_EVENT_CLICKED, NULL);
     lv_obj_t *graph_to_table_lbl = lv_label_create(graph_to_table_btn);
@@ -5434,6 +6238,24 @@ static void build_stats_tab(void)
     lv_obj_set_style_text_font(graph_to_table_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_stats_page_timer = lv_timer_create(refresh_stats_page, 2000, NULL);
+
+    /* 2026-09-10(태스크 격리 재설계 -> 같은 날 버그 수정: "열리는 게 매우 늦게", "닫는 것도
+     * 오래 걸려", "입력도 씹혀") — SD 조회를 전담하는 워커. 처음엔 "파일처리" 티어(10,
+     * [[project_cntl_task_priority_scheme_2026_09_09]] 통신17/SR제어15/파일처리10)를 그대로
+     * 썼는데, 이건 LVGL 태스크 우선순위(esp_lv_adapter 기본값 6, esp_lv_adapter.h
+     * ESP_LV_ADAPTER_DEFAULT_TASK_PRIORITY, 둘 다 코어 고정 없음)보다 높아서 정반대
+     * 효과였음 — SD가 계속 막혀있는 동안 워커가 (busy-poll이든 뭐든) CPU를 붙잡을 때마다
+     * 스케줄러가 매번 워커를 LVGL보다 먼저 돌려서, 렌더링은 물론 터치 입력 처리까지
+     * LVGL 태스크 자체가 통째로 밀려버림 — 정확히 "SD가 느려도 화면은 절대 안 막혀야
+     * 한다"는 이 재설계의 목적에 반대로 작용한 것. LVGL(6)보다 낮은 3으로 내려서, 화면/
+     * 입력이 항상 이기고 워커는 LVGL이 한가할 때만 돌게 함. 팝업 열려있는 동안만 존재
+     * (닫히면 스스로 종료) */
+    if (worker_ready) {
+        s_stats_io_stop = false;
+        s_graph_worker_tick = 0;
+        memset(&s_stats_snap, 0, sizeof(s_stats_snap));
+        xTaskCreate(stats_io_worker_task, "stats_io", 4096, NULL, 3, &s_stats_io_task);
+    }
 
     size_t heap_after_stats_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGW(TAG, "MEMDIAG 통계탭 위젯 생성 비용: internal %u -> %u (소모 %d bytes)",
@@ -5529,18 +6351,37 @@ static void cb_device_alias_ta_focused(lv_event_t *e)
     lv_keyboard_set_textarea(s_device_keyboard, s_device_alias_ta);
 }
 
-/* 포커스 해제(키보드 다음 탭으로 넘어가거나 팝업 닫기 등)될 때 저장 — 값이 실제로 안
- * 바뀌었으면 device_config_save()를 부르는 device_config_set_alias 자체가 매번 호출되긴
- * 하지만(불필요한 flash write 한 번 정도는 알리아스 편집처럼 드문 조작에서 문제 아님) */
-static void cb_device_alias_ta_defocused(lv_event_t *e)
+/* 2026-09-09(사용자 최종 설계 — "Alias도 Apply 버튼 넣고, 눌렀을 때만 적용, 안 누르고
+ * 닫으면 적용 안 되게") — 측정주기/촬영주기와 동일한 [값][Apply] 패턴으로 정정. 이전의
+ * "포커스 해제/닫기 시 자동저장" 방식은 전부 제거 — Apply를 누른 값만 저장됨 */
+static void update_device_alias_apply_enabled(void)
+{
+    if (!s_device_alias_ta || !s_device_alias_apply_btn) return;
+    bool changed = (strcmp(lv_textarea_get_text(s_device_alias_ta), s_device_alias_applied_text) != 0);
+    if (changed) lv_obj_clear_state(s_device_alias_apply_btn, LV_STATE_DISABLED);
+    else lv_obj_add_state(s_device_alias_apply_btn, LV_STATE_DISABLED);
+}
+
+static void cb_device_alias_ta_changed(lv_event_t *e)
+{
+    (void)e;
+    update_device_alias_apply_enabled();
+}
+
+/* 2026-09-09(사용자 지적 — "주화면에는 표시가 안되고") — Apply된 순간이 유일한 커밋
+ * 지점이므로, 여기서 저장과 동시에 주화면 목록도 갱신되게 강제(다음 refresh_dashboard()
+ * 틱에서 dash_changed로 처리되어 Summary/Sensor/Camera 대시 목록이 전부 다시 그려짐 —
+ * Alias 저장처럼 드문 조작이라 비용 무시 가능) */
+static void cb_device_alias_apply_clicked(lv_event_t *e)
 {
     (void)e;
     if (!s_device_alias_ta) return;
     const char *text = lv_textarea_get_text(s_device_alias_ta);
     device_config_set_alias(s_device_popup_node.mac, text);
-    if (s_device_popup_title) {
-        lv_label_set_text(s_device_popup_title, (text[0] != '\0') ? text : s_device_popup_node.name);
-    }
+    strncpy(s_device_alias_applied_text, text, sizeof(s_device_alias_applied_text) - 1);
+    s_device_alias_applied_text[sizeof(s_device_alias_applied_text) - 1] = '\0';
+    update_device_alias_apply_enabled();
+    s_dash_count_prev = -1;  /* 강제 재생성 — force_camera/sensor_list_redraw()와 동일 원칙 */
 }
 
 static void cb_device_disconnect_confirm(void *ctx)
@@ -5561,16 +6402,22 @@ static void cb_device_disconnect_clicked(lv_event_t *e)
 static void cb_close_device_popup(lv_event_t *e)
 {
     (void)e;
+    ESP_LOGW(TAG, "MEMDIAG 개별설정 팝업 X 탭 수신 t=%u", (unsigned)lv_tick_get());
     teardown_device_popup();
 }
 
 /* 2026-09-08(연결 기능 주화면 이관) — "연결됨" 대시 목록 행 탭 -> 개별설정 팝업. user_data는
  * 그 rebuild 세대의 행 인덱스(refresh_dashboard 참고) — s_*_dash_row_count 범위 밖이면
  * 이미 재생성된 뒤라 무시(방어) */
+/* 2026-09-09(사용자 지시 — "팝업이 늦게 열리는 건지, 탭 이벤트를 씹었는지 구분이 안되니
+ * 모니터링 할 필요가 있어") — 탭 수신 시각을 여기서, 팝업 완성 시각을 build_device_popup()
+ * 끝에서 각각 로그로 남김. 이 로그가 아예 안 뜨면 탭 자체가 안 먹은 것, 이 로그는 뜨는데
+ * 팝업 완성 로그와 시간차가 크면 진짜 느린 것 — 시리얼 캡처로 구분 가능해짐 */
 static void cb_camera_dash_row_clicked(lv_event_t *e)
 {
     lv_obj_t *row = lv_event_get_target(e);
     uintptr_t idx = (uintptr_t)lv_obj_get_user_data(row);
+    ESP_LOGW(TAG, "MEMDIAG 카메라 행 탭 수신 t=%u idx=%u/%d", (unsigned)lv_tick_get(), (unsigned)idx, s_camera_dash_row_count);
     if ((int)idx >= s_camera_dash_row_count) return;
     build_device_popup(s_camera_dash_row_macs[idx], s_camera_dash_row_names[idx], false);
 }
@@ -5579,6 +6426,7 @@ static void cb_sensor_dash_row_clicked(lv_event_t *e)
 {
     lv_obj_t *row = lv_event_get_target(e);
     uintptr_t idx = (uintptr_t)lv_obj_get_user_data(row);
+    ESP_LOGW(TAG, "MEMDIAG 센서 행 탭 수신 t=%u idx=%u/%d", (unsigned)lv_tick_get(), (unsigned)idx, s_sensor_dash_row_count);
     if ((int)idx >= s_sensor_dash_row_count) return;
     build_device_popup(s_sensor_dash_row_macs[idx], s_sensor_dash_row_names[idx], true);
 }
@@ -5586,10 +6434,20 @@ static void cb_sensor_dash_row_clicked(lv_event_t *e)
 static void teardown_device_popup(void)
 {
     if (!s_device_popup) return;
+    /* 2026-09-09(사용자 최종 설계 — "안 누르고 닫으면 적용시키지 않도록") — 자동저장 없음,
+     * Apply 안 누른 편집 내용은 그냥 버려짐(측정주기/촬영주기와 동일 원칙) */
+    /* 2026-09-09(사용자 지적 — "X로 닫았을 때 키보드 안닫혀", 이어서 "탭해도 키보드 안떠") —
+     * s_device_keyboard는 s_device_popup의 자식이 아니라 화면(lv_screen_active()) 직속
+     * 형제라 팝업만 지우면 안 지워지는 것도 문제였지만, 숨기기만 하고 재사용하면 그
+     * 키보드는 화면의 "오래된" 자식으로 남아서 다음에 새로 만들어지는 팝업(더 나중에 추가된
+     * 자식이라 위에 그려짐)에 가려짐 — 숨김을 풀어도 화면상 안 보임. WiFi 비번 입력창의
+     * s_wifi_keyboard와 동일하게 완전히 삭제(다음 사용 때 새로 만들어져 항상 최상단) */
+    if (s_device_keyboard) { lv_obj_delete(s_device_keyboard); s_device_keyboard = NULL; }
     lv_obj_delete(s_device_popup);
     s_device_popup = NULL;
     s_device_popup_title = NULL;
     s_device_alias_ta = NULL;
+    s_device_alias_apply_btn = NULL;
     /* 2026-09-08 — 측정주기 위젯도 이 팝업 자식이라 팝업과 함께 사라짐, 핸들 NULL로
      * 정리(build_option_tab 등 다른 곳의 기존 teardown 패턴과 동일) */
     s_sens_measure_dd = NULL;
@@ -5601,6 +6459,8 @@ static void teardown_device_popup(void)
     /* 다음에 팝업이 다시 열릴 때(같은 mac이라도) select_sensor()가 무조건 새 위젯을
      * 다시 동기화하도록 강제 — 아래 build_device_popup() 참고 */
     s_has_selected_sensor = false;
+
+    ESP_LOGW(TAG, "MEMDIAG 개별설정 팝업 닫기 완료 t=%u", (unsigned)lv_tick_get());
 }
 
 static void build_device_popup(const uint8_t *mac, const char *name, bool is_sensor)
@@ -5615,37 +6475,64 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
     lv_obj_t *popup = create_page_popup();
     s_device_popup = popup;
     const char *alias = device_config_get_alias(mac);
-    add_page_popup_header(popup, (alias[0] != '\0') ? alias : s_device_popup_node.name,
+    /* 2026-09-09(사용자 지시 — "팝업 제목은 Sensor/Camera로 고정") — 어떤 장치를 열든
+     * 제목은 판넬 종류로 고정, Alias/장치명은 본문에만 표시 */
+    add_page_popup_header(popup, ui_str(is_sensor ? STR_GROUP_SENSOR : STR_GROUP_CAMERA),
                            cb_close_device_popup, &s_device_popup_title);
     lv_obj_set_style_pad_hor(popup, 12, 0);
 
-    /* Alias 행 — [라벨][원래이름(회색, 참고용)] 위에, 입력창은 그 아래 한 줄 전체폭
-     * (2026-09-08, 사용자 설계: "Alias로 표기한다면 원래 이름[도 같이 보여야]") */
-    lv_obj_t *alias_orig_row = lv_obj_create(popup);
-    lv_obj_set_size(alias_orig_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(alias_orig_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(alias_orig_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(alias_orig_row, 0, 0);
-    lv_obj_set_style_pad_all(alias_orig_row, 0, 0);
+    /* 2026-09-09(사용자 설계 — "장치명 - 공백 - Alias: 텍스트 입력창으로 바꿔") — 한 줄:
+     * [장치명] ... [Alias: 입력창] */
+    lv_obj_t *alias_row = lv_obj_create(popup);
+    lv_obj_set_size(alias_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(alias_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(alias_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(alias_row, 0, 0);
+    lv_obj_set_style_pad_all(alias_row, 0, 0);
+    lv_obj_set_style_pad_column(alias_row, 12, 0);
 
-    lv_obj_t *alias_lbl = lv_label_create(alias_orig_row);
-    lv_label_set_text(alias_lbl, ui_str(STR_LABEL_ALIAS));
-    lv_obj_set_style_text_font(alias_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    lv_obj_t *orig_name_lbl = lv_label_create(alias_orig_row);
+    lv_obj_t *orig_name_lbl = lv_label_create(alias_row);
     lv_label_set_text(orig_name_lbl, s_device_popup_node.name);
     lv_obj_set_style_text_font(orig_name_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_style_text_color(orig_name_lbl, lv_palette_main(LV_PALETTE_GREY), 0);
 
-    s_device_alias_ta = lv_textarea_create(popup);
+    lv_obj_t *alias_cluster = lv_obj_create(alias_row);
+    lv_obj_set_flex_grow(alias_cluster, 1);
+    lv_obj_set_height(alias_cluster, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(alias_cluster, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(alias_cluster, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(alias_cluster, 0, 0);
+    lv_obj_set_style_pad_all(alias_cluster, 0, 0);
+    lv_obj_set_style_pad_column(alias_cluster, 6, 0);
+
+    lv_obj_t *alias_lbl = lv_label_create(alias_cluster);
+    lv_label_set_text_fmt(alias_lbl, "%s:", ui_str(STR_LABEL_ALIAS));
+    lv_obj_set_style_text_font(alias_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_device_alias_ta = lv_textarea_create(alias_cluster);
     lv_textarea_set_one_line(s_device_alias_ta, true);
     lv_textarea_set_max_length(s_device_alias_ta, DEVICE_CONFIG_ALIAS_MAX_LEN - 1);
     lv_textarea_set_placeholder_text(s_device_alias_ta, s_device_popup_node.name);
     if (alias[0] != '\0') lv_textarea_set_text(s_device_alias_ta, alias);
-    lv_obj_set_width(s_device_alias_ta, LV_PCT(100));
+    lv_obj_set_flex_grow(s_device_alias_ta, 1);
     lv_obj_set_style_text_font(s_device_alias_ta, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_device_alias_ta, cb_device_alias_ta_focused, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(s_device_alias_ta, cb_device_alias_ta_defocused, LV_EVENT_DEFOCUSED, NULL);
+    /* 2026-09-09(사용자 지적 — "키보드 감춤 후 텍스트창 탭해도 다시 안 나와") — 이미
+     * 포커스된 상태로 키보드만 숨긴 경우, 다시 탭해도 FOCUSED가 재발화 안 됨(이미
+     * 포커스 상태라). CLICKED는 포커스 여부와 무관하게 탭마다 뜨므로 같이 등록 —
+     * cb_device_alias_ta_focused 자체는 이벤트 종류를 안 가리므로 그대로 재사용 가능 */
+    lv_obj_add_event_cb(s_device_alias_ta, cb_device_alias_ta_focused, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_device_alias_ta, cb_device_alias_ta_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* 2026-09-09(사용자 최종 설계) — 측정주기/촬영주기와 동일한 Apply 버튼. applied_text를
+     * 현재 저장값으로 초기화해두면 이 시점엔 텍스트와 같으니 자동으로 비활성 상태로 시작 */
+    strncpy(s_device_alias_applied_text, alias, sizeof(s_device_alias_applied_text) - 1);
+    s_device_alias_applied_text[sizeof(s_device_alias_applied_text) - 1] = '\0';
+    s_device_alias_apply_btn = lv_button_create(alias_cluster);
+    lv_obj_add_event_cb(s_device_alias_apply_btn, cb_device_alias_apply_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_state(s_device_alias_apply_btn, LV_STATE_DISABLED);
+    lv_obj_t *alias_apply_lbl = lv_label_create(s_device_alias_apply_btn);
+    lv_label_set_text(alias_apply_lbl, ui_str(STR_BTN_APPLY));
+    lv_obj_set_style_text_font(alias_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     if (!s_device_keyboard) {
         s_device_keyboard = lv_keyboard_create(lv_screen_active());
@@ -5695,6 +6582,8 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
     lv_obj_t *disconnect_lbl = lv_label_create(disconnect_btn);
     lv_label_set_text(disconnect_lbl, ui_str(STR_BTN_DISCONNECT));
     lv_obj_set_style_text_font(disconnect_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    ESP_LOGW(TAG, "MEMDIAG 개별설정 팝업 완성 t=%u", (unsigned)lv_tick_get());
 }
 
 /* 2026-09-08(재설계) — 설정 콘텐츠만 지움(s_option_content 안 자식들, lv_obj_clean) — 팝업
@@ -5818,6 +6707,46 @@ static void build_option_tab(void)
     lv_obj_add_state(s_btn_en, LV_STATE_DISABLED);
 
     update_lang_buttons();  /* 초기 선택 상태(기본 UI_LANG_KO) 반영 */
+
+    /* 자동연결 스위치 2개(2026-09-08, 사용자 설계 — 연결 기능 주화면 이관).
+     * 2026-09-09(사용자 지시 — "이 두 줄은 System이 아니고 CNTL로 옮겨") — 시스템
+     * 그룹박스에서 CNTL 그룹박스로 이동. "신규 접속 장치"가 "이전 연결 장치"를 사실상
+     * 포함하는 더 넓은 옵션이라(사용자 설계) 위쪽에 둠(순서 반대로) */
+    lv_obj_t *auto_new_row = lv_obj_create(cntl_box);
+    lv_obj_set_size(auto_new_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(auto_new_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(auto_new_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(auto_new_row, 0, 0);
+    lv_obj_set_style_pad_hor(auto_new_row, 12, 0);
+    lv_obj_set_style_pad_ver(auto_new_row, 0, 0);
+
+    s_auto_connect_new_label = lv_label_create(auto_new_row);
+    lv_label_set_text(s_auto_connect_new_label, ui_str(STR_LABEL_AUTO_CONNECT_NEW));
+    lv_obj_set_style_text_font(s_auto_connect_new_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_auto_connect_new_switch = lv_switch_create(auto_new_row);
+    if (device_config_get_auto_connect_new()) lv_obj_add_state(s_auto_connect_new_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(s_auto_connect_new_switch, cb_auto_connect_new_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *auto_known_row = lv_obj_create(cntl_box);
+    lv_obj_set_size(auto_known_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(auto_known_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(auto_known_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(auto_known_row, 0, 0);
+    lv_obj_set_style_pad_hor(auto_known_row, 12, 0);
+    lv_obj_set_style_pad_ver(auto_known_row, 0, 0);
+
+    s_auto_connect_known_label = lv_label_create(auto_known_row);
+    lv_label_set_text(s_auto_connect_known_label, ui_str(STR_LABEL_AUTO_CONNECT_KNOWN));
+    lv_obj_set_style_text_font(s_auto_connect_known_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_auto_connect_known_switch = lv_switch_create(auto_known_row);
+    if (device_config_get_auto_connect_known()) lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_CHECKED);
+    if (device_config_get_auto_connect_new()) {
+        lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_CHECKED);
+        lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_DISABLED);
+    }
+    lv_obj_add_event_cb(s_auto_connect_known_switch, cb_auto_connect_known_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     /* 재시작 버튼 — 물리적 전원 재연결 없이 소프트 리셋(2026-08-01, 사용자 요청) */
     lv_obj_t *restart_row = lv_obj_create(cntl_box);
@@ -6035,43 +6964,6 @@ static void build_option_tab(void)
      * [라벨][드롭다운][Apply] 인라인 레이아웃 */
     lv_obj_t *system_group_box = create_group_box(option_page, STR_GROUP_SYSTEM);
 
-    /* 자동연결 스위치 2개(2026-09-08, 사용자 설계 — 연결 기능 주화면 이관) */
-    lv_obj_t *auto_known_row = lv_obj_create(system_group_box);
-    lv_obj_set_size(auto_known_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(auto_known_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(auto_known_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(auto_known_row, 0, 0);
-    lv_obj_set_style_pad_hor(auto_known_row, 12, 0);
-    lv_obj_set_style_pad_ver(auto_known_row, 0, 0);
-
-    s_auto_connect_known_label = lv_label_create(auto_known_row);
-    lv_label_set_text(s_auto_connect_known_label, ui_str(STR_LABEL_AUTO_CONNECT_KNOWN));
-    lv_obj_set_style_text_font(s_auto_connect_known_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    s_auto_connect_known_switch = lv_switch_create(auto_known_row);
-    if (device_config_get_auto_connect_known()) lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_CHECKED);
-    if (device_config_get_auto_connect_new()) {
-        lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_CHECKED);
-        lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_DISABLED);
-    }
-    lv_obj_add_event_cb(s_auto_connect_known_switch, cb_auto_connect_known_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-    lv_obj_t *auto_new_row = lv_obj_create(system_group_box);
-    lv_obj_set_size(auto_new_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(auto_new_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(auto_new_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(auto_new_row, 0, 0);
-    lv_obj_set_style_pad_hor(auto_new_row, 12, 0);
-    lv_obj_set_style_pad_ver(auto_new_row, 0, 0);
-
-    s_auto_connect_new_label = lv_label_create(auto_new_row);
-    lv_label_set_text(s_auto_connect_new_label, ui_str(STR_LABEL_AUTO_CONNECT_NEW));
-    lv_obj_set_style_text_font(s_auto_connect_new_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    s_auto_connect_new_switch = lv_switch_create(auto_new_row);
-    if (device_config_get_auto_connect_new()) lv_obj_add_state(s_auto_connect_new_switch, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(s_auto_connect_new_switch, cb_auto_connect_new_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
     lv_obj_t *response_row = lv_obj_create(system_group_box);
     lv_obj_set_size(response_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(response_row, LV_FLEX_FLOW_ROW);
@@ -6196,10 +7088,16 @@ static void build_option_tab(void)
     lv_obj_set_style_text_font(s_time_set_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 2026-09-07(탭→팝업 전환) — 설정탭 자신의 버튼들 폭 통일. s_action_btn_width는 이미
-     * ui_init()에서 상황판 버튼 기준으로 정해져있음(재계산 없음, 그냥 적용만) */
+     * ui_init()에서 상황판 버튼 기준으로 정해져있음(재계산 없음, 그냥 적용만).
+     * 2026-09-09(사용자 지적 — "세팅 단추를 누르면 콘이 죽어") — s_sens_measure_apply_btn은
+     * 측정주기 위젯이 개별설정 팝업으로 옮겨가면서 여기서 더 이상 안 만들어짐(NULL) —
+     * lv_obj_set_width(NULL, ...)가 태스크워치독 타임아웃(lvgl 태스크 무한루프로 보임)을
+     * 일으켰음. 배열에서 제거 — 그 버튼은 이제 개별설정 팝업 안에서 다른 버튼들처럼
+     * 자연폭(LV_SIZE_CONTENT)으로 그려짐(공용 s_action_btn_width 미적용, 시각적 차이는
+     * 미미해서 지금은 그대로 둠) */
     lv_obj_t *option_action_buttons[] = {
         restart_btn, s_capture_apply_btn, s_response_apply_btn, s_adaptive_apply_btn,
-        time_set_btn, s_xclk_apply_btn, s_sens_measure_apply_btn,
+        time_set_btn, s_xclk_apply_btn,
     };
     lv_obj_update_layout(lv_screen_active());
     for (size_t i = 0; i < sizeof(option_action_buttons) / sizeof(option_action_buttons[0]); i++) {

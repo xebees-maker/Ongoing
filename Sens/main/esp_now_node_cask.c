@@ -195,7 +195,10 @@ static void resolve_name(void)
         return;
     }
 #endif
-    snprintf(s_name, sizeof(s_name), "Sens-%02X%02X", s_mac[4], s_mac[5]);
+    /* 2026-09-09(사용자 지시 — "SENS와 CAM의 장치명에 일관성이 없네... 캠 기준으로 통일") —
+     * 캠의 resolve_name()(esp_now_cam.c)과 동일 형식: 접두문자 1글자 + MAC 뒤 3바이트(24비트) 헥스.
+     * 기존 페어링된 센스는 재페어링 시 새 이름으로 갱신됨(사용자 승인 — 마이그레이션 불필요) */
+    snprintf(s_name, sizeof(s_name), "S%02X%02X%02X", s_mac[3], s_mac[4], s_mac[5]);
 }
 
 /* CAM의 esp_now_cam_reconnect() 폴백과 동일 — 이미 시작했으면 재개, 아니면 최초 시작

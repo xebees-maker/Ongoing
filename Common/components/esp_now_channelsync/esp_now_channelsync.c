@@ -85,6 +85,9 @@ static esp_now_channelsync_on_synced_cb_t    s_on_synced    = NULL;
 
 static volatile bool s_synced       = false;
 static uint8_t        s_scan_channel = SCAN_CHANNEL_MIN;
+/* 2026-09-10(버그 수정) — 시작 채널과 무관하게 "실제 몇 번 방문했는지"로 한 바퀴 완료를
+ * 판정하기 위한 카운터. enter_unsynced()에서 0으로 리셋, scan_timer_cb()가 매 틱 증가시킴 */
+static uint8_t         s_scan_visit_count = 0;
 static uint8_t         s_hub_mac[6]  = { 0 };
 
 static esp_timer_handle_t s_scan_timer = NULL;  /* UNSYNCED에서만 동작 */
@@ -182,6 +185,7 @@ static void enter_unsynced(void)
     s_synced = false;
     if (s_rest_timer) esp_timer_stop(s_rest_timer);  /* 이전 검색의 휴식이 남아있으면 정리 */
     s_unsynced_start_us = esp_timer_get_time();       /* 스윕 백오프 기준시각 리셋 */
+    s_scan_visit_count = 0;  /* 2026-09-10(버그 수정) — 새 스윕 시작, 방문횟수 카운터 리셋 */
 
     /* 2026-08-10 — 마지막으로 성공했던 채널이 있으면 거기서 시작(위 s_last_synced_channel
      * 주석 참고). 증가/랩어라운드(scan_timer_cb)는 시작점과 무관하게 전체 1~13 범위를
@@ -232,18 +236,26 @@ static void scan_timer_cb(void *arg)
      * 보낸 그 채널에서 상대의 응답을 들을 시간이 없어서 매번 다음 채널로 잘못 락되는 레이스가
      * 있었음, 실기로 재현/수정 검증됨). 이 채널에 다음 타이머까지 계속 머무르므로 응답이
      * 도착할 시간이 충분함 */
+    /* 2026-09-10(버그 수정, 사용자 지시 — "카운터(랩어라운드 판정)이 잘못됐네. 13->1로
+     * circular로 14회를 해야지") — 예전엔 "채널 번호가 MAX를 넘었는가"로 "한 바퀴 다 돔"을
+     * 판정했는데, 이건 시작 채널이 SCAN_CHANNEL_MIN(1)일 때만 우연히 맞았음. 시작 채널이
+     * s_last_synced_channel(이전 성공 채널, 1~13 아무 값)이면, 예를 들어 10에서 시작 시
+     * 10,11,12,13,(래핑)1 — 겨우 5개 채널만 보고 "완료"로 오판해서 나머지(2~9)를 아예 안
+     * 살펴보고 포기하는 실제 버그였음. 이제 "채널 값"이 아니라 "주기타이머가 실제로 몇 번
+     * 돌았는가"로 셈 — enter_unsynced()의 즉시광고(시작채널) 1회 + 이 타이머 13회 = 14회를
+     * 다 채워야 시작점과 무관하게 13개 채널을 전부(정확히 한 번씩) 방문한 게 보장됨 */
     s_scan_channel++;
-    bool wrapped = false;
     if (s_scan_channel > SCAN_CHANNEL_MAX) {
         s_scan_channel = SCAN_CHANNEL_MIN;
-        wrapped = true;
     }
+    s_scan_visit_count++;
+    bool full_sweep_done = (s_scan_visit_count >= (SCAN_CHANNEL_MAX - SCAN_CHANNEL_MIN + 1));
     esp_wifi_set_channel(s_scan_channel, WIFI_SECOND_CHAN_NONE);
     /* 2026-08-23(사용자 지시) — 채널스캔 훅/로그는 send_advertise_on_current_channel() 안으로
      * 합쳐짐 — 여기선 그 함수를 부르기만 함(로그와 실제 수행이 어긋나지 않도록 한 곳에만 둠) */
     send_advertise_on_current_channel();
 
-    if (!wrapped) {
+    if (!full_sweep_done) {
         xSemaphoreGive(s_state_mutex);
         return;
     }

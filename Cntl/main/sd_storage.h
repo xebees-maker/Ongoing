@@ -15,6 +15,8 @@
 #pragma once
 
 #include "esp_err.h"
+#include <stdint.h>
+#include <stdbool.h>
 
 #define SD_STORAGE_MOUNT_POINT "/sdcard"
 
@@ -23,3 +25,8 @@
  * 전체를 막지 않음(CAM 저장소 등 SD 없이도 동작해야 하는 기존 기능들과 무관) — 실패
  * 시 로그만 남기고 ESP_FAIL 등 반환, 호출부는 계속 진행하면 됨 */
 esp_err_t sd_storage_init(void);
+
+/* 2026-09-10(사용자 설계 — "Storage[%(Remain MB)]: Picture xx(yy) / Measure zz(kk) /
+ * Total aa(bb)") — SD카드 실제 전체용량/여유용량(esp_vfs_fat_info 그대로 전달). 미마운트
+ * 등으로 실패하면 false, out 값은 안 건드림(호출부가 이전 값 유지하거나 0 처리) */
+bool sd_storage_get_capacity(uint64_t *out_total_bytes, uint64_t *out_free_bytes);

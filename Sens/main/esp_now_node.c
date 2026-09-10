@@ -188,7 +188,9 @@ static void resolve_name(void)
         return;
     }
 #endif
-    snprintf(s_name, sizeof(s_name), "Sens-%02X%02X", s_mac[4], s_mac[5]);
+    /* 2026-09-09(사용자 지시 — 캠 기준으로 장치명 통일) — esp_now_cam.c/esp_now_node_cask.c와
+     * 동일 형식 */
+    snprintf(s_name, sizeof(s_name), "S%02X%02X%02X", s_mac[3], s_mac[4], s_mac[5]);
 }
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)

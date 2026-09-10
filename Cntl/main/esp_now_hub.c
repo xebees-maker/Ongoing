@@ -165,9 +165,11 @@ static void liveness_sweep_cb(void *arg)
 static hub_node_kind_t classify_name(const char *name)
 {
     /* 2026-08-22 — CAM 기본 이름 "Cam-XXXXXX" -> "CXXXXXX"로 축약(전력로그 폭 문제,
-     * esp_now_cam.c:resolve_name 참고) — Sens는 "Sens-"라 'C'로 시작 안 해서 안전 */
-    if (strncmp(name, "C", 1) == 0)      return HUB_NODE_KIND_CAM;
-    if (strncmp(name, "Sens-", 5) == 0) return HUB_NODE_KIND_SENS;
+     * esp_now_cam.c:resolve_name 참고) — Sens는 "S"로 시작해 'C'와 겹치지 않아 안전.
+     * 2026-09-09(사용자 지시 — 센스 장치명을 캠 기준 "Sxxxxxx"로 통일) — 예전 "Sens-" 접두를
+     * 대체(esp_now_node.c/esp_now_node_cask.c:resolve_name 참고) */
+    if (strncmp(name, "C", 1) == 0) return HUB_NODE_KIND_CAM;
+    if (strncmp(name, "S", 1) == 0) return HUB_NODE_KIND_SENS;
     return HUB_NODE_KIND_UNKNOWN;
 }
 
@@ -293,7 +295,7 @@ static void push_cam_config_to(const uint8_t *mac)
     };
     static const uint8_t s_config_ack_types[] = { ESP_NOW_MSG_CAM_CONFIG_ACK };
     s_config_apply_stage = HUB_CONFIG_APPLY_SENT;
-    esp_now_tx_enqueue(mac, &cfg, sizeof(cfg), s_config_ack_types, 1, 800, 3, "CAM 설정");
+    esp_now_tx_enqueue(mac, &cfg, sizeof(cfg), s_config_ack_types, 1, 800, 3, "CAM config");
     ESP_LOGI(TAG, "CAM_CONFIG_SET -> 촬영주기=%us 응답성=%us AGC=%d AEC=%d XCLK=%uMHz NACK라운드=%u 큐잉됨",
              (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec,
              (int)cfg.agc_enable, (int)cfg.aec_enable, (unsigned)cfg.xclk_mhz,
@@ -317,7 +319,7 @@ static void push_sens_config_to(const uint8_t *mac)
         .unix_time           = rtc_sync_get_unix_time(),
     };
     static const uint8_t s_sens_config_ack_types[] = { ESP_NOW_MSG_SENS_CONFIG_ACK };
-    esp_now_tx_enqueue(mac, &cfg, sizeof(cfg), s_sens_config_ack_types, 1, 800, 3, "Sens 설정");
+    esp_now_tx_enqueue(mac, &cfg, sizeof(cfg), s_sens_config_ack_types, 1, 800, 3, "Sens config");
     ESP_LOGI(TAG, "SENS_CONFIG_SET -> 샘플링주기=%us 큐잉됨", (unsigned)cfg.sample_interval_sec);
 }
 
@@ -592,7 +594,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         } else {
             esp_now_cask_work_none_t none = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE };
             static const uint8_t s_work_none_ack_types[] = { ESP_NOW_MSG_CASK_WORK_NONE_ACK };
-            esp_now_tx_enqueue(info->src_addr, &none, sizeof(none), s_work_none_ack_types, 1, 500, 3, "할일없음");
+            esp_now_tx_enqueue(info->src_addr, &none, sizeof(none), s_work_none_ack_types, 1, 500, 3, "No work");
         }
         send_cask_sleep_now(n);
         xSemaphoreGive(s_nodes_mutex);
@@ -683,7 +685,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         } else {
             esp_now_cask_work_none_t none = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE };
             static const uint8_t s_work_none_ack_types[] = { ESP_NOW_MSG_CASK_WORK_NONE_ACK };
-            esp_now_tx_enqueue(info->src_addr, &none, sizeof(none), s_work_none_ack_types, 1, 500, 3, "할일없음");
+            esp_now_tx_enqueue(info->src_addr, &none, sizeof(none), s_work_none_ack_types, 1, 500, 3, "No work");
         }
         send_cask_sleep_now(n);
         xSemaphoreGive(s_nodes_mutex);
@@ -1289,7 +1291,7 @@ static void esp_now_hub_pair(const uint8_t *mac)
      * 하드코딩하면 휴리스틱이 됨, 사용자 지적)는 이 공식에 안 넣음 — 6초(3초×2)가 실측
      * 죽는시간(~4.8초)보다 이미 크므로 별도로 안 넣어도 안전마진 안에 들어옴 */
     esp_now_tx_enqueue(mac, &req, sizeof(req), s_pair_ack_types, 1,
-                        PAIR_REQUEST_RETRY_TIMEOUT_MS, PAIR_REQUEST_RETRY_ATTEMPTS, "페어링");
+                        PAIR_REQUEST_RETRY_TIMEOUT_MS, PAIR_REQUEST_RETRY_ATTEMPTS, "Pairing");
     ESP_LOGI(TAG, "PAIR_REQUEST -> %s 큐잉됨", name_copy);
 }
 

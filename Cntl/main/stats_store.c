@@ -183,6 +183,58 @@ uint32_t stats_store_read_since(uint32_t cutoff_unix_time, uint8_t chan_type,
     return picked;
 }
 
+uint64_t stats_store_get_used_bytes(void)
+{
+    return (uint64_t)stats_store_get_count() * sizeof(stats_record_t);
+}
+
+uint32_t stats_store_trim_to(uint64_t target_bytes)
+{
+    uint32_t total = stats_store_get_count();
+    uint64_t target_records64 = target_bytes / sizeof(stats_record_t);
+    uint32_t target_records = (target_records64 > total) ? total : (uint32_t)target_records64;
+    if (total <= target_records) return 0;  /* 이미 목표 이하 */
+
+    uint32_t drop_count = total - target_records;
+
+    FILE *src = fopen(STATS_FILE_PATH, "rb");
+    if (!src) return 0;
+    if (fseek(src, (long)drop_count * (long)sizeof(stats_record_t), SEEK_SET) != 0) {
+        fclose(src);
+        return 0;
+    }
+
+    static const char *tmp_path = SD_STORAGE_MOUNT_POINT "/stats/values.bin.tmp";
+    FILE *dst = fopen(tmp_path, "wb");
+    if (!dst) {
+        fclose(src);
+        ESP_LOGW(TAG, "trim_to: 임시파일 열기 실패");
+        return 0;
+    }
+
+    stats_record_t buf[64];
+    size_t got;
+    while ((got = fread(buf, sizeof(stats_record_t), 64, src)) > 0) {
+        fwrite(buf, sizeof(stats_record_t), got, dst);
+    }
+    fclose(src);
+    fclose(dst);
+
+    if (remove(STATS_FILE_PATH) != 0) {
+        ESP_LOGW(TAG, "trim_to: 원본 삭제 실패");
+        remove(tmp_path);
+        return 0;
+    }
+    if (rename(tmp_path, STATS_FILE_PATH) != 0) {
+        ESP_LOGW(TAG, "trim_to: 임시파일 교체(rename) 실패");
+        return 0;
+    }
+
+    ESP_LOGI(TAG, "trim_to: %u개 레코드 삭제(오래된 것부터), %u -> %u개 남음",
+             (unsigned)drop_count, (unsigned)total, (unsigned)target_records);
+    return drop_count;
+}
+
 bool stats_store_get_min_max_avg_since(uint32_t cutoff_unix_time, uint8_t chan_type,
                                         float *out_min, float *out_max, float *out_avg)
 {

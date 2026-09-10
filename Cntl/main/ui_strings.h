@@ -140,6 +140,13 @@ typedef enum {
     /* 요약판넬 1~2번째줄(2026-08-21, 사용자 지시) — 웹 대시보드 URL / 여유메모리 상시표시 */
     STR_LABEL_WEB,
     STR_LABEL_MEMORY,
+    /* 2026-09-10(사용자 설계 — SD Storage 상시표시, Memory 바로 아래 줄) —
+     * "Storage[%(Remain MB)]: Picture xx(yy) / Measure zz(kk) / Total aa(bb)"
+     * (Measure 라벨은 STR_LABEL_MEASURE_SHORT 재사용, 값 동일) */
+    STR_LABEL_STORAGE,
+    STR_LABEL_PICTURE,
+    STR_LABEL_TOTAL,
+    STR_MSG_STORAGE_CLEANUP,
     STR_LABEL_BATTERY,
     /* 네트워크 설정 행(2026-08-29) — 독립(AP)/종속(STA) 선택 + 우측 상태(IP 또는 SSID/찾기) */
     STR_LABEL_NETWORK,
@@ -219,6 +226,51 @@ typedef enum {
     STR_LABEL_PENDING,
     STR_LABEL_AUTO_CONNECT_KNOWN,
     STR_LABEL_AUTO_CONNECT_NEW,
+    STR_LABEL_MEASURE_SHORT,  /* Sensor 연결됨 행의 짧은 측정주기 라벨("측정 주기"보다 짧게) */
+    /* 2026-09-09(사용자 지적 — "E0007 과 그 뒤의 깨진 글자") — 에러코드 목록 팝업(cb_logo_
+     * warning_tap)의 설명 문구. 예전엔 ui_log.c의 s_err_table이 하드코딩 한글만 갖고
+     * 있었고(영문화 작업에서 빠뜨림), 게다가 코드 4개가 테이블에 아예 없어서(1006/4005/
+     * 5007/5008) "알 수 없는 에러"로 폴백 — 비트맵 폰트엔 한글 글리프가 없어 깨져 보였음.
+     * ui_log.h의 UI_ERR_* 순서와 1:1 대응, ui_main.c의 err_code_to_desc_str()가 매핑 */
+    STR_ERR_DESC_CACHE_TOO_BIG,
+    STR_ERR_DESC_CACHE_NO_BUF,
+    STR_ERR_DESC_RECV_BUF_ALLOC,
+    STR_ERR_DESC_CACHE_SLOT_ALLOC,
+    STR_ERR_DESC_PANEL_BUF_ALLOC,
+    STR_ERR_DESC_STA_CRED_ALLOC,
+    STR_ERR_DESC_SEND_PHOTO_REQ,
+    STR_ERR_DESC_SEND_CAPTURE_REQ,
+    STR_ERR_DESC_SEND_LIST_REQ,
+    STR_ERR_DESC_SEND_DELETE_REQ,
+    STR_ERR_DESC_SEND_DELETE_ALL_REQ,
+    STR_ERR_DESC_REQUEST_BUSY,
+    STR_ERR_DESC_NOT_PAIRED,
+    STR_ERR_DESC_TX_QUEUE_FULL,
+    STR_ERR_DESC_META_TOO_BIG,
+    STR_ERR_DESC_CHUNK_MISSING,
+    STR_ERR_DESC_CRC_MISMATCH,
+    STR_ERR_DESC_DECODE_FAIL,
+    STR_ERR_DESC_LIST_COUNT_MISMATCH,
+    STR_ERR_DESC_FETCH_NORESPONSE,
+    STR_ERR_DESC_LIST_NORESPONSE,
+    STR_ERR_DESC_PHOTO_SELECTION_STALE,
+    STR_ERR_DESC_DELETE_FAILED,
+    STR_ERR_DESC_DELETE_ALL_FAILED,
+    STR_ERR_DESC_CAPTURE_FAILED,
+    STR_ERR_DESC_CAPTURE_NORESPONSE,
+    STR_ERR_DESC_CONFIG_NORESPONSE,
+    STR_ERR_DESC_DELETE_ALL_NORESPONSE,
+    STR_ERR_DESC_DELETE_ALL_STOPPED,
+    STR_ERR_DESC_SET_TIME_NORESPONSE,
+    STR_ERR_DESC_FONT_FILE_MISSING,
+    STR_ERR_DESC_FONT_BUF_ALLOC,
+    STR_ERR_DESC_FONT_FILE_OPEN,
+    STR_ERR_DESC_FONT_CREATE,
+    STR_ERR_DESC_HTTPD_START,
+    STR_ERR_DESC_RTC_SET_FAILED,
+    STR_ERR_DESC_CONFIG_FILE_MISMATCH,
+    STR_ERR_DESC_SD_MOUNT_FAILED,
+    STR_ERR_DESC_UNKNOWN,  /* 테이블에 없는 코드용 폴백(원래 있었으면 안 되는 상황) */
     STR_COUNT,
 } ui_str_id_t;
 

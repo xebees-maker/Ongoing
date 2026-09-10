@@ -21,6 +21,7 @@
 #include "rtc_sync.h"
 #include "device_config.h"
 #include "sd_storage.h"
+#include "stats_store.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -236,12 +237,21 @@ static esp_err_t api_set_response_interval_get_handler(httpd_req_t *req)
 
 /* 2026-09-07(사용자 지시 — 어젯밤 쌓인 이산화탄소 0 레코드 정리용) — 통계 전체 삭제
  * 버튼+확인팝업 합성. 되돌릴 수 없는 동작이라 이 엔드포인트도 실제 온디바이스 탭과
- * 동일 경로(버튼->확인팝업->Yes)를 그대로 탐 */
+ * 동일 경로(버튼->확인팝업->Yes)를 그대로 탐.
+ *
+ * 2026-09-10(임시 비상탈출구 — SD 블록8256 반복실패로 LVGL 태스크가 몇 초씩 계속 막혀서
+ * 위 정상경로(run_on_lvgl_task, 1초 데드라인)가 항상 타임아웃남 — "콘이 죽었는데 어떻게
+ * 닫니" 상황. ?force=1이면 LVGL/화면 상태와 완전히 무관하게 httpd 태스크에서 직접
+ * stats_store_delete_all()을 불러서 화면이 죽어있어도 파일만 지움. 평소엔(force 없이)
+ * 원래 설계(실제 UI 경로 그대로 타기) 그대로 유지 — 상황 해결되면 이 분기는 제거 예정 */
 static esp_err_t api_delete_stats_get_handler(httpd_req_t *req)
 {
-    bool ok = ui_main_inject_delete_stats();
+    char query[16] = { 0 };
+    bool force = (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+                  strstr(query, "force=1") != NULL);
+    bool ok = force ? (stats_store_delete_all(), true) : ui_main_inject_delete_stats();
     char body[64];
-    int len = snprintf(body, sizeof(body), "{\"ok\":%s}", ok ? "true" : "false");
+    int len = snprintf(body, sizeof(body), "{\"ok\":%s,\"force\":%s}", ok ? "true" : "false", force ? "true" : "false");
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     return httpd_resp_send(req, body, len);
 }

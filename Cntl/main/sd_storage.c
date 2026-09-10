@@ -8,6 +8,7 @@
 
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include <stdbool.h>
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "sdmmc_cmd.h"
@@ -50,6 +51,13 @@ esp_err_t sd_storage_init(void)
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SD_SPI_HOST;
+    /* 2026-09-10(원복 — 짧은 타임아웃은 불필요했음) — 처음엔 실패를 빨리 포기시키려고
+     * command_timeout_ms를 200ms로 줄였는데, 다시 짚어보니 필요 없었음: 기본값(1000ms)도
+     * 어차피 결국은 리턴하는 fail이라 진짜 "행"이 아니었고, 실제 문제는 이 fail을 부르는
+     * 쪽(통계탭 스캔)이 반복되는 실패를 무시하고 계속 누적시킨 것(별도로 고쳐야 함)이었지
+     * 명령 하나의 타임아웃 길이가 아니었음. 게다가 open은 파일을 안 건드리니 아무리
+     * 오래 걸려도(재시도든 뭐든) 크래시 때 파일이 깨지는 것과 무관 — 오히려 오래 걸려도
+     * 되니까 짧게 자를 이유가 없음(사용자 지시). 그래서 ESP-IDF 기본값 그대로 씀 */
 
     sdspi_device_config_t slot_cfg = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_cfg.host_id = SD_SPI_HOST;
@@ -83,4 +91,15 @@ esp_err_t sd_storage_init(void)
 
     ESP_LOGI(TAG, "SD카드 마운트 완료: %s", SD_STORAGE_MOUNT_POINT);
     return ESP_OK;
+}
+
+bool sd_storage_get_capacity(uint64_t *out_total_bytes, uint64_t *out_free_bytes)
+{
+    if (!s_card) return false;  /* 미마운트 */
+    esp_err_t err = esp_vfs_fat_info(SD_STORAGE_MOUNT_POINT, out_total_bytes, out_free_bytes);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_vfs_fat_info 실패: %s", esp_err_to_name(err));
+        return false;
+    }
+    return true;
 }

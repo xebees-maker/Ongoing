@@ -278,7 +278,7 @@ static void start_single_receive(const uint8_t *cam_mac, uint8_t mode, uint32_t 
         .param    = param,
     };
     static const uint8_t s_meta_types[] = { ESP_NOW_MSG_PHOTO_META };
-    esp_now_hub_queue_action(cam_mac, &req, sizeof(req), s_meta_types, 1, 500, 3, "사진 요청");
+    esp_now_hub_queue_action(cam_mac, &req, sizeof(req), s_meta_types, 1, 500, 3, "Photo request");
     ESP_LOGI(TAG, "PHOTO_REQUEST(mode=%d, param=%u) 큐잉됨", mode, (unsigned)param);
     ui_log_add("REQUEST mode=%d param=%u queued", mode, (unsigned)param);
 }
@@ -306,7 +306,7 @@ void esp_now_photo_capture_now(const uint8_t *cam_mac)
      * (SUCCESS/FAILED)는 이후 별도 비동기 CAPTURE_STATUS로 옴 — 그건 기존처럼
      * recv_cb -> handle_capture_status()가 처리(여기서 안 기다림) */
     static const uint8_t s_capture_status_types[] = { ESP_NOW_MSG_CAPTURE_STATUS };
-    esp_now_hub_queue_action(cam_mac, &req, sizeof(req), s_capture_status_types, 1, 500, 3, "지금촬영");
+    esp_now_hub_queue_action(cam_mac, &req, sizeof(req), s_capture_status_types, 1, 500, 3, "Capture now");
     ESP_LOGI(TAG, "PHOTO_REQUEST(mode=CAPTURE_NOW) 큐잉됨");
 }
 
@@ -726,7 +726,7 @@ static void send_list_request_raw(const uint8_t *cam_mac)
         .msg_type = ESP_NOW_MSG_PHOTO_LIST_REQUEST,
     };
     static const uint8_t s_list_done_types[] = { ESP_NOW_MSG_PHOTO_LIST_DONE };
-    esp_now_hub_queue_action(cam_mac, &req, sizeof(req), s_list_done_types, 1, 3000, 3, "목록 요청");
+    esp_now_hub_queue_action(cam_mac, &req, sizeof(req), s_list_done_types, 1, 3000, 3, "List request");
     ESP_LOGI(TAG, "PHOTO_LIST_REQUEST 큐잉됨");
 }
 
@@ -887,7 +887,7 @@ static void send_list_error(const uint8_t *cam_mac)
         .msg_type = ESP_NOW_MSG_PHOTO_LIST_ERROR,
     };
     static const uint8_t s_list_error_ack_types[] = { ESP_NOW_MSG_PHOTO_LIST_ERROR_ACK };
-    esp_now_tx_enqueue(cam_mac, &msg, sizeof(msg), s_list_error_ack_types, 1, 800, 3, "목록 에러 통보");
+    esp_now_tx_enqueue(cam_mac, &msg, sizeof(msg), s_list_error_ack_types, 1, 800, 3, "List error notify");
     ESP_LOGW(TAG, "PHOTO_LIST_ERROR 큐잉됨(CAM 상태정리 요청)");
 }
 
@@ -1003,7 +1003,7 @@ void esp_now_photo_delete(const uint8_t *cam_mac, uint32_t file_id)
     /* 2026-08-05 Layer 1 -> 2026-08-26 CASK 큐 — PHOTO_DELETE_ACK를 기다리는 건 다음 CASK
      * "할일" 단계에서 esp_now_tx_enqueue가 함 */
     static const uint8_t s_delete_ack_types[] = { ESP_NOW_MSG_PHOTO_DELETE_ACK };
-    esp_now_hub_queue_action(cam_mac, &req, sizeof(req), s_delete_ack_types, 1, 500, 3, "사진 삭제");
+    esp_now_hub_queue_action(cam_mac, &req, sizeof(req), s_delete_ack_types, 1, 500, 3, "Photo delete");
     ESP_LOGI(TAG, "PHOTO_DELETE_REQUEST(id=%u) 큐잉됨", (unsigned)file_id);
 }
 
@@ -1048,7 +1048,7 @@ void esp_now_photo_delete_all(const uint8_t *cam_mac)
      * 2026-08-26 — RECEIVED를 기다리는 esp_now_tx_enqueue 호출 자체는 다음 CASK "할일"
      * 단계에서 일어남(esp_now_hub_queue_action으로 큐잉) */
     static const uint8_t s_delete_all_received_types[] = { ESP_NOW_MSG_PHOTO_DELETE_ALL_RECEIVED };
-    esp_now_hub_queue_action(cam_mac, &req, sizeof(req), s_delete_all_received_types, 1, 800, 3, "전체삭제");
+    esp_now_hub_queue_action(cam_mac, &req, sizeof(req), s_delete_all_received_types, 1, 800, 3, "Delete all");
     ESP_LOGI(TAG, "PHOTO_DELETE_ALL_REQUEST 큐잉됨");
 }
 

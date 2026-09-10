@@ -66,6 +66,18 @@ void stats_store_delete_all(void);
 uint32_t stats_store_read_since(uint32_t cutoff_unix_time, uint8_t chan_type,
                                  stats_record_t *out, uint32_t out_cap);
 
+/* 2026-09-10(사용자 설계 — "Storage[%(Remain MB)]... Measure zz(kk)") — 현재 파일 크기
+ * (바이트). stats_store_get_count() * sizeof(stats_record_t)와 동일하지만 호출부가
+ * 매번 곱하지 않아도 되게 별도 제공. 파일 없으면 0 */
+uint64_t stats_store_get_used_bytes(void);
+
+/* 2026-09-10(사용자 설계 — "할당된 용량의 90%가 될 때 10%만큼 오래된 걸 지운다") —
+ * 파일을 앞부분(오래된 레코드)부터 지워서 최종 크기가 target_bytes 이하가 되게 함.
+ * 이미 target_bytes 이하면 아무 것도 안 하고 0 반환. 실제로 지운 레코드 수를 반환.
+ * 임시파일에 남길 부분만 다시 써서 교체하는 방식(레코드가 고정크기라 오프셋 계산이
+ * 정확함) — SD 미마운트/파일 없음 등으로 실패해도 0 반환(치명적 아님) */
+uint32_t stats_store_trim_to(uint64_t target_bytes);
+
 #ifdef __cplusplus
 }
 #endif
