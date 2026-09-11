@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "esp_jpeg_dec.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_lv_adapter.h"
@@ -20,6 +21,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -429,7 +431,8 @@ static lv_obj_t *s_overview_temp_label  = NULL;
 static lv_obj_t *s_overview_humi_label  = NULL;
 static lv_obj_t *s_overview_co2_label   = NULL;
 static lv_obj_t *s_overview_nh3_label   = NULL;
-static const uint32_t s_stats_scale_values[] = { 3600, 43200, 86400, 259200, 604800 };
+/* 2026-09-11(그래프 재설계) — stats_store.h의 STATS_SCALE_SECONDS가 정본(스케일별 사전집계
+ * 저장 버킷폭도 이 값을 기준으로 계산되므로) — 예전엔 이 파일에 따로 복제해서 들고 있었음 */
 
 /* 통계탭 테이블<->그래프 스와이프 전환(2026-09-07, 사용자 설계) — 그래프는 뼈대만
  * (실제 lv_chart 내용은 다음 단계) */
@@ -444,17 +447,46 @@ static lv_obj_t *s_stats_delete_lbl  = NULL;
  * 3=암모니아(짙은 노랑 — 2026-09-10 사용자 지시로 청록에서 변경). 계열마다 실제 단위/범위가
  * 달라서(온도 vs CO2 등) 화면엔 각 계열을 자기 자신의 기간 내 최소~최대 기준으로 0~100
  * 정규화해서 그리고, 탭하면 정규화 전 실제 값을 보여줌(s_stats_chart_real_values에 원본 보관) */
-#define STATS_GRAPH_POINT_COUNT   60  /* 2026-09-10(사용자 결정 — "매 그래프는 60개 포인트로
-                                        * 그려") 고정. 60/120/240/480 조정 드롭다운+메모리표시는
-                                        * 값을 정하기 위한 임시 측정 도구였고, 측정 끝나서 제거함 */
+#define STATS_GRAPH_POINT_COUNT   STATS_AGG_POINTS_PER_SCALE  /* stats_store.h가 정본(60) */
 #define STATS_GRAPH_SERIES_COUNT  4
-static lv_obj_t          *s_stats_chart               = NULL;
+static lv_obj_t          *s_stats_chart               = NULL;  /* 실데이터 — 선만(점마커 숨김) */
+static lv_obj_t          *s_stats_gap_chart           = NULL;  /* 2026-09-11(그래프 재설계) —
+    * "값이 없는 슬롯마다 그 자리에 계열 고정높이로 점만" — s_stats_chart의 자식으로 만들어
+    * 똑같은 크기/위치로 겹쳐그림(부모 위에 자식이 그려지는 LVGL 기본 순서 이용), 점마커만
+    * 보이고 선은 숨김. CLICKABLE을 꺼서 탭이 밑의 실데이터 차트로 그대로 전달되게 함 */
 static lv_chart_series_t *s_stats_chart_series[STATS_GRAPH_SERIES_COUNT];
+static lv_chart_series_t *s_stats_gap_series[STATS_GRAPH_SERIES_COUNT];
 static lv_obj_t          *s_stats_chart_checkbox[STATS_GRAPH_SERIES_COUNT];
 static lv_obj_t          *s_stats_chart_tap_label      = NULL;
+static int                 s_stats_chart_tap_shown_series = -1;  /* 지금 탭 박스에 표시 중인 계열, -1=없음 */
 static float               s_stats_chart_real_values[STATS_GRAPH_SERIES_COUNT][STATS_GRAPH_POINT_COUNT];
 static bool                 s_stats_chart_has_value[STATS_GRAPH_SERIES_COUNT][STATS_GRAPH_POINT_COUNT];
 static uint32_t             s_stats_chart_shown_points  = 0;  /* 이번에 실제로 그려진 포인트 수(<=STATS_GRAPH_POINT_COUNT) */
+/* 2026-09-11(그래프 재설계 — "값 없는 슬롯은 계열 고정높이로 점만") — 정규화축(0~100) 기준
+ * 온도7/10·습도6/10·이산화탄소5/10·암모니아4/10, chan_types 배열과 동일 순서 */
+static const int32_t s_stats_gap_ref_height[STATS_GRAPH_SERIES_COUNT] = { 70, 60, 50, 40 };
+/* 2026-09-11(사용자 지적 — "내가 원한건 그래프 상단에 4계열의 최대값, 하단에 4계열의
+ * 최소값을 표시하는 거야") — 정규화가 계열별 자기 min~max를 0~100에 매핑하므로, 각 계열의
+ * 실제 최대값은 그 계열 선이 차트 "맨 위"에 닿는 지점, 최소값은 "맨 아래"에 닿는 지점과
+ * 항상 일치함 — 그래서 4계열 최대값을 차트 상단에 한 줄로, 4계열 최소값을 하단에 한 줄로 */
+static lv_obj_t          *s_stats_graph_max_row       = NULL;
+static lv_obj_t          *s_stats_graph_min_row       = NULL;
+static lv_obj_t          *s_stats_graph_max_label[STATS_GRAPH_SERIES_COUNT];
+static lv_obj_t          *s_stats_graph_min_label[STATS_GRAPH_SERIES_COUNT];
+/* 2026-09-11(그래프 재설계 항목4/6) — 스와이프로 과거로 넘어간 칸 수(0=지금). 매 갱신마다
+ * "지금"을 다시 계산해서 이 오프셋 기준으로 창을 다시 잡음(사용자 지시: "갱신이 되면,
+ * 다시 12시간 전 창을 보여줘야 한다") — 절대시각을 저장하지 않음 */
+static int                  s_stats_graph_offset = 0;
+static bool                  s_stats_graph_force_refresh = false;  /* 스와이프 직후 즉시 반영용 */
+/* 2026-09-11(사용자 지시 — "기기 반응이 느린 편... 스와이프 인식됨을 알려야") — 제스처
+ * 인식 즉시(느릴 수 있는 실제 갱신 전에) 잠깐 보여주는 방향 힌트 */
+static lv_obj_t          *s_stats_graph_swipe_hint     = NULL;
+/* 2026-09-11(그래프 재설계 항목5) — 스케일별 X축 표기 간격(초). "1H: 10분, 12H: 1H, 1D: 2H,
+ * 3D: 12H, 1W: 1D 간격으로 표기해"(사용자 지시) — STATS_SCALE_SECONDS와 동일 순서 */
+static const uint32_t s_stats_xaxis_interval_sec[STATS_SCALE_COUNT] = { 600, 3600, 7200, 43200, 86400 };
+#define STATS_GRAPH_X_LABEL_MAX 13  /* 1D 스케일이 2H간격=12칸+1=13개로 가장 많음 */
+static lv_obj_t          *s_stats_graph_xaxis_row      = NULL;
+static lv_obj_t          *s_stats_graph_x_labels[STATS_GRAPH_X_LABEL_MAX];
 
 /* 2026-09-08(재설계 — 단일화면+전체화면 팝업) — 통계는 상단바 버튼이 여는 전체화면 팝업.
  * s_stats_popup은 create_page_popup()이 만든 오버레이 루트(열려있을 때만 존재),
@@ -3101,8 +3133,7 @@ static bool  s_stats_minmax_cache_valid[STATS_GRAPH_SERIES_COUNT];
 static bool refresh_stats_overview_panel(void)
 {
     uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
-    uint32_t scale_sec = (idx < (sizeof(s_stats_scale_values) / sizeof(s_stats_scale_values[0])))
-                         ? s_stats_scale_values[idx] : s_stats_scale_values[0];
+    uint32_t scale_sec = (idx < STATS_SCALE_COUNT) ? STATS_SCALE_SECONDS[idx] : STATS_SCALE_SECONDS[0];
     uint32_t now = rtc_sync_get_unix_time();
     uint32_t cutoff = (now > scale_sec) ? now - scale_sec : 0;
 
@@ -3139,7 +3170,25 @@ static bool refresh_stats_overview_panel(void)
     return true;
 }
 
-static void cb_stats_scale_changed(lv_event_t *e) { (void)e; refresh_stats_overview_panel(); }
+static void stats_graph_swipe_async_refresh(void *user_data);  /* 아래(스와이프 처리부)에 정의 */
+
+static void cb_stats_scale_changed(lv_event_t *e)
+{
+    (void)e;
+    s_stats_graph_offset = 0;  /* 2026-09-11 — 스케일 바꾸면 "지금" 창으로 되돌림(다른
+                                   스케일에서의 오프셋을 그대로 들고 가면 혼란스러움) */
+    /* 2026-09-12(원 설계 — 탭 값 박스는 "Scale dropdown change"에 사라져야 함) */
+    if (s_stats_chart_tap_label) {
+        lv_obj_add_flag(s_stats_chart_tap_label, LV_OBJ_FLAG_HIDDEN);
+        s_stats_chart_tap_shown_series = -1;
+    }
+    refresh_stats_overview_panel();
+    /* 2026-09-11(사용자 지적 — "스케일 변경 시 X축 라벨이 바뀌지 않아") — 그래프 자체 갱신은
+     * 5틱에 한 번 도는 주기적 타이머라 스케일을 바꿔도 바로 안 반영됨. 스와이프와 동일하게
+     * force_refresh + async로 즉시 반영 */
+    s_stats_graph_force_refresh = true;
+    lv_async_call(stats_graph_swipe_async_refresh, NULL);
+}
 
 /* 리턴값 false = SD 자체 오류(그 틱 중단) */
 static bool refresh_stats_table(void)
@@ -3215,67 +3264,195 @@ static bool refresh_stats_table(void)
     return true;
 }
 
-/* 2026-09-10(사용자 설계 — 라인그래프, 계열 4개 온도/습도/CO2/암모니아, Scale 판넬과 공유) —
- * 계열마다 실제 단위/범위가 달라서(온도 vs CO2 등 같은 축에 그대로 그리면 한쪽이 눌려버림)
- * 각 계열을 자기 자신의 기간 내 최소~최대 기준 0~100으로 정규화해서 그림. 실제 값은
- * s_stats_chart_real_values에 원본 그대로 보관해서 탭했을 때 진짜 값을 보여줌(사용자 지시:
- * "탭하면 값이 나타나는 것"). 테이블 보고 있을 때(그래프 뷰 숨김)는 SD 조회 자체를 생략.
+/* 2026-09-11(그래프 재설계 항목5) — 스케일에 맞는 간격으로 X축 아래 상대시각 라벨을 배치.
+ * 라벨 위치는 챠트의 실제 픽셀 좌표를 기준으로 계산(오프셋과 무관 — 라벨은 항상 "이
+ * 창의 오른쪽 끝(0)"부터 "왼쪽 끝(-전체스케일)"까지의 상대 표기이므로, 절대시각/오프셋에
+ * 의존하지 않음 — 그래야 과거로 스와이프해도 라벨이 안 헷갈림) */
+/* 2026-09-11(사용자 지적 — "X legend가 잘못 구현됬어") — 오프셋으로 과거 창을 보고 있을 때도
+ * 이 함수가 offset을 몰라서 오른쪽 끝을 항상 "0"(지금)으로 라벨링하고 있었음. offset_sec을
+ * 받아 모든 라벨에 더해서, 실제 "지금부터 얼마나 전"인지를 보여주게 고침 */
+static void refresh_stats_graph_x_labels(uint16_t scale_idx, uint32_t offset_sec)
+{
+    if (!s_stats_graph_xaxis_row) return;
+    uint32_t scale_sec = STATS_SCALE_SECONDS[scale_idx];
+    uint32_t step = s_stats_xaxis_interval_sec[scale_idx];
+    int label_count = (int)(scale_sec / step) + 1;
+    if (label_count > STATS_GRAPH_X_LABEL_MAX) label_count = STATS_GRAPH_X_LABEL_MAX;
+
+    lv_area_t row_coords;
+    lv_obj_get_coords(s_stats_graph_xaxis_row, &row_coords);
+    int32_t row_w = row_coords.x2 - row_coords.x1;
+
+    for (int i = 0; i < STATS_GRAPH_X_LABEL_MAX; i++) {
+        if (!s_stats_graph_x_labels[i]) continue;
+        if (i >= label_count) {
+            lv_obj_add_flag(s_stats_graph_x_labels[i], LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_remove_flag(s_stats_graph_x_labels[i], LV_OBJ_FLAG_HIDDEN);
+
+        /* 2026-09-11(사용자 지적 — "X축 라벨이 왼쪽 한 곳에 뭉쳐서 표기돼") — 방금 추가한
+         * offset_sec을 좌표 계산에도 같이 넣어버린 게 원인. 화면상 위치는 "이 창 안에서
+         * 오른쪽 끝에서 얼마나 왼쪽인지"(i*step, 창 폭 기준)만으로 정해야 하고, offset은
+         * 텍스트(실제 "지금부터 몇 전"인지)에만 더해야 함 — 섞으면 offset>0일 때 분수가
+         * 1을 넘어 px가 음수가 되고, 전부 x=0으로 클램프되어 왼쪽에 뭉침 */
+        uint32_t seconds_in_window = (uint32_t)i * step;
+        uint32_t seconds_ago = seconds_in_window + offset_sec;
+        float frac_from_right = (float)seconds_in_window / (float)scale_sec;
+        int32_t px = (int32_t)((1.0f - frac_from_right) * (float)row_w);
+
+        char buf[16];
+        if (seconds_ago == 0) {
+            snprintf(buf, sizeof(buf), "0");
+        } else if (step % 86400 == 0) {
+            snprintf(buf, sizeof(buf), "-%ud", (unsigned)(seconds_ago / 86400));
+        } else if (step % 3600 == 0) {
+            snprintf(buf, sizeof(buf), "-%uh", (unsigned)(seconds_ago / 3600));
+        } else {
+            snprintf(buf, sizeof(buf), "-%um", (unsigned)(seconds_ago / 60));
+        }
+        lv_label_set_text(s_stats_graph_x_labels[i], buf);
+        /* 오른쪽 끝(i=0) 라벨은 폭 안 벗어나게 오른쪽 정렬, 나머지는 중앙정렬 근사 */
+        int32_t lbl_w = lv_obj_get_width(s_stats_graph_x_labels[i]);
+        int32_t x = px - lbl_w / 2;
+        if (x + lbl_w > row_w) x = row_w - lbl_w;
+        if (x < 0) x = 0;
+        lv_obj_set_pos(s_stats_graph_x_labels[i], x, 0);
+    }
+}
+
+/* 2026-09-10/11(재설계 — 라인그래프, 계열 4개 온도/습도/CO2/암모니아, 스케일별 사전집계
+ * 저장에서 읽음, [[project_cntl_stats_graph_redesign_2026_09_10]]) — 계열마다 실제 단위/
+ * 범위가 달라서 각 계열을 그 창 안의 최소~최대 기준 0~100으로 정규화. 값이 없는 슬롯은
+ * 계열별 고정 높이(s_stats_gap_ref_height)에 점만 찍음(별도 겹침 차트, 사용자 지시: "값이
+ * 없는 영역은... 찍어야 할 위치마다 찍는거야"). 테이블 보고 있을 때는 SD 조회 생략.
  * 리턴값 false = SD 자체 오류(그 틱 중단) */
 static bool refresh_stats_graph(void)
 {
     if (!s_stats_chart) return true;
     if (lv_obj_has_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN)) return true;
 
-    /* 2026-09-10 — 그래프는 테이블처럼 매초 갱신될 필요가 없으므로, 실제 SD 조회는 3틱(약
-     * 6초)에 한 번만 하도록 완화(2s 타이머 기준) */
-    static int s_graph_refresh_tick = 0;
-    if ((s_graph_refresh_tick++ % 3) != 0) return true;
+    /* 2026-09-11(사용자 지시 — 실측 137ms 안팎 확인 후 "갱신 주기는 15초로 결정") — 틱카운트
+     * 나눗셈(2s 타이머라 5의 배수만 가능)으론 15000ms를 못 맞춰서 경과시간 직접 비교로 변경.
+     * 스와이프/스케일변경 직후엔 force로 즉시 반영 */
+    static uint32_t s_graph_last_refresh_tick = 0;
+    uint32_t now_tick_ms = lv_tick_get();
+    if (!s_stats_graph_force_refresh && (now_tick_ms - s_graph_last_refresh_tick) < 15000) return true;
+    s_graph_last_refresh_tick = now_tick_ms;
+    s_stats_graph_force_refresh = false;
 
     uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
-    uint32_t scale_sec = (idx < (sizeof(s_stats_scale_values) / sizeof(s_stats_scale_values[0])))
-                         ? s_stats_scale_values[idx] : s_stats_scale_values[0];
+    if (idx >= STATS_SCALE_COUNT) idx = 0;
+    uint32_t scale_sec = STATS_SCALE_SECONDS[idx];
+    uint32_t bucket_width = scale_sec / STATS_GRAPH_POINT_COUNT;
+    if (bucket_width == 0) bucket_width = 1;
+
     uint32_t now = rtc_sync_get_unix_time();
-    uint32_t cutoff = (now > scale_sec) ? now - scale_sec : 0;
+    uint32_t offset_sec = (uint32_t)s_stats_graph_offset * scale_sec;
+    uint32_t window_end   = (now > offset_sec) ? now - offset_sec : 0;
+    uint32_t window_start = (window_end > scale_sec) ? window_end - scale_sec : 0;
+
+    /* 2026-09-11(사용자 지시 — "데이터 읽기부터 그리기까지 소요 시간 측정해") — SD 읽기
+     * 시작부터 차트에 값 세팅 끝까지(실제 픽셀 드로잉은 이후 LVGL 자체 렌더 패스에서 별도로
+     * 일어남 — 그건 이 함수 범위 밖이라 여기 포함 안 됨) */
+    int64_t t_start_us = esp_timer_get_time();
 
     static const uint8_t chan_types[STATS_GRAPH_SERIES_COUNT] = {
         SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM
     };
 
-    static stats_record_t buf[STATS_GRAPH_SERIES_COUNT][STATS_GRAPH_POINT_COUNT];
+    static stats_bucket_t buf[STATS_GRAPH_SERIES_COUNT][STATS_GRAPH_POINT_COUNT];
     uint32_t got[STATS_GRAPH_SERIES_COUNT];
-    uint32_t max_got = 0;
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
-        got[s] = stats_store_read_since(cutoff, chan_types[s], buf[s], STATS_GRAPH_POINT_COUNT);
+        got[s] = stats_agg_read_window((uint8_t)idx, chan_types[s], window_start, window_end,
+                                        buf[s], STATS_GRAPH_POINT_COUNT);
         if (got[s] == 0 && stats_store_had_io_error()) return false;  /* SD 자체 문제 — 즉시 중단 */
-        if (got[s] > max_got) max_got = got[s];
     }
-    if (max_got == 0) max_got = 1;
-    s_stats_chart_shown_points = max_got;
-    lv_chart_set_point_count(s_stats_chart, max_got);
+
+    lv_chart_set_point_count(s_stats_chart, STATS_GRAPH_POINT_COUNT);
+    lv_chart_set_point_count(s_stats_gap_chart, STATS_GRAPH_POINT_COUNT);
+    s_stats_chart_shown_points = STATS_GRAPH_POINT_COUNT;
 
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
-        /* 2026-09-10 — 개괄판넬(refresh_stats_overview_panel, 항상 이 함수보다 먼저 도는
-         * 순서 보장, refresh_stats_page 참고)이 이미 계산해둔 캐시 재사용 — 채널당 SD
-         * 스캔을 두 번에서 한 번으로 줄임 */
-        bool have_range = s_stats_minmax_cache_valid[s];
-        float mn = s_stats_minmax_cache_mn[s];
-        float mx = s_stats_minmax_cache_mx[s];
+        static bool has[STATS_GRAPH_POINT_COUNT];
+        static float vals[STATS_GRAPH_POINT_COUNT];
+        for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) has[i] = false;
+
+        for (uint32_t i = 0; i < got[s]; i++) {
+            long slot_l = ((long)buf[s][i].bucket_start_unix - (long)window_start) / (long)bucket_width;
+            if (slot_l < 0 || slot_l >= STATS_GRAPH_POINT_COUNT) continue;
+            uint32_t slot = (uint32_t)slot_l;
+            has[slot] = true;
+            vals[slot] = buf[s][i].avg_value;
+        }
+
+        /* 2026-09-11 — 스와이프로 지금이 아닌 다른 창을 볼 수 있게 되면서, "지금까지"
+         * 기준으로 미리 계산해둔 개괄판넬 min/max 캐시를 그대로 쓰면 안 맞을 수 있음
+         * (오프셋이 0이 아닐 때) — 항상 이 창에서 받아온 값들로 직접 min/max 계산 */
+        bool have_range = false;
+        float mn = 0.0f, mx = 0.0f;
+        for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
+            if (!has[i]) continue;
+            if (!have_range) { mn = mx = vals[i]; have_range = true; }
+            else {
+                if (vals[i] < mn) mn = vals[i];
+                if (vals[i] > mx) mx = vals[i];
+            }
+        }
         float span = (have_range && mx > mn) ? (mx - mn) : 0.0f;
 
         int32_t norm_vals[STATS_GRAPH_POINT_COUNT];
-        for (uint32_t i = 0; i < max_got; i++) {
-            if (i < got[s]) {
-                float v = buf[s][i].value;
-                s_stats_chart_real_values[s][i] = v;
+        int32_t gap_vals[STATS_GRAPH_POINT_COUNT];
+        for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
+            if (has[i]) {
+                s_stats_chart_real_values[s][i] = vals[i];
                 s_stats_chart_has_value[s][i] = true;
-                norm_vals[i] = (span > 0.0f) ? (int32_t)(((v - mn) / span) * 100.0f + 0.5f) : 50;
+                norm_vals[i] = (span > 0.0f) ? (int32_t)(((vals[i] - mn) / span) * 100.0f + 0.5f) : 50;
+                gap_vals[i] = LV_CHART_POINT_NONE;
             } else {
                 s_stats_chart_has_value[s][i] = false;
                 norm_vals[i] = LV_CHART_POINT_NONE;
+                gap_vals[i] = s_stats_gap_ref_height[s];
             }
         }
-        lv_chart_set_series_values(s_stats_chart, s_stats_chart_series[s], norm_vals, max_got);
+        lv_chart_set_series_values(s_stats_chart, s_stats_chart_series[s], norm_vals, STATS_GRAPH_POINT_COUNT);
+        lv_chart_set_series_values(s_stats_gap_chart, s_stats_gap_series[s], gap_vals, STATS_GRAPH_POINT_COUNT);
+
+        /* 2026-09-11(사용자 지적 — "상단에 4계열 최대값, 하단에 4계열 최소값") — 정규화상
+         * 100=그 계열의 실제 최대, 0=실제 최소라서 차트 맨 위/맨 아래와 항상 일치함 */
+        bool checked = lv_obj_has_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED);
+        bool show = checked && have_range;
+        ui_str_id_t label_id, unit_id;
+        chan_type_to_strs(chan_types[s], &label_id, &unit_id);
+        (void)label_id;
+        char numbuf[24];
+        if (s_stats_graph_max_label[s]) {
+            if (show) {
+                int mx_scaled = (int)(mx * 10.0f + (mx >= 0 ? 0.5f : -0.5f));
+                snprintf(numbuf, sizeof(numbuf), "%d.%d%s", mx_scaled / 10, abs(mx_scaled % 10), ui_str(unit_id));
+                lv_label_set_text(s_stats_graph_max_label[s], numbuf);
+                lv_obj_remove_flag(s_stats_graph_max_label[s], LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_stats_graph_max_label[s], LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        if (s_stats_graph_min_label[s]) {
+            if (show) {
+                int mn_scaled = (int)(mn * 10.0f + (mn >= 0 ? 0.5f : -0.5f));
+                snprintf(numbuf, sizeof(numbuf), "%d.%d%s", mn_scaled / 10, abs(mn_scaled % 10), ui_str(unit_id));
+                lv_label_set_text(s_stats_graph_min_label[s], numbuf);
+                lv_obj_remove_flag(s_stats_graph_min_label[s], LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_stats_graph_min_label[s], LV_OBJ_FLAG_HIDDEN);
+            }
+        }
     }
+
+    refresh_stats_graph_x_labels(idx, offset_sec);
+
+    int64_t t_end_us = esp_timer_get_time();
+    ESP_LOGW(TAG, "MEMDIAG 그래프 윈도 1회 갱신(읽기~차트데이터세팅) 소요시간: %lld us (스케일idx=%u)",
+             (long long)(t_end_us - t_start_us), (unsigned)idx);
     return true;
 }
 
@@ -3284,6 +3461,19 @@ static void cb_stats_chart_series_toggle(lv_event_t *e)
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     bool checked = lv_obj_has_state(s_stats_chart_checkbox[idx], LV_STATE_CHECKED);
     lv_chart_hide_series(s_stats_chart, s_stats_chart_series[idx], !checked);
+    /* 2026-09-11(사용자 지적 — "계열을 해제해도 점은 계속 찍혀") — 실데이터 차트만 숨기고
+     * 겹쳐그린 공백점 차트는 안 숨겼던 버그 */
+    lv_chart_hide_series(s_stats_gap_chart, s_stats_gap_series[idx], !checked);
+    if (!checked) {
+        if (s_stats_graph_max_label[idx]) lv_obj_add_flag(s_stats_graph_max_label[idx], LV_OBJ_FLAG_HIDDEN);
+        if (s_stats_graph_min_label[idx]) lv_obj_add_flag(s_stats_graph_min_label[idx], LV_OBJ_FLAG_HIDDEN);
+        /* 2026-09-12(원 설계 — 탭 값 박스는 "unchecking that series' checkbox"에 사라져야 함,
+         * 단 지금 박스에 표시 중인 계열이 그 계열일 때만) */
+        if (idx == s_stats_chart_tap_shown_series && s_stats_chart_tap_label) {
+            lv_obj_add_flag(s_stats_chart_tap_label, LV_OBJ_FLAG_HIDDEN);
+            s_stats_chart_tap_shown_series = -1;
+        }
+    }
 }
 
 /* 2026-09-10(사용자 지시 — "탭하면 값이 나타나는 것") — 탭 x좌표로 가장 가까운 인덱스를
@@ -3292,6 +3482,7 @@ static void cb_stats_chart_series_toggle(lv_event_t *e)
 static void cb_stats_chart_tap(lv_event_t *e)
 {
     (void)e;
+    if (!s_stats_chart_tap_label) return;
     lv_indev_t *indev = lv_indev_active();
     if (!indev) return;
     lv_point_t p;
@@ -3342,6 +3533,25 @@ static void cb_stats_chart_tap(lv_event_t *e)
     char buf[64];
     snprintf(buf, sizeof(buf), "%s: %d.%02d%s", ui_str(label_id), scaled / 100, scaled % 100, ui_str(unit_id));
     lv_label_set_text(s_stats_chart_tap_label, buf);
+
+    /* 2026-09-12(원 설계 carried-forward — "탭 위치에 직접 그려") — 고른 계열/지점의 실제
+     * 화면좌표에 박스를 놓음(다음 렌더에 라벨 크기가 반영되므로, 폭을 넘어가지 않게 clamp) */
+    lv_point_t chosen_pp;
+    lv_chart_get_point_pos_by_id(s_stats_chart, s_stats_chart_series[chosen_series], nearest_idx, &chosen_pp);
+    lv_obj_update_layout(s_stats_chart_tap_label);
+    int32_t lbl_w = lv_obj_get_width(s_stats_chart_tap_label);
+    int32_t lbl_h = lv_obj_get_height(s_stats_chart_tap_label);
+    int32_t chart_w = lv_obj_get_width(s_stats_chart);
+    int32_t chart_h = lv_obj_get_height(s_stats_chart);
+    int32_t x = chosen_pp.x - lbl_w / 2;
+    int32_t y = chosen_pp.y - lbl_h - 6;  /* 점 바로 위 */
+    if (x < 0) x = 0;
+    if (x + lbl_w > chart_w) x = chart_w - lbl_w;
+    if (y < 0) y = chosen_pp.y + 6;  /* 위 공간이 없으면 점 아래로 */
+    if (y + lbl_h > chart_h) y = chart_h - lbl_h;
+    lv_obj_set_pos(s_stats_chart_tap_label, x, y);
+    lv_obj_remove_flag(s_stats_chart_tap_label, LV_OBJ_FLAG_HIDDEN);
+    s_stats_chart_tap_shown_series = chosen_series;
 }
 
 /* 2026-09-10(재설계 — SD I/O를 stats_io_worker_task로 격리) — 이 타이머는 이제 SD를 전혀
@@ -3434,6 +3644,9 @@ static void switch_to_graph_view(void)
 {
     lv_obj_add_flag(s_stats_table_view, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN);
+    s_stats_graph_force_refresh = true;  /* 2026-09-11 — 숨겨져있던 동안 갱신 안 됐을 수
+                                             있으니 보이자마자 바로 최신으로 */
+    refresh_stats_graph();
 }
 
 static void switch_to_table_view(void)
@@ -3461,13 +3674,48 @@ static void cb_stats_table_gesture(lv_event_t *e)
     if (dir == LV_DIR_BOTTOM) { stats_prev_page_cb(NULL); return; }  /* 아래로 스와이프 = 이전(과거) */
 }
 
-static void cb_stats_graph_gesture(lv_event_t *e)
+/* 2026-09-11(그래프 재설계 항목4, 사용자 확정 — "테이블 그래프 스와이프 안쓰는데?") — 기존
+ * 좌우 스와이프로 테이블<->그래프 전환하던 건 실사용 안 하는 걸로 확인돼서, 좌우는 원래
+ * 설계대로 시간 이동에 씀(테이블<->그래프 전환은 "<<"/">>" 버튼으로만). 왼쪽 스와이프=더
+ * 과거로(오프셋 증가), 오른쪽 스와이프=더 최근으로(오프셋 감소, 0 미만/미래 없음) */
+/* 2026-09-11(사용자 지시 — "기기 반응이 느린 편... 스와이프 인식됨을 알려야") — 힌트를
+ * 보여준 프레임이 실제로 화면에 그려질 기회를 주기 위해, 무거운 작업(SD 재조회+다시
+ * 그리기)은 이 프레임 안에서 동기 실행하지 않고 lv_async_call로 다음 루프로 미룸
+ * (event-driven 패턴, [[feedback_event_driven_not_polling]]) */
+static void stats_graph_swipe_async_refresh(void *user_data)
+{
+    (void)user_data;
+    s_stats_graph_force_refresh = true;
+    refresh_stats_graph();
+    if (s_stats_graph_swipe_hint) lv_obj_add_flag(s_stats_graph_swipe_hint, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* older=true: 과거로(offset++, "<<"), older=false: 현재쪽으로(offset--, ">>", 0에서 멈춤) */
+static void stats_graph_pan(bool older)
+{
+    if (older) {
+        s_stats_graph_offset++;
+    } else {
+        if (s_stats_graph_offset == 0) return;
+        s_stats_graph_offset--;
+    }
+    if (s_stats_graph_swipe_hint) {
+        lv_label_set_text(s_stats_graph_swipe_hint, older ? "<<" : ">>");
+        lv_obj_remove_flag(s_stats_graph_swipe_hint, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_async_call(stats_graph_swipe_async_refresh, NULL);
+}
+
+static void cb_stats_graph_pan_left_tap(lv_event_t *e)
 {
     (void)e;
-    lv_indev_t *indev = lv_indev_active();
-    if (!indev) return;
-    lv_dir_t dir = lv_indev_get_gesture_dir(indev);
-    if (dir == LV_DIR_RIGHT) switch_to_table_view();
+    stats_graph_pan(true);
+}
+
+static void cb_stats_graph_pan_right_tap(lv_event_t *e)
+{
+    (void)e;
+    stats_graph_pan(false);
 }
 
 /* 2026-09-04(사용자 지시 — 요약판넬 우측에 신호세기, 숫자보다 막대/흔한 와이파이 표시형태로,
@@ -5992,6 +6240,37 @@ static void teardown_stats_tab(void)
     s_stats_jump_next_btn = NULL;
     s_stats_jump_next_lbl = NULL;
     s_stats_table = NULL;
+    /* 2026-09-11 — 스와이프 직후 팝업이 바로 닫히면 lv_async_call이 다음 루프에서 이미
+     * 삭제된 위젯을 건드릴 수 있어 취소(use-after-free 방지) */
+    lv_async_call_cancel(stats_graph_swipe_async_refresh, NULL);
+    s_stats_gap_chart = NULL;
+    s_stats_graph_swipe_hint = NULL;
+    s_stats_chart_tap_label = NULL;
+    s_stats_chart_tap_shown_series = -1;
+    s_stats_graph_xaxis_row = NULL;
+    for (int i = 0; i < STATS_GRAPH_X_LABEL_MAX; i++) s_stats_graph_x_labels[i] = NULL;
+    s_stats_graph_max_row = NULL;
+    s_stats_graph_min_row = NULL;
+    for (int i = 0; i < STATS_GRAPH_SERIES_COUNT; i++) {
+        s_stats_graph_max_label[i] = NULL;
+        s_stats_graph_min_label[i] = NULL;
+    }
+    s_stats_graph_offset = 0;  /* 다음에 다시 열 땐 "지금" 창부터 */
+}
+
+/* 2026-09-11(사용자 지시 — "스크롤 바와 스크롤러블을 이 화면내에서 다 없애고 진행해") —
+ * 개별 조상마다 하나씩 SCROLLABLE을 빼다가 chart_checkbox_row처럼 빠뜨리는 경우가 생김
+ * (버튼 2개 추가로 그 줄이 넘쳐서 가로 스크롤바 발생, 사용자가 직접 목격). 통계 팝업 전체
+ * 서브트리를 한 번에 순회하며 SCROLLABLE 플래그 + 스크롤바 자체를 다 꺼서 빠짐없이 처리 */
+static void disable_scroll_recursive(lv_obj_t *obj)
+{
+    if (!obj) return;
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_OFF);
+    uint32_t cnt = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < cnt; i++) {
+        disable_scroll_recursive(lv_obj_get_child(obj, i));
+    }
 }
 
 /* 2026-09-08(재설계 — 상단바 통계 버튼이 여는 전체화면 팝업) */
@@ -6106,6 +6385,14 @@ static void build_stats_tab(void)
     lv_obj_set_flex_grow(s_stats_pager, 1);
     lv_obj_set_style_pad_all(s_stats_pager, 0, 0);
     lv_obj_set_style_border_width(s_stats_pager, 0, 0);
+    /* 2026-09-11(그래프 스와이프 진단 — 코드+LVGL 공식 문서 확인: "Gestures are not triggered
+     * if a widget is being scrolled") — 차트/그래프뷰 자체는 이미 스크롤 꺼놨지만, 터치가
+     * 처음 눌리는 지점부터 화면까지 이어지는 조상 체인 중 스크롤 가능한 게 하나라도 남아
+     * 있으면 거기서 드래그를 스크롤로 먼저 채가서 제스처 자체가 안 생김 — 이 팝업은 내용이
+     * 화면에 정확히 맞게 설계돼 있어 스크롤할 이유가 없으므로, 체인 전체(페이저+팝업
+     * 오버레이)에서 스크롤을 꺼서 원천 차단 */
+    lv_obj_remove_flag(s_stats_pager, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(stats_page, LV_OBJ_FLAG_SCROLLABLE);
 
     s_stats_table_view = lv_obj_create(s_stats_pager);
     lv_obj_set_size(s_stats_table_view, LV_PCT(100), LV_PCT(100));
@@ -6216,7 +6503,6 @@ static void build_stats_tab(void)
     lv_obj_set_style_pad_all(s_stats_graph_view, 4, 0);
     lv_obj_set_style_pad_row(s_stats_graph_view, 4, 0);
     lv_obj_add_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_event_cb(s_stats_graph_view, cb_stats_graph_gesture, LV_EVENT_GESTURE, NULL);
 
     lv_color_t chart_colors[STATS_GRAPH_SERIES_COUNT] = {
         lv_palette_main(LV_PALETTE_RED), lv_palette_main(LV_PALETTE_BLUE),
@@ -6244,6 +6530,25 @@ static void build_stats_tab(void)
                              (void *)(intptr_t)s);
     }
 
+    /* 2026-09-11(사용자 지시 — "스와이프, 더블탭 다 없애고 그냥 버튼으로 해야겠다") — 제스처/
+     * 더블탭 둘 다 실기에서 인식이 안 되거나 불안정해서 완전히 버리고, 가장 단순/확실한
+     * LV_EVENT_CLICKED 버튼만 남김. "우측 끝 정렬"(사용자 지시) — 체크박스는 왼쪽에 그대로 두고
+     * 사이에 flex_grow 스페이서를 둬서 버튼 두 개만 행의 오른쪽 끝으로 밀어냄 */
+    lv_obj_t *pan_btn_spacer = lv_obj_create(chart_checkbox_row);
+    lv_obj_remove_style_all(pan_btn_spacer);
+    lv_obj_set_size(pan_btn_spacer, 1, 1);
+    lv_obj_set_flex_grow(pan_btn_spacer, 1);
+
+    lv_obj_t *pan_left_btn = lv_button_create(chart_checkbox_row);
+    lv_obj_t *pan_left_lbl = lv_label_create(pan_left_btn);
+    lv_label_set_text(pan_left_lbl, "<<");
+    lv_obj_add_event_cb(pan_left_btn, cb_stats_graph_pan_left_tap, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *pan_right_btn = lv_button_create(chart_checkbox_row);
+    lv_obj_t *pan_right_lbl = lv_label_create(pan_right_btn);
+    lv_label_set_text(pan_right_lbl, ">>");
+    lv_obj_add_event_cb(pan_right_btn, cb_stats_graph_pan_right_tap, LV_EVENT_CLICKED, NULL);
+
     s_stats_chart = lv_chart_create(s_stats_graph_view);
     lv_obj_set_size(s_stats_chart, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_grow(s_stats_chart, 1);
@@ -6255,19 +6560,128 @@ static void build_stats_tab(void)
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
         s_stats_chart_series[s] = lv_chart_add_series(s_stats_chart, chart_colors[s], LV_CHART_AXIS_PRIMARY_Y);
     }
+    /* 2026-09-11(사용자 지적 — "상단에 4계열 최대값, 하단에 4계열 최소값") — 정규화상
+     * 100=그 계열의 실제 최대, 0=실제 최소라서 차트 맨 위/맨 아래와 항상 일치. 표시여부/
+     * 값은 매 갱신마다 refresh_stats_graph()가 정함 */
+    s_stats_graph_max_row = lv_obj_create(s_stats_chart);
+    lv_obj_remove_style_all(s_stats_graph_max_row);
+    lv_obj_add_flag(s_stats_graph_max_row, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_size(s_stats_graph_max_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_stats_graph_max_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(s_stats_graph_max_row, 6, 0);
+    lv_obj_align(s_stats_graph_max_row, LV_ALIGN_TOP_MID, 0, 0);
 
-    /* 2026-09-10(사용자 지시 — "탭하면 값이 나타나는 것", 이어서 "그래프 위에 직접 그려
-     * (오버레이로)") — 별도 줄이 아니라 차트 자식으로 만들어 IGNORE_LAYOUT+좌상단 정렬,
-     * 차트 선 위에서도 읽히게 배경 박스 추가. 결과적으로 차트가 남는 공간을 전부 차지 */
+    s_stats_graph_min_row = lv_obj_create(s_stats_chart);
+    lv_obj_remove_style_all(s_stats_graph_min_row);
+    lv_obj_add_flag(s_stats_graph_min_row, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_size(s_stats_graph_min_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_stats_graph_min_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(s_stats_graph_min_row, 6, 0);
+    lv_obj_align(s_stats_graph_min_row, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+    /* 2026-09-12(사용자 지시 — "최대/최소값을 현재 탭하면 값 보여주는 것처럼 하얀 박스 위에
+     * 글씨를 써") — 방금 지운 탭-값 박스와 동일한 스타일(흰 배경 80% 불투명, 패딩4, radius4),
+     * 글자색만 그 계열 색 그대로 유지 */
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        s_stats_graph_max_label[s] = lv_label_create(s_stats_graph_max_row);
+        lv_obj_add_flag(s_stats_graph_max_label[s], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_text_font(s_stats_graph_max_label[s], ui_font_get(UI_FONT_SIZE_12), 0);
+        lv_obj_set_style_text_color(s_stats_graph_max_label[s], chart_colors[s], 0);
+        lv_obj_set_style_bg_color(s_stats_graph_max_label[s], lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(s_stats_graph_max_label[s], LV_OPA_80, 0);
+        lv_obj_set_style_pad_all(s_stats_graph_max_label[s], 4, 0);
+        lv_obj_set_style_radius(s_stats_graph_max_label[s], 4, 0);
+        /* 2026-09-12(사용자 지시 — "암모니아는 잘 안보일 수 있잖아. 글씨에 까만 테두리
+         * 둘 수 있어?") — LVGL 9 텍스트 외곽선 스타일, 모든 계열에 공통 적용 */
+        lv_obj_set_style_text_outline_stroke_color(s_stats_graph_max_label[s], lv_color_black(), 0);
+        lv_obj_set_style_text_outline_stroke_width(s_stats_graph_max_label[s], 1, 0);
+        lv_obj_set_style_text_outline_stroke_opa(s_stats_graph_max_label[s], LV_OPA_COVER, 0);
+        lv_label_set_text(s_stats_graph_max_label[s], "");
+
+        s_stats_graph_min_label[s] = lv_label_create(s_stats_graph_min_row);
+        lv_obj_add_flag(s_stats_graph_min_label[s], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_text_font(s_stats_graph_min_label[s], ui_font_get(UI_FONT_SIZE_12), 0);
+        lv_obj_set_style_text_color(s_stats_graph_min_label[s], chart_colors[s], 0);
+        lv_obj_set_style_bg_color(s_stats_graph_min_label[s], lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(s_stats_graph_min_label[s], LV_OPA_80, 0);
+        lv_obj_set_style_pad_all(s_stats_graph_min_label[s], 4, 0);
+        lv_obj_set_style_radius(s_stats_graph_min_label[s], 4, 0);
+        lv_obj_set_style_text_outline_stroke_color(s_stats_graph_min_label[s], lv_color_black(), 0);
+        lv_obj_set_style_text_outline_stroke_width(s_stats_graph_min_label[s], 1, 0);
+        lv_obj_set_style_text_outline_stroke_opa(s_stats_graph_min_label[s], LV_OPA_COVER, 0);
+        lv_label_set_text(s_stats_graph_min_label[s], "");
+    }
+    /* 2026-09-11(그래프 재설계 — "라인+도트인데 라인만 그리는 걸로") — 점마커(LV_PART_INDICATOR)
+     * 크기를 0으로 — 선만 남음 */
+    lv_obj_set_style_width(s_stats_chart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_height(s_stats_chart, 0, LV_PART_INDICATOR);
+
+    /* 2026-09-11(그래프 재설계 — "값이 없는 슬롯마다 그 자리에 점만") — 실데이터 차트와
+     * 정확히 같은 위치/크기로 겹쳐그리는 두 번째 차트. LVGL은 자식을 부모 위에 그리므로
+     * s_stats_chart의 자식으로 만들면 따로 정렬 계산 없이 자동으로 겹침. 선은 숨기고
+     * (LV_PART_ITEMS 폭 0) 점마커만 보이게 — 위 실데이터 차트와 반대 스타일 */
+    s_stats_gap_chart = lv_chart_create(s_stats_chart);
+    lv_obj_set_size(s_stats_gap_chart, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(s_stats_gap_chart, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_pos(s_stats_gap_chart, 0, 0);
+    lv_obj_remove_flag(s_stats_gap_chart, LV_OBJ_FLAG_CLICKABLE);  /* 탭이 밑 실데이터 차트로 전달되게 */
+    lv_obj_set_style_bg_opa(s_stats_gap_chart, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_stats_gap_chart, 0, 0);
+    lv_chart_set_type(s_stats_gap_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(s_stats_gap_chart, STATS_GRAPH_POINT_COUNT);
+    lv_chart_set_axis_range(s_stats_gap_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    lv_chart_set_div_line_count(s_stats_gap_chart, 0, 0);
+    lv_obj_set_style_line_width(s_stats_gap_chart, 0, LV_PART_ITEMS);  /* 선 숨김 */
+    lv_obj_set_style_width(s_stats_gap_chart, 2, LV_PART_INDICATOR);
+    lv_obj_set_style_height(s_stats_gap_chart, 2, LV_PART_INDICATOR);
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        s_stats_gap_series[s] = lv_chart_add_series(s_stats_gap_chart, chart_colors[s], LV_CHART_AXIS_PRIMARY_Y);
+    }
+
+    /* 2026-09-12(사용자 지시 — 좌상단 고정 박스는 지우고 탭 위치에 다시 만듦, "연한 노란색은
+     * 눌러서 나온 경험을 제공하려는 거야" — 즉 상시 표시되는 min/max 범례(흰색)와 의도적으로
+     * 다른 색으로 구분. "암모니아는 잘 안보일 수 있잖아" → 검정 글자 외곽선 추가) — 위치는
+     * 매 탭마다 cb_stats_chart_tap()이 실제 탭 지점으로 재배치, CLICKABLE을 꺼서 다음 탭이
+     * 이 박스가 아니라 밑 차트로 그대로 전달되게 함(원 설계: "must NOT intercept taps") */
     s_stats_chart_tap_label = lv_label_create(s_stats_chart);
     lv_obj_add_flag(s_stats_chart_tap_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_add_flag(s_stats_chart_tap_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_stats_chart_tap_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_text_font(s_stats_chart_tap_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_style_bg_color(s_stats_chart_tap_label, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(s_stats_chart_tap_label, LV_OPA_80, 0);
+    lv_obj_set_style_bg_color(s_stats_chart_tap_label, lv_palette_lighten(LV_PALETTE_YELLOW, 4), 0);
+    lv_obj_set_style_bg_opa(s_stats_chart_tap_label, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(s_stats_chart_tap_label, 4, 0);
     lv_obj_set_style_radius(s_stats_chart_tap_label, 4, 0);
-    lv_obj_align(s_stats_chart_tap_label, LV_ALIGN_TOP_LEFT, 4, 4);
+    lv_obj_set_style_text_outline_stroke_color(s_stats_chart_tap_label, lv_color_black(), 0);
+    lv_obj_set_style_text_outline_stroke_width(s_stats_chart_tap_label, 1, 0);
+    lv_obj_set_style_text_outline_stroke_opa(s_stats_chart_tap_label, LV_OPA_COVER, 0);
     lv_label_set_text(s_stats_chart_tap_label, "");
+
+    /* 2026-09-11(사용자 지시 — "스와이프, 더블탭 다 없애고 그냥 버튼으로") — 버튼 클릭 시에도
+     * 잠깐 보였다가 실제 갱신 끝나면 숨겨짐(stats_graph_pan/stats_graph_swipe_async_refresh) */
+    s_stats_graph_swipe_hint = lv_label_create(s_stats_chart);
+    lv_obj_add_flag(s_stats_graph_swipe_hint, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_add_flag(s_stats_graph_swipe_hint, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_text_font(s_stats_graph_swipe_hint, ui_font_get(UI_FONT_SIZE_30), 0);
+    lv_obj_set_style_bg_color(s_stats_graph_swipe_hint, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_stats_graph_swipe_hint, LV_OPA_80, 0);
+    lv_obj_set_style_pad_all(s_stats_graph_swipe_hint, 8, 0);
+    lv_obj_set_style_radius(s_stats_graph_swipe_hint, 6, 0);
+    lv_obj_align(s_stats_graph_swipe_hint, LV_ALIGN_CENTER, 0, 0);
+    lv_label_set_text(s_stats_graph_swipe_hint, "");
+
+    /* 2026-09-11(그래프 재설계 항목5) — 상대 X축 라벨 줄(차트 바로 아래, 고정 높이).
+     * 최대 개수만큼 미리 만들어두고 매 갱신 때 그 스케일에 필요한 개수만 보이게 함 */
+    s_stats_graph_xaxis_row = lv_obj_create(s_stats_graph_view);
+    lv_obj_set_size(s_stats_graph_xaxis_row, LV_PCT(100), 18);
+    lv_obj_set_style_border_width(s_stats_graph_xaxis_row, 0, 0);
+    lv_obj_set_style_pad_all(s_stats_graph_xaxis_row, 0, 0);
+    for (int i = 0; i < STATS_GRAPH_X_LABEL_MAX; i++) {
+        s_stats_graph_x_labels[i] = lv_label_create(s_stats_graph_xaxis_row);
+        lv_obj_add_flag(s_stats_graph_x_labels[i], LV_OBJ_FLAG_IGNORE_LAYOUT);
+        lv_obj_set_style_text_font(s_stats_graph_x_labels[i], ui_font_get(UI_FONT_SIZE_12), 0);
+        lv_label_set_text(s_stats_graph_x_labels[i], "");
+    }
 
     lv_obj_t *graph_to_table_btn = lv_button_create(s_stats_graph_view);
     /* 2026-09-10(사용자 지적 — "그래프 아래 좌측에 있어... 우측 가운데로 옮겨") — 그래프뷰가
@@ -6281,6 +6695,11 @@ static void build_stats_tab(void)
     lv_obj_set_style_text_font(graph_to_table_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_stats_page_timer = lv_timer_create(refresh_stats_page, 2000, NULL);
+
+    /* 이 시점까지 만들어진 통계 팝업 전체(테이블뷰+그래프뷰 포함)를 순회하며 스크롤 완전 차단.
+     * 테이블 행(refresh_stats_table)은 이후 주기적으로 새로 생성되지만 그쪽은 생성 시점에
+     * 개별적으로 이미 SCROLLABLE을 빼고 있음(기존 코드) */
+    disable_scroll_recursive(stats_page);
 
     size_t heap_after_stats_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGW(TAG, "MEMDIAG 통계탭 위젯 생성 비용: internal %u -> %u (소모 %d bytes)",

@@ -96,6 +96,42 @@ uint32_t stats_store_trim_to(uint64_t target_bytes);
  * 직후 이 값을 확인해서, true면 그 틱의 나머지 SD 조회까지 전부 건너뜀(회로차단기) */
 bool stats_store_had_io_error(void);
 
+/* ════════════════════════════════════════════════════════════
+ * 그래프용 스케일별 사전집계 저장 — [[project_cntl_stats_graph_redesign_2026_09_10]]
+ * 매 stats_store_append_batch() 호출마다(원본 기록과 같은 지점) 내부적으로 같이 갱신됨
+ * (이 헤더에 노출 안 함, esp_now_hub.c는 여전히 stats_store_append_batch()만 부르면 됨).
+ * 읽기 때 원본 로그를 매번 다시 스캔하던 것(1주 창 기준 추정 26초+)을 피하기 위해, 쓸 때
+ * 미리 평균을 계산해 별도 저장 — 스케일 5단계(1시간/12시간/1일/3일/1주) 각각 60포인트로
+ * 나뉘는 버킷 폭으로 미리 평균냄(그래프가 항상 60포인트 고정이므로).
+ * ════════════════════════════════════════════════════════════ */
+
+/* ui_main.c의 그래프 스케일 드롭다운(1H/12H/1D/3D/1W) 순서와 반드시 일치 —
+ * 이 헤더가 정본(authoritative)이라 ui_main.c는 STATS_SCALE_SECONDS를 직접 참조함 */
+#define STATS_SCALE_COUNT 5
+extern const uint32_t STATS_SCALE_SECONDS[STATS_SCALE_COUNT];  /* 3600/43200/86400/259200/604800 */
+
+/* 2026-09-11(사용자 결정 — "매 그래프는 60개 포인트로") — 스케일마다 이 개수만큼의 버킷으로
+ * 나뉨(버킷폭 = STATS_SCALE_SECONDS[i] / 이 값) */
+#define STATS_AGG_POINTS_PER_SCALE 60
+
+typedef struct __attribute__((packed)) {
+    uint32_t bucket_start_unix;  /* 벽시계 정렬(unix_time/버킷폭*버킷폭) — 그 버킷의 시작 */
+    uint8_t  chan_type;
+    uint8_t  sample_count;       /* 이 평균에 들어간 원본 샘플 개수(최소 2, 그 미만이면 버킷
+                                     자체가 안 만들어짐 — "절대 단일 샘플 아님") */
+    float    avg_value;
+} stats_bucket_t;  /* 10바이트 고정 */
+
+/* scale_idx(0..4)의 사전집계 저장에서, [window_start_unix, window_end_unix) 범위 안의
+ * chan_type 버킷들을 out에 채움(파일에 쓰인 순서=시간순 그대로). 실제 채운 개수 반환.
+ * 각 버킷이 스케일 안의 몇 번째 슬롯인지는 호출부가
+ * (bucket_start_unix - window_start_unix) / (STATS_SCALE_SECONDS[scale_idx] /
+ * STATS_AGG_POINTS_PER_SCALE)로 직접 계산 — 없는 슬롯(원본 기록이 아예 없던 구간)은 이
+ * 함수가 채워주지 않으므로 호출부가 "데이터 없음"으로 처리 */
+uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type,
+                                uint32_t window_start_unix, uint32_t window_end_unix,
+                                stats_bucket_t *out, uint32_t out_cap);
+
 #ifdef __cplusplus
 }
 #endif
