@@ -96,7 +96,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_BTN_APPLY]                  = { "적용",                       "Apply" },
     [STR_CONFIG_APPLY_PROGRESS]      = { "설정 적용 중...",             "Applying settings..." },
     [STR_CONFIG_APPLY_STALLED]       = { "응답 없음 — 연결 상태를 확인하세요", "No response — check connection" },
-    [STR_TITLE_ERROR_LIST]           = { "에러 코드 목록",               "Error code list" },
+    [STR_TITLE_ERROR_LIST]           = { "에러/워닝 상태",               "Error / Warning status" },
     [STR_ERROR_LIST_EMPTY]           = { "(없음)",                     "(None)" },
     [STR_TITLE_WEB_QR]               = { "웹 접속 QR",                 "Web Access QR" },
     [STR_MSG_WEB_QR_NO_IP]           = { "아직 IP가 없습니다",          "No IP yet" },
@@ -282,6 +282,24 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_ERR_DESC_CONFIG_FILE_MISMATCH]  = { "설정 파일 형식 불일치(기본값)",   "Config file mismatch (defaults)" },
     [STR_ERR_DESC_SD_MOUNT_FAILED]       = { "SD카드 마운트 실패",             "SD card mount failed" },
     [STR_ERR_DESC_UNKNOWN]               = { "알 수 없는 에러",               "Unknown error" },
+
+    [STR_STATUS_SD_IO_ERROR_MSG] = { "오류 - 상태버튼을 눌러 조치하세요",        "error - tap the status button to act" },
+    [STR_STATUS_SD_UNMOUNTED]    = { "미마운트",                                  "not mounted" },
+    [STR_BTN_SD_RECONNECT]       = { "재마운트",                       "Remount" },
+    [STR_BTN_SD_FORMAT]          = { "포맷",                          "Format" },
+    [STR_MSG_SD_FORMAT_CONFIRM]  = { "SD카드를 포맷하면 저장된 모든 사진/측정기록이 삭제됩니다. 계속하시겠습니까?",
+                                      "Formatting the SD card will erase all stored photos and measurement records. Continue?" },
+    [STR_MSG_SD_RECONNECT_OK]    = { "SD 재연결 성공",                 "SD reconnected successfully" },
+    [STR_MSG_SD_RECONNECT_FAIL]  = { "SD 재연결 실패 - 카드를 확인하거나 새 카드로 교체 후 콘을 재시작하세요",
+                                      "SD reconnect failed - check the card, or replace it and restart CNTL" },
+    [STR_MSG_SD_FORMAT_OK]       = { "SD 포맷 완료",                   "SD format complete" },
+    [STR_MSG_SD_FORMAT_FAIL]     = { "SD 포맷 실패",                   "SD format failed" },
+    [STR_ERR_DESC_SD_IO_FAIL]    = { "SD 읽기/쓰기 오류",               "SD read/write failure" },
+    [STR_MSG_STATS_BLOCKED_SD_FAIL] = { "SD 불량으로 통계를 조회할 수 없습니다. 상태버튼을 눌러 조치하세요.",
+                                        "Statistics can't be viewed because the SD card is faulty. Tap the status button to take action." },
+    [STR_BTN_DISMISS]            = { "지우기",                         "Dismiss" },
+    [STR_BTN_SD_RESOLVE]         = { "해결",                           "Resolve" },
+    [STR_TITLE_SD_RESOLVE]       = { "SD 조치 선택",                    "Resolve SD Issue" },
 };
 
 void ui_lang_load(void)

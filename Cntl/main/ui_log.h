@@ -91,6 +91,14 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
                                              저장 기능이 없이 계속 진행됨. 사용자 지시:
                                              "그래야 네가 캡쳐 안하고 보지" — 시리얼 캡처 없이
                                              화면 로그탭에서 바로 확인 가능하게 */
+#define UI_ERR_SD_IO_FAIL           5009  /* SD카드는 마운트돼 있지만(위 5008과 다름) 실제
+                                             읽기/쓰기 중 I/O 실패(2026-09-11,
+                                             [[project_cntl_sd_reliability_redesign_2026_09_10]]).
+                                             "중대한 에러"(사용자 지시)라 상태아이콘 빨강+토스트로
+                                             바로 알림. 다른 에러와 달리 재연결/포맷으로 실제
+                                             해소 가능 — 성공 검증 시 s_sd_io_fail_active를
+                                             꺼서 상태아이콘도 정상으로 되돌림(ui_main.c 참고,
+                                             이 코드 자체는 이력에 계속 남음) */
 
 void ui_log_add_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
@@ -105,18 +113,22 @@ int ui_log_get_error_history(int *out_codes, int max);
 /* code에 대응하는 짧은 설명 문자열(찾는 코드가 없으면 "알 수 없는 에러") */
 const char *ui_log_err_desc(int code);
 
-/* 2026-08-11 — 워닝 레벨(사용자 지시). 에러(UI_ERR_*)와 별개 체계: 에러는 아이콘이
- * 재부팅 전까지 계속 남지만, 워닝은 사용자가 팝업으로 확인하면 그 즉시 이력이 지워지고
- * 로고 아이콘도 정상으로 돌아옴 — "잠깐 있었지만 지금은 괜찮을 수도 있는" 신호라는
- * 성격 차이를 반영. 코드 네임스페이스는 에러와 안 겹치게 6xxx대.
+/* 2026-09-11(재설계 — 사용자 지시: "행별로 조치 가능한 버튼... 통신 에러인데 지우고
+ * 싶으면 에러끄기 식") — 에러목록 팝업의 각 행마다 붙는 "지우기" 버튼용. 이력에서 해당
+ * 코드 1개만 제거(없는 코드면 아무 일 없음). 이후 ui_log_get_error_history()가 빈 배열을
+ * 반환하면 호출부(ui_main.c)가 상태아이콘을 정상으로 되돌림 — 예전의 "에러는 재부팅 전까지
+ * 절대 안 지워짐" 정책(2026-08-11)을 대체함(워닝과 동일하게 취급하기로 재설계) */
+void ui_log_clear_one_error(int code);
+
+/* 2026-08-11 — 워닝 레벨(사용자 지시). 코드 네임스페이스는 에러와 안 겹치게 6xxx대.
  * 2026-08-25 — 유일했던 용도(SLEEP_NOW 재요청, 6001)가 CASK 재설계로 제거되어 지금은
- * 등록된 코드가 없음 — 체계 자체는 다음에 쓸 일이 생기면 그대로 재사용 */
+ * 등록된 코드가 없음 — 체계 자체는 다음에 쓸 일이 생기면 그대로 재사용.
+ * 2026-09-11 — 에러와 마찬가지로 개별 지우기로 통일(위 ui_log_clear_one_error 참고) */
 
 void ui_log_add_warn(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 bool ui_log_get_pending_warn(char *out, size_t out_cap);
 #define UI_WARN_HISTORY_CAP 16
 int ui_log_get_warn_history(int *out_codes, int max);
 const char *ui_log_warn_desc(int code);
-/* 워닝 팝업을 닫을 때 호출 — 이력을 비워서 로고 아이콘이 정상으로 돌아가게 함(에러와
- * 다른 점, 위 주석 참고) */
-void ui_log_clear_warn_history(void);
+/* 에러목록 팝업의 워닝 행 "지우기" 버튼용 — ui_log_clear_one_error()와 동일 패턴 */
+void ui_log_clear_one_warn(int code);

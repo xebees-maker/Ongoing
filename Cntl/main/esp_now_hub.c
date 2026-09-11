@@ -654,11 +654,23 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             }
 
             /* 2026-09-06(통계탭 저장) — 새로 측정된 값만 SD에 영구 기록. 캐시 재전송(중복)
-             * 사이클엔 안 씀 — 어차피 같은 값이라 시계열에 의미 있는 새 점이 아님 */
+             * 사이클엔 안 씀 — 어차피 같은 값이라 시계열에 의미 있는 새 점이 아님.
+             * 2026-09-11(SD 신뢰성 재설계 항목5, 사용자 지시: "쓸 것들이 여러 개면 모아서
+             * 한 번에") — 채널마다 따로 fopen/fwrite/fclose 하던 것을 레코드 배열에 모아
+             * 한 번의 stats_store_append_batch() 호출로 통합(최대 ESP_NOW_MAX_CHANNELS개) */
+            stats_record_t recs[ESP_NOW_MAX_CHANNELS];
+            uint8_t rec_count = 0;
             for (uint8_t ci = 0; ci < n->chan_count; ci++) {
                 if (!n->chan_ok[ci] || n->chan_invalid[ci]) continue;
-                stats_store_append(n->mac, n->chan_type[ci], ci,
-                                    n->sensor_last_update_unix_time, n->chan_val[ci]);
+                memcpy(recs[rec_count].mac, n->mac, 6);
+                recs[rec_count].chan_type  = n->chan_type[ci];
+                recs[rec_count].chan_index = ci;
+                recs[rec_count].unix_time  = n->sensor_last_update_unix_time;
+                recs[rec_count].value      = n->chan_val[ci];
+                rec_count++;
+            }
+            if (rec_count > 0) {
+                stats_store_append_batch(recs, rec_count);
             }
         }
 

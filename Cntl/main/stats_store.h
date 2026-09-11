@@ -32,10 +32,21 @@ typedef struct __attribute__((packed)) {
 
 #define STATS_STORE_PAGE_SIZE 20
 
-/* SD 미마운트 등으로 폴더가 없으면 파일 열기만 실패하고 로그만 남김(치명적 아님) —
- * sd_storage_init() 실패해도 앱 전체가 안 멈추는 기존 정책과 동일 */
-void stats_store_append(const uint8_t mac[6], uint8_t chan_type, uint8_t chan_index,
-                         uint32_t unix_time, float value);
+/* 2026-09-11(재설계 — SD 신뢰성 항목4/5, [[project_cntl_sd_reliability_redesign_2026_09_10]]) —
+ * 예전엔 채널 하나당 fopen/fwrite/fclose를 따로 했음(WAKE_HELLO_SENS 1건에 최대 5채널이면
+ * 5번 여닫음). "쓸 것들이 여러 개면 모아서 한 번에"(사용자 지시)에 따라 한 번의
+ * open+연속쓰기+close로 통합 — 크래시 시 파일이 깨질 수 있는 위험구간(열려있는 시간)도
+ * 5배 줄어듦. fopen 실패(SD 자체 문제로 추정) 시 false 반환, 값 전체 유실(로그만 남김,
+ * 치명적 아님 — sd_storage_init() 실패해도 앱 전체가 안 멈추는 기존 정책과 동일) */
+bool stats_store_append_batch(const stats_record_t *records, uint32_t count);
+
+/* 2026-09-11(SD 신뢰성 항목4 — 쓰기경로도 사용자에게 알려야 함) — stats_store_append_batch()가
+ * WAKE_HELLO_SENS 처리 중(esp_now_hub.c, ESP-NOW recv_cb 컨텍스트, LVGL 태스크 아님)에
+ * fopen 실패를 만나면 여기 true를 세팅. LVGL 태스크 쪽(ui_main.c의 1초 주기 refresh_dashboard)이
+ * 매 틱 이 값을 확인+리셋(test-and-clear)해서 주화면 SD 상태를 갱신 — LVGL API를 다른
+ * 태스크에서 직접 호출하면 안 되므로(스레드 안전성), 값 전달만 이 플래그로 하고 실제
+ * lv_label_set_text() 등은 항상 LVGL 태스크 쪽에서 실행됨 */
+bool stats_store_take_write_io_error(void);
 
 /* 전체 레코드 수(파일 없으면 0) */
 uint32_t stats_store_get_count(void);
@@ -77,6 +88,13 @@ uint64_t stats_store_get_used_bytes(void);
  * 임시파일에 남길 부분만 다시 써서 교체하는 방식(레코드가 고정크기라 오프셋 계산이
  * 정확함) — SD 미마운트/파일 없음 등으로 실패해도 0 반환(치명적 아님) */
 uint32_t stats_store_trim_to(uint64_t target_bytes);
+
+/* 2026-09-10(재설계 — SD fail 회로차단기, 사용자 지시: "SD 조회 fail이면, 다른 값도 믿을
+ * 수 없어. 즉시 중단이지") — 위 읽기 함수들 중 하나가 방금 "데이터 없음"이 아니라 진짜
+ * fopen() 등 I/O 자체가 실패해서 실패값(0/false)을 반환했는지 구분. 각 읽기 함수는 자기
+ * 시작 시점에 이 값을 false로 리셋하고, 실패 시에만 true로 세팅 — 호출부는 함수가 리턴한
+ * 직후 이 값을 확인해서, true면 그 틱의 나머지 SD 조회까지 전부 건너뜀(회로차단기) */
+bool stats_store_had_io_error(void);
 
 #ifdef __cplusplus
 }

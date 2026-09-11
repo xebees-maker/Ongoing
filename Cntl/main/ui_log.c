@@ -198,6 +198,24 @@ int ui_log_get_error_history(int *out_codes, int max)
     return n;
 }
 
+/* 2026-09-11 — 에러목록 팝업의 행별 "지우기" 버튼용. 찾으면 그 자리를 뒤 항목들로 당겨서
+ * 채움(순서는 중요하지 않음, 단순 목록) */
+void ui_log_clear_one_error(int code)
+{
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_err_history_count; i++) {
+        if (s_err_history[i] == code) {
+            for (int j = i; j < s_err_history_count - 1; j++) {
+                s_err_history[j] = s_err_history[j + 1];
+            }
+            s_err_history_count--;
+            break;
+        }
+    }
+    xSemaphoreGive(s_mutex);
+}
+
 const char *ui_log_err_desc(int code)
 {
     for (size_t i = 0; i < sizeof(s_err_table) / sizeof(s_err_table[0]); i++) {
@@ -294,11 +312,20 @@ const char *ui_log_warn_desc(int code)
     return "알 수 없는 워닝";
 }
 
-void ui_log_clear_warn_history(void)
+/* 2026-09-11 — 위 ui_log_clear_one_error()와 동일 패턴(워닝용) */
+void ui_log_clear_one_warn(int code)
 {
     if (!s_mutex) return;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_warn_history_count = 0;
+    for (int i = 0; i < s_warn_history_count; i++) {
+        if (s_warn_history[i] == code) {
+            for (int j = i; j < s_warn_history_count - 1; j++) {
+                s_warn_history[j] = s_warn_history[j + 1];
+            }
+            s_warn_history_count--;
+            break;
+        }
+    }
     xSemaphoreGive(s_mutex);
 }
 

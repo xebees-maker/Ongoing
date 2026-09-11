@@ -18,42 +18,77 @@
 static const char *TAG = "stats_store";
 #define STATS_FILE_PATH SD_STORAGE_MOUNT_POINT "/stats/values.bin"
 
+/* 2026-09-10(재설계 — fail/행/죽음 3분류 중 "fail" 처리, [[feedback_design_for_exceptions_not_just_fails]]) —
+ * fopen() 실패(SD 자체 문제로 추정)와 "그냥 이 조건에 맞는 레코드가 없음"을 호출부가 구분할
+ * 수 있어야, 통계탭이 "SD 이상이면 그 틱 전체를 즉시 중단"하는 회로차단기를 만들 수 있음
+ * (사용자 지시: "SD 조회 fail이면, 다른 값도 믿을 수 없어. 즉시 중단이지"). 읽기 함수들
+ * 각자 자기 시작 지점에서 false로 리셋하고, 자기(또는 내부에서 부르는 다른 stats_store
+ * 함수)의 fopen()이 실패하면 true로 세팅 — 호출부는 함수가 리턴한 직후 이 값을 확인 */
+static bool s_last_io_error = false;
+
+bool stats_store_had_io_error(void)
+{
+    return s_last_io_error;
+}
+
 /* 2026-09-07(임시 진단 — 사용자 지시: "메모리 누수... 이유를 찾아야겠어") — 내부RAM이
  * 측정 성공 사이클마다 서서히 준다는 관찰을 이 함수(SD fopen/fwrite/fclose 반복)로 좁혀서
  * 실측 검증. 원인 확정되면 이 로그는 제거 예정 */
 static size_t s_stats_append_call_count = 0;
 
-void stats_store_append(const uint8_t mac[6], uint8_t chan_type, uint8_t chan_index,
-                         uint32_t unix_time, float value)
+/* 2026-09-11(SD 신뢰성 재설계 항목4) — WAKE_HELLO_SENS 처리(esp_now_hub.c의 recv_cb 컨텍스트,
+ * LVGL 태스크가 아님)에서 쓰기실패가 나면 여기만 세팅. ui_main.c의 1초 주기 LVGL 타이머가
+ * 매 틱 stats_store_take_write_io_error()로 test-and-clear해서 안전하게 가져감(LVGL API는
+ * 항상 LVGL 태스크에서만 호출) */
+static volatile bool s_write_io_error_pending = false;
+
+bool stats_store_take_write_io_error(void)
 {
+    bool v = s_write_io_error_pending;
+    s_write_io_error_pending = false;
+    return v;
+}
+
+bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
+{
+    s_last_io_error = false;
+    if (count == 0) return true;
+    /* 2026-09-11(사용자 지적 — "마운트가 안됬는데 왜 리드라이트를 시도했지?") — 미마운트
+     * 상태면 fopen 시도 자체를 안 함. 이건 "I/O 실패"(s_last_io_error)가 아니라 "애초에
+     * 시도 안 함" — 미마운트는 이미 sd_storage_is_mounted()로 별도 판별되므로 여기서까지
+     * I/O 실패로 잡으면 5008(마운트실패)/5009(I/O실패)가 같이 뜨는 모순이 생김 */
+    if (!sd_storage_is_mounted()) return false;
+
     size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
     FILE *f = fopen(STATS_FILE_PATH, "ab");
     if (!f) {
-        ESP_LOGW(TAG, "값 파일 열기 실패(append) — SD 미마운트 등으로 추정, 이번 값은 유실");
-        return;
+        s_last_io_error = true;
+        s_write_io_error_pending = true;
+        ESP_LOGW(TAG, "값 파일 열기 실패(append) — SD 미마운트 등으로 추정, 이번 값 %u개 유실",
+                 (unsigned)count);
+        return false;
     }
-    stats_record_t rec = {
-        .unix_time  = unix_time,
-        .chan_type  = chan_type,
-        .chan_index = chan_index,
-        .value      = value,
-    };
-    memcpy(rec.mac, mac, 6);
-    fwrite(&rec, sizeof(rec), 1, f);
+    fwrite(records, sizeof(stats_record_t), count, f);
     fclose(f);
 
     s_stats_append_call_count++;
     size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG stats_store_append #%u: internal free %u -> %u (delta=%d)",
-             (unsigned)s_stats_append_call_count, (unsigned)before, (unsigned)after,
+    ESP_LOGW(TAG, "MEMDIAG stats_store_append #%u(레코드 %u개): internal free %u -> %u (delta=%d)",
+             (unsigned)s_stats_append_call_count, (unsigned)count, (unsigned)before, (unsigned)after,
              (int)before - (int)after);
+    return true;
 }
 
 uint32_t stats_store_get_count(void)
 {
+    s_last_io_error = false;
+    /* 2026-09-11 — 위 stats_store_append_batch()와 동일 이유. 이 함수는 read_page/
+     * read_since/get_min_max_avg_since/trim_to/get_used_bytes가 전부 내부에서 먼저
+     * 부르므로, 여기서 한 번만 막아도 그 아래 함수들의 fopen 시도까지 자연히 다 같이 막힘 */
+    if (!sd_storage_is_mounted()) return 0;
     FILE *f = fopen(STATS_FILE_PATH, "rb");
-    if (!f) return 0;
+    if (!f) { s_last_io_error = true; return 0; }
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fclose(f);
@@ -80,7 +115,7 @@ uint32_t stats_store_read_page(uint32_t page_index, uint32_t page_size,
     uint64_t start_record = total - newest_shown_upto;
 
     FILE *f = fopen(STATS_FILE_PATH, "rb");
-    if (!f) return 0;
+    if (!f) { s_last_io_error = true; return 0; }
     fseek(f, (long)(start_record * sizeof(stats_record_t)), SEEK_SET);
     uint32_t got = (uint32_t)fread(out, sizeof(stats_record_t), count_in_page, f);
     fclose(f);
@@ -138,7 +173,7 @@ uint32_t stats_store_read_since(uint32_t cutoff_unix_time, uint8_t chan_type,
     if (total == 0) return 0;
 
     FILE *f = fopen(STATS_FILE_PATH, "rb");
-    if (!f) return 0;
+    if (!f) { s_last_io_error = true; return 0; }
 
     /* 이진탐색 — unix_time >= cutoff인 첫 레코드 인덱스(레코드가 도착순=시간순 단조증가라
      * 가능, 위 파일 헤더 주석 참고). 순차 스캔 없이 log2(total)번의 직접 오프셋 접근만 함 */
@@ -146,7 +181,7 @@ uint32_t stats_store_read_since(uint32_t cutoff_unix_time, uint8_t chan_type,
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
         uint32_t t;
-        if (!read_time_at(f, mid, &t)) { fclose(f); return 0; }
+        if (!read_time_at(f, mid, &t)) { s_last_io_error = true; fclose(f); return 0; }
         if (t < cutoff_unix_time) lo = mid + 1;
         else hi = mid;
     }
@@ -242,14 +277,14 @@ bool stats_store_get_min_max_avg_since(uint32_t cutoff_unix_time, uint8_t chan_t
     if (total == 0) return false;
 
     FILE *f = fopen(STATS_FILE_PATH, "rb");
-    if (!f) return false;
+    if (!f) { s_last_io_error = true; return false; }
 
     /* stats_store_read_since()와 동일한 이진탐색으로 시작 오프셋만 찾음 */
     uint32_t lo = 0, hi = total;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
         uint32_t t;
-        if (!read_time_at(f, mid, &t)) { fclose(f); return false; }
+        if (!read_time_at(f, mid, &t)) { s_last_io_error = true; fclose(f); return false; }
         if (t < cutoff_unix_time) lo = mid + 1;
         else hi = mid;
     }

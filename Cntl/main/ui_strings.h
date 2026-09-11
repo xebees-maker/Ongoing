@@ -271,6 +271,29 @@ typedef enum {
     STR_ERR_DESC_CONFIG_FILE_MISMATCH,
     STR_ERR_DESC_SD_MOUNT_FAILED,
     STR_ERR_DESC_UNKNOWN,  /* 테이블에 없는 코드용 폴백(원래 있었으면 안 되는 상황) */
+    /* 2026-09-10(SD 신뢰성 재설계, [[project_cntl_sd_reliability_redesign_2026_09_10]]) —
+     * 주화면 SD 상태 라벨(짧은 문구) + 탭해서 여는 상태팝업(긴 설명) + 재연결/포맷 버튼과
+     * 그 결과 안내 */
+    STR_STATUS_SD_UNMOUNTED,
+    STR_BTN_SD_RECONNECT,
+    STR_BTN_SD_FORMAT,
+    STR_MSG_SD_FORMAT_CONFIRM,
+    STR_MSG_SD_RECONNECT_OK,
+    STR_MSG_SD_RECONNECT_FAIL,
+    STR_MSG_SD_FORMAT_OK,
+    STR_MSG_SD_FORMAT_FAIL,
+    /* 2026-09-11(상태아이콘/토스트 통합, 통계팝업 차단) */
+    STR_ERR_DESC_SD_IO_FAIL,
+    STR_MSG_STATS_BLOCKED_SD_FAIL,
+    /* 2026-09-11(에러목록 팝업 행별 재설계 — 지우기 버튼) */
+    STR_BTN_DISMISS,
+    /* 2026-09-11(사용자 지시 — "SD:" 접두어는 기본색, 나머지는 빨강). "SD:" 자체는 고유
+     * 명사류라 번역 테이블 없이 하드코딩, 이건 그 뒤에 붙는 메시지 부분만 */
+    STR_STATUS_SD_IO_ERROR_MSG,
+    /* 2026-09-11(재설계 — 사용자 지시: "단순 재시도만으론 무한루프... Resolve 누르면
+     * 포맷할지 재마운트할지 묻는 팝업") — 5008/5009 행 공용 버튼 + 그 선택팝업 제목 */
+    STR_BTN_SD_RESOLVE,
+    STR_TITLE_SD_RESOLVE,
     STR_COUNT,
 } ui_str_id_t;
 

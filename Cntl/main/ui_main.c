@@ -63,6 +63,12 @@ static lv_obj_t *s_status_warning = NULL;
 static lv_obj_t *s_status_error   = NULL;
 static bool      s_error_active = false;
 static bool      s_warn_active  = false;
+/* 2026-09-11(SD 신뢰성 재설계, 사용자 지시: "그럼 상태 버튼이 빨간색으로 되야하는 중대한
+ * 에러야") — SD 읽기/쓰기 I/O 실패 회로차단기. s_error_active와 달리 재연결/포맷으로 실제
+ * 해소되면 false로 되돌아갈 수 있음(단, 다른 에러가 하나라도 있으면 그쪽 정책대로 계속
+ * 빨강 유지 — update_logo_warning_display()에서 OR 조건으로 합쳐짐). 정의는 SD 상태/복구
+ * 섹션(mark_sd_io_fail 등)에 있고 여기서는 update_logo_warning_display()가 값만 읽음 */
+static bool      s_sd_io_fail_active = false;
 
 /* 상단 에러 토스트 — 진행팝업(create_modal)과 달리 배경을 안 가리고 입력도 안 막음,
  * 몇 초 뒤 자동으로 없어짐 */
@@ -247,6 +253,21 @@ static void teardown_stats_tab(void);
 static void teardown_option_tab(void);
 static void teardown_log_tab(void);
 static void cb_stats_btn_tap(lv_event_t *e);
+/* 2026-09-10(SD 신뢰성 재설계, [[project_cntl_sd_reliability_redesign_2026_09_10]]) — SD 자체
+ * I/O 오류(fail) 발생 시 호출 — 주화면 SD 상태 표시를 갱신. 정의는 주화면 SD 상태 섹션에 있고,
+ * 통계탭 회로차단기(refresh_stats_page)가 그보다 앞에서 이걸 부르므로 fwd 필요 */
+static void report_sd_io_fail(const char *context);
+/* 2026-09-11(사용자 지시 — "상태 버튼을 눌렀을 때... 이 팝업에서 포맷을 하든지 해야되") —
+ * 재연결/포맷 버튼을 기존 에러/워닝 목록 팝업(cb_logo_warning_tap, 이 fwd보다 먼저 정의됨)
+ * 안에 넣어야 해서 그보다 앞서 fwd 필요. 정의는 SD 상태/복구 섹션에 있음 */
+static void cb_sd_reconnect_tap(lv_event_t *e);
+static void cb_sd_format_tap(lv_event_t *e);
+/* 2026-09-11(재설계 — "Resolve" 공용 버튼) — cb_logo_warning_tap(이 fwd보다 먼저 정의됨)의
+ * 5008/5009 행이 씀. 정의는 SD 상태/복구 섹션에 있음 */
+static void cb_sd_resolve_tap(lv_event_t *e);
+/* 2026-09-11(에러목록 팝업 행별 "지우기" 재설계) — cb_dismiss_error_row/cb_dismiss_warn_row
+ * (cb_logo_warning_tap 근처, 이 fwd보다 먼저 정의됨)가 씀. 정의는 SD 상태/복구 섹션에 있음 */
+static void sync_error_warn_active_from_history(void);
 static void cb_settings_btn_tap(lv_event_t *e);
 static void cb_option_log_btn_tap(lv_event_t *e);
 static void cb_network_ctrl_tap(lv_event_t *e);
@@ -423,40 +444,17 @@ static lv_obj_t *s_stats_delete_lbl  = NULL;
  * 3=암모니아(짙은 노랑 — 2026-09-10 사용자 지시로 청록에서 변경). 계열마다 실제 단위/범위가
  * 달라서(온도 vs CO2 등) 화면엔 각 계열을 자기 자신의 기간 내 최소~최대 기준으로 0~100
  * 정규화해서 그리고, 탭하면 정규화 전 실제 값을 보여줌(s_stats_chart_real_values에 원본 보관) */
-#define STATS_GRAPH_POINT_COUNT      60   /* 기본값 — 팝업 열 때마다 이 값으로 리셋 */
-#define STATS_GRAPH_POINT_COUNT_MAX  480  /* 아래 임시 디버그 드롭다운의 최댓값 */
+#define STATS_GRAPH_POINT_COUNT   60  /* 2026-09-10(사용자 결정 — "매 그래프는 60개 포인트로
+                                        * 그려") 고정. 60/120/240/480 조정 드롭다운+메모리표시는
+                                        * 값을 정하기 위한 임시 측정 도구였고, 측정 끝나서 제거함 */
 #define STATS_GRAPH_SERIES_COUNT  4
 static lv_obj_t          *s_stats_chart               = NULL;
 static lv_chart_series_t *s_stats_chart_series[STATS_GRAPH_SERIES_COUNT];
 static lv_obj_t          *s_stats_chart_checkbox[STATS_GRAPH_SERIES_COUNT];
 static lv_obj_t          *s_stats_chart_tap_label      = NULL;
-/* 2026-09-10(임시 디버그 기능 — 사용자 지시: "스케일 왼쪽에 60/120/240/480 드랍다운으로 라인
- * 수를 조정할 수 있게 하고, 남은 Internal memory를 overview 옆에 주화면처럼 표기해" — 점
- * 개수를 늘렸을 때 실제 내부메모리 비용이 얼마인지 화면에서 직접 보면서 정하기 위한 임시
- * 도구. 그래서 원래 STATS_GRAPH_POINT_COUNT 고정 배열이던 아래 3개를 힙 할당+런타임
- * 리사이즈로 바꿈. 적당한 값이 정해지면 드롭다운/메모리라벨/리사이즈 로직은 걷어내고 다시
- * 고정 배열로 되돌릴 예정 */
-static uint32_t         s_stats_graph_point_cap    = STATS_GRAPH_POINT_COUNT;
-static float            *s_stats_chart_real_values = NULL;  /* [s*cap+i], MALLOC_CAP_INTERNAL */
-static bool              *s_stats_chart_has_value   = NULL;  /* [s*cap+i] */
-static stats_record_t    *s_stats_graph_read_buf    = NULL;  /* refresh_stats_graph() SD읽기 스크래치, [s*cap+i] */
-static uint32_t            s_stats_chart_shown_points  = 0;  /* 이번에 실제로 그려진 포인트 수(<=s_stats_graph_point_cap) */
-static lv_obj_t          *s_stats_point_count_dd    = NULL;  /* 임시 디버그용(위 주석) */
-static lv_obj_t          *s_stats_graph_mem_label   = NULL;  /* 임시 디버그용 — 남은 Internal memory 표시 */
-
-/* 임시 디버그 기능(위 주석) — new_cap으로 그래프 관련 힙 버퍼 3종을 재할당하고 차트
- * point_count도 맞춤. s_stats_chart가 만들어진 뒤(build_stats_tab 안)에만 호출됨 */
-static void resize_stats_graph_buffers(uint32_t new_cap)
-{
-    heap_caps_free(s_stats_chart_real_values);
-    heap_caps_free(s_stats_chart_has_value);
-    heap_caps_free(s_stats_graph_read_buf);
-    s_stats_chart_real_values = heap_caps_malloc(sizeof(float) * STATS_GRAPH_SERIES_COUNT * new_cap, MALLOC_CAP_INTERNAL);
-    s_stats_chart_has_value   = heap_caps_calloc(STATS_GRAPH_SERIES_COUNT * new_cap, sizeof(bool), MALLOC_CAP_INTERNAL);
-    s_stats_graph_read_buf    = heap_caps_malloc(sizeof(stats_record_t) * STATS_GRAPH_SERIES_COUNT * new_cap, MALLOC_CAP_INTERNAL);
-    s_stats_graph_point_cap = new_cap;
-    if (s_stats_chart) lv_chart_set_point_count(s_stats_chart, new_cap);
-}
+static float               s_stats_chart_real_values[STATS_GRAPH_SERIES_COUNT][STATS_GRAPH_POINT_COUNT];
+static bool                 s_stats_chart_has_value[STATS_GRAPH_SERIES_COUNT][STATS_GRAPH_POINT_COUNT];
+static uint32_t             s_stats_chart_shown_points  = 0;  /* 이번에 실제로 그려진 포인트 수(<=STATS_GRAPH_POINT_COUNT) */
 
 /* 2026-09-08(재설계 — 단일화면+전체화면 팝업) — 통계는 상단바 버튼이 여는 전체화면 팝업.
  * s_stats_popup은 create_page_popup()이 만든 오버레이 루트(열려있을 때만 존재),
@@ -578,7 +576,7 @@ static void update_logo_warning_display(void)
     lv_obj_add_flag(s_status_normal, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_status_warning, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_status_error, LV_OBJ_FLAG_HIDDEN);
-    if (s_error_active) {
+    if (s_error_active || s_sd_io_fail_active) {
         lv_obj_remove_flag(s_status_error, LV_OBJ_FLAG_HIDDEN);
     } else if (s_warn_active) {
         lv_obj_remove_flag(s_status_warning, LV_OBJ_FLAG_HIDDEN);
@@ -606,12 +604,11 @@ static void error_poll_tick(lv_timer_t *t)
         lv_obj_delete(s_toast);
         s_toast = NULL;
     }
-    /* 에러는 절대 자동으로/확인해도 안 지워짐(2026-08-11, 사용자 지시 — "에러는 아이콘
-     * 원상복구 안 함"). 워닝은 팝업에서 확인할 때만 지워짐(cb_error_warn_list_close 참고) —
-     * 여기 폴링에서는 건드리지 않음. 2026-08-10 — 예전엔 ui_log_clear_err()로 "일시적이고
-     * 스스로 해소됨"을 자동으로 지우는 별도 경로가 있었는데, 그 경로의 유일한 용도였던
-     * 구 UI_ERR_NOT_PAIRED 상시폴링 방식 자체가 require_active_or_report()의 즉시판정
-     * 방식으로 바뀌면서 더는 호출되는 곳이 없어 함수째 제거함(죽은 코드) */
+    /* 2026-09-11 재설계 — 예전엔 에러는 재부팅 전까지 절대 안 지워지고 워닝만 팝업 확인 시
+     * 전체 삭제됐는데(2026-08-11), 이제 에러/워닝 둘 다 에러목록 팝업(cb_logo_warning_tap)의
+     * 행별 "지우기"/SD 전용 조치버튼으로 개별 해제되는 걸로 통일됨(사용자 지시: "앞으로
+     * 경고, 에러를 같은 방식으로 처리하면 되지"). 여기 폴링에서는 지우기를 건드리지 않음 —
+     * 새 항목이 생기는 것만 감지 */
 }
 
 static void set_checked(lv_obj_t *cb, bool checked)
@@ -918,22 +915,6 @@ static lv_obj_t *create_modal_btn_row(lv_obj_t *box)
     return btn_row;
 }
 
-/* 경고 로고 탭 닫기 — 일반 cb_modal_close와 똑같이 모달을 닫지만, 추가로 워닝 이력을
- * 지우고 아이콘을 갱신함(2026-08-11, 사용자 지시: "워닝코드를 본 경우... 로고 아이콘
- * 원상 복구. 에러는 아이콘 원상복구 안 함" — 팝업으로 확인하는 행위 자체가 워닝만
- * 해제시키는 트리거) */
-static void cb_error_warn_list_close(lv_event_t *e)
-{
-    ui_log_clear_warn_history();
-    s_warn_active = false;
-    update_logo_warning_display();
-
-    lv_obj_t *btn = lv_event_get_target(e);
-    lv_obj_t *overlay = lv_obj_get_parent(lv_obj_get_parent(lv_obj_get_parent(btn)));
-    lv_obj_delete(overlay);
-    resume_bg_timers();
-}
-
 /* 2026-09-09(사용자 지적 — "E0007 과 그 뒤의 깨진 글자") — ui_log.c의 ui_log_err_desc()는
  * s_err_table이 하드코딩 한글 문자열이라(이번 세션 영문화 작업에서 빠뜨림) 비트맵 폰트로는
  * 깨져 보였고, 게다가 코드 4개가 테이블에 아예 없어서 "알 수 없는 에러" 폴백으로 떨어졌음
@@ -982,6 +963,7 @@ static ui_str_id_t err_code_to_desc_str(int code)
         case UI_ERR_RTC_SET_FAILED:        return STR_ERR_DESC_RTC_SET_FAILED;
         case UI_ERR_CONFIG_FILE_MISMATCH:  return STR_ERR_DESC_CONFIG_FILE_MISMATCH;
         case UI_ERR_SD_MOUNT_FAILED:       return STR_ERR_DESC_SD_MOUNT_FAILED;
+        case UI_ERR_SD_IO_FAIL:            return STR_ERR_DESC_SD_IO_FAIL;
         default:                           return STR_ERR_DESC_UNKNOWN;
     }
 }
@@ -990,7 +972,34 @@ static ui_str_id_t err_code_to_desc_str(int code)
  * 지시: "로고를 찍으면 error code를 보여주는 팝업... 누적된 게 있으면 여러 개를
  * 보여줄 수도"). 에러는 "Exxxx"(빨강), 워닝은 "Wxxxx"(어두운 노랑 — 팝업 배경이 밝아서
  * 원래 아이콘/토스트에 쓰는 밝은 노랑 0xFFCC00은 가독성이 떨어짐, 2026-08-11 사용자 지시
- * 반영) 한 줄씩. 확인 누르면 에러 목록은 그대로, 워닝 목록만 지워짐(cb_error_warn_list_close) */
+ * 반영) 한 줄씩, 각 행마다 자기 조치버튼(지우기, 또는 SD 코드면 재연결/포맷) —
+ * 2026-09-11 재설계, [[project_cntl_popup_close_vs_action_buttons]] */
+/* 지우기 버튼(행별) — 2026-09-11 재설계, [[project_cntl_popup_close_vs_action_buttons]].
+ * code는 lv_obj_add_event_cb()의 user_data로 정수를 그대로 캐스팅해서 받음(별도 할당 불필요,
+ * 흔한 관례) */
+static void cb_dismiss_error_row(lv_event_t *e)
+{
+    int code = (int)(intptr_t)lv_event_get_user_data(e);
+    ui_log_clear_one_error(code);
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_delete(lv_obj_get_parent(btn));  /* btn의 부모 = 그 행(row) 컨테이너 */
+    sync_error_warn_active_from_history();
+}
+
+static void cb_dismiss_warn_row(lv_event_t *e)
+{
+    int code = (int)(intptr_t)lv_event_get_user_data(e);
+    ui_log_clear_one_warn(code);
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_delete(lv_obj_get_parent(btn));
+    sync_error_warn_active_from_history();
+}
+
+/* 2026-09-11(재설계 — [[project_cntl_popup_close_vs_action_buttons]]) — 목록의 각 행이
+ * 자기 조치버튼(재연결/포맷/지우기)을 갖는 구조라 "팝업 전체가 하나의 결정"이 아님 → X로만
+ * 닫힘(하단 확인버튼 없음). create_modal()의 고정폭(420px)은 이 용도엔 좁아서(재연결+포맷
+ * 버튼이 한 행에 다 안 들어감) 재사용 안 하고 화면비율 기반으로 직접 만듦(사용자 지시 —
+ * "화면이 바뀔 수 있으니 고정폭 대신 비율로") */
 static void cb_logo_warning_tap(lv_event_t *e)
 {
     (void)e;
@@ -999,11 +1008,21 @@ static void cb_logo_warning_tap(lv_event_t *e)
     int warn_codes[UI_WARN_HISTORY_CAP];
     int warn_n = ui_log_get_warn_history(warn_codes, UI_WARN_HISTORY_CAP);
 
-    lv_obj_t *box = create_modal();
+    pause_bg_timers();
+    lv_obj_t *overlay = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(overlay, 0, 0);
+    lv_obj_set_style_radius(overlay, 0, 0);
 
-    lv_obj_t *title = lv_label_create(box);
-    lv_label_set_text(title, ui_str(STR_TITLE_ERROR_LIST));
-    lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_t *box = lv_obj_create(overlay);
+    lv_obj_set_size(box, LV_PCT(80), LV_SIZE_CONTENT);
+    lv_obj_center(box);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    s_last_modal = box;
+
+    add_page_popup_header(box, ui_str(STR_TITLE_ERROR_LIST), cb_modal_close, NULL);
 
     if (err_n == 0 && warn_n == 0) {
         lv_obj_t *lbl = lv_label_create(box);
@@ -1011,25 +1030,49 @@ static void cb_logo_warning_tap(lv_event_t *e)
         lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
     } else {
         for (int i = 0; i < err_n; i++) {
+            int code = err_codes[i];
+            lv_obj_t *row = lv_obj_create(box);
+            lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_border_width(row, 0, 0);
+
             char buf[160];
-            snprintf(buf, sizeof(buf), "E%04d %s", err_codes[i], ui_str(err_code_to_desc_str(err_codes[i])));
-            lv_obj_t *lbl = lv_label_create(box);
+            snprintf(buf, sizeof(buf), "E%04d %s", code, ui_str(err_code_to_desc_str(code)));
+            lv_obj_t *lbl = lv_label_create(row);
             lv_label_set_text(lbl, buf);
             lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
             lv_obj_set_style_text_color(lbl, lv_palette_main(LV_PALETTE_RED), 0);
+
+            /* 2026-09-11(재설계 — 사용자 지시: "단순 재시도만으론... 무한루프잖아",
+             * "Resolve 누르면 포맷할지 재마운트할지 묻는 팝업") — 5008/5009 둘 다 코드별
+             * 전용 버튼 대신 공용 "해결"(Resolve) 버튼 하나 → 선택팝업(cb_sd_resolve_tap)에서
+             * 포맷/재연결 아무거나 고를 수 있음(코드에 따라 하나로 강제하지 않음). SD 코드
+             * 둘은 수동 지우기 버튼을 안 줌(검증 후에만 지워짐, 사용자 지시) */
+            if (code == UI_ERR_SD_MOUNT_FAILED || code == UI_ERR_SD_IO_FAIL) {
+                add_modal_button(row, STR_BTN_SD_RESOLVE, cb_sd_resolve_tap, NULL);
+            } else {
+                add_modal_button(row, STR_BTN_DISMISS, cb_dismiss_error_row, (void *)(intptr_t)code);
+            }
         }
         for (int i = 0; i < warn_n; i++) {
+            int code = warn_codes[i];
+            lv_obj_t *row = lv_obj_create(box);
+            lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_border_width(row, 0, 0);
+
             char buf[160];
-            snprintf(buf, sizeof(buf), "W%04d %s", warn_codes[i], ui_log_warn_desc(warn_codes[i]));
-            lv_obj_t *lbl = lv_label_create(box);
+            snprintf(buf, sizeof(buf), "W%04d %s", code, ui_log_warn_desc(code));
+            lv_obj_t *lbl = lv_label_create(row);
             lv_label_set_text(lbl, buf);
             lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
             lv_obj_set_style_text_color(lbl, lv_color_hex(0xB8860B), 0);
+
+            add_modal_button(row, STR_BTN_DISMISS, cb_dismiss_warn_row, (void *)(intptr_t)code);
         }
     }
-
-    lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_error_warn_list_close, NULL);
 }
 
 /* 2026-08-30(사용자 지시: "상단 로고(플렉스팜)을 눌렀을 때 URL QR 팝업 띄워줘", "아이콘 말고,
@@ -1127,6 +1170,260 @@ static void show_storage_cleanup_popup(const char *category_name, uint32_t delet
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
     add_modal_button(btn_row, STR_BTN_CONFIRM, cb_modal_close, NULL);
+}
+
+/* ════════════════════════════════════════════════════════════
+ * SD 저장소 상태/복구 — [[project_cntl_sd_reliability_redesign_2026_09_10]]
+ * "SD 조회 fail이면 즉시 중단, 사용자에게 알리고, 재연결/포맷으로 대응"(사용자 설계).
+ * 2026-09-11 재설계(사용자 지시) — "상태 버튼이 빨간색으로 되야하는 중대한 에러", "토스트도
+ * 떠야하고" — 새로 만들지 않고 기존 상태아이콘/토스트 메커니즘(ui_log_add_err +
+ * error_poll_tick, s_error_active/s_sd_io_fail_active OR조건)을 그대로 재사용. 조치(재연결/
+ * 포맷)는 상태아이콘 탭 팝업(cb_logo_warning_tap)에 통합 — 라벨 자체의 별도 팝업은 없앰
+ * (사용자 지시: "상태버튼을 눌러서 조치하라고 문구 표시"). report_sd_io_fail()은 통계탭
+ * 읽기 회로차단기(stats_store_had_io_error() 감지 시 refresh_stats_page()가 호출)가 세팅하는
+ * 진입점 — 이 플래그가 서면 재연결/포맷으로 사용자가 실제로 해소하기 전까지 유지됨(조용히
+ * 넘어가면 또 같은 실패를 반복 무시하게 됨) */
+
+/* s_sd_io_fail_active 세팅(+로그+토스트/아이콘) — 라벨 갱신은 호출부가 직접 하거나
+ * refresh_storage_status_label()을 부름. report_sd_io_fail()과 refresh_storage_status_label()
+ * 내부의 I/O 실패 감지 둘 다 이걸 거치므로, refresh_storage_status_label() 자기 자신이
+ * 이 함수를 부르면 안 됨(순환호출) — refresh_storage_status_label()은 이 함수 대신
+ * 플래그를 직접 세팅하고 즉시 리턴 */
+static void mark_sd_io_fail(const char *context)
+{
+    if (!s_sd_io_fail_active) {
+        ESP_LOGE(TAG, "SD I/O 오류 감지(%s) — 복구(재연결/포맷) 전까지 SD 조회 회로차단기 작동", context);
+        ui_log_add_err(UI_ERR_SD_IO_FAIL, "SD I/O failure (%s)", context);
+    }
+    s_sd_io_fail_active = true;
+    update_logo_warning_display();
+}
+
+/* 2026-09-11(사용자 지시 — "포맷 후에도 정상이 아니면 역시 정상으로 돌리면 안되고") —
+ * 재연결/포맷 API가 ESP_OK를 반환해도 그대로 믿지 않고, 가벼운 실제 읽기 한 번으로 카드가
+ * 진짜 정상인지 검증. stats_store_get_count()는 fopen만 해보는 제일 가벼운 읽기라 이
+ * 용도에 적합 — 실패하면 stats_store_had_io_error()가 true로 남음 */
+static bool sd_verify_healthy(void)
+{
+    stats_store_get_count();
+    return !stats_store_had_io_error();
+}
+
+/* 2026-09-11(에러목록 팝업 행별 재설계 — "지우기" 버튼, s_error_active/s_warn_active를
+ * 더 이상 한번 서면 안 지워지는 래치가 아니라 이력 유무로 매번 다시 계산) — 지우기 버튼이나
+ * SD 검증-후-지우기 둘 다 이걸 거쳐서 상태아이콘을 갱신함 */
+static void sync_error_warn_active_from_history(void)
+{
+    int err_codes[UI_ERR_HISTORY_CAP];
+    s_error_active = ui_log_get_error_history(err_codes, UI_ERR_HISTORY_CAP) > 0;
+    int warn_codes[UI_WARN_HISTORY_CAP];
+    s_warn_active = ui_log_get_warn_history(warn_codes, UI_WARN_HISTORY_CAP) > 0;
+    update_logo_warning_display();
+}
+
+/* 2026-09-11 — 재연결/포맷이 실제로 카드를 되살렸을 때만 호출(위 검증 통과 시). 5008/5009
+ * 둘 다 이력에서 제거(사용자 지시: "SD는 검증 후 지워야 해") — 어느 쪽 버튼으로
+ * 고쳤든 카드가 검증됐다면 둘 다 더 이상 사실이 아니므로. 다른 에러가 이미 있으면
+ * sync_error_warn_active_from_history()가 그건 그대로 반영해 아이콘은 계속 빨강으로 남음
+ * (사용자 지시: "다른 에러가 있다면 정상으로 돌리면 안되고") */
+static void clear_sd_io_fail(void)
+{
+    s_sd_io_fail_active = false;
+    ui_log_clear_one_error(UI_ERR_SD_MOUNT_FAILED);
+    ui_log_clear_one_error(UI_ERR_SD_IO_FAIL);
+    sync_error_warn_active_from_history();
+}
+
+/* 2026-09-11(사용자 지시 — "SD: 뒤에 붙는 정상일 때 문구/에러일 때 써지는 문구들이 다
+ * 하나의 함수에서 파라메터에 의해 검정/빨강으로 표시되게 만들어야 잘하는 거야") — 이전엔
+ * 이 "SD: <내용>" 조합을 여러 곳에 따로 하드코딩해서 제목도 "Storage"/"SD:"로 갈렸었음.
+ * is_error만으로 색 결정, 제목("SD:")은 항상 고정 — 라벨에 lv_label_set_recolor()가 켜져
+ * 있어야 함(생성부 참고, 이걸 빠뜨려서 "#ff0000 ..."이 그대로 문자로 찍혔던 전례 있음) */
+static void set_storage_label_text(const char *detail, bool is_error)
+{
+    if (is_error) {
+        lv_label_set_text_fmt(s_storage_status_label, "SD: #ff0000 %s#", detail);
+    } else {
+        lv_label_set_text_fmt(s_storage_status_label, "SD: %s", detail);
+    }
+}
+
+static void refresh_storage_status_label(void)
+{
+    if (!s_storage_status_label) return;
+
+    /* 2026-09-11(사용자 지시 — "에러 시에는 용량이나 사용량을 표기할 수 없잖아. 그냥
+     * 지금처럼 에러로만 표기하고, 상태버튼을 눌러서 조치하라고 문구 표시") — 라벨 자체는
+     * 더 이상 탭 대상이 아님(조치는 상태아이콘 쪽으로 일원화), 문구도 그에 맞게 안내 */
+    if (s_sd_io_fail_active) {
+        set_storage_label_text(ui_str(STR_STATUS_SD_IO_ERROR_MSG), true);
+        return;
+    }
+    if (!sd_storage_is_mounted()) {
+        /* 미마운트도 5008(UI_ERR_SD_MOUNT_FAILED)로 이어지는 에러 상태라 빨간색 처리 */
+        set_storage_label_text(ui_str(STR_STATUS_SD_UNMOUNTED), true);
+        return;
+    }
+
+    uint64_t sd_total = 0, sd_free = 0;
+    if (!sd_storage_get_capacity(&sd_total, &sd_free) || sd_total == 0) {
+        lv_label_set_text(s_storage_status_label, "");
+        return;
+    }
+
+    uint64_t picture_budget = sd_total * 9 / 10;
+    uint64_t measure_budget = sd_total / 10;
+    uint64_t picture_used = 0;  /* TODO(미정): 캠 사진 저장 구현되면 폴더 크기 합산으로 교체 */
+    uint64_t measure_used = stats_store_get_used_bytes();
+    /* 2026-09-10(SD fail 회로차단기) — 이 조회 자체가 fopen 등에서 진짜 I/O 실패였다면
+     * (단순 "기록 0개"가 아니라) 나머지 계산/표시를 이어가지 말고 즉시 에러 상태로 전환.
+     * stats_store_get_used_bytes()는 내부에서 stats_store_get_count()를 부르므로 그
+     * 함수의 리셋/세팅이 그대로 반영됨 */
+    if (stats_store_had_io_error()) {
+        mark_sd_io_fail("main screen SD capacity display");
+        set_storage_label_text(ui_str(STR_STATUS_SD_IO_ERROR_MSG), true);
+        return;
+    }
+    /* 2026-09-10(임시 진단 — "지금 1주일치가 아니지, 몇시간 정도일 뿐이야" 정확한
+     * 수치 확인용, 확인 후 제거) */
+    {
+        uint64_t recs = measure_used / sizeof(stats_record_t);
+        double hours = (double)recs / 4.0 * 30.0 / 3600.0;
+        ESP_LOGW(TAG, "MEMDIAG stats_store: used=%llu bytes records=%llu (~%.2fh, 30s/4ch 가정)",
+                 (unsigned long long)measure_used, (unsigned long long)recs, hours);
+    }
+    uint64_t picture_used_clamped = (picture_used > picture_budget) ? picture_budget : picture_used;
+    uint64_t measure_used_clamped = (measure_used > measure_budget) ? measure_budget : measure_used;
+
+    uint32_t picture_pct = (uint32_t)(picture_used * 100 / picture_budget);
+    uint32_t measure_pct = (uint32_t)(measure_used * 100 / measure_budget);
+    uint32_t total_pct   = (uint32_t)((sd_total - sd_free) * 100 / sd_total);
+    uint32_t picture_remain_mb = (uint32_t)((picture_budget - picture_used_clamped) / (1024 * 1024));
+    uint32_t measure_remain_mb = (uint32_t)((measure_budget - measure_used_clamped) / (1024 * 1024));
+    uint32_t total_remain_mb   = (uint32_t)(sd_free / (1024 * 1024));
+
+    /* 2026-09-11(사용자 지시 — 제목을 "SD:"로 통일) — 예전엔 이 정상상태 문구만 자체
+     * 제목("Storage")을 갖고 있었음(STR_LABEL_STORAGE). 이제 set_storage_label_text()가
+     * 항상 "SD:"를 붙이므로, 여기선 그 뒤에 올 상세 내용만 만듦 */
+    char detail[128];
+    snprintf(detail, sizeof(detail), "[%%(Remain MB)] %s %u(%u) / %s %u(%u) / %s %u(%u)",
+        ui_str(STR_LABEL_PICTURE), (unsigned)picture_pct, (unsigned)picture_remain_mb,
+        ui_str(STR_LABEL_MEASURE_SHORT), (unsigned)measure_pct, (unsigned)measure_remain_mb,
+        ui_str(STR_LABEL_TOTAL), (unsigned)total_pct, (unsigned)total_remain_mb);
+    set_storage_label_text(detail, false);
+
+    /* 정리 트리거 — Measure가 자기 예산의 90% 이상이면 80%까지 삭제. Picture는
+     * 실사용 0이라 지금은 절대 안 걸림(사진저장 구현 후 동일 패턴으로 확장 예정) */
+    if (measure_used * 100 / measure_budget >= 90) {
+        uint32_t deleted = stats_store_trim_to(measure_budget * 80 / 100);
+        if (deleted > 0) {
+            show_storage_cleanup_popup(ui_str(STR_LABEL_MEASURE_SHORT), deleted);
+        }
+    }
+}
+
+/* stats_store 읽기 함수가 stats_store_had_io_error()로 진짜 I/O 실패(단순 "데이터 없음"이
+ * 아니라 fopen 등 자체가 실패)를 알려왔을 때 통계탭 회로차단기(refresh_stats_page)가 호출 */
+static void report_sd_io_fail(const char *context)
+{
+    mark_sd_io_fail(context);
+    refresh_storage_status_label();
+}
+
+/* 단순 안내(버튼 1개) 공용 — show_storage_cleanup_popup과 동일 구조지만 포맷 인자 없이
+ * 완성된 문자열 그대로 표시(재연결/포맷 결과 안내용) */
+static void show_alert_popup(const char *message)
+{
+    lv_obj_t *box = create_modal();
+
+    lv_obj_t *msg = lv_label_create(box);
+    lv_label_set_text(msg, message);
+    lv_obj_set_width(msg, LV_PCT(100));
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_modal_close, NULL);
+}
+
+/* 2026-09-11(사용자 지적 — "리마운트, 포맷 실패시 팝업이 모두 다 닫히네, 직전으로
+ * 돌아가야되는데") — 실패하면 해결(Resolve) 선택팝업을 안 닫고 그 위에 결과팝업만 띄워서,
+ * 결과팝업을 확인하면 다시 해결 팝업(다른 조치를 또 고를 수 있음)으로 돌아가게 함. 성공했을
+ * 때만 해결 팝업까지 같이 닫음(문제가 실제로 풀렸으니 더 고를 게 없음) */
+static void cb_sd_reconnect_tap(lv_event_t *e)
+{
+    esp_err_t err = sd_storage_reconnect();
+    if (err == ESP_OK && sd_verify_healthy()) {
+        clear_sd_io_fail();
+        cb_modal_close(e);  /* 성공 — 해결 팝업도 같이 닫음 */
+        show_alert_popup(ui_str(STR_MSG_SD_RECONNECT_OK));
+    } else {
+        show_alert_popup(ui_str(STR_MSG_SD_RECONNECT_FAIL));  /* 실패 — 해결 팝업은 그대로 둠 */
+    }
+    refresh_storage_status_label();
+}
+
+/* ctx = 해결(Resolve) 팝업의 오버레이(cb_sd_format_tap이 확인팝업 열기 전에 미리 챙겨서
+ * 넘김) — 성공했을 때만 이걸 직접 닫음. show_confirm_popup()이 내부적으로 s_last_modal을
+ * 확인팝업 자신으로 덮어써버려서(그리고 Yes 누르면 그 확인팝업 자체도 먼저 닫혀버려서)
+ * s_last_modal로는 더 이상 해결 팝업을 못 찾음 — 그래서 ctx로 직접 전달받음 */
+static void cb_sd_format_confirmed(void *ctx)
+{
+    lv_obj_t *resolve_overlay = (lv_obj_t *)ctx;
+    esp_err_t err = sd_storage_format();
+    if (err == ESP_OK && sd_verify_healthy()) {
+        clear_sd_io_fail();
+        if (resolve_overlay) {
+            lv_obj_delete(resolve_overlay);
+            resume_bg_timers();
+        }
+        show_alert_popup(ui_str(STR_MSG_SD_FORMAT_OK));
+    } else {
+        show_alert_popup(ui_str(STR_MSG_SD_FORMAT_FAIL));  /* 실패 — 해결 팝업은 그대로 둠 */
+    }
+    refresh_storage_status_label();
+}
+
+static void cb_sd_format_tap(lv_event_t *e)
+{
+    /* 해결(Resolve) 팝업은 안 닫고, 그 오버레이를 확인팝업 콜백에 넘겨서 성공 시에만
+     * 닫게 함(위 주석 참고) — 되돌릴 수 없는 동작이라 확인팝업이 먼저 뜸 */
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_t *resolve_overlay = lv_obj_get_parent(lv_obj_get_parent(lv_obj_get_parent(btn)));
+    show_confirm_popup(ui_str(STR_MSG_SD_FORMAT_CONFIRM), cb_sd_format_confirmed, resolve_overlay);
+}
+
+/* 2026-09-11(재설계 — 사용자 지시: "단순 재시도만으론... 무한루프잖아", "Resolve 누르면
+ * 포맷할지, 재마운트할지 묻는 팝업이 떠야지") — 에러목록 팝업(5008/5009 행)의 공용 "해결"
+ * 버튼. 행위(포맷/재연결)가 있는 팝업이라 X로 닫힘(사용자 지시: "행위가 있는 팝업이니까"),
+ * [[project_cntl_popup_close_vs_action_buttons]] */
+static void cb_sd_resolve_tap(lv_event_t *e)
+{
+    cb_modal_close(e);  /* 에러목록 팝업부터 닫고 선택팝업으로 교체 */
+
+    pause_bg_timers();
+    lv_obj_t *overlay = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(overlay, 0, 0);
+    lv_obj_set_style_radius(overlay, 0, 0);
+
+    lv_obj_t *box = lv_obj_create(overlay);
+    lv_obj_set_size(box, LV_PCT(80), LV_SIZE_CONTENT);
+    lv_obj_center(box);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    s_last_modal = box;
+
+    add_page_popup_header(box, ui_str(STR_TITLE_SD_RESOLVE), cb_modal_close, NULL);
+
+    lv_obj_t *btn_row = lv_obj_create(box);
+    lv_obj_set_size(btn_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(btn_row, 0, 0);
+    add_modal_button(btn_row, STR_BTN_SD_RECONNECT, cb_sd_reconnect_tap, NULL);
+    add_modal_button(btn_row, STR_BTN_SD_FORMAT, cb_sd_format_tap, NULL);
 }
 
 /* 아래에서 씀 — 정의는 판넬 표시 코드 근처(display_photo 옆) */
@@ -2791,46 +3088,17 @@ static float s_stats_minmax_cache_mn[STATS_GRAPH_SERIES_COUNT];
 static float s_stats_minmax_cache_mx[STATS_GRAPH_SERIES_COUNT];
 static bool  s_stats_minmax_cache_valid[STATS_GRAPH_SERIES_COUNT];
 
-/* 2026-09-10(재설계 — 사용자 지시: SD I/O가 태스크 워치독 exception을 일으키는 걸 태스크
- * 격리로 막음, [[feedback_design_for_exceptions_not_just_fails]]) — 통계탭 SD 조회(overview/
- * table/graph)를 LVGL 태스크에서 완전히 떼어내 별도 태스크(stats_io_worker_task)로 옮김.
- *
- * 원칙: SD 읽기 자체는 뮤텍스를 절대 안 잡은 채로 함(몇 초가 걸리든 LVGL 태스크는 전혀
- * 영향 안 받아야 하므로). 다 읽은 뒤 "결과를 스냅샷/공유배열에 복사"하는 딱 그 짧은
- * 순간에만 s_stats_io_mutex를 잡음. LVGL 쪽(refresh_stats_page, 여전히 2초 타이머)은 그
- * 스냅샷을 읽어서 화면만 그리고, SD는 절대 직접 안 만짐 — SD가 아무리 느려도(지금처럼
- * 반복 실패해도) UI는 안 막힘.
- *
- * 팝업 열릴 때(build_stats_tab) 태스크 생성, 닫힐 때(teardown_stats_tab) stop 플래그로
- * "안전한 지점(루프 맨 위, SD 호출 도중이 아닌 곳)"에서만 스스로 종료 — 절대 밖에서
- * 강제로 vTaskDelete 안 함(SD I/O 도중 강제종료하면 FatFs 내부 리엔트런트 뮤텍스가 영원히
- * 잠긴 채 남아 이후 모든 파일접근이 막히는 훨씬 심각한 문제가 생길 수 있음). 그래프용 힙
- * 버퍼(s_stats_chart_real_values 등)도 워커 자신이 종료 직전에 스스로 해제 — teardown이
- * 즉시 해제하면, 그 순간 워커가 아직 그 버퍼를 쓰고 있을 수 있어(use-after-free) 안 됨 */
-typedef struct {
-    bool     ov_valid[STATS_GRAPH_SERIES_COUNT];
-    float    ov_mn[STATS_GRAPH_SERIES_COUNT];
-    float    ov_mx[STATS_GRAPH_SERIES_COUNT];
-    float    ov_avg[STATS_GRAPH_SERIES_COUNT];
+/* 2026-09-10(재설계 — [[project_cntl_sd_reliability_redesign_2026_09_10]]) — 태스크 격리
+ * 아키텍처(별도 워커+뮤텍스+세마포어)는 잘못된 진단(SD 에러를 "행"으로 오판) 위에 지어졌던
+ * 구조라 전부 제거함. 실제 SD 에러는 fail(정상 리턴, 유한시간)이었고, 진짜 문제는 그 fail을
+ * 무시하고 계속 다음 것도 시도해서 누적된 것 — 고쳐야 할 건 회로차단기(첫 fail에서 그 틱
+ * 전체 중단)이지 격리가 아니었음. 그래서 원래대로 LVGL 태스크(2초 타이머)에서 직접 SD를
+ * 부르되, 각 단계는 bool을 리턴해서 "SD 자체 문제로 실패했는지"(stats_store_had_io_error(),
+ * "데이터 없음"과 구분됨)를 알리고, 그러면 그 틱의 나머지 단계를 전부 건너뜀(사용자 지시:
+ * "SD 조회 fail이면, 다른 값도 믿을 수 없어. 즉시 중단이지") */
 
-    uint32_t tb_page_index;
-    uint32_t tb_got;
-    uint32_t tb_total_pages;
-    stats_record_t tb_recs[STATS_STORE_PAGE_SIZE];
-
-    uint32_t gr_got[STATS_GRAPH_SERIES_COUNT];
-    uint32_t gr_max_got;
-} stats_io_snapshot_t;
-
-static stats_io_snapshot_t   s_stats_snap;
-static SemaphoreHandle_t     s_stats_io_mutex        = NULL;  /* 스냅샷 + real_values/has_value 보호 */
-static SemaphoreHandle_t     s_stats_graph_buf_mutex = NULL;  /* s_stats_graph_read_buf/point_cap 보호(리사이즈용) */
-static SemaphoreHandle_t     s_stats_io_exited_sem   = NULL;  /* 워커가 완전히 끝났음을 teardown에 알림 */
-static TaskHandle_t          s_stats_io_task         = NULL;
-static volatile bool         s_stats_io_stop         = false;
-static uint32_t              s_graph_worker_tick     = 0;     /* 워커 자신의 3틱당 1회 그래프 스로틀 */
-
-static void stats_io_compute_overview(void)
+/* chan_type별 min/max/avg를 개요판넬 라벨에 반영. 리턴값 false = SD 자체 오류(그 틱 중단) */
+static bool refresh_stats_overview_panel(void)
 {
     uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
     uint32_t scale_sec = (idx < (sizeof(s_stats_scale_values) / sizeof(s_stats_scale_values[0])))
@@ -2838,53 +3106,27 @@ static void stats_io_compute_overview(void)
     uint32_t now = rtc_sync_get_unix_time();
     uint32_t cutoff = (now > scale_sec) ? now - scale_sec : 0;
 
-    static const uint8_t chan_types[STATS_GRAPH_SERIES_COUNT] = {
-        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM
-    };
-    bool  valid[STATS_GRAPH_SERIES_COUNT];
-    float mn[STATS_GRAPH_SERIES_COUNT], mx[STATS_GRAPH_SERIES_COUNT], avg[STATS_GRAPH_SERIES_COUNT];
-    for (int i = 0; i < STATS_GRAPH_SERIES_COUNT; i++) {
-        valid[i] = stats_store_get_min_max_avg_since(cutoff, chan_types[i], &mn[i], &mx[i], &avg[i]);
-    }
-
-    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
-    memcpy(s_stats_snap.ov_valid, valid, sizeof(valid));
-    memcpy(s_stats_snap.ov_mn, mn, sizeof(mn));
-    memcpy(s_stats_snap.ov_mx, mx, sizeof(mx));
-    memcpy(s_stats_snap.ov_avg, avg, sizeof(avg));
-    /* 그래프 계산(같은 워커 루프 안에서 뒤이어 돔)이 이 min/max를 그대로 재사용 —
-     * 채널당 SD 스캔을 두 번에서 한 번으로 줄임(2026-09-10 원래 설계 그대로 유지) */
-    memcpy(s_stats_minmax_cache_valid, valid, sizeof(valid));
-    memcpy(s_stats_minmax_cache_mn, mn, sizeof(mn));
-    memcpy(s_stats_minmax_cache_mx, mx, sizeof(mx));
-    xSemaphoreGive(s_stats_io_mutex);
-}
-
-static void stats_io_render_overview(void)
-{
     struct { uint8_t chan_type; lv_obj_t *label; } rows[] = {
         { SENSOR_CHAN_TEMP_C,   s_overview_temp_label },
         { SENSOR_CHAN_HUMI_PCT, s_overview_humi_label },
         { SENSOR_CHAN_CO2_PPM,  s_overview_co2_label  },
         { SENSOR_CHAN_NH3_PPM,  s_overview_nh3_label  },
     };
-    bool  valid[STATS_GRAPH_SERIES_COUNT];
-    float mn[STATS_GRAPH_SERIES_COUNT], mx[STATS_GRAPH_SERIES_COUNT], avg[STATS_GRAPH_SERIES_COUNT];
-    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
-    memcpy(valid, s_stats_snap.ov_valid, sizeof(valid));
-    memcpy(mn, s_stats_snap.ov_mn, sizeof(mn));
-    memcpy(mx, s_stats_snap.ov_mx, sizeof(mx));
-    memcpy(avg, s_stats_snap.ov_avg, sizeof(avg));
-    xSemaphoreGive(s_stats_io_mutex);
-
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
         ui_str_id_t label_id, unit_id;
         if (!chan_type_to_strs(rows[i].chan_type, &label_id, &unit_id)) continue;
+
         char line[128];
-        if (valid[i]) {
-            int mx_s = (int)(mx[i] * 100.0f + 0.5f);
-            int mn_s = (int)(mn[i] * 100.0f + 0.5f);
-            int avg_s = (int)(avg[i] * 100.0f + 0.5f);
+        float mn, mx, avg;
+        bool have_range = stats_store_get_min_max_avg_since(cutoff, rows[i].chan_type, &mn, &mx, &avg);
+        if (!have_range && stats_store_had_io_error()) return false;  /* SD 자체 문제 — 즉시 중단 */
+        s_stats_minmax_cache_valid[i] = have_range;
+        if (have_range) {
+            s_stats_minmax_cache_mn[i] = mn;
+            s_stats_minmax_cache_mx[i] = mx;
+            int mx_s = (int)(mx * 100.0f + 0.5f);
+            int mn_s = (int)(mn * 100.0f + 0.5f);
+            int avg_s = (int)(avg * 100.0f + 0.5f);
             snprintf(line, sizeof(line), ui_str(STR_STATS_OVERVIEW_ROW_FMT), ui_str(label_id), ui_str(unit_id),
                      mx_s / 100, mx_s % 100,
                      mn_s / 100, mn_s % 100,
@@ -2894,45 +3136,25 @@ static void stats_io_render_overview(void)
         }
         lv_label_set_text(rows[i].label, line);
     }
+    return true;
 }
 
-/* Scale 변경/페이지이동/삭제처럼 "지금 바로 반영돼야 하는" 이벤트는 워커를 깨워서(kick)
- * 다음 대기(ulTaskNotifyTake)에서 바로 일어나 재계산하게 함 — 직접 SD를 부르지 않음 */
-static void kick_stats_io_worker(void)
-{
-    if (s_stats_io_task) xTaskNotifyGive(s_stats_io_task);
-}
+static void cb_stats_scale_changed(lv_event_t *e) { (void)e; refresh_stats_overview_panel(); }
 
-static void cb_stats_scale_changed(lv_event_t *e) { (void)e; kick_stats_io_worker(); }
-
-static void stats_io_compute_table(void)
+/* 리턴값 false = SD 자체 오류(그 틱 중단) */
+static bool refresh_stats_table(void)
 {
-    uint32_t page_index = s_stats_page_index;  /* 워커가 읽는 순간 값 — 살짝 stale해도 다음 사이클에 스스로 보정 */
     stats_record_t recs[STATS_STORE_PAGE_SIZE];
-    uint32_t got = stats_store_read_page(page_index, STATS_STORE_PAGE_SIZE, recs, STATS_STORE_PAGE_SIZE);
+    uint32_t got = stats_store_read_page(s_stats_page_index, STATS_STORE_PAGE_SIZE,
+                                          recs, STATS_STORE_PAGE_SIZE);
+    if (got == 0 && stats_store_had_io_error()) return false;
     uint32_t total = stats_store_get_count();
+    if (total == 0 && stats_store_had_io_error()) return false;
     uint32_t total_pages = (total + STATS_STORE_PAGE_SIZE - 1) / STATS_STORE_PAGE_SIZE;
     if (total_pages == 0) total_pages = 1;
 
-    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
-    s_stats_snap.tb_page_index  = page_index;
-    s_stats_snap.tb_got         = got;
-    s_stats_snap.tb_total_pages = total_pages;
-    memcpy(s_stats_snap.tb_recs, recs, sizeof(recs));
-    xSemaphoreGive(s_stats_io_mutex);
-}
-
-static void stats_io_render_table(void)
-{
-    uint32_t page_index, got, total_pages;
-    stats_record_t recs[STATS_STORE_PAGE_SIZE];
-    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
-    page_index  = s_stats_snap.tb_page_index;
-    got         = s_stats_snap.tb_got;
-    total_pages = s_stats_snap.tb_total_pages;
-    memcpy(recs, s_stats_snap.tb_recs, sizeof(recs));
-    xSemaphoreGive(s_stats_io_mutex);
-
+    /* 2026-09-07 — 헤더(항목/값/시간)는 이제 테이블 밖(stats_table_header_row)에 고정으로
+     * 따로 그림(사용자 지시: "스크롤 안되야되"), 테이블 자신은 데이터 행만 채움 */
     lv_table_set_row_count(s_stats_table, got > 0 ? got : 1);
     if (got == 0) {
         lv_table_set_cell_value(s_stats_table, 0, 0, ui_str(STR_STATS_TABLE_EMPTY));
@@ -2974,14 +3196,14 @@ static void stats_io_render_table(void)
         }
     }
 
-    uint32_t displayed_page = page_index + 1;
+    uint32_t displayed_page = s_stats_page_index + 1;
     char page_buf[32];
     snprintf(page_buf, sizeof(page_buf), ui_str(STR_STATS_PAGE_FMT),
              (unsigned long)displayed_page, (unsigned long)total_pages);
     lv_label_set_text(s_stats_page_label, page_buf);
 
-    bool can_prev = (page_index + 1) < total_pages;  /* 더 오래된 페이지 있음 */
-    bool can_next = (page_index > 0);                /* 더 최신 페이지 있음 */
+    bool can_prev = (s_stats_page_index + 1) < total_pages;  /* 더 오래된 페이지 있음 */
+    bool can_next = (s_stats_page_index > 0);                /* 더 최신 페이지 있음 */
     if (can_prev) lv_obj_remove_state(s_stats_prev_btn, LV_STATE_DISABLED);
     else          lv_obj_add_state(s_stats_prev_btn, LV_STATE_DISABLED);
     if (can_next) lv_obj_remove_state(s_stats_next_btn, LV_STATE_DISABLED);
@@ -2990,18 +3212,24 @@ static void stats_io_render_table(void)
     else          lv_obj_add_state(s_stats_jump_prev_btn, LV_STATE_DISABLED);
     if (can_next) lv_obj_remove_state(s_stats_jump_next_btn, LV_STATE_DISABLED);
     else          lv_obj_add_state(s_stats_jump_next_btn, LV_STATE_DISABLED);
+    return true;
 }
 
 /* 2026-09-10(사용자 설계 — 라인그래프, 계열 4개 온도/습도/CO2/암모니아, Scale 판넬과 공유) —
  * 계열마다 실제 단위/범위가 달라서(온도 vs CO2 등 같은 축에 그대로 그리면 한쪽이 눌려버림)
  * 각 계열을 자기 자신의 기간 내 최소~최대 기준 0~100으로 정규화해서 그림. 실제 값은
- * s_stats_chart_real_values에 원본 그대로 보관해서 탭했을 때 진짜 값을 보여줌. 그래프뷰가
- * 숨겨져 있어도(테이블 보는 중) 워커는 계속 계산은 해둠 — 어차피 SD 읽기는 더 이상 LVGL
- * 태스크를 안 막으므로 아낄 필요가 없어짐(예전엔 이게 LVGL 부담이라 뷰 숨김 시 생략했었음) */
-static void stats_io_compute_graph(void)
+ * s_stats_chart_real_values에 원본 그대로 보관해서 탭했을 때 진짜 값을 보여줌(사용자 지시:
+ * "탭하면 값이 나타나는 것"). 테이블 보고 있을 때(그래프 뷰 숨김)는 SD 조회 자체를 생략.
+ * 리턴값 false = SD 자체 오류(그 틱 중단) */
+static bool refresh_stats_graph(void)
 {
-    if ((s_graph_worker_tick++ % 3) != 0) return;  /* 워커 루프 3회(약 6초)당 1번만 SD 읽음 */
-    if (!s_stats_graph_read_buf) return;            /* 리사이즈 경합 등으로 아직 없으면 이번 사이클 건너뜀 */
+    if (!s_stats_chart) return true;
+    if (lv_obj_has_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN)) return true;
+
+    /* 2026-09-10 — 그래프는 테이블처럼 매초 갱신될 필요가 없으므로, 실제 SD 조회는 3틱(약
+     * 6초)에 한 번만 하도록 완화(2s 타이머 기준) */
+    static int s_graph_refresh_tick = 0;
+    if ((s_graph_refresh_tick++ % 3) != 0) return true;
 
     uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
     uint32_t scale_sec = (idx < (sizeof(s_stats_scale_values) / sizeof(s_stats_scale_values[0])))
@@ -3013,119 +3241,42 @@ static void stats_io_compute_graph(void)
         SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM
     };
 
-    /* s_stats_graph_read_buf/s_stats_graph_point_cap 전용 뮤텍스 — 이 구간(SD 읽기 포함) 내내
-     * 잡고 있음. 이걸 기다릴 수 있는 건 리사이즈(cb_stats_point_count_changed, 드물게 발생하는
-     * 디버그 조작)뿐이라 LVGL 렌더 경로엔 전혀 영향 없음 */
-    xSemaphoreTake(s_stats_graph_buf_mutex, portMAX_DELAY);
-    uint32_t cap = s_stats_graph_point_cap;
+    static stats_record_t buf[STATS_GRAPH_SERIES_COUNT][STATS_GRAPH_POINT_COUNT];
     uint32_t got[STATS_GRAPH_SERIES_COUNT];
     uint32_t max_got = 0;
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
-        got[s] = stats_store_read_since(cutoff, chan_types[s], &s_stats_graph_read_buf[(size_t)s * cap], cap);
+        got[s] = stats_store_read_since(cutoff, chan_types[s], buf[s], STATS_GRAPH_POINT_COUNT);
+        if (got[s] == 0 && stats_store_had_io_error()) return false;  /* SD 자체 문제 — 즉시 중단 */
         if (got[s] > max_got) max_got = got[s];
     }
     if (max_got == 0) max_got = 1;
-
-    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
-    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
-        for (uint32_t i = 0; i < max_got; i++) {
-            if (i < got[s]) {
-                s_stats_chart_real_values[(size_t)s * cap + i] = s_stats_graph_read_buf[(size_t)s * cap + i].value;
-                s_stats_chart_has_value[(size_t)s * cap + i] = true;
-            } else {
-                s_stats_chart_has_value[(size_t)s * cap + i] = false;
-            }
-        }
-        s_stats_snap.gr_got[s] = got[s];
-    }
-    s_stats_snap.gr_max_got = max_got;
-    xSemaphoreGive(s_stats_io_mutex);
-    xSemaphoreGive(s_stats_graph_buf_mutex);
-}
-
-static void stats_io_render_graph(void)
-{
-    if (!s_stats_chart) return;
-    if (lv_obj_has_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN)) return;
-
-    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
-    uint32_t got[STATS_GRAPH_SERIES_COUNT];
-    memcpy(got, s_stats_snap.gr_got, sizeof(got));
-    uint32_t max_got = s_stats_snap.gr_max_got;
-    bool  ov_valid[STATS_GRAPH_SERIES_COUNT];
-    float ov_mn[STATS_GRAPH_SERIES_COUNT], ov_mx[STATS_GRAPH_SERIES_COUNT];
-    memcpy(ov_valid, s_stats_snap.ov_valid, sizeof(ov_valid));
-    memcpy(ov_mn, s_stats_snap.ov_mn, sizeof(ov_mn));
-    memcpy(ov_mx, s_stats_snap.ov_mx, sizeof(ov_mx));
-    uint32_t cap = s_stats_graph_point_cap;  /* real_values/has_value 인덱싱과 정합성 맞춰 같은 락 안에서 읽음 */
-
-    if (max_got == 0) { xSemaphoreGive(s_stats_io_mutex); return; }  /* 워커가 아직 한 번도 안 돎 */
     s_stats_chart_shown_points = max_got;
     lv_chart_set_point_count(s_stats_chart, max_got);
 
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
-        bool have_range = ov_valid[s];
-        float mn = ov_mn[s];
-        float mx = ov_mx[s];
+        /* 2026-09-10 — 개괄판넬(refresh_stats_overview_panel, 항상 이 함수보다 먼저 도는
+         * 순서 보장, refresh_stats_page 참고)이 이미 계산해둔 캐시 재사용 — 채널당 SD
+         * 스캔을 두 번에서 한 번으로 줄임 */
+        bool have_range = s_stats_minmax_cache_valid[s];
+        float mn = s_stats_minmax_cache_mn[s];
+        float mx = s_stats_minmax_cache_mx[s];
         float span = (have_range && mx > mn) ? (mx - mn) : 0.0f;
 
-        int32_t norm_vals[STATS_GRAPH_POINT_COUNT_MAX];
+        int32_t norm_vals[STATS_GRAPH_POINT_COUNT];
         for (uint32_t i = 0; i < max_got; i++) {
             if (i < got[s]) {
-                float v = s_stats_chart_real_values[(size_t)s * cap + i];
+                float v = buf[s][i].value;
+                s_stats_chart_real_values[s][i] = v;
+                s_stats_chart_has_value[s][i] = true;
                 norm_vals[i] = (span > 0.0f) ? (int32_t)(((v - mn) / span) * 100.0f + 0.5f) : 50;
             } else {
+                s_stats_chart_has_value[s][i] = false;
                 norm_vals[i] = LV_CHART_POINT_NONE;
             }
         }
         lv_chart_set_series_values(s_stats_chart, s_stats_chart_series[s], norm_vals, max_got);
     }
-    xSemaphoreGive(s_stats_io_mutex);
-}
-
-static void stats_io_worker_task(void *arg)
-{
-    (void)arg;
-    for (;;) {
-        if (s_stats_io_stop) break;
-        stats_io_compute_overview();
-        if (s_stats_io_stop) break;
-        stats_io_compute_table();
-        if (s_stats_io_stop) break;
-        stats_io_compute_graph();
-        if (s_stats_io_stop) break;
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));  /* 2초 주기, kick_stats_io_worker()로 즉시 깨울 수 있음 */
-    }
-    /* 종료 직전, 이 팝업 세션 동안 쓰던 그래프 힙 버퍼를 스스로 해제 — teardown이 즉시
-     * 해제하면 그 순간 이 워커가 아직 쓰고 있을 수 있어 위험함(use-after-free). 리사이즈
-     * (cb_stats_point_count_changed)와 같은 뮤텍스로 보호해서 서로 안 겹치게 함 */
-    xSemaphoreTake(s_stats_graph_buf_mutex, portMAX_DELAY);
-    heap_caps_free(s_stats_chart_real_values); s_stats_chart_real_values = NULL;
-    heap_caps_free(s_stats_chart_has_value);   s_stats_chart_has_value = NULL;
-    heap_caps_free(s_stats_graph_read_buf);    s_stats_graph_read_buf = NULL;
-    s_stats_graph_point_cap = STATS_GRAPH_POINT_COUNT;
-    xSemaphoreGive(s_stats_graph_buf_mutex);
-    s_stats_io_task = NULL;
-    if (s_stats_io_exited_sem) xSemaphoreGive(s_stats_io_exited_sem);
-    vTaskDelete(NULL);
-}
-
-/* 2026-09-10(임시 디버그 콜백 — 위 STATS_GRAPH_POINT_COUNT_MAX 주석 참고) — 점 개수
- * 드롭다운이 바뀌면 버퍼를 새 크기로 재할당. s_stats_graph_buf_mutex로 워커의
- * stats_io_compute_graph()와 경합(같은 포인터/cap을 동시에 못 건드리게)을 막음.
- * 리사이즈는 드문 디버그 조작이라 워커가 마침 SD 읽는 중이면 그게 끝날 때까지 잠깐
- * 기다릴 수 있음(최대 몇 초) — 이건 LVGL 렌더 경로와 무관한 뮤텍스라 화면은 안 막힘 */
-static void cb_stats_point_count_changed(lv_event_t *e)
-{
-    (void)e;
-    static const uint32_t opts[] = { 60, 120, 240, 480 };
-    uint16_t idx = lv_dropdown_get_selected(s_stats_point_count_dd);
-    uint32_t new_cap = (idx < (sizeof(opts) / sizeof(opts[0]))) ? opts[idx] : 60;
-    xSemaphoreTake(s_stats_graph_buf_mutex, portMAX_DELAY);
-    resize_stats_graph_buffers(new_cap);
-    xSemaphoreGive(s_stats_graph_buf_mutex);
-    s_graph_worker_tick = 0;
-    kick_stats_io_worker();
+    return true;
 }
 
 static void cb_stats_chart_series_toggle(lv_event_t *e)
@@ -3171,24 +3322,19 @@ static void cb_stats_chart_tap(lv_event_t *e)
     static const uint8_t chan_types[STATS_GRAPH_SERIES_COUNT] = {
         SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM
     };
-    /* 2026-09-10(태스크 격리 재설계) — real_values/has_value는 이제 워커 태스크도 같이
-     * 건드리는 공유 배열이라 s_stats_io_mutex로 보호해서 읽음(짧은 CPU 작업이라 잠깐
-     * 잡아도 워커의 SD I/O와는 안 겹침 — 워커는 이 뮤텍스를 I/O 중엔 안 잡으므로) */
-    xSemaphoreTake(s_stats_io_mutex, portMAX_DELAY);
     int chosen_series = -1;
     int32_t best_y_dist = INT32_MAX;
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
         if (!lv_obj_has_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED)) continue;
-        if (!s_stats_chart_has_value[(size_t)s * s_stats_graph_point_cap + nearest_idx]) continue;
+        if (!s_stats_chart_has_value[s][nearest_idx]) continue;
         lv_point_t pp;
         lv_chart_get_point_pos_by_id(s_stats_chart, s_stats_chart_series[s], nearest_idx, &pp);
         int32_t py = chart_coords.y1 + pp.y;
         int32_t dist = (p.y > py) ? (p.y - py) : (py - p.y);
         if (dist < best_y_dist) { best_y_dist = dist; chosen_series = s; }
     }
-    if (chosen_series < 0) { xSemaphoreGive(s_stats_io_mutex); return; }
-    float v = s_stats_chart_real_values[(size_t)chosen_series * s_stats_graph_point_cap + nearest_idx];
-    xSemaphoreGive(s_stats_io_mutex);
+    if (chosen_series < 0) return;
+    float v = s_stats_chart_real_values[chosen_series][nearest_idx];
 
     ui_str_id_t label_id, unit_id;
     if (!chan_type_to_strs(chan_types[chosen_series], &label_id, &unit_id)) return;
@@ -3209,14 +3355,15 @@ static void refresh_stats_page(lv_timer_t *t)
     (void)t;
     size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     uint32_t t0 = lv_tick_get();
-    stats_io_render_overview();
+    bool ok = refresh_stats_overview_panel();
     uint32_t t1 = lv_tick_get();
-    stats_io_render_table();
+    if (ok) ok = refresh_stats_table();
     uint32_t t2 = lv_tick_get();
-    stats_io_render_graph();
+    if (ok) ok = refresh_stats_graph();
     uint32_t t3 = lv_tick_get();
+    if (!ok) report_sd_io_fail("stats tab query");
     if ((t3 - t0) > 50) {  /* 50ms 이상 걸린 사이클만 로그(매번 찍으면 스팸) */
-        ESP_LOGW(TAG, "MEMDIAG refresh_stats_page(render) timing: overview=%ums table=%ums graph=%ums total=%ums",
+        ESP_LOGW(TAG, "MEMDIAG refresh_stats_page timing: overview=%ums table=%ums graph=%ums total=%ums",
                  (unsigned)(t1 - t0), (unsigned)(t2 - t1), (unsigned)(t3 - t2), (unsigned)(t3 - t0));
     }
     size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -3224,20 +3371,8 @@ static void refresh_stats_page(lv_timer_t *t)
         ESP_LOGW(TAG, "MEMDIAG refresh_stats_page: internal %u -> %u (delta=%d)",
                  (unsigned)before, (unsigned)after, (int)before - (int)after);
     }
-    /* 2026-09-10(임시 디버그 — 사용자 지시: "남은 Internal memory를 overview 옆에
-     * 주화면처럼 표기해") — 이미 위에서 잰 after를 그대로 재사용, 추가 조회 없음 */
-    if (s_stats_graph_mem_label) {
-        char mem_i[16];
-        format_bytes_human((uint32_t)after, mem_i, sizeof(mem_i));
-        lv_label_set_text_fmt(s_stats_graph_mem_label, "I = %s", mem_i);
-    }
 }
 
-/* 2026-09-10(태스크 격리 재설계) — 예전엔 여기서 바로 refresh_stats_table()을 불러 즉시
- * 반영했는데, 이제 그 함수(SD 읽기 포함)가 워커 태스크로 옮겨져서 여기선 페이지 인덱스만
- * 바꾸고 워커를 깨움(kick) — 화면 반영은 다음 refresh_stats_page 틱(최대 2초)에 이뤄짐.
- * 약간의 지연이 생기지만, 이 버튼들이 SD 스캔을 직접 다시 하지 않으므로 LVGL 태스크가
- * 절대 안 막힌다는 이득이 더 큼 */
 static void stats_prev_page_cb(lv_event_t *e)
 {
     (void)e;
@@ -3245,14 +3380,14 @@ static void stats_prev_page_cb(lv_event_t *e)
     uint32_t total_pages = (total + STATS_STORE_PAGE_SIZE - 1) / STATS_STORE_PAGE_SIZE;
     if (total_pages == 0) total_pages = 1;
     if (s_stats_page_index + 1 < total_pages) s_stats_page_index++;
-    kick_stats_io_worker();
+    refresh_stats_table();
 }
 
 static void stats_next_page_cb(lv_event_t *e)
 {
     (void)e;
     if (s_stats_page_index > 0) s_stats_page_index--;
-    kick_stats_io_worker();
+    refresh_stats_table();
 }
 
 /* 2026-09-07(사용자 지시 — "10개씩 이동 단추도 있으면") — 1칸 이동과 동일 원칙, 그냥
@@ -3265,14 +3400,14 @@ static void stats_jump_prev_page_cb(lv_event_t *e)
     if (total_pages == 0) total_pages = 1;
     s_stats_page_index += STATS_JUMP_PAGE_COUNT;
     if (s_stats_page_index + 1 > total_pages) s_stats_page_index = total_pages - 1;
-    kick_stats_io_worker();
+    refresh_stats_table();
 }
 
 static void stats_jump_next_page_cb(lv_event_t *e)
 {
     (void)e;
     s_stats_page_index = (s_stats_page_index > STATS_JUMP_PAGE_COUNT) ? s_stats_page_index - STATS_JUMP_PAGE_COUNT : 0;
-    kick_stats_io_worker();
+    refresh_stats_table();
 }
 
 /* 2026-09-07(사용자 지시 — "저장값 지우기 기능도", "지울때 확인 팝업도") — Yes/Cancel
@@ -3282,7 +3417,8 @@ static void cb_delete_stats_confirmed(void *ctx)
     (void)ctx;
     stats_store_delete_all();
     s_stats_page_index = 0;
-    kick_stats_io_worker();
+    refresh_stats_table();
+    refresh_stats_overview_panel();
 }
 
 static void cb_delete_stats_tap(lv_event_t *e)
@@ -3386,6 +3522,14 @@ static void refresh_dashboard(lv_timer_t *t)
 {
     (void)t;
 
+    /* 2026-09-11(SD 신뢰성 재설계 항목4) — 쓰기경로(esp_now_hub.c recv_cb, LVGL 태스크 아님)가
+     * SD I/O 실패를 만났으면 여기(LVGL 태스크, 매 틱)서 test-and-clear로 가져와 회로차단기를
+     * 세움 — 읽기실패와 마찬가지로 사용자에게 알리고 재연결/포맷으로 대응하게 함 */
+    if (stats_store_take_write_io_error()) {
+        mark_sd_io_fail("measurement save (write)");
+        refresh_storage_status_label();
+    }
+
     /* 2026-08-21 — 웹 대시보드 URL(사용자 지시). IP는 WiFi 재연결 등으로 바뀔 수 있어서
      * 매 틱 다시 읽음(가벼운 문자열 비교라 비용 무시 가능) — 없으면(빈 문자열) 숨김 */
     const char *ip = esp_now_hub_get_own_ip_str();
@@ -3414,47 +3558,9 @@ static void refresh_dashboard(lv_timer_t *t)
     static int s_storage_check_tick = 0;
     if (++s_storage_check_tick >= 5) {
         s_storage_check_tick = 0;
-        uint64_t sd_total = 0, sd_free = 0;
-        if (s_storage_status_label && sd_storage_get_capacity(&sd_total, &sd_free) && sd_total > 0) {
-            uint64_t picture_budget = sd_total * 9 / 10;
-            uint64_t measure_budget = sd_total / 10;
-            uint64_t picture_used = 0;  /* TODO(미정): 캠 사진 저장 구현되면 폴더 크기 합산으로 교체 */
-            uint64_t measure_used = stats_store_get_used_bytes();
-            /* 2026-09-10(임시 진단 — "지금 1주일치가 아니지, 몇시간 정도일 뿐이야" 정확한
-             * 수치 확인용, 확인 후 제거) */
-            {
-                uint64_t recs = measure_used / sizeof(stats_record_t);
-                double hours = (double)recs / 4.0 * 30.0 / 3600.0;
-                ESP_LOGW(TAG, "MEMDIAG stats_store: used=%llu bytes records=%llu (~%.2fh, 30s/4ch 가정)",
-                         (unsigned long long)measure_used, (unsigned long long)recs, hours);
-            }
-            uint64_t picture_used_clamped = (picture_used > picture_budget) ? picture_budget : picture_used;
-            uint64_t measure_used_clamped = (measure_used > measure_budget) ? measure_budget : measure_used;
-
-            uint32_t picture_pct = (uint32_t)(picture_used * 100 / picture_budget);
-            uint32_t measure_pct = (uint32_t)(measure_used * 100 / measure_budget);
-            uint32_t total_pct   = (uint32_t)((sd_total - sd_free) * 100 / sd_total);
-            uint32_t picture_remain_mb = (uint32_t)((picture_budget - picture_used_clamped) / (1024 * 1024));
-            uint32_t measure_remain_mb = (uint32_t)((measure_budget - measure_used_clamped) / (1024 * 1024));
-            uint32_t total_remain_mb   = (uint32_t)(sd_free / (1024 * 1024));
-
-            lv_label_set_text_fmt(s_storage_status_label, "%s[%%(Remain MB)]: %s %u(%u) / %s %u(%u) / %s %u(%u)",
-                ui_str(STR_LABEL_STORAGE),
-                ui_str(STR_LABEL_PICTURE), (unsigned)picture_pct, (unsigned)picture_remain_mb,
-                ui_str(STR_LABEL_MEASURE_SHORT), (unsigned)measure_pct, (unsigned)measure_remain_mb,
-                ui_str(STR_LABEL_TOTAL), (unsigned)total_pct, (unsigned)total_remain_mb);
-
-            /* 정리 트리거 — Measure가 자기 예산의 90% 이상이면 80%까지 삭제. Picture는
-             * 실사용 0이라 지금은 절대 안 걸림(사진저장 구현 후 동일 패턴으로 확장 예정) */
-            if (measure_used * 100 / measure_budget >= 90) {
-                uint32_t deleted = stats_store_trim_to(measure_budget * 80 / 100);
-                if (deleted > 0) {
-                    show_storage_cleanup_popup(ui_str(STR_LABEL_MEASURE_SHORT), deleted);
-                }
-            }
-        } else if (s_storage_status_label) {
-            lv_label_set_text(s_storage_status_label, "");
-        }
+        refresh_storage_status_label();  /* 2026-09-10 재설계 — 실제 계산/표시 로직은
+            SD 상태/복구 섹션의 refresh_storage_status_label()로 이동(탭 팝업에서 재연결/
+            포맷 직후에도 즉시 재사용해야 해서 공용 함수로 뺌, [[project_cntl_sd_reliability_redesign_2026_09_10]]) */
     }
     /* 2026-09-07(임시 진단 — 내부RAM 서서히 감소 원인 추적) — 10초마다(이 틱이 1초 주기라
      * 10번째마다) 전체 추이를 로그로 남김. stats_store_append() 안쪽 진단과 대조용 */
@@ -5543,6 +5649,12 @@ void ui_init(void)
     s_storage_status_label = lv_label_create(summary_top_box);
     lv_obj_set_style_text_font(s_storage_status_label, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_label_set_text(s_storage_status_label, "");
+    /* 2026-09-11(사용자 지시 — "상태버튼을 눌러서 조치하라고 문구 표시") — 조치는 상태
+     * 아이콘(cb_logo_warning_tap) 쪽으로 일원화, 이 라벨 자체는 더 이상 탭 대상 아님.
+     * 2026-09-11(사용자 지시 — "SD: 빼고만 빨간색으로 해") — #RRGGBB 텍스트# 인라인
+     * 문법을 쓰려면 반드시 이걸 켜야 함(전에 이걸 빠뜨려서 "#ff0000 ..." 이 그대로
+     * 문자로 찍혔던 버그가 있었음, 이번엔 잊지 않음) */
+    lv_label_set_recolor(s_storage_status_label, true);
 
     /* 2026-09-08(연결 기능 주화면 이관, 사용자 설계) — 장치별 행은 전부 Sensor/Camera
      * 판넬로 이관, Summary에는 대신 실시간 순시치(온도/습도/CO2/암모니아)만 —
@@ -5849,21 +5961,6 @@ static void cb_close_stats_popup(lv_event_t *e)
 static void teardown_stats_tab(void)
 {
     size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-
-    /* 2026-09-10(태스크 격리 재설계 -> 같은 날 버그 수정: "여닫는데 수초 걸려") — 워커에게
-     * 정지 요청 + 깨우기만 하고 절대 기다리지 않음. 처음엔 여기서 워커 종료를 최대 1.5초
-     * 기다렸었는데, SD가 막혀있는 동안은 매번 그 1.5초를 꽉 채워서 LVGL 태스크를 붙잡아버려서
-     * — 정확히 이 재설계로 없애려던 그 문제(LVGL 태스크가 SD 때문에 멈춤)를 닫기 경로에서
-     * 다시 만든 꼴이었음. 이제 팝업 UI는 워커 상태와 완전히 무관하게 즉시 닫힘 — 워커는
-     * 백그라운드에서 자기 페이스대로(안전한 지점에서만) 정리하고 사라짐. 절대 vTaskDelete로
-     * 강제종료 안 함(SD I/O 도중이면 FatFs 내부 뮤텍스가 영원히 잠길 위험,
-     * [[feedback_design_for_exceptions_not_just_fails]]). 그래프 힙 버퍼(s_stats_chart_
-     * real_values 등)는 절대 여기서 손 안 댐, 오직 그 워커 자신만 마지막에 정리함(교차
-     * 소유로 인한 use-after-free 방지) — build_stats_tab()이 재오픈 시 이 워커가 아직
-     * 안 끝났으면 그건 그쪽에서 따로 처리 */
-    s_stats_io_stop = true;
-    kick_stats_io_worker();
-
     if (s_stats_page_timer) { lv_timer_delete(s_stats_page_timer); s_stats_page_timer = NULL; }
     lv_obj_delete(s_stats_popup);
     s_stats_popup = NULL;
@@ -5875,8 +5972,6 @@ static void teardown_stats_tab(void)
              (int)heap_after_close - (int)heap_before_close);
     s_stats_overview_title = NULL;
     s_stats_scale_dd = NULL;
-    s_stats_point_count_dd = NULL;
-    s_stats_graph_mem_label = NULL;
     s_overview_temp_label = NULL;
     s_overview_humi_label = NULL;
     s_overview_co2_label = NULL;
@@ -5903,28 +5998,6 @@ static void teardown_stats_tab(void)
 static void build_stats_tab(void)
 {
     if (s_stats_tab_built) return;  /* 이미 열려있음 */
-
-    /* 2026-09-10(태스크 격리 재설계) — 뮤텍스/세마포어는 프로세스 수명 내내 한 번만 만들고
-     * 절대 안 지움(만들 때마다/지울 때마다의 경합을 원천봉쇄, 어차피 비용은 무시할 수준) */
-    if (!s_stats_io_mutex)        s_stats_io_mutex        = xSemaphoreCreateMutex();
-    if (!s_stats_graph_buf_mutex) s_stats_graph_buf_mutex = xSemaphoreCreateMutex();
-    if (!s_stats_io_exited_sem)   s_stats_io_exited_sem   = xSemaphoreCreateBinary();
-
-    /* 2026-09-10(버그 수정 — "여닫는데 수초 걸려") — teardown이 더 이상 워커 종료를 안
-     * 기다리므로(위 teardown_stats_tab 주석 참고), 빨리 닫았다 다시 열면 직전 워커가 아직
-     * 살아있을 수 있음(특히 SD가 막혀있는 동안엔 거의 항상). 이것도 오래 기다리면 열기
-     * 자체가 느려지므로 아주 짧게(50ms, 그냥 "이미 끝났으면 공짜로 알아채자" 정도)만
-     * 확인하고, 그래도 살아있으면 그냥 이번엔 그래프 워커를 새로 안 만듦(개괄/테이블은
-     * 직전 워커가 마저 정리되기 전까지 남겨둔 마지막 값을 그대로 보여줌 — 화면 자체는
-     * 항상 즉시 뜸) */
-    bool worker_ready = true;
-    if (s_stats_io_task) {
-        worker_ready = (xSemaphoreTake(s_stats_io_exited_sem, pdMS_TO_TICKS(50)) == pdTRUE);
-        if (!worker_ready) {
-            ESP_LOGW(TAG, "이전 통계 SD 워커가 아직 안 끝남 — 이번엔 그래프 워커 생성 생략");
-        }
-    }
-
     s_stats_tab_built = true;
 
     lv_obj_t *stats_page = create_page_popup();
@@ -5958,23 +6031,9 @@ static void build_stats_tab(void)
     lv_obj_set_style_border_width(overview_header_row, 0, 0);
     lv_obj_set_style_pad_all(overview_header_row, 0, 0);
 
-    /* 2026-09-10(임시 디버그 — 사용자 지시: "남은 Internal memory를 overview() 옆에
-     * 주화면처럼 표기해") — 제목을 단독으로 두지 않고 왼쪽 묶음으로 감싸서 그 옆에 메모리
-     * 라벨을 붙임(아래 overview_header_right와 대칭되는 패턴) */
-    lv_obj_t *overview_header_left = lv_obj_create(overview_header_row);
-    lv_obj_set_size(overview_header_left, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(overview_header_left, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(overview_header_left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(overview_header_left, 0, 0);
-    lv_obj_set_style_pad_column(overview_header_left, 8, 0);
-    lv_obj_set_style_border_width(overview_header_left, 0, 0);
-
-    s_stats_overview_title = lv_label_create(overview_header_left);
+    s_stats_overview_title = lv_label_create(overview_header_row);
     lv_label_set_text(s_stats_overview_title, ui_str(STR_PANEL_STATS_OVERVIEW));
     lv_obj_set_style_text_font(s_stats_overview_title, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    s_stats_graph_mem_label = lv_label_create(overview_header_left);  /* 임시 디버그용, 위 주석 참고 */
-    lv_obj_set_style_text_font(s_stats_graph_mem_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 2026-09-07(사용자 지시 — "Overview(좌정렬) - 공간 - 우정렬 드랍다운, 모두지우기") —
      * 3개를 그냥 SPACE_BETWEEN에 나란히 두면 Scale이 가운데 어중간한 자리에 뜸. Scale+삭제를
@@ -5987,16 +6046,6 @@ static void build_stats_tab(void)
     lv_obj_set_style_pad_all(overview_header_right, 0, 0);
     lv_obj_set_style_pad_column(overview_header_right, 8, 0);
     lv_obj_set_style_border_width(overview_header_right, 0, 0);
-
-    /* 2026-09-10(임시 디버그 — 사용자 지시: "스케일 왼쪽에 드랍다운(60/120/240/480)을
-     * 선택해서 라인 수를 조정할 수 있게") — 값이 정해지면 이 드롭다운째로 제거 예정 */
-    s_stats_point_count_dd = lv_dropdown_create(overview_header_right);
-    lv_dropdown_set_options(s_stats_point_count_dd, "60\n120\n240\n480");
-    lv_dropdown_set_selected(s_stats_point_count_dd, 0);
-    lv_obj_set_style_pad_ver(s_stats_point_count_dd, 7, 0);
-    lv_obj_set_style_text_font(s_stats_point_count_dd, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_style_text_font(lv_dropdown_get_list(s_stats_point_count_dd), ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_add_event_cb(s_stats_point_count_dd, cb_stats_point_count_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     s_stats_scale_dd = lv_dropdown_create(overview_header_right);
     lv_dropdown_set_options(s_stats_scale_dd, ui_str(STR_STATS_SCALE_OPTIONS));
@@ -6199,13 +6248,7 @@ static void build_stats_tab(void)
     lv_obj_set_size(s_stats_chart, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_grow(s_stats_chart, 1);
     lv_chart_set_type(s_stats_chart, LV_CHART_TYPE_LINE);
-    if (worker_ready) {
-        xSemaphoreTake(s_stats_graph_buf_mutex, portMAX_DELAY);
-        resize_stats_graph_buffers(STATS_GRAPH_POINT_COUNT);  /* 2026-09-10 임시 디버그 — 위 주석 참고, lv_chart_set_point_count도 여기서 같이 함 */
-        xSemaphoreGive(s_stats_graph_buf_mutex);
-    } else {
-        lv_chart_set_point_count(s_stats_chart, STATS_GRAPH_POINT_COUNT);  /* 워커 없이(그래프 빈 채로) 최소한 팝업은 정상 동작 */
-    }
+    lv_chart_set_point_count(s_stats_chart, STATS_GRAPH_POINT_COUNT);
     lv_chart_set_axis_range(s_stats_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
     lv_chart_set_div_line_count(s_stats_chart, 3, 0);
     lv_obj_add_event_cb(s_stats_chart, cb_stats_chart_tap, LV_EVENT_CLICKED, NULL);
@@ -6239,24 +6282,6 @@ static void build_stats_tab(void)
 
     s_stats_page_timer = lv_timer_create(refresh_stats_page, 2000, NULL);
 
-    /* 2026-09-10(태스크 격리 재설계 -> 같은 날 버그 수정: "열리는 게 매우 늦게", "닫는 것도
-     * 오래 걸려", "입력도 씹혀") — SD 조회를 전담하는 워커. 처음엔 "파일처리" 티어(10,
-     * [[project_cntl_task_priority_scheme_2026_09_09]] 통신17/SR제어15/파일처리10)를 그대로
-     * 썼는데, 이건 LVGL 태스크 우선순위(esp_lv_adapter 기본값 6, esp_lv_adapter.h
-     * ESP_LV_ADAPTER_DEFAULT_TASK_PRIORITY, 둘 다 코어 고정 없음)보다 높아서 정반대
-     * 효과였음 — SD가 계속 막혀있는 동안 워커가 (busy-poll이든 뭐든) CPU를 붙잡을 때마다
-     * 스케줄러가 매번 워커를 LVGL보다 먼저 돌려서, 렌더링은 물론 터치 입력 처리까지
-     * LVGL 태스크 자체가 통째로 밀려버림 — 정확히 "SD가 느려도 화면은 절대 안 막혀야
-     * 한다"는 이 재설계의 목적에 반대로 작용한 것. LVGL(6)보다 낮은 3으로 내려서, 화면/
-     * 입력이 항상 이기고 워커는 LVGL이 한가할 때만 돌게 함. 팝업 열려있는 동안만 존재
-     * (닫히면 스스로 종료) */
-    if (worker_ready) {
-        s_stats_io_stop = false;
-        s_graph_worker_tick = 0;
-        memset(&s_stats_snap, 0, sizeof(s_stats_snap));
-        xTaskCreate(stats_io_worker_task, "stats_io", 4096, NULL, 3, &s_stats_io_task);
-    }
-
     size_t heap_after_stats_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGW(TAG, "MEMDIAG 통계탭 위젯 생성 비용: internal %u -> %u (소모 %d bytes)",
              (unsigned)heap_before_stats_tab, (unsigned)heap_after_stats_tab,
@@ -6266,6 +6291,13 @@ static void build_stats_tab(void)
 static void cb_stats_btn_tap(lv_event_t *e)
 {
     (void)e;
+    /* 2026-09-11(사용자 지시 — "조치를 취하지 않고... 통계 팝업을 열려고 시도할 때, SD
+     * 불량이라 통계 팝업을 열 수 없다고 알려야되") — SD I/O 에러 활성 중엔 팝업 자체를
+     * 안 열고 안내만 표시 */
+    if (s_sd_io_fail_active) {
+        show_alert_popup(ui_str(STR_MSG_STATS_BLOCKED_SD_FAIL));
+        return;
+    }
     build_stats_tab();
 }
 
