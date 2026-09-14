@@ -47,6 +47,13 @@
     static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
         SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT,
     };
+#elif CONFIG_SENS_SENSOR_MQ137
+    #include "mq137.h"
+    #define SENSOR_KIND_CURRENT  SENSOR_KIND_MQ137
+    #define SENSOR_CHAN_COUNT    1
+    static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
+        SENSOR_CHAN_NH3_PPM,   /* 2026-09-12 — 아직 진짜 ppm 아님, AO 원본 mV(mq137.h 참고) */
+    };
 #else
     #error "SENS_SENSOR_TYPE을 골라야 함 (idf.py menuconfig > Sens Sensor Node) — SCD41은 sens_deep_sleep_node.c가 담당"
 #endif
@@ -86,12 +93,20 @@ static int   s_full_mv_persisted = 0;
 
 static adc_oneshot_unit_handle_t s_vin_adc = NULL;
 
-static bool sensor_init(void)
+/* 2026-09-12(MQ137 추가) — MQ137은 AO 채널 설정에 공유 ADC 유닛 핸들이 필요한데,
+ * 그 핸들은 battery_init() 이후에만 존재함(app_main에서 sensor_init()보다 뒤로 옮김,
+ * 아래 app_main 참고) — 그래서 핸들을 인자로 받게 바꿈(다른 센서 타입은 그냥 무시) */
+static bool sensor_init(adc_oneshot_unit_handle_t shared_adc)
 {
 #if CONFIG_SENS_SENSOR_DHT22
+    (void)shared_adc;
     dht22_init(BSP_C3_DHT22_PIN);
     return true;
+#elif CONFIG_SENS_SENSOR_MQ137
+    return mq137_init(shared_adc, BSP_C3_MQ137_AO_ADC_CHANNEL, BSP_C3_MQ137_AO_ADC_ATTEN,
+                       BSP_C3_MQ137_DO_PIN);
 #else  /* SHT45 / SHT40 */
+    (void)shared_adc;
     return sht4x_init(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL);
 #endif
 }
@@ -100,6 +115,13 @@ static bool sensor_read(float out[SENSOR_CHAN_COUNT])
 {
 #if CONFIG_SENS_SENSOR_DHT22
     return dht22_read(&out[0], &out[1]);
+#elif CONFIG_SENS_SENSOR_MQ137
+    bool do_alarm = false;
+    bool ok = mq137_read(&out[0], &do_alarm);
+    if (ok && do_alarm) {
+        ESP_LOGW(TAG, "MQ137 DO 임계값 초과 알림");
+    }
+    return ok;
 #else  /* SHT45 / SHT40 */
     return sht4x_read(&out[0], &out[1]);
 #endif
@@ -258,11 +280,6 @@ void app_main(void)
         history_log_set_time(mktime(&seed_tm));
     }
 
-    bool sensor_ok = sensor_init();
-    if (!sensor_ok) {
-        ESP_LOGW(TAG, "센서 초기화 실패 — 연결 확인 필요(계속 재시도됨)");
-    }
-
     battery_config_t batt_cfg = {
         .adc_unit    = BSP_C3_BATTERY_ADC_UNIT,
         .adc_channel = BSP_C3_BATTERY_ADC_CHANNEL,
@@ -281,6 +298,13 @@ void app_main(void)
             .bitwidth = ADC_BITWIDTH_DEFAULT,
         };
         adc_oneshot_config_channel(s_vin_adc, BSP_C3_VIN_ADC_CHANNEL, &vin_ch_cfg);
+    }
+
+    /* 2026-09-12(MQ137 추가) — sensor_init()이 공유 ADC 핸들(MQ137 AO용)을 필요로 해서
+     * battery_init() 뒤로 옮김(그 전엔 sensor_init()이 더 먼저였음) */
+    bool sensor_ok = sensor_init(s_vin_adc);
+    if (!sensor_ok) {
+        ESP_LOGW(TAG, "센서 초기화 실패 — 연결 확인 필요(계속 재시도됨)");
     }
 
     status_led_init(BSP_C3_LED_BLUE);

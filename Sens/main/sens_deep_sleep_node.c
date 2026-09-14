@@ -45,29 +45,55 @@
 #include "esp_now_channelsync.h"
 #include "status_led.h"
 #include "rwdt_guard.h"
-#include "scd41.h"
 #include "led_strip.h"
 
-static const char *TAG = "sens_deep_sleep_node";
+/* 2026-09-12(사용자 지시 — "장치 종류가 달라도 프로토콜/루틴은 동일해야 한다") — 이 파일은
+ * 이제 SCD41 전용이 아니라 캐스크(딥슬립) 구조를 쓰는 모든 센서 종류의 공용 루틴이다.
+ * 센서 종류는 sensor_node.c와 동일한 패턴(#if CONFIG_SENS_SENSOR_*)으로만 갈리고, CASK
+ * 왕복/딥슬립/측정주기 게이팅 등 나머지 전부는 완전히 공용이다. */
+#if CONFIG_SENS_SENSOR_SCD41
+    #include "scd41.h"
+    #define SENSOR_KIND_CURRENT  SENSOR_KIND_SCD41
+    #define SENSOR_CHAN_COUNT    3
+    static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
+        SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT,
+    };
+#elif CONFIG_SENS_SENSOR_MQ137
+    #include "mq137.h"
+    #define SENSOR_KIND_CURRENT  SENSOR_KIND_MQ137
+    #define SENSOR_CHAN_COUNT    1
+    static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
+        SENSOR_CHAN_NH3_PPM,   /* 2026-09-12 — 아직 진짜 ppm 아님, mq137.h 참고 */
+    };
+#else
+    #error "sens_deep_sleep_node.c는 SCD41/MQ137만 지원 — 다른 센서를 캐스크로 옮기려면 여기 분기 추가"
+#endif
 
-#define SENSOR_KIND_CURRENT  SENSOR_KIND_SCD41
-#define SENSOR_CHAN_COUNT    3
-static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
-    SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT,
-};
+static const char *TAG = "sens_deep_sleep_node";
 
 #define BATT_PLATEAU_MIN_MV     3900.0f
 #define BATT_FULL_MV_DEFAULT    4020.0f
 #define NVS_NS_BATTCAL           "battcal"
 #define NVS_KEY_FULL_MV          "full_mv"
 
+#if CONFIG_SENS_SENSOR_SCD41
 /* SCD41 single-shot 측정 소요시간(~5초) 대비 여유 — 트리거 후 이 안에 완료 안 되면 실패로
- * 처리(cam_node.c류 "무한정 안 기다린다" 원칙과 동일). 2026-09-05 — 센서마다 측정 소요시간이
- * 다름(사용자 지시: 온습도~100ms, CO2~1초, 암모니아~3초) — 이 값은 SCD41 전용이고, 다른
- * 센서의 딥슬립 포팅이 나중에 필요해지면 그 센서 고유 타임아웃으로 따로 정의해야 함(지금은
- * SCD41 헤드리스 빌드만 범위) */
+ * 처리(cam_node.c류 "무한정 안 기다린다" 원칙과 동일). 센서마다 측정 소요시간이 다름
+ * (사용자 지시: 온습도~100ms, CO2~1초, 암모니아~3초) — 이 값은 SCD41 전용, MQ137은 AO/DO를
+ * 그냥 즉시 읽으면 되므로(트리거+폴링 자체가 없음) 이 타임아웃이 필요 없음 */
 #define SCD41_MEASURE_POLL_MS    200
 #define SCD41_MEASURE_TIMEOUT_MS 6000
+/* 2026-09-14(사용자 지적 "SCD41 값 못읽은 거 왜 안 찾았냐" 재조사 — Sensirion SCD4x
+ * 공식 매뉴얼 v1.7 확인) — measure_single_shot(0x219d)의 실행시간은 정확히 5000ms
+ * (Table 9)이고, Section 3.4: "실행시간이 명시된 명령은 그 실행시간 동안 추가 명령을
+ * 보내면 안 된다." 아래 measure_scd41()이 트리거 직후부터 200ms 간격으로
+ * GET_DATA_READY_STATUS를 계속 보내던 것은 이 5초 구간 동안 명령을 보내지 말라는
+ * 규정 위반 — Section 3.11(싱글샷) 공식 절차도 "트리거 -> 실행시간만큼 대기 -> 곧장
+ * read_measurement"이지 폴링이 아님(get_data_ready_status는 언급조차 없음, periodic
+ * 모드 패턴을 그대로 잘못 가져다 쓴 것). 5000ms를 먼저 그대로 흘려보내고 그 이후에만
+ * 폴링하도록 수정 */
+#define SCD41_MEASURE_MIN_WAIT_MS 5000
+#endif
 
 /* CAM의 cam_node.c와 동일 상수(esp_now_link.h의 ESP_NOW_NODE_UNPAIRED_RETRY_SEC 공용값 재사용) */
 #define UNPAIRED_BACKOFF_SHORT_UNTIL_SEC   60          /* 1분까지: 짧게(3초) */
@@ -301,6 +327,7 @@ static void pm_lock_no_light_sleep_release(void)
     if (s_no_light_sleep_lock) esp_pm_lock_release(s_no_light_sleep_lock);
 }
 
+#if CONFIG_SENS_SENSOR_SCD41
 /* SCD41 single-shot 판독 — 트리거 후 최대 SCD41_MEASURE_TIMEOUT_MS까지 블로킹 폴링.
  * 예전 sensor_node.c는 이걸 여러 esp_timer 틱에 걸쳐 논블로킹으로 했는데(계속실행 전제),
  * 딥슬립은 부팅마다 한 번뿐이라 "다음 틱"이 없음 — CAM의 촬영 대기 패턴과 동일하게
@@ -309,10 +336,12 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
 {
     if (!scd41_trigger_single_shot()) return false;
 
-    uint32_t waited_ms = 0;
+    /* 위 SCD41_MEASURE_MIN_WAIT_MS 주석 참고 — 데이터시트가 명시한 5000ms 실행시간
+     * 동안은 어떤 명령도 안 보내고 그냥 기다림(이전엔 200ms마다 폴링해서 위반) */
+    vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_MIN_WAIT_MS));
+
+    uint32_t waited_ms = SCD41_MEASURE_MIN_WAIT_MS;
     while (waited_ms < SCD41_MEASURE_TIMEOUT_MS) {
-        vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_POLL_MS));
-        waited_ms += SCD41_MEASURE_POLL_MS;
         int co2 = 0;
         float t = 0.0f, h = 0.0f;
         bool ok = false;
@@ -320,22 +349,40 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
             if (ok) { out[0] = (float)co2; out[1] = t; out[2] = h; }
             return ok;
         }
+        vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_POLL_MS));
+        waited_ms += SCD41_MEASURE_POLL_MS;
     }
     ESP_LOGW(TAG, "SCD41 측정 타임아웃(%ums)", (unsigned)SCD41_MEASURE_TIMEOUT_MS);
     return false;
 }
+#endif
 
-/* 2026-09-06(사용자 지시) — 측정 시도 한 번(노랑 시작 표시 -> 트리거+폴링 -> 청록/보라
+/* 2026-09-12(사용자 지시 — "같은 루틴, 변수만 다르게") — 센서 종류별 실제 판독 하나로
+ * 모음. SCD41은 트리거+블로킹폴링(위), MQ137은 이미 히터가 외부전원으로 항상 예열돼
+ * 있어서(배터리가 아니라 상시전원 전제) 트리거/대기 없이 즉시 읽으면 됨 */
+static bool measure_sensor(float out[SENSOR_CHAN_COUNT])
+{
+#if CONFIG_SENS_SENSOR_SCD41
+    return measure_scd41(out);
+#elif CONFIG_SENS_SENSOR_MQ137
+    bool do_alarm = false;
+    bool ok = mq137_read(&out[0], &do_alarm);
+    if (ok && do_alarm) ESP_LOGW(TAG, "MQ137 DO 임계값 초과 알림");
+    return ok;
+#endif
+}
+
+/* 2026-09-06(사용자 지시) — 측정 시도 한 번(노랑 시작 표시 -> 실제 판독 -> 청록/보라
  * 결과 표시)을 통째로 감싼 헬퍼. 파워사이클 후 첫 워밍업 측정도 이 함수로 똑같이
  * 표시하고(사용자 지시: 구분 없이 LED 표시), 실측정도 이 함수로 함 — 한 사이클 안에서
  * 최대 두 번(워밍업+실측정) 불릴 수 있어서 elapsed는 호출부가 계속 누적하도록
  * 포인터로 받음 */
-static bool attempt_one_scd41_measurement(float out[SENSOR_CHAN_COUNT], uint32_t *accum_elapsed_ms)
+static bool attempt_one_measurement(float out[SENSOR_CHAN_COUNT], uint32_t *accum_elapsed_ms)
 {
     ws2812_flash(WS2812_COLOR_YELLOW, 100);
     uint32_t start_ms = (uint32_t)(esp_timer_get_time() / 1000);
     pm_lock_no_light_sleep_acquire();
-    bool ok = measure_scd41(out);
+    bool ok = measure_sensor(out);
     pm_lock_no_light_sleep_release();
     *accum_elapsed_ms += (uint32_t)(esp_timer_get_time() / 1000) - start_ms;
     if (ok) {
@@ -361,17 +408,22 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
     if (due_for_measurement) {
         bool is_first_ever = (s_measurement_id == 0);
         float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
-        bool fresh_ok = attempt_one_scd41_measurement(fresh_vals, measurement_elapsed_ms);
+        bool fresh_ok = attempt_one_measurement(fresh_vals, measurement_elapsed_ms);
 
+#if CONFIG_SENS_SENSOR_SCD41
         if (fresh_ok && is_first_ever) {
             /* 2026-09-06(Sensirion 공식 문서: "파워사이클 후 첫 싱글샷 결과는 항상 버려야
              * 안정화됨") — 진짜 최초(측정ID==0)일 때만 해당, 딥슬립 웨이크는 센서 자체
              * 전원이 안 끊기므로 매번 적용 안 함. 워밍업 결과는 버리고 곧장 한 번 더
              * 측정해서 그 결과를 진짜 첫 값(측정ID=1)으로 씀 — 사용자 지시로 이 워밍업도
-             * 진짜 측정과 동일하게 LED로 표시(구분 없음) */
+             * 진짜 측정과 동일하게 LED로 표시(구분 없음). MQ137은 히터가 외부전원으로 항상
+             * 예열돼 있어서(배터리 아님) 이 워밍업-버림이 필요 없음 */
             ESP_LOGI(TAG, "SCD41 워밍업 측정 완료(버림, 파워사이클 후 첫 값) — 실제 측정 재시도");
-            fresh_ok = attempt_one_scd41_measurement(fresh_vals, measurement_elapsed_ms);
+            fresh_ok = attempt_one_measurement(fresh_vals, measurement_elapsed_ms);
         }
+#else
+        (void)is_first_ever;
+#endif
 
         if (fresh_ok) {
             memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
@@ -379,14 +431,22 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
             s_measurement_id++;
             s_seconds_since_last_measurement = 0;
             /* %f 안 씀(newlib-nano 미지원 — feedback_lvgl_no_percent_f 관례) — 정수부/소수부
-             * 수동 분리(format_battery_display()와 동일 패턴) */
+             * 수동 분리(format_battery_display()와 동일 패턴). 로그 포맷은 채널 구성이
+             * 센서마다 달라서(SCD41=3채널, MQ137=1채널) 그대로 센서별로 남겨둠(값 자체 —
+             * 측정/전송 루틴은 위에서 이미 공용화됨) */
+#if CONFIG_SENS_SENSOR_SCD41
             int temp_x10 = (int)(s_cached_vals[1] * 10.0f + 0.5f);
             int humi_x10 = (int)(s_cached_vals[2] * 10.0f + 0.5f);
-            ESP_LOGI(TAG, "SCD41MARK 측정 성공 — 측정ID=%u co2=%d temp=%d.%d humi=%d.%d",
+            ESP_LOGI(TAG, "MEASMARK 측정 성공 — 측정ID=%u co2=%d temp=%d.%d humi=%d.%d",
                      (unsigned)s_measurement_id, (int)s_cached_vals[0],
                      temp_x10 / 10, temp_x10 % 10, humi_x10 / 10, humi_x10 % 10);
+#elif CONFIG_SENS_SENSOR_MQ137
+            int ppm_x10 = (int)(s_cached_vals[0] * 10.0f + 0.5f);
+            ESP_LOGI(TAG, "MEASMARK 측정 성공 — 측정ID=%u NH3=%d.%dppm(잠정계수)",
+                     (unsigned)s_measurement_id, ppm_x10 / 10, ppm_x10 % 10);
+#endif
         } else {
-            ESP_LOGW(TAG, "SCD41MARK 판독 실패 — 직전 캐시값(측정ID=%u) 재사용", (unsigned)s_measurement_id);
+            ESP_LOGW(TAG, "MEASMARK 판독 실패 — 직전 캐시값(측정ID=%u) 재사용", (unsigned)s_measurement_id);
         }
     } else {
         ESP_LOGI(TAG, "측정주기(%us) 미도달(경과 %us) — 재측정 생략, 캐시값(측정ID=%u) 재사용",
@@ -442,10 +502,15 @@ void app_main(void)
      * "연결 전에 측정하지 말아" — 캠의 "캐스크 타이밍과 무관"을 센스에 잘못 그대로 확장 적용한
      * 실수를 정정. 캠은 로컬저장이 있어 연결 여부와 무관하게 촬영 가치가 있지만, 센스 값은
      * 보낼 곳이 없으면 측정 자체가 무의미) */
+#if CONFIG_SENS_SENSOR_SCD41
     if (!scd41_init_single_shot(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) {
         ESP_LOGW(TAG, "SCD41 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
     }
     vTaskDelay(pdMS_TO_TICKS(1000));  /* 싱글샷용 전원안정화 지연(위 주석 참고) */
+#endif
+    /* 2026-09-12(MQ137 추가) — AO 채널 설정에 공유 ADC 유닛 핸들이 필요한데, 그 핸들은
+     * battery_init() 이후에나 생기므로 여기서는 못 함(아래 battery_init()+VIN 채널 설정
+     * 직후로 미룸) — SCD41(I2C)은 그런 의존성이 없어서 그대로 여기(초기)에 둠 */
 
     uint32_t measurement_elapsed_ms = 0;  /* 2026-09-06(사용자 지시) — 이번 사이클에 측정으로
                                             * 쓴 실제 시간, 나중에 딥슬립 시간에서 뺄 기준.
@@ -474,6 +539,13 @@ void app_main(void)
         };
         adc_oneshot_config_channel(s_vin_adc, BSP_C3_VIN_ADC_CHANNEL, &vin_ch_cfg);
     }
+
+#if CONFIG_SENS_SENSOR_MQ137
+    if (!mq137_init(s_vin_adc, BSP_C3_MQ137_AO_ADC_CHANNEL, BSP_C3_MQ137_AO_ADC_ATTEN,
+                    BSP_C3_MQ137_DO_PIN)) {
+        ESP_LOGW(TAG, "MQ137 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
+    }
+#endif
 
     int batt_mv = battery_read_mv();
     bool batt_ok = (batt_mv > 0);
@@ -608,14 +680,14 @@ void app_main(void)
         uint32_t live_measure_period_sec = esp_now_node_get_sample_interval_sec();
         if (s_seconds_since_last_measurement + live_awake_elapsed_sec >= live_measure_period_sec) {
             float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
-            if (attempt_one_scd41_measurement(fresh_vals, &measurement_elapsed_ms)) {
+            if (attempt_one_measurement(fresh_vals, &measurement_elapsed_ms)) {
                 memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
                 for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = 1;
                 s_measurement_id++;
                 s_seconds_since_last_measurement = 0;
                 live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
             } else {
-                ESP_LOGW(TAG, "SCD41 판독 실패(Live 재측정) — 직전 캐시값(측정ID=%u) 재사용",
+                ESP_LOGW(TAG, "센서 판독 실패(Live 재측정) — 직전 캐시값(측정ID=%u) 재사용",
                          (unsigned)s_measurement_id);
                 /* 기준점을 안 옮겨서 다음 Live 반복에서 곧바로 다시 재시도됨 */
             }

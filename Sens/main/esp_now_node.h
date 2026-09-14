@@ -25,7 +25,10 @@ bool esp_now_node_is_paired(void);
  */
 void esp_now_node_set_status_led(gpio_num_t pin);
 
-#if CONFIG_SENS_SENSOR_SCD41
+#if CONFIG_SENS_SENSOR_SCD41 || CONFIG_SENS_SENSOR_MQ137
+/* 2026-09-12(사용자 지시 — "장치 종류가 달라도 프로토콜은 동일") — 캐스크 구조를 쓰는
+ * 센서 종류가 늘어날 때마다 여기도 같이 OR로 추가해야 함(CMakeLists.txt의 조건과 항상
+ * 짝을 맞출 것 — 실제로 이걸 안 맞춰서 MQ137이 예전 설계 선언부를 받는 버그가 있었음) */
 
 /**
  * @brief 2026-09-05(사용자 지시로 정정) — sensor_kind/chan_count/chan_type은 페어링 완료
@@ -102,7 +105,7 @@ void esp_now_node_note_sleep_now_requested(uint32_t sleep_sec);
 void esp_now_node_reset_sleep_now_state(void);
 void esp_now_node_note_scan_restarted(void);
 
-#else /* !CONFIG_SENS_SENSOR_SCD41 — 예전 설계 그대로(DHT22/SHT45/SHT40 헤드리스, 레거시 C6 콤보) */
+#else /* DHT22/SHT45/SHT40 헤드리스, 레거시 C6 콤보 — 예전 설계(esp_now_node.c) 그대로 */
 
 void esp_now_node_init(void);
 
@@ -124,4 +127,4 @@ void esp_now_node_set_readings(sensor_kind_t sensor_kind, uint8_t chan_count,
  */
 void esp_now_node_set_data_period_ms(uint32_t ms);
 
-#endif /* CONFIG_SENS_SENSOR_SCD41 */
+#endif /* CONFIG_SENS_SENSOR_SCD41 || CONFIG_SENS_SENSOR_MQ137 */

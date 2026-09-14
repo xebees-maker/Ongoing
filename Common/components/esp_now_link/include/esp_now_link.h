@@ -288,7 +288,7 @@ typedef enum {
     SENSOR_CHAN_TEMP_C,
     SENSOR_CHAN_HUMI_PCT,
     SENSOR_CHAN_CO2_PPM,
-    SENSOR_CHAN_NH3_PPM,      /* 암모니아(2026-09-06) — 아직 실물 센서 없음, 통계탭 설계용 */
+    SENSOR_CHAN_NH3_PPM,      /* 암모니아(2026-09-06) — 2026-09-12부터 MQ137로 실물 연결 시작 */
     SENSOR_CHAN_TYPE_COUNT,   /* 배열 크기용 — 새 채널 종류 추가 시 항상 마지막에 유지 */
 } sensor_channel_type_t;
 
@@ -299,6 +299,7 @@ typedef enum {
     SENSOR_KIND_DHT22,
     SENSOR_KIND_SHT45,
     SENSOR_KIND_SHT40,
+    SENSOR_KIND_MQ137,               /* 2026-09-12 — 암모니아, 아날로그(AO)+디지털(DO) */
     SENSOR_KIND_DHT22_SCD41_COMBO,   /* 레거시 Waveshare LCD 콤보 앱 전용 */
 } sensor_kind_t;
 

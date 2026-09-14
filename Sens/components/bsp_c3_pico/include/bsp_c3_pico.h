@@ -39,6 +39,16 @@ extern "C" {
 #define BSP_C3_DHT22_PIN     GPIO_NUM_6
 
 /* ════════════════════════════════════════════════════════════
+ * MQ137 (암모니아, 아날로그 AO + 디지털 DO) — 2026-09-12 실험용 배선.
+ * LED를 GPIO2/5로 옮겨서 비운 자리(둘 다 진짜 ADC 핀)를 씀 — AO는 ADC 필요, DO는
+ * 그냥 디지털이라 아무 핀이어도 되지만 같이 비워진 GPIO4를 그대로 씀
+ * ════════════════════════════════════════════════════════════ */
+#define BSP_C3_MQ137_AO_ADC_UNIT     ADC_UNIT_1
+#define BSP_C3_MQ137_AO_ADC_CHANNEL  ADC_CHANNEL_0   /* GPIO0 */
+#define BSP_C3_MQ137_AO_ADC_ATTEN    ADC_ATTEN_DB_12
+#define BSP_C3_MQ137_DO_PIN          GPIO_NUM_4
+
+/* ════════════════════════════════════════════════════════════
  * 배터리 ADC — 보드 내장 분압(R7/R10 100k+100k, JP1 "BAT_AD" 점퍼로 GPIO3에 연결)
  * ════════════════════════════════════════════════════════════ */
 #define BSP_C3_BATTERY_ADC_UNIT     ADC_UNIT_1
@@ -56,9 +66,14 @@ extern "C" {
 
 /* ════════════════════════════════════════════════════════════
  * 상태 LED — Green: ESP-NOW 링크 상태 / Blue: 배터리 잔량
+ * 2026-09-12(사용자 지시 — "향후 임의센서 부착에 유연성을 주려고") — 원래 GPIO0/4(둘 다
+ * 진짜 ADC 핀)에 있던 LED를, 이 보드에서 유일하게 비어있던 비-ADC 핀 GPIO2/5로 옮김.
+ * GPIO2는 스트래핑 핀이지만 LED는 MCU가 능동적으로 켜고 끄는 수동소자라 외부 센서
+ * 출력과 달리 리셋 시점 전압을 흔들 위험이 낮음. 이 덕분에 GPIO0/4가 비어서 향후
+ * ADC가 필요한 센서(예: MQ137 AO)가 스트래핑 핀을 안 거치고 쓸 수 있게 됨.
  * ════════════════════════════════════════════════════════════ */
-#define BSP_C3_LED_GREEN     GPIO_NUM_0
-#define BSP_C3_LED_BLUE      GPIO_NUM_4
+#define BSP_C3_LED_GREEN     GPIO_NUM_5
+#define BSP_C3_LED_BLUE      GPIO_NUM_2
 
 /**
  * @brief 보드 레벨 초기화 — 현재는 로그만 남김(센서/LED/ADC는 각자 컴포넌트가 스스로 초기화).
