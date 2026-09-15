@@ -192,9 +192,11 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LIST_FETCH_FAILED]           = { "목록 가져오기 실패",         "Failed to fetch list" },
     /* 2026-09-05(사용자 설계) — sensor_channel_type_t(esp_now_link.h) enum 순서와 반드시
      * 같이 맞출 것: NONE=0(미사용), TEMP_C, HUMI_PCT, CO2_PPM */
-    [STR_CHAN_LABEL_TEMP_C]           = { "온도",                       "Temperature" },
+    /* 2026-09-15(사용자 지시 — "테이블에 들어가는 것도 마찬가지로 짧게") — Overview/그래프뿐
+     * 아니라 통계 표 ITEM 칸 등 chan_type_to_strs()를 쓰는 모든 곳에 공통 적용됨 */
+    [STR_CHAN_LABEL_TEMP_C]           = { "T",                          "T" },
     [STR_CHAN_UNIT_TEMP_C]            = { "\xC2\xB0""C",                "\xC2\xB0""C" },
-    [STR_CHAN_LABEL_HUMI_PCT]         = { "습도",                       "Humidity" },
+    [STR_CHAN_LABEL_HUMI_PCT]         = { "H",                          "H" },
     [STR_CHAN_UNIT_HUMI_PCT]          = { "%",                          "%" },
     [STR_CHAN_LABEL_CO2_PPM]          = { "이산화탄소",                  "CO2" },
     [STR_CHAN_UNIT_CO2_PPM]           = { "ppm",                        "ppm" },
@@ -212,7 +214,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_STATS_PEAK_ROW_FMT]          = { "%s: 최대 %d.%02d%s / 최소 %d.%02d%s",
                                            "%s: max %d.%02d%s / min %d.%02d%s" },
     [STR_STATS_PEAK_NO_DATA]          = { "데이터 없음",                "No data" },
-    [STR_STATS_TABLE_HEADER_ITEM]     = { "항목",                       "Item" },
+    [STR_STATS_TABLE_HEADER_ITEM]     = { "센서",                       "Sensor" },
     [STR_STATS_TABLE_HEADER_VALUE]    = { "값",                         "Value" },
     [STR_STATS_TABLE_HEADER_TIME]     = { "시간",                       "Time" },
     [STR_STATS_TABLE_EMPTY]           = { "저장된 값 없음",              "No data yet" },
@@ -300,6 +302,24 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_BTN_DISMISS]            = { "지우기",                         "Dismiss" },
     [STR_BTN_SD_RESOLVE]         = { "해결",                           "Resolve" },
     [STR_TITLE_SD_RESOLVE]       = { "SD 조치 선택",                    "Resolve SD Issue" },
+    /* 2026-09-15(사용자 지적 — "Air Temperature가 길어서... 뒤에 숫자가 보일꺼야") — 값이
+     * 잘려 안 보이던 문제라 축약 표기로 변경 */
+    [STR_OVERVIEW_AIR_TEMP]      = { "공기T",                          "Air T" },
+    [STR_OVERVIEW_AIR_HUMI]      = { "공기H",                          "Air H" },
+    [STR_OVERVIEW_AGAR_TEMP]     = { "Agar T",                         "Agar T" },
+    /* 2026-09-15(사용자 지시 — "Precise/Basic... Precise보다 짧은 단어가 있을까?" -> "Fine 좋아") */
+    [STR_PRECISION_PRECISE]      = { "정밀",                           "Fine" },
+    [STR_PRECISION_BASIC]        = { "간이",                           "Basic" },
+    [STR_AGAR_BLENDED]           = { "혼합",                           "Blended" },
+    [STR_VIEW_GROUP_AIR]         = { "온습도",                         "Air" },
+    [STR_VIEW_GROUP_AGAR]        = { "Agar",                           "Agar" },
+    [STR_VIEW_GROUP_GAS]         = { "가스",                           "Gas" },
+    [STR_LABEL_MEASURE_TINY] = { "측정", "M" },
+    [STR_LABEL_BATTERY_TINY] = { "Bat", "Bat" },
+    [STR_BTN_RECORD] = { "기록 보기", "View Record" },
+    [STR_TITLE_RECORD] = { "기록", "Record" },
+    [STR_LABEL_PERIOD] = { "기간:", "Period:" },
+    [STR_LABEL_STORAGE_LEGEND] = { "[사용 %(여유 MB)]", "[Used % (MB free)]" },
 };
 
 void ui_lang_load(void)

@@ -294,6 +294,28 @@ typedef enum {
      * 포맷할지 재마운트할지 묻는 팝업") — 5008/5009 행 공용 버튼 + 그 선택팝업 제목 */
     STR_BTN_SD_RESOLVE,
     STR_TITLE_SD_RESOLVE,
+    /* 2026-09-15(사용자 설계 — 부위/정밀도 그룹핑) — 공기/Agar/가스 3군 Overview+그래프 공용 */
+    STR_OVERVIEW_AIR_TEMP,       /* "공기 온도" / "Air Temperature" */
+    STR_OVERVIEW_AIR_HUMI,       /* "공기 습도" / "Air Humidity" */
+    STR_OVERVIEW_AGAR_TEMP,      /* "Agar 온도" / "Agar Temperature" */
+    STR_PRECISION_PRECISE,       /* "정밀" / "Precise" */
+    STR_PRECISION_BASIC,         /* "간이" / "Basic" */
+    STR_AGAR_BLENDED,            /* "혼합" / "Blended" */
+    STR_VIEW_GROUP_AIR,          /* 그래프 그룹 세그먼트 버튼: "온습도" / "Air" */
+    STR_VIEW_GROUP_AGAR,         /* "Agar" / "Agar" */
+    STR_VIEW_GROUP_GAS,          /* "가스" / "Gas" */
+    /* 2026-09-15(사용자 지시 — 센서 판넬 행 압축: "Measure 10S => M 10S, Battery xxxx ->
+     * Bat xx%") — 기존 STR_LABEL_MEASURE_SHORT/STR_LABEL_BATTERY는 다른 화면(저장공간
+     * 정리 팝업 등)에서도 쓰여서 그대로 두고, 이 행 전용으로 더 짧은 버전을 새로 둠 */
+    STR_LABEL_MEASURE_TINY,      /* "측정" / "M" */
+    STR_LABEL_BATTERY_TINY,      /* "Bat" / "Bat" */
+    STR_BTN_RECORD,              /* 통계 팝업 제목바에서 Record 팝업을 여는 버튼: "기록 보기" / "View Record" */
+    STR_TITLE_RECORD,            /* Record 팝업 제목: "기록" / "Record" */
+    STR_LABEL_PERIOD,            /* Scale 드랍다운 왼쪽 라벨: "기간:" / "Period:" */
+    /* 2026-09-15(사용자 지시 — "SD: [%(Remain MB)]가... 좋은 표현이 있을까?" -> "SD: [Used
+     * % (MB free)]") — SD 상태 라인의 범례(각 카테고리 뒤에 오는 "pct(remainMB)" 형식을
+     * 설명하는 고정 텍스트, 실제 숫자 아님) */
+    STR_LABEL_STORAGE_LEGEND,    /* "[사용 %(여유 MB)]" / "[Used % (MB free)]" */
     STR_COUNT,
 } ui_str_id_t;
 

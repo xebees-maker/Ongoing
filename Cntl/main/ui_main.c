@@ -90,14 +90,8 @@ static lv_obj_t          *s_web_row             = NULL;  /* 2026-09-09 — "Web 
 static lv_obj_t          *s_web_prefix_label    = NULL;
 static lv_obj_t          *s_mem_status_label    = NULL;  /* 2026-08-21 — 요약 둘째줄, 여유 메모리 상시 표시(사용자 지시) */
 static lv_obj_t          *s_storage_status_label = NULL;  /* 2026-09-10 — 메모리 줄 바로 아래, SD Storage(Picture/Measure/Total) 상시 표시(사용자 설계) */
-/* 2026-09-08(연결 기능 주화면 이관, 사용자 설계) — Summary 실시간 순시치 블록. 통계
- * Overview와 같은 채널 4개(온도/습도/CO2/암모니아)지만 스케일/min/max/avg 없이 그냥
- * "지금 값"만 — 여러 센서가 같은 채널을 보고하면 첫 번째로 찾은 것만 씀(오늘은 센서
- * 1개뿐이라 실질적으로 문제 없음) */
-static lv_obj_t          *s_summary_live_temp_label = NULL;
-static lv_obj_t          *s_summary_live_humi_label = NULL;
-static lv_obj_t          *s_summary_live_co2_label  = NULL;
-static lv_obj_t          *s_summary_live_nh3_label  = NULL;
+/* 2026-09-15(사용자 지시로 제거) — Summary 실시간 순시치 4라벨(s_summary_live_*)은
+ * Sensor 판넬 행별 T/H/C/A 표시로 대체됨 */
 static lv_obj_t          *s_sensor_empty        = NULL;
 static lv_obj_t          *s_camera_empty        = NULL;
 static lv_obj_t          *s_camera_content      = NULL;  /* 카메라 판넬 툴바 — 아래 split_row와 함께 토글 */
@@ -154,6 +148,11 @@ static char      s_sensor_dash_row_alias[ESP_NOW_HUB_MAX_NODES][DEVICE_CONFIG_AL
 static int       s_sensor_dash_row_count = 0;
 static char      s_sensor_dash_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
 static lv_obj_t *s_sensor_dash_row_signal[ESP_NOW_HUB_MAX_NODES];
+/* 2026-09-15(사용자 설계 — "각 센서별로 T, H, C, A로 값을 표기") — 설명 라벨(왼쪽, 자연폭)과
+ * 별개로 실제 채널값(오른쪽, flex_grow+우정렬)을 담는 두번째 라벨. ">" 슈브런 바로 앞까지
+ * 밀착시켜야 해서(사용자 지시) 라벨을 쪼갬 */
+static lv_obj_t *s_sensor_dash_row_value[ESP_NOW_HUB_MAX_NODES];
+static char      s_sensor_dash_row_last_value_text[ESP_NOW_HUB_MAX_NODES][96];
 
 static uint8_t            s_selected_cam_mac[6];
 static bool               s_has_selected_cam = false;  /* 지금촬영/목록/삭제 등이 쏠 대상 —
@@ -252,9 +251,11 @@ static lv_obj_t *create_row_right_cluster(lv_obj_t *row);  /* fwd — refresh_da
 static void build_stats_tab(void);
 static void build_option_tab(void);
 static void build_log_tab(void);
+static void build_record_tab(void);
 static void teardown_stats_tab(void);
 static void teardown_option_tab(void);
 static void teardown_log_tab(void);
+static void teardown_record_tab(void);
 static void cb_stats_btn_tap(lv_event_t *e);
 /* 2026-09-10(SD 신뢰성 재설계, [[project_cntl_sd_reliability_redesign_2026_09_10]]) — SD 자체
  * I/O 오류(fail) 발생 시 호출 — 주화면 SD 상태 표시를 갱신. 정의는 주화면 SD 상태 섹션에 있고,
@@ -288,9 +289,6 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
 static void teardown_device_popup(void);
 static void cb_camera_dash_row_clicked(lv_event_t *e);
 static void cb_sensor_dash_row_clicked(lv_event_t *e);
-/* 2026-09-08(연결 기능 주화면 이관) — Summary 실시간 순시치 블록(refresh_dashboard가 매 틱
- * 호출), 정의는 아래(Summary 판넬 구성부 근처) */
-static void refresh_summary_live_values(const esp_now_hub_node_t *nodes, int count);
 
 /* 적응형 반응시간 행(2026-08-10) — 마지막 사용자 조작 후 이만큼 조용해야 CAM에 SLEEP_NOW.
  * CAM에는 전송 안 되는 Cntl 내부 판단값이라(esp_now_hub.c 참고), Apply해도 네트워크 왕복이
@@ -428,19 +426,38 @@ static uint32_t  s_stats_page_index  = 0;  /* 0 = 가장 최근 페이지 */
  * 우=습도/암모니아. Scale을 바꾸면 이 판넬 숫자도 그 기간 기준으로 재계산됨(사용자 확정) */
 static lv_obj_t *s_stats_overview_title = NULL;
 static lv_obj_t *s_stats_scale_dd       = NULL;
-static lv_obj_t *s_overview_temp_label  = NULL;
-static lv_obj_t *s_overview_humi_label  = NULL;
+/* 2026-09-15(사용자 지시 — "Air T, Air H, Agar T는 역상으로(누를 수 있다는 표시)... 콜론
+ * 까지만") — 탭 가능한 3줄(온도/습도/Agar)만 라벨을 badge(콜론까지, 역상)+value(숫자,
+ * 보통 스타일) 두 위젯으로 쪼갬. CO2/암모니아는 탭 불가라 기존처럼 라벨 하나 그대로 */
+static lv_obj_t *s_overview_temp_badge  = NULL;
+static lv_obj_t *s_overview_temp_value  = NULL;
+static lv_obj_t *s_overview_humi_badge  = NULL;
+static lv_obj_t *s_overview_humi_value  = NULL;
+static lv_obj_t *s_overview_agar_badge  = NULL;
+static lv_obj_t *s_overview_agar_value  = NULL;
 static lv_obj_t *s_overview_co2_label   = NULL;
 static lv_obj_t *s_overview_nh3_label   = NULL;
+/* 2026-09-15(사용자 설계 — "Air Temperature... 탭해서 토글") — 탭할 때마다 뒤집힘, 시작값은
+ * "더 나은 데이터를 기본으로" 정밀(SHT45)로 둠 */
+static bool s_overview_air_temp_precise = true;
+static bool s_overview_air_humi_precise = true;
+/* 2026-09-15(사용자 설계 — "Agar는... 탭해서 서큘라로... 혼합 -> Agar1 -> Agar2 -> 혼합") —
+ * 0=혼합, 1..N=stats_collect_group_macs()가 반환한 순서의 개별 기기. 실제 기기 수로 wrap은
+ * refresh_stats_overview_panel()이 매번 함(기기 수가 바뀔 수 있어서 고정 상한을 여기 안 둠) */
+static int s_overview_agar_cycle_idx = 0;
 /* 2026-09-11(그래프 재설계) — stats_store.h의 STATS_SCALE_SECONDS가 정본(스케일별 사전집계
  * 저장 버킷폭도 이 값을 기준으로 계산되므로) — 예전엔 이 파일에 따로 복제해서 들고 있었음 */
 
-/* 통계탭 테이블<->그래프 스와이프 전환(2026-09-07, 사용자 설계) — 그래프는 뼈대만
- * (실제 lv_chart 내용은 다음 단계) */
-static lv_obj_t *s_stats_pager       = NULL;  /* 좌우 스와이프로 이동하는 컨테이너(자식 2개) */
-static lv_obj_t *s_stats_table_view  = NULL;
+/* 2026-09-15(사용자 설계 — "통계 팝업 구조를 완전히 바꿔야겠는데... 지금의 테이블과
+ * 그래프 오가는 걸 없애고, Overview = graph 한 덩어리고... 상단바에서 기록(Record)
+ * 단추를 누르면 현재의 테이블이 전화면 팝업으로") — 표<->그래프 스와이프 페이저 제거.
+ * 표는 별도 Record 팝업(build_record_tab)으로 분리, 그래프는 통계 팝업에 항상 보임 */
 static lv_obj_t *s_stats_graph_view  = NULL;
-static lv_obj_t *s_stats_delete_btn  = NULL;
+static lv_obj_t *s_stats_record_btn  = NULL;  /* 통계 팝업 제목바 — Record 팝업 여는 버튼 */
+static lv_obj_t *s_record_popup       = NULL;
+static lv_obj_t *s_record_popup_title = NULL;
+static bool      s_record_tab_built   = false;
+static lv_obj_t *s_stats_delete_btn  = NULL;  /* 이제 Record 팝업 제목바 소속 */
 static lv_obj_t *s_stats_delete_lbl  = NULL;
 
 /* 2026-09-10(사용자 설계 — "라인+도트", "계열 4개 선택 표시", "탭하면 값", "청록/빨강/파랑/
@@ -482,6 +499,13 @@ static lv_obj_t          *s_stats_graph_max_row       = NULL;
 static lv_obj_t          *s_stats_graph_min_row       = NULL;
 static lv_obj_t          *s_stats_graph_max_label[STATS_GRAPH_SERIES_COUNT];
 static lv_obj_t          *s_stats_graph_min_label[STATS_GRAPH_SERIES_COUNT];
+/* 2026-09-15(사용자 설계 — "온습도/Agar/가스 이렇게 세가지로 나눠서 선택") — 그래프 상단의
+ * 그룹 선택 3버튼(온습도/Agar/가스) */
+static lv_obj_t          *s_stats_group_btn[3];
+/* 2026-09-15(사용자 지적 — "체크박스를 탭하면 끄고, 체크박스 글씨를 탭하면 정밀/기본이
+ * 바껴야... 바의 공간이 모자라") — 스왑 버튼을 따로 두면 줄 공간이 부족해서, 체크박스
+ * 하나로 통합: 인디케이터(네모) 탭=표시/숨김, 글씨 탭=정밀/간이 전환(cb_stats_chart_
+ * series_toggle에서 탭 x좌표로 구분) — 별도 위젯 불필요해서 제거함 */
 /* 2026-09-11(그래프 재설계 항목4/6) — 스와이프로 과거로 넘어간 칸 수(0=지금). 매 갱신마다
  * "지금"을 다시 계산해서 이 오프셋 기준으로 창을 다시 잡음(사용자 지시: "갱신이 되면,
  * 다시 12시간 전 창을 보여줘야 한다") — 절대시각을 저장하지 않음 */
@@ -1362,7 +1386,8 @@ static void refresh_storage_status_label(void)
      * 제목("Storage")을 갖고 있었음(STR_LABEL_STORAGE). 이제 set_storage_label_text()가
      * 항상 "SD:"를 붙이므로, 여기선 그 뒤에 올 상세 내용만 만듦 */
     char detail[128];
-    snprintf(detail, sizeof(detail), "[%%(Remain MB)] %s %u(%u) / %s %u(%u) / %s %u(%u)",
+    snprintf(detail, sizeof(detail), "%s %s %u(%u) / %s %u(%u) / %s %u(%u)",
+        ui_str(STR_LABEL_STORAGE_LEGEND),
         ui_str(STR_LABEL_PICTURE), (unsigned)picture_pct, (unsigned)picture_remain_mb,
         ui_str(STR_LABEL_MEASURE_SHORT), (unsigned)measure_pct, (unsigned)measure_remain_mb,
         ui_str(STR_LABEL_TOTAL), (unsigned)total_pct, (unsigned)total_remain_mb);
@@ -3054,6 +3079,10 @@ static void format_battery_display(char *buf, size_t buf_size, uint16_t battery_
 /* 2026-09-05(사용자 설계) — sensor_channel_type_t(esp_now_link.h) enum -> 콘 로컬 라벨/단위.
  * 와이어엔 enum만 오가고, 사람이 읽을 텍스트는 여기서만 나옴(i18n, ui_strings) — 새 채널
  * 종류가 생기면 여기 case 하나만 추가하면 됨(프로토콜 구조 자체는 안 바뀜) */
+/* trim_to_width()는 이 파일 뒤쪽(로그박스 폭 처리부)에 정의됨 — 통계 표/그래프 라벨의
+ * "..." 말줄임(2026-09-15 사용자 지시)에도 재사용하려고 앞당겨 선언만 함 */
+static void trim_to_width(char *text, const lv_font_t *font, int32_t max_width);
+
 static bool chan_type_to_strs(uint8_t chan_type, ui_str_id_t *label_id, ui_str_id_t *unit_id)
 {
     switch (chan_type) {
@@ -3065,55 +3094,46 @@ static bool chan_type_to_strs(uint8_t chan_type, ui_str_id_t *label_id, ui_str_i
     }
 }
 
-/* 2026-09-08(연결 기능 주화면 이관, 사용자 설계 — "Summary는 시스템이 잘 돌고 있는지
- * 보여주려는 의도") — Summary 실시간 순시치 블록. 통계 Overview와 채널 4개는 같지만
- * 스케일/min/max/avg 없이 "지금 값"만 "라벨: 값 단위" 한 줄씩. 여러 센서가 같은 채널을
- * 보고하면 먼저 찾은 것만 씀(챈널당 최대 하나만 표시하는 단순화 — 오늘은 센서가 1개뿐이라
- * 실질적으로 문제 없음, 여러 센서 지원은 project_cntl_sensor_panel_needs_per_node_rows 범위) */
-static void refresh_summary_live_values(const esp_now_hub_node_t *nodes, int count)
+/* 2026-09-15(사용자 설계 — "각 센서별로 T, H, C, A로 값을 표기") — 센서 판넬 행 전용
+ * 한글자 태그(표/그래프의 STR_CHAN_LABEL_*와 별개 — CO2/암모니아는 거기선 아직 "CO2"/
+ * "Ammonia"라 여기선 더 짧게 감) */
+static char sens_row_chan_letter(uint8_t chan_type)
 {
-    struct { uint8_t chan_type; lv_obj_t *label; } rows[] = {
-        { SENSOR_CHAN_TEMP_C,   s_summary_live_temp_label },
-        { SENSOR_CHAN_HUMI_PCT, s_summary_live_humi_label },
-        { SENSOR_CHAN_CO2_PPM,  s_summary_live_co2_label  },
-        { SENSOR_CHAN_NH3_PPM,  s_summary_live_nh3_label  },
-    };
-    static char s_last_text[4][96];
-
-    for (size_t r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
-        ui_str_id_t label_id, unit_id;
-        if (!chan_type_to_strs(rows[r].chan_type, &label_id, &unit_id)) continue;
-
-        char line[96];
-        bool found = false;
-        for (int i = 0; i < count && !found; i++) {
-            if (nodes[i].kind != HUB_NODE_KIND_SENS || !nodes[i].has_sensor_data) continue;
-            for (int c = 0; c < nodes[i].chan_count; c++) {
-                if (nodes[i].chan_type[c] != rows[r].chan_type) continue;
-                found = true;
-                if (nodes[i].chan_ok[c] && nodes[i].chan_invalid[c]) {
-                    snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_SENSOR_VALUE_INVALID));
-                } else if (!nodes[i].chan_ok[c]) {
-                    snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_SENSOR_VALUE_PENDING));
-                } else {
-                    float val = nodes[i].chan_val[c];
-                    int scaled = (int)(val * 100.0f + 0.5f);
-                    int whole = scaled / 100;
-                    int frac  = scaled % 100;
-                    snprintf(line, sizeof(line), "%s: %d.%02d %s", ui_str(label_id), whole, frac, ui_str(unit_id));
-                }
-                break;
-            }
-        }
-        if (!found) snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_STATS_OVERVIEW_NO_DATA));
-
-        if (strcmp(s_last_text[r], line) != 0) {
-            lv_label_set_text(rows[r].label, line);
-            strncpy(s_last_text[r], line, sizeof(s_last_text[r]) - 1);
-            s_last_text[r][sizeof(s_last_text[r]) - 1] = '\0';
-        }
+    switch (chan_type) {
+        case SENSOR_CHAN_TEMP_C:   return 'T';
+        case SENSOR_CHAN_HUMI_PCT: return 'H';
+        case SENSOR_CHAN_CO2_PPM:  return 'C';
+        case SENSOR_CHAN_NH3_PPM:  return 'A';
+        default: return 0;
     }
 }
+
+/* 2026-09-15(사용자 지시 — "값도... 두 줄로 나옴. 총 자리수를 4개로 고정하면 좋겠네") —
+ * 정수부 자릿수에 따라 소수부를 줄여 전체(정수+소수) 자릿수가 4를 안 넘게. newlib-nano가
+ * printf류에서 %f를 지원 안 해서(레포 전역 관례, feedback_lvgl_no_percent_f) 정수
+ * 스케일링+수동 분리 유지 */
+static void format_value_capped(char *buf, size_t buf_size, float v)
+{
+    float av = (v < 0) ? -v : v;
+    int int_digits = (av < 10.0f) ? 1 : (av < 100.0f) ? 2 : (av < 1000.0f) ? 3 : 4;
+    int decimals = 4 - int_digits;
+    if (decimals < 0) decimals = 0;
+    if (decimals > 2) decimals = 2;
+
+    if (decimals == 0) {
+        int whole = (int)(v + (v >= 0 ? 0.5f : -0.5f));
+        snprintf(buf, buf_size, "%d", whole);
+    } else if (decimals == 1) {
+        int scaled = (int)(v * 10.0f + (v >= 0 ? 0.5f : -0.5f));
+        snprintf(buf, buf_size, "%d.%d", scaled / 10, abs(scaled % 10));
+    } else {
+        int scaled = (int)(v * 100.0f + (v >= 0 ? 0.5f : -0.5f));
+        snprintf(buf, buf_size, "%d.%02d", scaled / 100, abs(scaled % 100));
+    }
+}
+
+/* 2026-09-15(사용자 지시 — "주화면에서 현재 4계열 표시를 없애고") — refresh_summary_live_
+ * values()는 완전히 제거됨. Summary의 "지금 값" 표시는 Sensor 판넬 행별 T/H/C/A로 대체 */
 
 /* 2026-09-06(사용자 설계) — 통계탭 값 테이블 한 행의 mac -> 노드 이름. 언페어/이름변경 등으로
  * 지금 노드 목록에서 못 찾으면(오래된 기록) mac 뒤 2바이트로 폴백 표시 */
@@ -3130,19 +3150,171 @@ static void find_node_name_by_mac(const uint8_t mac[6], char *out, size_t out_ca
     snprintf(out, out_cap, "%02X%02X", mac[4], mac[5]);
 }
 
+/* 2026-09-15(사용자 설계 — 부위/정밀도 대화, "Sensor kind는... 접속한 장치의 센서 정보를
+ * 보고 부위, 정밀도를 판단할 수 있게 하드코딩해야 할 듯") — sensor_kind_t(+chan_type) ->
+ * {뷰 그룹, 정밀여부} 고정 매핑. 새 저장 포맷 불필요 — esp_now_hub_node_t.sensor_kind를
+ * find_node_name_by_mac()과 동일한 방식으로 조회해서 판단(project_cntl_stats_grouping_2026_09_15
+ * 참고). SHT40/DHT22는 앞으로도 안 씀(사용자 확인)이라 표에 없음 — 없는 (kind,chan_type)은
+ * "미분류"로 처리. */
+typedef enum {
+    STATS_VIEW_GROUP_AIR  = 0,  /* 온습도(공기) — SCD41/SHT45 */
+    STATS_VIEW_GROUP_AGAR = 1,  /* Agar(접촉 온도) — PT100/DS18B20, 아직 미보유 */
+    STATS_VIEW_GROUP_GAS  = 2,  /* 이산화탄소/암모니아 */
+} stats_view_group_t;
+
+/* ESP_NOW_HUB_MAX_NODES(esp_now_hub.h)와 같은 값 — 한 그룹에 속할 수 있는 mac의 상한
+ * (stats_store.c의 STATS_AGG_MAX_MACS와 동일 값, 이 파일은 그쪽 내부 상수에 의존 안 함) */
+#define STATS_AGG_MAX_MACS_UI 8
+
+typedef struct {
+    uint8_t             kind;       /* sensor_kind_t */
+    uint8_t             chan_type;  /* sensor_channel_type_t — 같은 kind도 채널별로 그룹이
+                                        다를 수 있음(SCD41의 CO2=가스, 온습도=공기) */
+    stats_view_group_t  group;
+    bool                is_precise; /* AIR 그룹 안에서만 의미: true=정밀(Precise), false=간이(Basic) */
+} stats_kind_channel_info_t;
+
+static const stats_kind_channel_info_t s_stats_kind_channel_table[] = {
+    { SENSOR_KIND_SCD41, SENSOR_CHAN_TEMP_C,   STATS_VIEW_GROUP_AIR, false },
+    { SENSOR_KIND_SCD41, SENSOR_CHAN_HUMI_PCT, STATS_VIEW_GROUP_AIR, false },
+    { SENSOR_KIND_SCD41, SENSOR_CHAN_CO2_PPM,  STATS_VIEW_GROUP_GAS, false },
+    { SENSOR_KIND_SHT45, SENSOR_CHAN_TEMP_C,   STATS_VIEW_GROUP_AIR, true  },
+    { SENSOR_KIND_SHT45, SENSOR_CHAN_HUMI_PCT, STATS_VIEW_GROUP_AIR, true  },
+    { SENSOR_KIND_MQ137, SENSOR_CHAN_NH3_PPM,  STATS_VIEW_GROUP_GAS, false },
+    { SENSOR_KIND_SC05,  SENSOR_CHAN_NH3_PPM,  STATS_VIEW_GROUP_GAS, false },
+};
+
+/* 2026-09-15(임시 테스트용 — 사용자 지시: "SCD41 온습도를 Agar1, SHT45 온습도를 Agar2로
+ * 활용하면 나중에 편할 듯", "값은 다 가짜니까... 대부분의 코드는 재사용 가능할 듯") — PT100
+ * 실물이 아직 없어서, Agar UI(기기별 체크박스/혼합/순환) 검증용으로 SCD41/SHT45의 "온도"
+ * 채널을 Agar 그룹에도 "추가로" 복제해 넣음(사용자 정정 — "Agar는 테스트용이니까, Air가
+ * 기본이고 Agar에 복제해서 넣어야지": 배타적 오버라이드였던 첫 구현은 잘못 — Air 쪽 실측
+ * 분류는 그대로 두고, Agar 수집 시에만 같은 mac을 추가로 끼워넣는 방식으로 정정함). 실제
+ * PT100 연결되면 이 블록만 지우면 됨. */
+#define STATS_TEST_AGAR_FAKE_DATA 1
+
+static uint8_t find_node_kind_by_mac(const uint8_t mac[6])
+{
+    esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
+    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, ESP_NOW_HUB_MAX_NODES);
+    for (int i = 0; i < total; i++) {
+        if (memcmp(nodes[i].mac, mac, 6) == 0) return nodes[i].sensor_kind;
+    }
+    return SENSOR_KIND_UNKNOWN;
+}
+
+#if STATS_TEST_AGAR_FAKE_DATA
+static bool stats_is_agar_fake_source(uint8_t kind, uint8_t chan_type)
+{
+    return chan_type == SENSOR_CHAN_TEMP_C && (kind == SENSOR_KIND_SCD41 || kind == SENSOR_KIND_SHT45);
+}
+#endif
+
+/* mac+chan_type -> {그룹, 정밀여부}. 미분류(매핑에 없는 kind, 또는 아예 모르는 mac)면 false.
+ * 테스트 오버라이드 없음 — 항상 실제 분류표 그대로(Air는 항상 실측대로 표시됨) */
+static bool stats_classify(const uint8_t mac[6], uint8_t chan_type,
+                            stats_view_group_t *out_group, bool *out_is_precise)
+{
+    uint8_t kind = find_node_kind_by_mac(mac);
+    for (size_t i = 0; i < sizeof(s_stats_kind_channel_table) / sizeof(s_stats_kind_channel_table[0]); i++) {
+        if (s_stats_kind_channel_table[i].kind == kind && s_stats_kind_channel_table[i].chan_type == chan_type) {
+            if (out_group) *out_group = s_stats_kind_channel_table[i].group;
+            if (out_is_precise) *out_is_precise = s_stats_kind_channel_table[i].is_precise;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* group(+chan_type)에 속하는 mac들을 out_macs에 채움(최대 out_cap개, 페어링된 적 있는 노드
+ * 전체를 훑음 — find_node_name_by_mac()과 동일 소스라 잠든 장치도 계속 잡힘). AIR 그룹은
+ * want_precise로 정밀/간이 중 하나만 추림(다른 그룹은 무시됨). AGAR 그룹은 실제 분류(PT100
+ * 등, 아직 없음)에 더해 테스트용 SCD41/SHT45 온도도 추가로 끼워넣음(위 STATS_TEST_AGAR_
+ * FAKE_DATA 주석 참고 — Air 쪽 집계와 별개로 중복 포함되는 게 의도된 동작) */
+static int stats_collect_group_macs(stats_view_group_t group, uint8_t chan_type, bool want_precise,
+                                     uint8_t out_macs[][6], int out_cap)
+{
+    esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
+    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, ESP_NOW_HUB_MAX_NODES);
+    int count = 0;
+    for (int i = 0; i < total && count < out_cap; i++) {
+        stats_view_group_t g;
+        bool prec;
+        bool matched = false;
+        if (stats_classify(nodes[i].mac, chan_type, &g, &prec)) {
+            if (g == group && (group != STATS_VIEW_GROUP_AIR || prec == want_precise)) matched = true;
+        }
+#if STATS_TEST_AGAR_FAKE_DATA
+        if (!matched && group == STATS_VIEW_GROUP_AGAR &&
+            stats_is_agar_fake_source(nodes[i].sensor_kind, chan_type)) {
+            matched = true;
+        }
+#endif
+        if (matched) memcpy(out_macs[count++], nodes[i].mac, 6);
+    }
+    return count;
+}
+
+/* mac 하나의 [window_start,window_end) min/max/avg — 사전집계 버킷을 그대로 훑음(스케일당
+ * 최대 STATS_AGG_POINTS_PER_SCALE개뿐이라 순차 스캔으로 충분). 데이터 없으면 false */
+static bool stats_read_mac_window_stat(uint8_t scale_idx, uint8_t chan_type, const uint8_t mac[6],
+                                        uint32_t window_start, uint32_t window_end,
+                                        float *out_min, float *out_max, float *out_avg)
+{
+    static stats_bucket_t buf[STATS_AGG_POINTS_PER_SCALE];
+    uint32_t got = stats_agg_read_window(scale_idx, chan_type, mac, window_start, window_end,
+                                          buf, STATS_AGG_POINTS_PER_SCALE);
+    if (got == 0) return false;
+    float mn = buf[0].avg_value, mx = buf[0].avg_value;
+    double sum = 0.0;
+    for (uint32_t i = 0; i < got; i++) {
+        float v = buf[i].avg_value;
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+        sum += (double)v;
+    }
+    *out_min = mn;
+    *out_max = mx;
+    *out_avg = (float)(sum / (double)got);
+    return true;
+}
+
+/* 2026-09-15(사용자 설계 — "1번기기 최대100 최소10 평균30, 2번기기 최대90 최소5 평균50 ->
+ * 그룹 100/5/40") — 최대=기기별 최대의 최대, 최소=기기별 최소의 최소, 평균=기기별 평균의
+ * 평균(표본수 가중 아님 — 측정주기/도달시각이 기기마다 달라도 한쪽에 치우치지 않게) */
+static bool stats_blend_macs(uint8_t scale_idx, uint8_t chan_type,
+                              const uint8_t macs[][6], int mac_count,
+                              uint32_t window_start, uint32_t window_end,
+                              float *out_min, float *out_max, float *out_avg)
+{
+    bool have = false;
+    float mn = 0.0f, mx = 0.0f;
+    double avg_sum = 0.0;
+    int avg_count = 0;
+    for (int i = 0; i < mac_count; i++) {
+        float dmn, dmx, davg;
+        if (!stats_read_mac_window_stat(scale_idx, chan_type, macs[i], window_start, window_end,
+                                         &dmn, &dmx, &davg)) continue;
+        if (!have) { mn = dmn; mx = dmx; have = true; }
+        else { if (dmn < mn) mn = dmn; if (dmx > mx) mx = dmx; }
+        avg_sum += (double)davg;
+        avg_count++;
+    }
+    if (!have || avg_count == 0) return false;
+    *out_min = mn;
+    *out_max = mx;
+    *out_avg = (float)(avg_sum / (double)avg_count);
+    return true;
+}
+
 /* 개괄 판넬(2026-09-07 재설계, 구 "최대/최소 판넬") — 좌=온도/이산화탄소,
  * 우=습도/암모니아. Scale 드롭다운으로 고른 기간 기준으로 재계산(사용자 확정:
  * "스케일마다 계산해야되"). Max/Min/Average 범례는 제목(STR_PANEL_STATS_OVERVIEW)에
  * 한 번만 있고, 각 줄은 "라벨[단위]: 값 / 값 / 값"만(사용자 재지시 — 이산화탄소처럼
  * 긴 값이 X/N/A 반복으로 줄바꿈되던 문제 해결) */
-/* 2026-09-10(임시 진단으로 발견 — "2009가 한번 나면 계속 나네", refresh_stats_page timing
- * 실측: graph만 매번 ~100ms, 개괄판넬과 그래프가 채널당 min/max/avg를 각자 또 계산해서
- * SD 스캔이 중복됨) — 개괄판넬이 계산한 걸 여기 캐시에 남겨서 refresh_stats_graph()가
- * 재사용하게 함(같은 tick 안에서 순서 보장: refresh_stats_page()가 overview -> graph 순).
- * 채널 순서는 STATS_GRAPH_SERIES_COUNT 순서(온도/습도/CO2/암모니아)와 동일 */
-static float s_stats_minmax_cache_mn[STATS_GRAPH_SERIES_COUNT];
-static float s_stats_minmax_cache_mx[STATS_GRAPH_SERIES_COUNT];
-static bool  s_stats_minmax_cache_valid[STATS_GRAPH_SERIES_COUNT];
+/* 2026-09-10에 있던 개괄->그래프 min/max 캐시 공유 최적화는 2026-09-15 그룹/mac 기반
+ * 재설계로 제거됨(refresh_stats_overview_panel() 헤더 주석 참고 — 인덱스 0..3 캐시로는
+ * 더 이상 표현 불가능한 임의 mac/그룹 조합이 됨) */
 
 /* 2026-09-10(재설계 — [[project_cntl_sd_reliability_redesign_2026_09_10]]) — 태스크 격리
  * 아키텍처(별도 워커+뮤텍스+세마포어)는 잘못된 진단(SD 에러를 "행"으로 오판) 위에 지어졌던
@@ -3162,6 +3334,52 @@ static bool  s_stats_minmax_cache_valid[STATS_GRAPH_SERIES_COUNT];
  * 자신이 이미 쓰는 사전집계 버킷(stats_agg_read_window)으로 바꿔서 원본 스캔을 없앰. 최대
  * 60개 버킷만 보므로 min/max/avg가 원본 전수 스캔 대비 근사치지만, 그래프에 실제로 표시되는
  * 값과 동일한 소스라 오히려 일관성 있음 */
+/* 라벨 포맷 공용 헬퍼 — "라벨접미사[단위]: max/min/avg" 또는 "라벨접미사: 데이터 없음" */
+static void stats_format_overview_line(char *out, size_t out_cap, const char *label,
+                                        ui_str_id_t unit_id, bool have_range,
+                                        float mn, float mx, float avg)
+{
+    if (have_range) {
+        int mx_s = (int)(mx * 100.0f + 0.5f);
+        int mn_s = (int)(mn * 100.0f + 0.5f);
+        int avg_s = (int)(avg * 100.0f + 0.5f);
+        snprintf(out, out_cap, ui_str(STR_STATS_OVERVIEW_ROW_FMT), label, ui_str(unit_id),
+                 mx_s / 100, mx_s % 100, mn_s / 100, mn_s % 100, avg_s / 100, avg_s % 100);
+    } else {
+        snprintf(out, out_cap, "%s: %s", label, ui_str(STR_STATS_OVERVIEW_NO_DATA));
+    }
+}
+
+/* 2026-09-15(사용자 지시 — "Air T, Air H, Agar T는 역상으로... 콜론까지만") — 탭 가능한
+ * 줄 전용: "라벨[단위]:" 부분(badge, 역상 스타일)과 "max/min/avg" 부분(value, 보통 스타일)을
+ * 따로 채움 — 데이터 없으면 value에 "데이터 없음"만 들어가고 badge는 그대로 */
+static void stats_format_overview_badge_value(char *badge_out, size_t badge_cap,
+                                               char *value_out, size_t value_cap,
+                                               const char *label, ui_str_id_t unit_id,
+                                               bool have_range, float mn, float mx, float avg)
+{
+    snprintf(badge_out, badge_cap, "%s[%s]:", label, ui_str(unit_id));
+    if (have_range) {
+        int mx_s = (int)(mx * 100.0f + 0.5f);
+        int mn_s = (int)(mn * 100.0f + 0.5f);
+        int avg_s = (int)(avg * 100.0f + 0.5f);
+        snprintf(value_out, value_cap, "%d.%02d / %d.%02d / %d.%02d",
+                 mx_s / 100, mx_s % 100, mn_s / 100, mn_s % 100, avg_s / 100, avg_s % 100);
+    } else {
+        snprintf(value_out, value_cap, "%s", ui_str(STR_STATS_OVERVIEW_NO_DATA));
+    }
+}
+
+/* 2026-09-15(사용자 설계 — 부위/정밀도 대화 전체) — 개괄 판넬 재설계:
+ *   - Air Temperature/Humidity: 탭으로 정밀(SHT45)<->간이(SCD41) 토글, 한 종류에 기기가
+ *     여러 대면 stats_blend_macs()로 블렌딩.
+ *   - Agar Temperature: 탭으로 혼합->Agar1->Agar2->...->혼합 순환.
+ *   - CO2/암모니아: 가스군 전체를 블렌딩(장치별 개별 표시는 그래프 쪽 담당, 오늘 설계
+ *     범위는 Overview는 Air/Agar만 명시됐음).
+ * 2026-09-11에 있던 개괄->그래프 min/max 캐시 재사용 최적화는 여기서 뺌 — 그래프가 이제
+ * 고정 4계열이 아니라 그룹/토글/순환 상태에 따라 달라지는 임의 mac을 읽으므로, 캐시 키가
+ * 인덱스 0..3으로는 더 이상 표현이 안 됨. SD 읽기 자체는 실측 ~86ms 수준(오늘 세션 타이밍
+ * 계측 기준)이라 중복 읽기 비용은 감수 가능 판단 */
 static bool refresh_stats_overview_panel(void)
 {
     uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
@@ -3170,52 +3388,110 @@ static bool refresh_stats_overview_panel(void)
     uint32_t now = rtc_sync_get_unix_time();
     uint32_t window_start = (now > scale_sec) ? now - scale_sec : 0;
 
-    struct { uint8_t chan_type; lv_obj_t *label; } rows[] = {
-        { SENSOR_CHAN_TEMP_C,   s_overview_temp_label },
-        { SENSOR_CHAN_HUMI_PCT, s_overview_humi_label },
-        { SENSOR_CHAN_CO2_PPM,  s_overview_co2_label  },
-        { SENSOR_CHAN_NH3_PPM,  s_overview_nh3_label  },
-    };
-    static stats_bucket_t buf[STATS_GRAPH_POINT_COUNT];
-    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
-        ui_str_id_t label_id, unit_id;
-        if (!chan_type_to_strs(rows[i].chan_type, &label_id, &unit_id)) continue;
+    char line[128];
+    char badge[64];
+    char value[96];
+    uint8_t macs[STATS_AGG_MAX_MACS_UI][6];
+    int mac_count;
+    float mn, mx, avg;
 
-        uint32_t got = stats_agg_read_window((uint8_t)idx, rows[i].chan_type, window_start, now,
-                                              buf, STATS_GRAPH_POINT_COUNT);
-        if (got == 0 && stats_store_had_io_error()) return false;  /* SD 자체 문제 — 즉시 중단 */
+    /* --- Air Temperature (정밀/간이 토글) --- */
+    mac_count = stats_collect_group_macs(STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C,
+                                          s_overview_air_temp_precise, macs, STATS_AGG_MAX_MACS_UI);
+    bool have = (mac_count > 0) && stats_blend_macs((uint8_t)idx, SENSOR_CHAN_TEMP_C, macs, mac_count,
+                                                      window_start, now, &mn, &mx, &avg);
+    char label[64];
+    snprintf(label, sizeof(label), "%s(%s)", ui_str(STR_OVERVIEW_AIR_TEMP),
+             ui_str(s_overview_air_temp_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
+    stats_format_overview_badge_value(badge, sizeof(badge), value, sizeof(value), label,
+                                       STR_CHAN_UNIT_TEMP_C, have, mn, mx, avg);
+    lv_label_set_text(s_overview_temp_badge, badge);
+    lv_label_set_text(s_overview_temp_value, value);
 
-        char line[128];
-        bool have_range = false;
-        float mn = 0.0f, mx = 0.0f;
-        double sum = 0.0;
-        for (uint32_t b = 0; b < got; b++) {
-            float v = buf[b].avg_value;
-            if (!have_range) { mn = mx = v; have_range = true; }
-            else {
-                if (v < mn) mn = v;
-                if (v > mx) mx = v;
-            }
-            sum += (double)v;
-        }
-        s_stats_minmax_cache_valid[i] = have_range;
-        if (have_range) {
-            float avg = (float)(sum / (double)got);
-            s_stats_minmax_cache_mn[i] = mn;
-            s_stats_minmax_cache_mx[i] = mx;
-            int mx_s = (int)(mx * 100.0f + 0.5f);
-            int mn_s = (int)(mn * 100.0f + 0.5f);
-            int avg_s = (int)(avg * 100.0f + 0.5f);
-            snprintf(line, sizeof(line), ui_str(STR_STATS_OVERVIEW_ROW_FMT), ui_str(label_id), ui_str(unit_id),
-                     mx_s / 100, mx_s % 100,
-                     mn_s / 100, mn_s % 100,
-                     avg_s / 100, avg_s % 100);
+    /* --- Air Humidity (정밀/간이 토글) --- */
+    mac_count = stats_collect_group_macs(STATS_VIEW_GROUP_AIR, SENSOR_CHAN_HUMI_PCT,
+                                          s_overview_air_humi_precise, macs, STATS_AGG_MAX_MACS_UI);
+    have = (mac_count > 0) && stats_blend_macs((uint8_t)idx, SENSOR_CHAN_HUMI_PCT, macs, mac_count,
+                                                 window_start, now, &mn, &mx, &avg);
+    snprintf(label, sizeof(label), "%s(%s)", ui_str(STR_OVERVIEW_AIR_HUMI),
+             ui_str(s_overview_air_humi_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
+    stats_format_overview_badge_value(badge, sizeof(badge), value, sizeof(value), label,
+                                       STR_CHAN_UNIT_HUMI_PCT, have, mn, mx, avg);
+    lv_label_set_text(s_overview_humi_badge, badge);
+    lv_label_set_text(s_overview_humi_value, value);
+
+    /* --- Agar Temperature (혼합 -> Agar1 -> Agar2 -> ... 순환) --- */
+    mac_count = stats_collect_group_macs(STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false,
+                                          macs, STATS_AGG_MAX_MACS_UI);
+    if (mac_count == 0) {
+        s_overview_agar_cycle_idx = 0;
+        snprintf(badge, sizeof(badge), "%s[%s]:", ui_str(STR_OVERVIEW_AGAR_TEMP), ui_str(STR_CHAN_UNIT_TEMP_C));
+        snprintf(value, sizeof(value), "%s", ui_str(STR_STATS_OVERVIEW_NO_DATA));
+    } else {
+        int wrapped = s_overview_agar_cycle_idx % (mac_count + 1);  /* 0=혼합, 1..mac_count=개별 */
+        if (wrapped == 0) {
+            have = stats_blend_macs((uint8_t)idx, SENSOR_CHAN_TEMP_C, macs, mac_count,
+                                     window_start, now, &mn, &mx, &avg);
+            /* 2026-09-15(사용자 정리 — "모든 계열 이름 콘벤션이 Air T/H, Agar T... 장치별로는
+             * Alias... T/H") — 혼합(그룹 전체)은 그룹명 그대로("Agar T"), 개별 기기만
+             * "Alias T"/"기기명 T" 형식 */
+            snprintf(label, sizeof(label), "%s", ui_str(STR_OVERVIEW_AGAR_TEMP));
         } else {
-            snprintf(line, sizeof(line), "%s: %s", ui_str(label_id), ui_str(STR_STATS_OVERVIEW_NO_DATA));
+            const uint8_t *one_mac = macs[wrapped - 1];
+            have = stats_read_mac_window_stat((uint8_t)idx, SENSOR_CHAN_TEMP_C, one_mac,
+                                               window_start, now, &mn, &mx, &avg);
+            char devname[ESP_NOW_LINK_NAME_LEN];
+            find_node_name_by_mac(one_mac, devname, sizeof(devname));
+            const char *alias = device_config_get_alias(one_mac);
+            const char *disp = (alias[0] != '\0') ? alias : devname;
+            snprintf(label, sizeof(label), "%s %s", disp, ui_str(STR_CHAN_LABEL_TEMP_C));
         }
-        lv_label_set_text(rows[i].label, line);
+        stats_format_overview_badge_value(badge, sizeof(badge), value, sizeof(value), label,
+                                           STR_CHAN_UNIT_TEMP_C, have, mn, mx, avg);
     }
+    lv_label_set_text(s_overview_agar_badge, badge);
+    lv_label_set_text(s_overview_agar_value, value);
+
+    /* --- CO2 / 암모니아 (가스군 전체 블렌딩) --- */
+    mac_count = stats_collect_group_macs(STATS_VIEW_GROUP_GAS, SENSOR_CHAN_CO2_PPM, false,
+                                          macs, STATS_AGG_MAX_MACS_UI);
+    have = (mac_count > 0) && stats_blend_macs((uint8_t)idx, SENSOR_CHAN_CO2_PPM, macs, mac_count,
+                                                 window_start, now, &mn, &mx, &avg);
+    stats_format_overview_line(line, sizeof(line), ui_str(STR_CHAN_LABEL_CO2_PPM), STR_CHAN_UNIT_CO2_PPM,
+                                have, mn, mx, avg);
+    lv_label_set_text(s_overview_co2_label, line);
+
+    mac_count = stats_collect_group_macs(STATS_VIEW_GROUP_GAS, SENSOR_CHAN_NH3_PPM, false,
+                                          macs, STATS_AGG_MAX_MACS_UI);
+    have = (mac_count > 0) && stats_blend_macs((uint8_t)idx, SENSOR_CHAN_NH3_PPM, macs, mac_count,
+                                                 window_start, now, &mn, &mx, &avg);
+    stats_format_overview_line(line, sizeof(line), ui_str(STR_CHAN_LABEL_NH3_PPM), STR_CHAN_UNIT_NH3_PPM,
+                                have, mn, mx, avg);
+    lv_label_set_text(s_overview_nh3_label, line);
+
+    if (stats_store_had_io_error()) return false;  /* SD 자체 문제 — 회로차단기 신호만 전달 */
     return true;
+}
+
+static void cb_overview_air_temp_tap(lv_event_t *e)
+{
+    (void)e;
+    s_overview_air_temp_precise = !s_overview_air_temp_precise;
+    refresh_stats_overview_panel();
+}
+
+static void cb_overview_air_humi_tap(lv_event_t *e)
+{
+    (void)e;
+    s_overview_air_humi_precise = !s_overview_air_humi_precise;
+    refresh_stats_overview_panel();
+}
+
+static void cb_overview_agar_tap(lv_event_t *e)
+{
+    (void)e;
+    s_overview_agar_cycle_idx++;
+    refresh_stats_overview_panel();
 }
 
 static void stats_graph_swipe_async_refresh(void *user_data);  /* 아래(스와이프 처리부)에 정의 */
@@ -3251,12 +3527,15 @@ static bool refresh_stats_table(void)
     if (total_pages == 0) total_pages = 1;
 
     /* 2026-09-07 — 헤더(항목/값/시간)는 이제 테이블 밖(stats_table_header_row)에 고정으로
-     * 따로 그림(사용자 지시: "스크롤 안되야되"), 테이블 자신은 데이터 행만 채움 */
-    lv_table_set_row_count(s_stats_table, got > 0 ? got : 1);
+     * 따로 그림(사용자 지시: "스크롤 안되야되"), 테이블 자신은 데이터 행만 채움.
+     * 2026-09-15(사용자 지시 — "현재 테이블을 2열로 보이고, 높이를 낮춘 후") — 항목/값/시간
+     * 3칸짜리 열그룹을 좌우로 2벌(컬럼 0-2, 3-5) 두어서, 같은 20개 레코드를 절반(최대 10행)
+     * 만으로 표시 — 세로로 한 행씩 아래로 늘어지던 걸 줄임 */
+    uint32_t table_rows = (got + 1) / 2;
+    lv_table_set_row_count(s_stats_table, table_rows > 0 ? table_rows : 1);
     if (got == 0) {
         lv_table_set_cell_value(s_stats_table, 0, 0, ui_str(STR_STATS_TABLE_EMPTY));
-        lv_table_set_cell_value(s_stats_table, 0, 1, "");
-        lv_table_set_cell_value(s_stats_table, 0, 2, "");
+        for (int c = 1; c < 6; c++) lv_table_set_cell_value(s_stats_table, 0, c, "");
     } else {
         /* stats_store_read_page()는 파일에 쓰인 순서(오래된 것부터)로 채워서 돌려줌 —
          * 화면엔 최신이 위로 오게 역순으로 순회 */
@@ -3265,19 +3544,23 @@ static bool refresh_stats_table(void)
 
             char name[ESP_NOW_LINK_NAME_LEN];
             find_node_name_by_mac(r->mac, name, sizeof(name));
+            /* 2026-09-15(사용자 지시 — "통계에도 Alias가 있으면 Alias로 표기") — Sensor/Camera
+             * 판넬(device_config_get_alias 사용처 참고)과 동일 규칙: 빈 문자열=미지정 */
+            const char *alias = device_config_get_alias(r->mac);
+            const char *display_name = (alias[0] != '\0') ? alias : name;
 
             ui_str_id_t label_id, unit_id;
             char item_buf[64];
             char value_buf[32];
             if (chan_type_to_strs(r->chan_type, &label_id, &unit_id)) {
-                snprintf(item_buf, sizeof(item_buf), "%s %s", name, ui_str(label_id));
-                int scaled = (int)(r->value * 100.0f + 0.5f);
-                snprintf(value_buf, sizeof(value_buf), "%d.%02d%s",
-                         scaled / 100, scaled % 100, ui_str(unit_id));
+                snprintf(item_buf, sizeof(item_buf), "%s %s", display_name, ui_str(label_id));
+                /* 2026-09-15(사용자 지시 — "값도 마찬가지... 총 자리수를 4개로 고정") */
+                char num_buf[16];
+                format_value_capped(num_buf, sizeof(num_buf), r->value);
+                snprintf(value_buf, sizeof(value_buf), "%s%s", num_buf, ui_str(unit_id));
             } else {
-                snprintf(item_buf, sizeof(item_buf), "%s", name);
-                int scaled = (int)(r->value * 100.0f + 0.5f);
-                snprintf(value_buf, sizeof(value_buf), "%d.%02d", scaled / 100, scaled % 100);
+                snprintf(item_buf, sizeof(item_buf), "%s", display_name);
+                format_value_capped(value_buf, sizeof(value_buf), r->value);
             }
 
             struct tm tm_buf;
@@ -3287,9 +3570,27 @@ static bool refresh_stats_table(void)
             snprintf(time_buf, sizeof(time_buf), "%02u:%02u:%02u",
                      tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
 
-            lv_table_set_cell_value(s_stats_table, i, 0, item_buf);
-            lv_table_set_cell_value(s_stats_table, i, 1, value_buf);
-            lv_table_set_cell_value(s_stats_table, i, 2, time_buf);
+            /* 2026-09-15(사용자 지시 — "아이템명이 길어지면 ...으로 표기"했는데도 "...이
+             * 나옴에도 불구하고 word wrap 됨") — 여백을 더 줄이고(115->95), TEXT_CROP
+             * 셀 컨트롤을 같이 걸어서 폭 계산이 조금 어긋나도 무조건 한 줄 높이로 고정
+             * (lv_table.c 확인: CROP이면 행높이를 글꼴 line-height 하나로 못박음) */
+            /* 2026-09-15 — 아이템 열 폭이 130->160으로 늘어난 만큼(+30) 잘림 여유도 같이 늘림 */
+            trim_to_width(item_buf, ui_font_get(UI_FONT_SIZE_18), 125);
+            uint32_t row = i / 2;
+            uint32_t col_base = (i % 2 == 0) ? 0 : 3;
+            lv_table_set_cell_value(s_stats_table, row, col_base + 0, item_buf);
+            lv_table_set_cell_value(s_stats_table, row, col_base + 1, value_buf);
+            lv_table_set_cell_value(s_stats_table, row, col_base + 2, time_buf);
+            for (uint32_t c = 0; c < 3; c++) {
+                lv_table_set_cell_ctrl(s_stats_table, row, col_base + c, LV_TABLE_CELL_CTRL_TEXT_CROP);
+            }
+        }
+        /* got가 홀수면 마지막 행 오른쪽 3칸이 이전 페이지 값 잔상으로 남을 수 있어 비움 */
+        if (got % 2 == 1) {
+            uint32_t last_row = (got - 1) / 2;
+            lv_table_set_cell_value(s_stats_table, last_row, 3, "");
+            lv_table_set_cell_value(s_stats_table, last_row, 4, "");
+            lv_table_set_cell_value(s_stats_table, last_row, 5, "");
         }
     }
 
@@ -3439,6 +3740,102 @@ static bool stats_graph_local_trend(const bool has[], const float vals[], int po
     return true;
 }
 
+/* 2026-09-15(사용자 설계 — "온습도/Agar/가스 이렇게 세가지로 나눠서 선택") — 그래프가 이제
+ * 고정 4계열(온도/습도/CO2/암모니아)이 아니라, 선택된 그룹에 따라 런타임에 슬롯이 채워짐.
+ * STATS_GRAPH_SERIES_COUNT는 "고정 계열 수"가 아니라 "동시 표시 가능한 최대 슬롯 수"로
+ * 의미가 바뀜(Agar 최대 4개 제한과 값이 같아 그대로 재사용) — lv_chart_series_t/체크박스/
+ * min·max 라벨은 이 개수만큼 미리 만들어두고(아래 build_stats_tab), 그룹이 바뀔 때마다
+ * 재사용(relabel/recolor/보이기·숨기기)만 함 — LVGL 오브젝트를 매번 새로 만들고 지우지
+ * 않음(이번 세션 내내 겪은 malloc 관련 문제들을 감안한 저위험 선택) */
+static stats_view_group_t s_stats_active_group = STATS_VIEW_GROUP_AIR;
+static int     s_stats_slot_count = 0;
+static uint8_t s_stats_slot_mac[STATS_GRAPH_SERIES_COUNT][6];
+static uint8_t s_stats_slot_chan_type[STATS_GRAPH_SERIES_COUNT];
+static char    s_stats_slot_label[STATS_GRAPH_SERIES_COUNT][48];
+/* 그래프 자체의 정밀/간이 토글 상태 — 개괄 판넬(s_overview_air_*_precise)과 위젯이 달라서
+ * 독립적으로 둠(둘을 동기화해야 한다는 지시는 없었음) */
+static bool s_stats_air_temp_precise = true;
+static bool s_stats_air_humi_precise = true;
+
+/* 2026-09-15(사용자 확인 — "가스도 빨파 중에... Agar도 빨파흑노... 최대 4개로 일단 한정") */
+#define STATS_AGAR_MAX_SLOTS 4
+#define STATS_GAS_MAX_SLOTS  2
+
+static void stats_graph_populate_slots_for_group(stats_view_group_t group)
+{
+    s_stats_active_group = group;
+    s_stats_slot_count = 0;
+    uint8_t macs[STATS_AGG_MAX_MACS_UI][6];
+
+    if (group == STATS_VIEW_GROUP_AIR) {
+        int n = stats_collect_group_macs(STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C,
+                                          s_stats_air_temp_precise, macs, STATS_AGG_MAX_MACS_UI);
+        if (n > 0) {
+            int s = s_stats_slot_count++;
+            memcpy(s_stats_slot_mac[s], macs[0], 6);
+            s_stats_slot_chan_type[s] = SENSOR_CHAN_TEMP_C;
+            snprintf(s_stats_slot_label[s], sizeof(s_stats_slot_label[0]), "%s(%s)",
+                     ui_str(STR_OVERVIEW_AIR_TEMP),
+                     ui_str(s_stats_air_temp_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
+        }
+        n = stats_collect_group_macs(STATS_VIEW_GROUP_AIR, SENSOR_CHAN_HUMI_PCT,
+                                      s_stats_air_humi_precise, macs, STATS_AGG_MAX_MACS_UI);
+        if (n > 0 && s_stats_slot_count < STATS_GRAPH_SERIES_COUNT) {
+            int s = s_stats_slot_count++;
+            memcpy(s_stats_slot_mac[s], macs[0], 6);
+            s_stats_slot_chan_type[s] = SENSOR_CHAN_HUMI_PCT;
+            snprintf(s_stats_slot_label[s], sizeof(s_stats_slot_label[0]), "%s(%s)",
+                     ui_str(STR_OVERVIEW_AIR_HUMI),
+                     ui_str(s_stats_air_humi_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
+        }
+    } else if (group == STATS_VIEW_GROUP_AGAR) {
+        int n = stats_collect_group_macs(STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false,
+                                          macs, STATS_AGG_MAX_MACS_UI);
+        if (n > STATS_AGAR_MAX_SLOTS) n = STATS_AGAR_MAX_SLOTS;
+        for (int i = 0; i < n; i++) {
+            memcpy(s_stats_slot_mac[i], macs[i], 6);
+            s_stats_slot_chan_type[i] = SENSOR_CHAN_TEMP_C;
+            char devname[ESP_NOW_LINK_NAME_LEN];
+            find_node_name_by_mac(macs[i], devname, sizeof(devname));
+            const char *alias = device_config_get_alias(macs[i]);
+            snprintf(s_stats_slot_label[i], sizeof(s_stats_slot_label[0]), "%s %s",
+                     (alias[0] != '\0') ? alias : devname, ui_str(STR_CHAN_LABEL_TEMP_C));
+            /* 2026-09-15(사용자 지시 — "기기명(Alias)이 길어지면 ...으로... 스케일, << >>
+             * 공간을 확보해야되") */
+            trim_to_width(s_stats_slot_label[i], ui_font_get(UI_FONT_SIZE_18), 90);
+        }
+        s_stats_slot_count = n;
+    } else {  /* STATS_VIEW_GROUP_GAS */
+        uint8_t co2_macs[STATS_AGG_MAX_MACS_UI][6], nh3_macs[STATS_AGG_MAX_MACS_UI][6];
+        int co2_n = stats_collect_group_macs(STATS_VIEW_GROUP_GAS, SENSOR_CHAN_CO2_PPM, false,
+                                              co2_macs, STATS_AGG_MAX_MACS_UI);
+        int nh3_n = stats_collect_group_macs(STATS_VIEW_GROUP_GAS, SENSOR_CHAN_NH3_PPM, false,
+                                              nh3_macs, STATS_AGG_MAX_MACS_UI);
+        int n = 0;
+        for (int i = 0; i < co2_n && n < STATS_GAS_MAX_SLOTS; i++, n++) {
+            memcpy(s_stats_slot_mac[n], co2_macs[i], 6);
+            s_stats_slot_chan_type[n] = SENSOR_CHAN_CO2_PPM;
+            char devname[ESP_NOW_LINK_NAME_LEN];
+            find_node_name_by_mac(co2_macs[i], devname, sizeof(devname));
+            const char *alias = device_config_get_alias(co2_macs[i]);
+            snprintf(s_stats_slot_label[n], sizeof(s_stats_slot_label[0]), "%s %s",
+                     (alias[0] != '\0') ? alias : devname, ui_str(STR_CHAN_LABEL_CO2_PPM));
+            trim_to_width(s_stats_slot_label[n], ui_font_get(UI_FONT_SIZE_18), 90);
+        }
+        for (int i = 0; i < nh3_n && n < STATS_GAS_MAX_SLOTS; i++, n++) {
+            memcpy(s_stats_slot_mac[n], nh3_macs[i], 6);
+            s_stats_slot_chan_type[n] = SENSOR_CHAN_NH3_PPM;
+            char devname[ESP_NOW_LINK_NAME_LEN];
+            find_node_name_by_mac(nh3_macs[i], devname, sizeof(devname));
+            const char *alias = device_config_get_alias(nh3_macs[i]);
+            snprintf(s_stats_slot_label[n], sizeof(s_stats_slot_label[0]), "%s %s",
+                     (alias[0] != '\0') ? alias : devname, ui_str(STR_CHAN_LABEL_NH3_PPM));
+            trim_to_width(s_stats_slot_label[n], ui_font_get(UI_FONT_SIZE_18), 90);
+        }
+        s_stats_slot_count = n;
+    }
+}
+
 /* 2026-09-10/11(재설계 — 라인그래프, 계열 4개 온도/습도/CO2/암모니아, 스케일별 사전집계
  * 저장에서 읽음, [[project_cntl_stats_graph_redesign_2026_09_10]]) — 계열마다 실제 단위/
  * 범위가 달라서 각 계열을 그 창 안의 최소~최대 기준 0~100으로 정규화.
@@ -3446,7 +3843,8 @@ static bool stats_graph_local_trend(const bool has[], const float vals[], int po
  * 않고 stats_graph_local_trend()로 추세선을 채워서 선이 끊기지 않게 함(사용자 지시:
  * "측정 주기가 길면... 선이 끊기고 점이 나오지" 문제 해결). 근처에 실측값이 너무 멀면
  * (STATS_GRAPH_LOW_SUPPORT_SLOTS 초과) 그 지점만 겹침 차트로 "저신뢰" 표시. 테이블 보고
- * 있을 때는 SD 조회 생략. 리턴값 false = SD 자체 오류(그 틱 중단) */
+ * 있을 때는 SD 조회 생략. 리턴값 false = SD 자체 오류(그 틱 중단)
+ * 2026-09-15(그룹 재설계) — 계열은 이제 고정 chan_type이 아니라 s_stats_slot_*[]에서 읽음 */
 static bool refresh_stats_graph(void)
 {
     if (!s_stats_chart) return true;
@@ -3481,30 +3879,40 @@ static bool refresh_stats_graph(void)
      * 일어남 — 그건 이 함수 범위 밖이라 여기 포함 안 됨) */
     int64_t t_start_us = esp_timer_get_time();
 
-    static const uint8_t chan_types[STATS_GRAPH_SERIES_COUNT] = {
-        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM
-    };
-
     /* 2026-09-15(사용자 지시 — "SD 읽기, 회귀 계산, 그리기 완료 이 3가지로 나누어 로그로
      * 측정해") — 1/3: SD 읽기만 따로 측정(회귀 실측은 아래 계열별 루프에 이미 있음,
-     * 그리기 완료는 함수 끝의 LV_EVENT_REFR_READY 훅에서 별도로 로그) */
+     * 그리기 완료는 함수 끝의 LV_EVENT_REFR_READY 훅에서 별도로 로그)
+     * 2026-09-15(그룹 재설계) — chan_type뿐 아니라 mac까지 슬롯별로 다름(s_stats_slot_*) */
     int64_t t_sdread_start_us = esp_timer_get_time();
     static stats_bucket_t buf[STATS_GRAPH_SERIES_COUNT][STATS_GRAPH_POINT_COUNT];
     uint32_t got[STATS_GRAPH_SERIES_COUNT];
-    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
-        got[s] = stats_agg_read_window((uint8_t)idx, chan_types[s], window_start, window_end,
-                                        buf[s], STATS_GRAPH_POINT_COUNT);
+    for (int s = 0; s < s_stats_slot_count; s++) {
+        got[s] = stats_agg_read_window((uint8_t)idx, s_stats_slot_chan_type[s], s_stats_slot_mac[s],
+                                        window_start, window_end, buf[s], STATS_GRAPH_POINT_COUNT);
         if (got[s] == 0 && stats_store_had_io_error()) return false;  /* SD 자체 문제 — 즉시 중단 */
     }
     int64_t t_sdread_end_us = esp_timer_get_time();
-    ESP_LOGI(TAG, "STATSGRAPH SD읽기 실측(계열%d개, 스케일idx=%u): %lldus", STATS_GRAPH_SERIES_COUNT,
+    ESP_LOGI(TAG, "STATSGRAPH SD읽기 실측(계열%d개, 스케일idx=%u): %lldus", s_stats_slot_count,
              (unsigned)idx, (long long)(t_sdread_end_us - t_sdread_start_us));
 
     lv_chart_set_point_count(s_stats_chart, STATS_GRAPH_POINT_COUNT);
     lv_chart_set_point_count(s_stats_gap_chart, STATS_GRAPH_POINT_COUNT);
     s_stats_chart_shown_points = STATS_GRAPH_POINT_COUNT;
 
-    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+    /* 지금 그룹의 슬롯 수보다 많이 켜져 있던 이전 그룹의 계열(예: Agar 4개 -> 가스 2개로
+     * 전환)은 숨기고 값도 비워서, 다음 탭 조회 등에서 stale 데이터가 안 잡히게 함 */
+    for (int s = s_stats_slot_count; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        lv_obj_add_flag(s_stats_chart_checkbox[s], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_stats_graph_max_label[s], LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_stats_graph_min_label[s], LV_OBJ_FLAG_HIDDEN);
+        for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) s_stats_chart_has_value[s][i] = false;
+        lv_chart_set_all_value(s_stats_chart, s_stats_chart_series[s], LV_CHART_POINT_NONE);
+        lv_chart_set_all_value(s_stats_gap_chart, s_stats_gap_series[s], LV_CHART_POINT_NONE);
+    }
+
+    for (int s = 0; s < s_stats_slot_count; s++) {
+        lv_obj_remove_flag(s_stats_chart_checkbox[s], LV_OBJ_FLAG_HIDDEN);
+        lv_checkbox_set_text(s_stats_chart_checkbox[s], s_stats_slot_label[s]);
         static bool has[STATS_GRAPH_POINT_COUNT];
         static float vals[STATS_GRAPH_POINT_COUNT];
         for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) has[i] = false;
@@ -3598,7 +4006,7 @@ static bool refresh_stats_graph(void)
         bool checked = lv_obj_has_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED);
         bool show = checked && have_range;
         ui_str_id_t label_id, unit_id;
-        chan_type_to_strs(chan_types[s], &label_id, &unit_id);
+        chan_type_to_strs(s_stats_slot_chan_type[s], &label_id, &unit_id);
         (void)label_id;
         char numbuf[24];
         if (s_stats_graph_max_label[s]) {
@@ -3636,10 +4044,45 @@ static bool refresh_stats_graph(void)
     return true;
 }
 
+/* 2026-09-15(사용자 설계 — "체크박스를 탭하면 끄고, 체크박스 글씨를 탭하면 정밀/기본이
+ * 바껴야 좋겠어. 지금처럼하면 바의 공간이 모자라") — 별도 스왑 버튼은 공간이 부족해서
+ * 제거하고, AIR 그룹의 온도/습도 슬롯만 체크박스 하나 안에서 탭 x좌표로 구분: 인디케이터
+ * (네모, 왼쪽) 탭=표시/숨김 그대로, 글씨(라벨, 오른쪽) 탭=정밀<->간이 전환. LVGL은 클릭
+ * 시 체크상태를 이미 뒤집어놓으므로, 글씨 탭인 경우 그 뒤집힘을 다시 뒤집어 원복시키고
+ * 표시/숨김 대신 소스만 바꿈 */
 static void cb_stats_chart_series_toggle(lv_event_t *e)
 {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    bool checked = lv_obj_has_state(s_stats_chart_checkbox[idx], LV_STATE_CHECKED);
+    lv_obj_t *cb = s_stats_chart_checkbox[idx];
+
+    if (s_stats_active_group == STATS_VIEW_GROUP_AIR &&
+        (s_stats_slot_chan_type[idx] == SENSOR_CHAN_TEMP_C ||
+         s_stats_slot_chan_type[idx] == SENSOR_CHAN_HUMI_PCT)) {
+        lv_indev_t *indev = lv_indev_active();
+        lv_point_t p = { 0, 0 };
+        if (indev) lv_indev_get_point(indev, &p);
+        lv_area_t coords;
+        lv_obj_get_coords(cb, &coords);
+        int32_t rel_x = p.x - coords.x1;
+        const int32_t indicator_zone_w = 30;  /* 실기 확인 후 조정 필요할 수 있음 */
+
+        if (rel_x >= indicator_zone_w) {
+            if (lv_obj_has_state(cb, LV_STATE_CHECKED)) lv_obj_remove_state(cb, LV_STATE_CHECKED);
+            else lv_obj_add_state(cb, LV_STATE_CHECKED);
+
+            if (s_stats_slot_chan_type[idx] == SENSOR_CHAN_TEMP_C) {
+                s_stats_air_temp_precise = !s_stats_air_temp_precise;
+            } else {
+                s_stats_air_humi_precise = !s_stats_air_humi_precise;
+            }
+            stats_graph_populate_slots_for_group(STATS_VIEW_GROUP_AIR);
+            s_stats_graph_force_refresh = true;
+            refresh_stats_graph();
+            return;
+        }
+    }
+
+    bool checked = lv_obj_has_state(cb, LV_STATE_CHECKED);
     lv_chart_hide_series(s_stats_chart, s_stats_chart_series[idx], !checked);
     /* 2026-09-11(사용자 지적 — "계열을 해제해도 점은 계속 찍혀") — 실데이터 차트만 숨기고
      * 겹쳐그린 공백점 차트는 안 숨겼던 버그 */
@@ -3654,6 +4097,34 @@ static void cb_stats_chart_series_toggle(lv_event_t *e)
             s_stats_chart_tap_shown_series = -1;
         }
     }
+}
+
+/* 2026-09-15(사용자 설계 — 그래프 그룹 선택 3버튼) — 탭한 버튼의 그룹으로 전환, 나머지
+ * 두 버튼은 배경을 원래대로 되돌림(선택된 버튼만 강조) */
+static void cb_stats_graph_group_tap(lv_event_t *e)
+{
+    stats_view_group_t group = (stats_view_group_t)(intptr_t)lv_event_get_user_data(e);
+    for (int g = 0; g < 3; g++) {
+        if (!s_stats_group_btn[g]) continue;
+        lv_obj_set_style_bg_color(s_stats_group_btn[g],
+            lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+    lv_obj_t *btn = lv_event_get_target(e);
+    lv_obj_set_style_bg_color(btn, lv_palette_main(LV_PALETTE_BLUE), 0);
+
+    stats_graph_populate_slots_for_group(group);
+    /* 2026-09-12(원 설계 — 탭 값 박스는 그룹 전환에도 사라져야 함, 스케일 변경과 동일 이유) */
+    if (s_stats_chart_tap_label) {
+        lv_obj_add_flag(s_stats_chart_tap_label, LV_OBJ_FLAG_HIDDEN);
+        s_stats_chart_tap_shown_series = -1;
+    }
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        lv_obj_add_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED);  /* 새 그룹은 전부 보이는 채로 시작 */
+        lv_chart_hide_series(s_stats_chart, s_stats_chart_series[s], false);
+        lv_chart_hide_series(s_stats_gap_chart, s_stats_gap_series[s], false);
+    }
+    s_stats_graph_force_refresh = true;
+    refresh_stats_graph();
 }
 
 /* 2026-09-10(사용자 지시 — "탭하면 값이 나타나는 것") — 탭 x좌표로 가장 가까운 인덱스를
@@ -3672,7 +4143,7 @@ static void cb_stats_chart_tap(lv_event_t *e)
     if (point_count == 0) return;
 
     int ref_series = -1;
-    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+    for (int s = 0; s < s_stats_slot_count; s++) {
         if (lv_obj_has_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED)) { ref_series = s; break; }
     }
     if (ref_series < 0) return;
@@ -3690,12 +4161,9 @@ static void cb_stats_chart_tap(lv_event_t *e)
         if (dist < best_dist) { best_dist = dist; nearest_idx = i; }
     }
 
-    static const uint8_t chan_types[STATS_GRAPH_SERIES_COUNT] = {
-        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM
-    };
     int chosen_series = -1;
     int32_t best_y_dist = INT32_MAX;
-    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+    for (int s = 0; s < s_stats_slot_count; s++) {
         if (!lv_obj_has_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED)) continue;
         if (!s_stats_chart_has_value[s][nearest_idx]) continue;
         lv_point_t pp;
@@ -3708,7 +4176,7 @@ static void cb_stats_chart_tap(lv_event_t *e)
     float v = s_stats_chart_real_values[chosen_series][nearest_idx];
 
     ui_str_id_t label_id, unit_id;
-    if (!chan_type_to_strs(chan_types[chosen_series], &label_id, &unit_id)) return;
+    if (!chan_type_to_strs(s_stats_slot_chan_type[chosen_series], &label_id, &unit_id)) return;
     int scaled = (int)(v * 100.0f + 0.5f);
     char buf[64];
     snprintf(buf, sizeof(buf), "%s: %d.%02d%s", ui_str(label_id), scaled / 100, scaled % 100, ui_str(unit_id));
@@ -3743,18 +4211,18 @@ static void cb_stats_chart_tap(lv_event_t *e)
 static void refresh_stats_page(lv_timer_t *t)
 {
     (void)t;
+    /* 2026-09-15(사용자 설계) — 표가 별도 Record 팝업으로 분리되면서 refresh_stats_table()
+     * 호출 제거(그 팝업 자체 생명주기/네비게이션 콜백이 직접 부름) */
     size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     uint32_t t0 = lv_tick_get();
     bool ok = refresh_stats_overview_panel();
     uint32_t t1 = lv_tick_get();
-    if (ok) ok = refresh_stats_table();
-    uint32_t t2 = lv_tick_get();
     if (ok) ok = refresh_stats_graph();
     uint32_t t3 = lv_tick_get();
     if (!ok) report_sd_io_fail("stats tab query");
     if ((t3 - t0) > 50) {  /* 50ms 이상 걸린 사이클만 로그(매번 찍으면 스팸) */
-        ESP_LOGW(TAG, "MEMDIAG refresh_stats_page timing: overview=%ums table=%ums graph=%ums total=%ums",
-                 (unsigned)(t1 - t0), (unsigned)(t2 - t1), (unsigned)(t3 - t2), (unsigned)(t3 - t0));
+        ESP_LOGW(TAG, "MEMDIAG refresh_stats_page timing: overview=%ums graph=%ums total=%ums",
+                 (unsigned)(t1 - t0), (unsigned)(t3 - t1), (unsigned)(t3 - t0));
     }
     size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     if (before != after) {
@@ -3817,39 +4285,15 @@ static void cb_delete_stats_tap(lv_event_t *e)
     show_confirm_popup(ui_str(STR_CONFIRM_DELETE_STATS), cb_delete_stats_confirmed, NULL);
 }
 
-/* 2026-09-07(사용자 설계 — "사용자는 그래프만 보거나 테이블만 보는 형태") — 한 번에 하나만
- * 보임(분할 아님). 스크롤/스냅 애니메이션 대신 단순 HIDDEN 토글 — 정확히 이 요구사항과
- * 일치하고, 제스처 처리도 훨씬 단순해짐 */
-static void switch_to_graph_view(void)
-{
-    lv_obj_add_flag(s_stats_table_view, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN);
-    s_stats_graph_force_refresh = true;  /* 2026-09-11 — 숨겨져있던 동안 갱신 안 됐을 수
-                                             있으니 보이자마자 바로 최신으로 */
-    refresh_stats_graph();
-}
-
-static void switch_to_table_view(void)
-{
-    lv_obj_add_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(s_stats_table_view, LV_OBJ_FLAG_HIDDEN);
-}
-
-static void cb_switch_to_graph_tap(lv_event_t *e) { (void)e; switch_to_graph_view(); }
-static void cb_switch_to_table_tap(lv_event_t *e) { (void)e; switch_to_table_view(); }
-
-/* 2026-09-07(사용자 설계) — 테이블: 좌측 스와이프하면 그래프로, 위/아래 스와이프하면
- * 페이지 이동(세로 스와이프로 하단 버튼줄 대체, 사용자 지시: "세로 스와이프로 페이지
- * 넘기기"). 테이블 자체의 CLICKABLE은 그대로 둬야 제스처 인식이 되므로(꺼버리면 눌림
- * 자체가 안 잡힘), 선택 비활성화는 위젯 생성부에서 눌림 상태 스타일을 투명 처리하는
- * 방식으로 별도 처리(cb_stats_table_gesture와는 무관) */
+/* 2026-09-15(사용자 설계 — "지금의 테이블과 그래프 오가는 걸 없애고") — 표<->그래프 전환
+ * 자체가 없어짐(표는 별도 Record 팝업). switch_to_graph_view/switch_to_table_view/
+ * cb_switch_to_graph_tap/cb_switch_to_table_tap 삭제. 세로 스와이프(페이지 이동)만 남김 */
 static void cb_stats_table_gesture(lv_event_t *e)
 {
     (void)e;
     lv_indev_t *indev = lv_indev_active();
     if (!indev) return;
     lv_dir_t dir = lv_indev_get_gesture_dir(indev);
-    if (dir == LV_DIR_LEFT) { switch_to_graph_view(); return; }
     if (dir == LV_DIR_TOP)    { stats_next_page_cb(NULL); return; }  /* 위로 스와이프 = 다음(최신) */
     if (dir == LV_DIR_BOTTOM) { stats_prev_page_cb(NULL); return; }  /* 아래로 스와이프 = 이전(과거) */
 }
@@ -3928,7 +4372,13 @@ static lv_obj_t *create_signal_widget(lv_obj_t *parent)
     return box;
 }
 
-static void update_signal_widget(lv_obj_t *box, bool has_rssi, int8_t rssi)
+/* 2026-09-15(사용자 지시 — "wifi 아이콘 색을 바꿀 수 있으면, Active도 없앨 수 있겠네.
+ * Active는 지금처럼 파랑, 그 외는 빨강") — 채워진 막대 색으로 Active/Paired 텍스트를
+ * 대체함(is_active 인자 추가). 카메라 행은 기존 동작 유지(항상 파랑, true로 호출) */
+/* 2026-09-15(사용자 정정 — "파랑(액티브)-통신 중, 녹색(페어드)-자는 중, 빨강(문제)-오르판
+ * 가기 전 상태") — Active=파랑, Paired(정상 대기/딥슬립)=녹색, near_orphan(고아 타임아웃에
+ * 근접)=빨강. near_orphan은 호출부가 last_seen_ms/esp_now_hub_node_timeout_ms()로 계산 */
+static void update_signal_widget(lv_obj_t *box, bool has_rssi, int8_t rssi, bool is_active, bool near_orphan)
 {
     int filled;
     if      (!has_rssi)   filled = 0;
@@ -3939,9 +4389,13 @@ static void update_signal_widget(lv_obj_t *box, bool has_rssi, int8_t rssi)
     else if (rssi >= -85) filled = 1;
     else                  filled = 0;
 
+    lv_color_t filled_color;
+    if (near_orphan) filled_color = lv_palette_main(LV_PALETTE_RED);
+    else if (is_active) filled_color = lv_palette_main(LV_PALETTE_BLUE);
+    else filled_color = lv_palette_main(LV_PALETTE_GREEN);
     for (int i = 0; i < SIGNAL_BAR_COUNT; i++) {
         lv_obj_t *bar = lv_obj_get_child(box, i);
-        lv_obj_set_style_bg_color(bar, (i < filled) ? lv_palette_main(LV_PALETTE_BLUE)
+        lv_obj_set_style_bg_color(bar, (i < filled) ? filled_color
                                                      : lv_palette_main(LV_PALETTE_GREY), 0);
     }
 }
@@ -4047,8 +4501,11 @@ static void refresh_dashboard(lv_timer_t *t)
             lv_obj_set_style_pad_all(row, 0, 0);
             /* 2026-09-09(사용자 발견 — PRESSED 하이라이트를 넣고 보니 "탭 가능 영역이 딱
              * 글씨 높이만큼이었어") — 행 사이 간격(pad_row, 리스트 쪽)은 그대로 두고 행
-             * 자신의 상하 패딩만 최대한 키워서 탭 영역을 넓힘("최대한 넓혀") */
-            lv_obj_set_style_pad_ver(row, 16, 0);
+             * 자신의 상하 패딩만 최대한 키워서 탭 영역을 넓힘("최대한 넓혀").
+             * 2026-09-15(사용자 지시 — "센서 목록 줄간격은 더 못 줄이나?... 12 Px로",
+             * 이어서 "4PX 더 줄여도 될 듯") — T/H/C/A 값이 추가돼 줄이 길어진 만큼 줄여도
+             * 됨(카메라 목록은 그대로 16 유지) */
+            lv_obj_set_style_pad_ver(row, 8, 0);
             lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
             /* 2026-09-09(사용자 재설계 — "전계강도를 가장 왼쪽으로... 전계강도+공백1칸+
              * 장치명...+> 표시는 우측 정렬") — SPACE_BETWEEN을 버리고 순서(signal->label->
@@ -4067,9 +4524,20 @@ static void refresh_dashboard(lv_timer_t *t)
 
             lv_obj_t *signal = create_signal_widget(row);
 
+            /* 2026-09-15(사용자 설계 — "각 센서별로 T,H,C,A로 값을 표기", "측정값은 >
+             * 왼쪽에 붙는 우정렬") — 기존 라벨(Alias/M/Bat, 자연폭)과 별개로 값 전용
+             * 라벨을 새로 둠(flex_grow+우정렬)해서 ">" 바로 앞까지 밀착시킴 */
             lv_obj_t *label = lv_label_create(row);
-            lv_obj_set_flex_grow(label, 1);
             lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+            /* 2026-09-15(사용자 지적 — "센서 판넬 줄 간격이 벌어졌어") — width를 LV_PCT(100)
+             * 로 명시했던 게 flex_grow와 충돌해서 줄바꿈을 유발, 행이 2줄로 늘어졌던 버그.
+             * flex_grow만으로 충분(주축 폭은 grow가 정함, text_align은 그 결과 폭 기준으로
+             * 적용됨) */
+            lv_obj_t *value = lv_label_create(row);
+            lv_obj_set_flex_grow(value, 1);
+            lv_obj_set_style_text_font(value, ui_font_get(UI_FONT_SIZE_18), 0);
+            lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_RIGHT, 0);
 
             lv_obj_t *chevron = lv_label_create(row);
             lv_label_set_text(chevron, ">");
@@ -4077,6 +4545,7 @@ static void refresh_dashboard(lv_timer_t *t)
             lv_obj_add_style(chevron, &style_text_muted, 0);
 
             s_sensor_dash_row_objs[i] = label;
+            s_sensor_dash_row_value[i] = value;
             s_sensor_dash_row_signal[i] = signal;
             memcpy(s_sensor_dash_row_macs[i], sens_macs[i], 6);
             /* 2026-09-09(사용자 설계 — "장치명은 접속해온 장치가 제시하는 이름... 코드
@@ -4089,6 +4558,7 @@ static void refresh_dashboard(lv_timer_t *t)
                     sizeof(s_sensor_dash_row_alias[i]) - 1);
             s_sensor_dash_row_alias[i][sizeof(s_sensor_dash_row_alias[i]) - 1] = '\0';
             s_sensor_dash_row_last_text[i][0] = '\0';
+            s_sensor_dash_row_last_value_text[i][0] = '\0';
         }
         s_sensor_dash_row_count = (sens_count < ESP_NOW_HUB_MAX_NODES) ? sens_count : ESP_NOW_HUB_MAX_NODES;
     }
@@ -4098,30 +4568,74 @@ static void refresh_dashboard(lv_timer_t *t)
         /* 표시용으로만 여기서 alias-or-name 선택(지역 변수) — name 필드 자체는 절대 안 바뀜 */
         const char *display_name = (s_sensor_dash_row_alias[i][0] != '\0')
                                     ? s_sensor_dash_row_alias[i] : s_sensor_dash_row_names[i];
-        int n = snprintf(buf, sizeof(buf), "%s (%s)", display_name,
-                 ui_str(st == HUB_CONN_STATE_ACTIVE ? STR_STATUS_ACTIVE : STR_STATUS_PAIRED));
-        /* 개별설정값(측정주기) — 사용자 설계: "연결된 목록에는 측정 값이 아니라, 개별
-         * 설정된 값이 보여야되". 2026-09-09(사용자 지적 — "그냥 10s로 나오고... Measure 10S
-         * 형식이 좋고, 항목간 대시(-)보다 (/)가 좋아") — 라벨 접두 추가, 구분자 " / "로 통일 */
+        /* 2026-09-15(사용자 지시 — "Active도 없앨 수 있겠네... wifi 아이콘 색"으로 대체) —
+         * "(Active)"/"(Paired)" 텍스트 제거, signal 위젯 색으로만 표현 */
+        int n = snprintf(buf, sizeof(buf), "%s", display_name);
+        /* 2026-09-15(사용자 지시 — "Measure 10S => M 10S, Battery xxxx -> Bat xx%만 남기면,
+         * 공간이 많이 확보되니까") — 값 블록(T/H/C/A) 넣을 공간 확보용 압축 */
         uint32_t interval_sec = device_config_get_sens_sample_interval_sec(s_sensor_dash_row_macs[i]);
         if (interval_sec > 0 && n > 0 && (size_t)n < sizeof(buf)) {
             n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %us",
-                          ui_str(STR_LABEL_MEASURE_SHORT), (unsigned)interval_sec);
+                          ui_str(STR_LABEL_MEASURE_TINY), (unsigned)interval_sec);
         }
+
+        char value_buf[96];
+        int vn = 0;
+        value_buf[0] = '\0';
         for (int j = 0; j < sens_count; j++) {
             if (memcmp(sens_macs[j], s_sensor_dash_row_macs[i], 6) != 0) continue;
             if (sens_nodes[j].has_deepsleep_stats && n > 0 && (size_t)n < sizeof(buf)) {
-                char batt[32];
-                format_battery_display(batt, sizeof(batt), sens_nodes[j].battery_mv, sens_nodes[j].battery_pct);
-                snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", batt);
+                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %u%%",
+                              ui_str(STR_LABEL_BATTERY_TINY), (unsigned)sens_nodes[j].battery_pct);
             }
-            update_signal_widget(s_sensor_dash_row_signal[i], sens_nodes[j].has_rssi, sens_nodes[j].rssi);
+            /* 2026-09-15(사용자 설계 — "각 센서별로 T, H, C, A로 값을 표기") — 그 기기가
+             * 실제로 보고하는 채널만, chan_type 순서 그대로 */
+            if (sens_nodes[j].has_sensor_data) {
+                for (int c = 0; c < sens_nodes[j].chan_count && vn < (int)sizeof(value_buf) - 1; c++) {
+                    char tag = sens_row_chan_letter(sens_nodes[j].chan_type[c]);
+                    if (!tag) continue;
+                    ui_str_id_t label_id, unit_id;
+                    if (!chan_type_to_strs(sens_nodes[j].chan_type[c], &label_id, &unit_id)) continue;
+                    (void)label_id;
+                    if (vn > 0) vn += snprintf(value_buf + vn, sizeof(value_buf) - (size_t)vn, " ");
+                    if (!sens_nodes[j].chan_ok[c]) {
+                        vn += snprintf(value_buf + vn, sizeof(value_buf) - (size_t)vn, "%c:%s",
+                                       tag, ui_str(STR_SENSOR_VALUE_PENDING));
+                    } else if (sens_nodes[j].chan_invalid[c]) {
+                        vn += snprintf(value_buf + vn, sizeof(value_buf) - (size_t)vn, "%c:%s",
+                                       tag, ui_str(STR_SENSOR_VALUE_INVALID));
+                    } else {
+                        int scaled = (int)(sens_nodes[j].chan_val[c] * 100.0f + 0.5f);
+                        vn += snprintf(value_buf + vn, sizeof(value_buf) - (size_t)vn, "%c: %d.%02d%s",
+                                       tag, scaled / 100, scaled % 100, ui_str(unit_id));
+                    }
+                }
+            }
+            {
+                uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                uint32_t timeout_ms = esp_now_hub_node_timeout_ms(&sens_nodes[j]);
+                uint32_t elapsed_ms = now_ms - sens_nodes[j].last_seen_ms;
+                /* 2026-09-15(사용자 설계) — 타임아웃의 80% 이상 지나면 "오르판 가기 직전"
+                 * 경고로 빨강. 그 전까지는 PAIRED=정상 딥슬립(녹색) */
+                bool near_orphan = (timeout_ms > 0) && ((uint64_t)elapsed_ms * 10 >= (uint64_t)timeout_ms * 8);
+                update_signal_widget(s_sensor_dash_row_signal[i], sens_nodes[j].has_rssi, sens_nodes[j].rssi,
+                                      st == HUB_CONN_STATE_ACTIVE, near_orphan);
+            }
             break;
         }
         if (strcmp(s_sensor_dash_row_last_text[i], buf) != 0) {
             lv_label_set_text(s_sensor_dash_row_objs[i], buf);
             strncpy(s_sensor_dash_row_last_text[i], buf, sizeof(s_sensor_dash_row_last_text[i]) - 1);
             s_sensor_dash_row_last_text[i][sizeof(s_sensor_dash_row_last_text[i]) - 1] = '\0';
+        }
+        /* 2026-09-15(사용자 지시 — "- 가 측정값 왼쪽 앞에 붙도록") */
+        char value_disp[100];
+        if (vn > 0) snprintf(value_disp, sizeof(value_disp), "- %s", value_buf);
+        else value_disp[0] = '\0';
+        if (strcmp(s_sensor_dash_row_last_value_text[i], value_disp) != 0) {
+            lv_label_set_text(s_sensor_dash_row_value[i], value_disp);
+            strncpy(s_sensor_dash_row_last_value_text[i], value_disp, sizeof(s_sensor_dash_row_last_value_text[i]) - 1);
+            s_sensor_dash_row_last_value_text[i][sizeof(s_sensor_dash_row_last_value_text[i]) - 1] = '\0';
         }
     }
 
@@ -4138,8 +4652,6 @@ static void refresh_dashboard(lv_timer_t *t)
         else lv_obj_add_flag(s_sensor_empty, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_sensor_dash_list, LV_OBJ_FLAG_HIDDEN);
     }
-    refresh_summary_live_values(s_dash_nodes, total);  /* 2026-09-08 — Summary 실시간 순시치 블록 */
-
     /* 판넬3: 카메라 — 페어링된 CAM을 전부 모아 드롭다운을 채우고, 지금 선택된 CAM이 여전히
      * 그 안에 있으면 유지·아니면 첫 번째로 자동 폴백(2026-08-05, 여러 CAM 동시 페어링 지원
      * — select_camera()/rebuild_camera_dropdown_if_changed() 참고, 위 함수 설명 참고) */
@@ -4171,8 +4683,9 @@ static void refresh_dashboard(lv_timer_t *t)
             lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
             lv_obj_set_style_pad_all(row, 0, 0);
             /* 2026-09-09(사용자 발견 — "탭 가능 영역이 딱 글씨 높이만큼이었어") — 센서
-             * 목록과 동일 이유로 행 자신의 상하 패딩만 최대한 키움 */
-            lv_obj_set_style_pad_ver(row, 16, 0);
+             * 목록과 동일 이유로 행 자신의 상하 패딩만 최대한 키움.
+             * 2026-09-15(사용자 지시 — "카메라도 동일하게 수정") — 센서 목록과 같은 8px로 */
+            lv_obj_set_style_pad_ver(row, 8, 0);
             lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
             /* 2026-09-09(사용자 재설계 — 센서 목록과 동일 원칙, "전계강도를 가장 왼쪽으로") */
             lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -4227,7 +4740,7 @@ static void refresh_dashboard(lv_timer_t *t)
                 format_battery_display(batt, sizeof(batt), cam_nodes[j].battery_mv, cam_nodes[j].battery_pct);
                 snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", batt);
             }
-            update_signal_widget(s_camera_dash_row_signal[i], cam_nodes[j].has_rssi, cam_nodes[j].rssi);
+            update_signal_widget(s_camera_dash_row_signal[i], cam_nodes[j].has_rssi, cam_nodes[j].rssi, true, false);
             break;
         }
         if (strcmp(s_camera_dash_row_last_text[i], buf) != 0) {
@@ -6084,51 +6597,10 @@ void ui_init(void)
      * 문자로 찍혔던 버그가 있었음, 이번엔 잊지 않음) */
     lv_label_set_recolor(s_storage_status_label, true);
 
-    /* 2026-09-08(연결 기능 주화면 이관, 사용자 설계) — 장치별 행은 전부 Sensor/Camera
-     * 판넬로 이관, Summary에는 대신 실시간 순시치(온도/습도/CO2/암모니아)만 —
-     * "Summary는 시스템이 잘 돌고 있는지 보여주려는 의도". 2026-09-09(사용자 지시 —
-     * "통계처럼 보이길 바래 (두 줄로)") — 통계 Overview 판넬과 동일한 좌우 2열 구조(좌=온도/
-     * CO2, 우=습도/암모니아)로, 4줄 세로나열 대신 2줄로 */
-    lv_obj_t *summary_sub_row = lv_obj_create(summary_box);
-    lv_obj_set_size(summary_sub_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(summary_sub_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_border_width(summary_sub_row, 0, 0);
-    /* 2026-09-09(사용자 지시 — "4개 항목을 한 박스 안에 보이게") — 온도/습도/CO2/암모니아를
-     * 감싸는 이 컨테이너 자체에 연한 회색 배경+둥근모서리+패딩("좋아", 사용자 승인) */
-    lv_obj_set_style_bg_color(summary_sub_row, lv_palette_lighten(LV_PALETTE_GREY, 3), 0);
-    lv_obj_set_style_bg_opa(summary_sub_row, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(summary_sub_row, 8, 0);
-    lv_obj_set_style_pad_all(summary_sub_row, 10, 0);
-    lv_obj_set_style_pad_column(summary_sub_row, 12, 0);
-
-    lv_obj_t *summary_left_box = lv_obj_create(summary_sub_row);
-    lv_obj_set_flex_grow(summary_left_box, 1);
-    lv_obj_set_height(summary_left_box, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(summary_left_box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_border_width(summary_left_box, 0, 0);
-    lv_obj_set_style_pad_all(summary_left_box, 0, 0);
-    /* 2026-09-09(사용자 지적 — "글씨배경은 여전히 흰색") — 기본 테마가 이 박스에 불투명
-     * 흰색을 칠해서 부모(summary_sub_row)의 회색이 안 보였음 */
-    lv_obj_set_style_bg_opa(summary_left_box, LV_OPA_TRANSP, 0);
-
-    s_summary_live_temp_label = lv_label_create(summary_left_box);
-    lv_obj_set_style_text_font(s_summary_live_temp_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    s_summary_live_co2_label = lv_label_create(summary_left_box);
-    lv_obj_set_style_text_font(s_summary_live_co2_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    lv_obj_t *summary_right_box = lv_obj_create(summary_sub_row);
-    lv_obj_set_flex_grow(summary_right_box, 1);
-    lv_obj_set_height(summary_right_box, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(summary_right_box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_border_width(summary_right_box, 0, 0);
-    lv_obj_set_style_pad_all(summary_right_box, 0, 0);
-    lv_obj_set_style_bg_opa(summary_right_box, LV_OPA_TRANSP, 0);
-
-    s_summary_live_humi_label = lv_label_create(summary_right_box);
-    lv_obj_set_style_text_font(s_summary_live_humi_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    s_summary_live_nh3_label = lv_label_create(summary_right_box);
-    lv_obj_set_style_text_font(s_summary_live_nh3_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
+    /* 2026-09-15(사용자 지시 — "주화면에서 현재 4계열 표시를 없애고... 바탕판넬도"[제거]) —
+     * Summary의 온도/습도/CO2/암모니아 실시간값 + 회색 배경 패널을 통째로 제거. 이유:
+     * 장치가 늘면 "어느 장치 값인지" 모호해지는 문제(오늘 Stats 쪽에서 겪은 것과 동일) —
+     * 개별 기기 현재값은 Sensor 판넬 행(기기당 하나, 자연스럽게 스케일링)으로 이관 */
     lv_obj_t *sensor_box = create_dashboard_panel(dashboard_page, STR_GROUP_SENSOR, 1);
     /* 2026-09-08(사용자 지시 — "센서 판넬 제목 Sensor를... 역상으로", "센서 판넬 Sensor
      * 역상을 누르면 열리게") — 통계는 전부 센서 데이터라 진입점을 여기로 옮김 */
@@ -6400,26 +6872,18 @@ static void teardown_stats_tab(void)
              (int)heap_after_close - (int)heap_before_close);
     s_stats_overview_title = NULL;
     s_stats_scale_dd = NULL;
-    s_overview_temp_label = NULL;
-    s_overview_humi_label = NULL;
+    s_overview_temp_badge = NULL;
+    s_overview_temp_value = NULL;
+    s_overview_humi_badge = NULL;
+    s_overview_humi_value = NULL;
+    s_overview_agar_badge = NULL;
+    s_overview_agar_value = NULL;
     s_overview_co2_label = NULL;
     s_overview_nh3_label = NULL;
-    s_stats_pager = NULL;
-    s_stats_table_view = NULL;
     s_stats_graph_view = NULL;
-    s_stats_delete_btn = NULL;
-    s_stats_delete_lbl = NULL;
-    s_stats_table_header_lbl = NULL;
-    s_stats_jump_prev_btn = NULL;
-    s_stats_jump_prev_lbl = NULL;
-    s_stats_prev_btn = NULL;
-    s_stats_prev_lbl = NULL;
-    s_stats_page_label = NULL;
-    s_stats_next_btn = NULL;
-    s_stats_next_lbl = NULL;
-    s_stats_jump_next_btn = NULL;
-    s_stats_jump_next_lbl = NULL;
-    s_stats_table = NULL;
+    s_stats_record_btn = NULL;
+    /* 2026-09-15 — 표 관련 위젯(s_stats_delete_btn/table/nav 버튼들)은 이제 Record 팝업
+     * 소속이라 teardown_record_tab()에서 NULL 처리됨 */
     /* 2026-09-11 — 스와이프 직후 팝업이 바로 닫히면 lv_async_call이 다음 루프에서 이미
      * 삭제된 위젯을 건드릴 수 있어 취소(use-after-free 방지) */
     lv_async_call_cancel(stats_graph_swipe_async_refresh, NULL);
@@ -6435,6 +6899,7 @@ static void teardown_stats_tab(void)
         s_stats_graph_max_label[i] = NULL;
         s_stats_graph_min_label[i] = NULL;
     }
+    for (int i = 0; i < 3; i++) s_stats_group_btn[i] = NULL;
     s_stats_graph_offset = 0;  /* 다음에 다시 열 땐 "지금" 창부터 */
 }
 
@@ -6453,137 +6918,93 @@ static void disable_scroll_recursive(lv_obj_t *obj)
     }
 }
 
-/* 2026-09-08(재설계 — 상단바 통계 버튼이 여는 전체화면 팝업) */
-static void build_stats_tab(void)
+/* 2026-09-15(사용자 설계 — "상단바에서 기록(Record) 단추를 누르면 현재의 테이블이
+ * 전화면 팝업으로... Delete all은 record popup에서") — 원본 레코드 표 전용 팝업. 통계
+ * 팝업의 build_stats_tab()에 있던 표 관련 코드를 그대로 옮김(위젯 생성 내용 자체는
+ * 불변, 부모/제목바만 바뀜) */
+static void cb_close_record_popup(lv_event_t *e)
 {
-    if (s_stats_tab_built) return;  /* 이미 열려있음 */
-    s_stats_tab_built = true;
+    (void)e;
+    teardown_record_tab();
+}
 
-    lv_obj_t *stats_page = create_page_popup();
-    s_stats_popup = stats_page;
-    add_page_popup_header(stats_page, ui_str(STR_TAB_STATISTICS), cb_close_stats_popup, &s_stats_popup_title);
-    lv_obj_set_style_pad_hor(stats_page, 4, 0);
-    lv_obj_set_style_pad_bottom(stats_page, 4, 0);
-    lv_obj_set_style_pad_row(stats_page, 4, 0);
-    lv_obj_set_style_bg_color(stats_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
-    lv_obj_set_style_bg_opa(stats_page, LV_OPA_COVER, 0);
+static void teardown_record_tab(void)
+{
+    size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    lv_obj_delete(s_record_popup);
+    s_record_popup = NULL;
+    s_record_popup_title = NULL;
+    s_record_tab_built = false;
+    size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG, "MEMDIAG 기록팝업 닫기: internal %u -> %u (회수 %d bytes)",
+             (unsigned)heap_before_close, (unsigned)heap_after_close,
+             (int)heap_after_close - (int)heap_before_close);
+    s_stats_delete_btn = NULL;
+    s_stats_delete_lbl = NULL;
+    s_stats_table_header_lbl = NULL;
+    s_stats_jump_prev_btn = NULL;
+    s_stats_jump_prev_lbl = NULL;
+    s_stats_prev_btn = NULL;
+    s_stats_prev_lbl = NULL;
+    s_stats_page_label = NULL;
+    s_stats_next_btn = NULL;
+    s_stats_next_lbl = NULL;
+    s_stats_jump_next_btn = NULL;
+    s_stats_jump_next_lbl = NULL;
+    s_stats_table = NULL;
+}
 
-    /* 2026-09-07(임시 진단 — 사용자 지시: "통계탭에서 소모되는 메모리들을 측정해") — 어젯밤
-     * 부팅단계별 프로파일링과 동일 기법, 이번엔 통계탭 위젯 생성 구간만 잘라서 측정 */
-    size_t heap_before_stats_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+static void cb_open_record_popup(lv_event_t *e)
+{
+    (void)e;
+    build_record_tab();
+}
 
-    /* 2026-09-06(사용자 지시) — 일반로그/전력로그는 새 "로그" 탭(4번째)으로 이동함(아래
-     * log_page 생성부 참고, 위젯/변수는 그대로 재사용). 이 탭은 이제 실제 시계열 통계 —
-     * 그래프(Y=값, X=시간, 1h/12h/24h/1주일)는 다음 단계, 이번엔 최대/최소 판넬 +
-     * 페이지네이션 값 테이블만 구현 */
-    /* 개괄 판넬(2026-09-07 재설계, 구 "최대/최소 판넬") — 제목+Scale은 서브판넬 바깥
-     * (전체폭), 그 아래 좌=온도/이산화탄소, 우=습도/암모니아 서브판넬(사용자 확정) */
-    lv_obj_t *overview_box = lv_obj_create(stats_page);
-    lv_obj_set_size(overview_box, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(overview_box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(overview_box, 6, 0);
+static void build_record_tab(void)
+{
+    if (s_record_tab_built) return;
+    s_record_tab_built = true;
 
-    lv_obj_t *overview_header_row = lv_obj_create(overview_box);
-    lv_obj_set_size(overview_header_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(overview_header_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(overview_header_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(overview_header_row, 0, 0);
-    lv_obj_set_style_pad_all(overview_header_row, 0, 0);
+    lv_obj_t *record_page = create_page_popup();
+    s_record_popup = record_page;
+    lv_obj_t *record_header = add_page_popup_header(record_page, ui_str(STR_TITLE_RECORD),
+                                                      cb_close_record_popup, &s_record_popup_title);
+    lv_obj_set_style_pad_hor(record_page, 4, 0);
+    lv_obj_set_style_pad_bottom(record_page, 4, 0);
+    lv_obj_set_style_pad_row(record_page, 4, 0);
+    lv_obj_set_style_bg_color(record_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    lv_obj_set_style_bg_opa(record_page, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(record_page, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_stats_overview_title = lv_label_create(overview_header_row);
-    lv_label_set_text(s_stats_overview_title, ui_str(STR_PANEL_STATS_OVERVIEW));
-    lv_obj_set_style_text_font(s_stats_overview_title, ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 2026-09-15(사용자 정정 — "닫기 왼쪽 우정렬") — 통계 팝업과 동일 이유(SPACE_BETWEEN
+     * 3자식 균등분산 문제) */
+    lv_obj_set_flex_grow(s_record_popup_title, 1);
 
-    /* 2026-09-07(사용자 지시 — "Overview(좌정렬) - 공간 - 우정렬 드랍다운, 모두지우기") —
-     * 3개를 그냥 SPACE_BETWEEN에 나란히 두면 Scale이 가운데 어중간한 자리에 뜸. Scale+삭제를
-     * 하나의 묶음으로 만들어서 그 묶음 자체를 오른쪽 끝에 붙임(제목은 왼쪽 끝 그대로) */
-    lv_obj_t *overview_header_right = lv_obj_create(overview_header_row);
-    lv_obj_set_size(overview_header_right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(overview_header_right, LV_FLEX_FLOW_ROW);
-    /* 2026-09-07 — stats_nav_cluster와 동일 이유로 세로 CENTER 명시(안 그러면 기본값 TOP) */
-    lv_obj_set_flex_align(overview_header_right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(overview_header_right, 0, 0);
-    lv_obj_set_style_pad_column(overview_header_right, 8, 0);
-    lv_obj_set_style_border_width(overview_header_right, 0, 0);
-
-    s_stats_scale_dd = lv_dropdown_create(overview_header_right);
-    lv_dropdown_set_options(s_stats_scale_dd, ui_str(STR_STATS_SCALE_OPTIONS));
-    lv_dropdown_set_selected(s_stats_scale_dd, 0);
-    lv_obj_set_style_pad_ver(s_stats_scale_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
-    lv_obj_set_style_text_font(s_stats_scale_dd, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_style_text_font(lv_dropdown_get_list(s_stats_scale_dd), ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_add_event_cb(s_stats_scale_dd, cb_stats_scale_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-    s_stats_delete_btn = lv_button_create(overview_header_right);
+    /* 2026-09-15(사용자 지시 — "제목바에 모두 삭제 단추를 옮기고 (단추 색은 빨강이
+     * 좋겠어) 단추 높이는 제목바가 더 높아지지 않게") — 닫기(X) 바로 앞에 삽입 */
+    /* 2026-09-15(사용자 지적 — "크기가 왜 작지? 주화면 Settings하고... X 닫기 버튼이랑
+     * 높이가 같아야") — 패딩을 명시하면 오히려 기본(테마 디폴트) 버튼보다 작아짐(X 버튼/
+     * Settings 버튼 둘 다 패딩 명시 없이 기본값 그대로 씀) — 명시적 패딩 전부 제거 */
+    s_stats_delete_btn = lv_button_create(record_header);
+    lv_obj_set_style_bg_color(s_stats_delete_btn, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_bg_opa(s_stats_delete_btn, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(s_stats_delete_btn, cb_delete_stats_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_move_to_index(s_stats_delete_btn, 1);
     s_stats_delete_lbl = lv_label_create(s_stats_delete_btn);
     lv_label_set_text(s_stats_delete_lbl, ui_str(STR_BTN_DELETE_STATS));
-    /* 2026-09-08(사용자 지시 — "통계의 버튼들은 다 높이가 작네... 폰트도 표준 폰트로") */
-    lv_obj_set_style_text_font(s_stats_delete_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_color(s_stats_delete_lbl, lv_color_white(), 0);
 
-    lv_obj_t *overview_sub_row = lv_obj_create(overview_box);
-    lv_obj_set_size(overview_sub_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(overview_sub_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_border_width(overview_sub_row, 0, 0);
-    lv_obj_set_style_pad_all(overview_sub_row, 0, 0);
-    lv_obj_set_style_pad_column(overview_sub_row, 12, 0);
-
-    lv_obj_t *overview_left_box = lv_obj_create(overview_sub_row);
-    lv_obj_set_flex_grow(overview_left_box, 1);
-    lv_obj_set_height(overview_left_box, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(overview_left_box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_border_width(overview_left_box, 0, 0);
-    lv_obj_set_style_pad_all(overview_left_box, 0, 0);
-
-    s_overview_temp_label = lv_label_create(overview_left_box);
-    lv_obj_set_style_text_font(s_overview_temp_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(s_overview_temp_label, "");
-
-    s_overview_co2_label = lv_label_create(overview_left_box);
-    lv_obj_set_style_text_font(s_overview_co2_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(s_overview_co2_label, "");
-
-    lv_obj_t *overview_right_box = lv_obj_create(overview_sub_row);
-    lv_obj_set_flex_grow(overview_right_box, 1);
-    lv_obj_set_height(overview_right_box, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(overview_right_box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_border_width(overview_right_box, 0, 0);
-    lv_obj_set_style_pad_all(overview_right_box, 0, 0);
-
-    s_overview_humi_label = lv_label_create(overview_right_box);
-    lv_obj_set_style_text_font(s_overview_humi_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(s_overview_humi_label, "");
-
-    s_overview_nh3_label = lv_label_create(overview_right_box);
-    lv_obj_set_style_text_font(s_overview_nh3_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(s_overview_nh3_label, "");
-
-    /* 테이블<->그래프 스와이프 전환(2026-09-07, 사용자 설계 — "사용자는 그래프만 보거나
-     * 테이블만 보는 형태"). 그래프 자체는 다음 단계, 지금은 뼈대(전환+자리)만 */
-    s_stats_pager = lv_obj_create(stats_page);
-    lv_obj_set_size(s_stats_pager, LV_PCT(100), 0);
-    lv_obj_set_flex_grow(s_stats_pager, 1);
-    lv_obj_set_style_pad_all(s_stats_pager, 0, 0);
-    lv_obj_set_style_border_width(s_stats_pager, 0, 0);
-    /* 2026-09-11(그래프 스와이프 진단 — 코드+LVGL 공식 문서 확인: "Gestures are not triggered
-     * if a widget is being scrolled") — 차트/그래프뷰 자체는 이미 스크롤 꺼놨지만, 터치가
-     * 처음 눌리는 지점부터 화면까지 이어지는 조상 체인 중 스크롤 가능한 게 하나라도 남아
-     * 있으면 거기서 드래그를 스크롤로 먼저 채가서 제스처 자체가 안 생김 — 이 팝업은 내용이
-     * 화면에 정확히 맞게 설계돼 있어 스크롤할 이유가 없으므로, 체인 전체(페이저+팝업
-     * 오버레이)에서 스크롤을 꺼서 원천 차단 */
-    lv_obj_remove_flag(s_stats_pager, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_remove_flag(stats_page, LV_OBJ_FLAG_SCROLLABLE);
-
-    s_stats_table_view = lv_obj_create(s_stats_pager);
-    lv_obj_set_size(s_stats_table_view, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_flex_flow(s_stats_table_view, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(s_stats_table_view, 6, 0);
-    lv_obj_set_style_border_width(s_stats_table_view, 0, 0);
+    lv_obj_t *table_view = lv_obj_create(record_page);
+    lv_obj_set_size(table_view, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(table_view, 1);
+    lv_obj_set_flex_flow(table_view, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(table_view, 6, 0);
+    lv_obj_set_style_border_width(table_view, 0, 0);
 
     /* 헤더(항목/값/시간) — 테이블 밖으로 분리해서 스크롤 안 되게 고정(사용자 지시:
      * "스크롤 안되야되. 이게 어려우면 테이블 밖에 둬도 되"), 우측 끝에 현재/전체 페이지도
      * 같이 표시(사용자 지시: "그 헤더 줄에 같이 넣으면") */
-    lv_obj_t *stats_table_header_row = lv_obj_create(s_stats_table_view);
+    lv_obj_t *stats_table_header_row = lv_obj_create(table_view);
     lv_obj_set_size(stats_table_header_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(stats_table_header_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(stats_table_header_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -6596,22 +7017,15 @@ static void build_stats_tab(void)
                            ui_str(STR_STATS_TABLE_HEADER_VALUE), ui_str(STR_STATS_TABLE_HEADER_TIME));
 
     /* 2026-09-07(사용자 지시 — "테이블 이동 단추 4개는 제목줄로 옮겨") — ±1/±10 버튼과
-     * 페이지표시를 전부 한 묶음으로 헤더 우측에 배치(구 하단 버튼줄/우하단 오버레이 제거) */
+     * 페이지표시를 전부 한 묶음으로 헤더 우측에 배치 */
     lv_obj_t *stats_nav_cluster = lv_obj_create(stats_table_header_row);
     lv_obj_set_size(stats_nav_cluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(stats_nav_cluster, LV_FLEX_FLOW_ROW);
-    /* 2026-09-07 버그수정 — flex_align을 안 줘서 기본값(START/START)으로 자식들이 위쪽
-     * 정렬되고 있었음(사용자 지적: "페이지 레이블... TOP으로 되있는 것 같아"). 세로는
-     * CENTER로 버튼들과 나란히 맞춤 */
     lv_obj_set_flex_align(stats_nav_cluster, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(stats_nav_cluster, 0, 0);
     lv_obj_set_style_pad_column(stats_nav_cluster, 4, 0);
     lv_obj_set_style_border_width(stats_nav_cluster, 0, 0);
 
-    /* 2026-09-08(사용자 지시 — "역상처리로 바꿔. Disable도 카메라와 같은 convention으로") —
-     * style_inverted_control()이 흰 글씨를 buttons에 지정하면 자식 라벨로 상속(LVGL
-     * text_color는 상속 속성) — LV_STATE_DISABLED 오버라이드만 따로 얹으면 자동 전환됨
-     * (Camera 판넬 제목처럼 수동 추적 불필요, LVGL 상태 시스템이 대신 처리) */
     s_stats_jump_prev_btn = lv_button_create(stats_nav_cluster);
     style_inverted_control(s_stats_jump_prev_btn);
     lv_obj_set_style_text_color(s_stats_jump_prev_btn, lv_palette_lighten(LV_PALETTE_GREY, 1), LV_STATE_DISABLED);
@@ -6648,67 +7062,316 @@ static void build_stats_tab(void)
     lv_label_set_text(s_stats_jump_next_lbl, ui_str(STR_BTN_JUMP_NEXT10));
     lv_obj_set_style_text_font(s_stats_jump_next_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_stats_table = lv_table_create(s_stats_table_view);
+    s_stats_table = lv_table_create(table_view);
     lv_obj_set_width(s_stats_table, LV_PCT(100));
     lv_obj_set_flex_grow(s_stats_table, 1);
-    lv_table_set_column_count(s_stats_table, 3);
-    lv_table_set_column_width(s_stats_table, 0, 300);
-    lv_table_set_column_width(s_stats_table, 1, 180);
-    lv_table_set_column_width(s_stats_table, 2, 150);
+    /* 2026-09-15(사용자 지시 — "현재 테이블을 2열로 보이고, 높이를 낮춘 후") — 항목/값/시간
+     * 3칸짜리 열그룹을 좌우로 2벌(0-2, 3-5) — refresh_stats_table() 참고 */
+    /* 2026-09-15(사용자 지시 — "시간 표시를 우측 끝으로 더 붙이면 아이템명에 더 폭을 줄 수
+     * 있을 것 같고") — 시간(120)은 "12:34:56" 표시에 여유가 컸던 열이라 줄이고, 그만큼을
+     * 아이템명(130->160)에 넘김. 합계(390)는 그대로라 col_divider 위치는 안 바뀜 */
+    lv_table_set_column_count(s_stats_table, 6);
+    lv_table_set_column_width(s_stats_table, 0, 160);
+    lv_table_set_column_width(s_stats_table, 1, 140);
+    lv_table_set_column_width(s_stats_table, 2, 90);
+    lv_table_set_column_width(s_stats_table, 3, 160);
+    lv_table_set_column_width(s_stats_table, 4, 140);
+    lv_table_set_column_width(s_stats_table, 5, 90);
     lv_obj_set_style_text_font(s_stats_table, ui_font_get(UI_FONT_SIZE_18), 0);
-    /* 줄간격 절반으로 축소(사용자 지시: "줄 간격이 너무 넓어. 반으로 줄여봐") */
     lv_obj_set_style_pad_ver(s_stats_table, 2, LV_PART_ITEMS);
-    /* 선택(탭 시 셀 하이라이트) 비활성화(사용자 지시: "아예 선택이 안되야되") — CLICKABLE
-     * 자체를 끄면 제스처 인식(아래)까지 같이 죽으므로, 눌림 상태 배경만 투명 처리해서
-     * 시각적으로만 무효화 */
+    /* 2026-09-15(사용자 지시 — "아이템명 시작 위치도 좀 더 왼쪽에 붙이면(지금 여백의 반)") —
+     * 테마 기본 pad_all(LV_PART_ITEMS)=24px(PAD_DEF, DISP_LARGE) 중 좌측만 절반(12)로 */
+    lv_obj_set_style_pad_left(s_stats_table, 12, LV_PART_ITEMS);
     lv_obj_set_style_bg_opa(s_stats_table, LV_OPA_TRANSP, LV_PART_ITEMS | LV_STATE_PRESSED);
-    /* 세로 스와이프로 페이지 이동, 좌측 스와이프로 그래프 전환(사용자 설계) */
+    /* 세로 스와이프로 페이지 이동(사용자 설계) — 좌측 스와이프=그래프전환은 표<->그래프
+     * 전환 자체가 없어지면서 제거됨(cb_stats_table_gesture 참고) */
     lv_obj_add_event_cb(s_stats_table, cb_stats_table_gesture, LV_EVENT_GESTURE, NULL);
 
-    /* "<<" 오버레이(좌측 끝, 사용자 설계: 테이블에서 좌측 스와이프/이 버튼 둘 다로 그래프 전환) */
-    lv_obj_t *table_to_graph_btn = lv_button_create(s_stats_table_view);
-    lv_obj_add_flag(table_to_graph_btn, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_align(table_to_graph_btn, LV_ALIGN_LEFT_MID, 2, 0);
-    lv_obj_add_event_cb(table_to_graph_btn, cb_switch_to_graph_tap, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *table_to_graph_lbl = lv_label_create(table_to_graph_btn);
-    lv_label_set_text(table_to_graph_lbl, "<<");
-    lv_obj_set_style_text_font(table_to_graph_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 2026-09-15(사용자 질문 — "두 컬럼이라고 치고, 가운데 컬럼 구분자를 표시할 수 있나?") —
+     * lv_table의 CUSTOM_1..4 셀 컨트롤 플래그는 이 LVGL 버전 draw 코드에서 실제로 안 읽힘
+     * (lv_table.c 확인 — MERGE_RIGHT/TEXT_CROP만 소비됨, CUSTOM 플래그는 상태/스타일에
+     * 연결 안 돼있어 원래 답("가능")이 틀렸음) — 대신 테이블 위에 얇은 세로선 오버레이로 구현.
+     * x=160+140+90=390(왼쪽 열그룹 폭 합, 컬럼폭 상수와 반드시 같이 맞출 것) */
+    lv_obj_t *col_divider = lv_obj_create(s_stats_table);
+    lv_obj_remove_style_all(col_divider);
+    lv_obj_add_flag(col_divider, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_size(col_divider, 2, LV_PCT(100));
+    lv_obj_align(col_divider, LV_ALIGN_TOP_LEFT, 160 + 140 + 90, 0);
+    lv_obj_set_style_bg_color(col_divider, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_bg_opa(col_divider, LV_OPA_COVER, 0);
 
-    /* 2026-09-10(사용자 설계 — "라인+도트", "계열 4개 선택 표시", "탭하면 값") — 실제
-     * lv_chart. 계열 순서 고정: 0=온도(빨강) 1=습도(파랑) 2=CO2(까망) 3=암모니아(청록) */
-    s_stats_graph_view = lv_obj_create(s_stats_pager);
-    lv_obj_set_size(s_stats_graph_view, LV_PCT(100), LV_PCT(100));
+    refresh_stats_table();
+    disable_scroll_recursive(record_page);
+}
+
+/* 2026-09-08(재설계 — 상단바 통계 버튼이 여는 전체화면 팝업) */
+static void build_stats_tab(void)
+{
+    if (s_stats_tab_built) return;  /* 이미 열려있음 */
+    s_stats_tab_built = true;
+
+    lv_obj_t *stats_page = create_page_popup();
+    s_stats_popup = stats_page;
+    lv_obj_t *stats_header = add_page_popup_header(stats_page, ui_str(STR_TAB_STATISTICS),
+                                                     cb_close_stats_popup, &s_stats_popup_title);
+    /* 2026-09-15(사용자 설계 — "통계 팝업 구조를 완전히 바꿔야겠는데... 상단바에서 기록
+     * (Record) 단추를 누르면 현재의 테이블이 전화면 팝업으로... 1. 통계 제목바에 위치") —
+     * 표는 별도 Record 팝업으로 분리(build_record_tab), 여기 제목바엔 여는 버튼만 */
+    /* 2026-09-15(사용자 정정 — "닫기 버튼 좌측으로 우정렬") — 제목 라벨에 flex_grow를
+     * 줘서 남는 공간을 제목이 다 먹게 하면, 뒤에 추가된 버튼들이 자연히 닫기 옆에 붙음
+     * (SPACE_BETWEEN만으로는 3개 자식이 균등분산돼 가운데로 떠버렸음) */
+    lv_obj_set_flex_grow(s_stats_popup_title, 1);
+    /* 2026-09-15(사용자 지적 — "크기가 왜 작지?... X 닫기 버튼이랑 높이가 같아야") —
+     * 패딩 명시 안 함(X/Settings 버튼과 동일하게 테마 기본값) */
+    s_stats_record_btn = lv_button_create(stats_header);
+    lv_obj_add_event_cb(s_stats_record_btn, cb_open_record_popup, LV_EVENT_CLICKED, NULL);
+    lv_obj_move_to_index(s_stats_record_btn, 1);  /* [제목, 닫기] 사이 */
+    lv_obj_t *stats_record_lbl = lv_label_create(s_stats_record_btn);
+    lv_label_set_text(stats_record_lbl, ui_str(STR_BTN_RECORD));
+    lv_obj_set_style_pad_hor(stats_page, 4, 0);
+    lv_obj_set_style_pad_bottom(stats_page, 4, 0);
+    lv_obj_set_style_pad_row(stats_page, 4, 0);
+    lv_obj_set_style_bg_color(stats_page, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
+    lv_obj_set_style_bg_opa(stats_page, LV_OPA_COVER, 0);
+
+    /* 2026-09-07(임시 진단 — 사용자 지시: "통계탭에서 소모되는 메모리들을 측정해") — 어젯밤
+     * 부팅단계별 프로파일링과 동일 기법, 이번엔 통계탭 위젯 생성 구간만 잘라서 측정 */
+    size_t heap_before_stats_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
+    /* 2026-09-06(사용자 지시) — 일반로그/전력로그는 새 "로그" 탭(4번째)으로 이동함(아래
+     * log_page 생성부 참고, 위젯/변수는 그대로 재사용). 이 탭은 이제 실제 시계열 통계 —
+     * 그래프(Y=값, X=시간, 1h/12h/24h/1주일)는 다음 단계, 이번엔 최대/최소 판넬 +
+     * 페이지네이션 값 테이블만 구현 */
+    /* 개괄 판넬(2026-09-07 재설계, 구 "최대/최소 판넬") — 제목+Scale은 서브판넬 바깥
+     * (전체폭), 그 아래 좌=온도/이산화탄소, 우=습도/암모니아 서브판넬(사용자 확정) */
+    lv_obj_t *overview_box = lv_obj_create(stats_page);
+    lv_obj_set_size(overview_box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(overview_box, 6, 0);
+
+    lv_obj_t *overview_header_row = lv_obj_create(overview_box);
+    lv_obj_set_size(overview_header_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_header_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(overview_header_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(overview_header_row, 0, 0);
+    lv_obj_set_style_pad_all(overview_header_row, 0, 0);
+
+    s_stats_overview_title = lv_label_create(overview_header_row);
+    lv_label_set_text(s_stats_overview_title, ui_str(STR_PANEL_STATS_OVERVIEW));
+    lv_obj_set_style_text_font(s_stats_overview_title, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-09-15(사용자 정정 — "아까 지시한게 섞였구만. 스케일 원래 위치로") — 그래프
+     * 툴바로 옮겼던 걸 되돌림(Scale이 그래프뿐 아니라 Overview 계산에도 쓰여서, 그래프
+     * 전용으로 옮기는 게 애초에 맞지 않았음) */
+    lv_obj_t *overview_header_right = lv_obj_create(overview_header_row);
+    lv_obj_set_size(overview_header_right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_header_right, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(overview_header_right, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(overview_header_right, 0, 0);
+    lv_obj_set_style_pad_column(overview_header_right, 8, 0);
+    lv_obj_set_style_border_width(overview_header_right, 0, 0);
+
+    /* 2026-09-15(사용자 지시 — "스케일 드랍다운 왼쪽에 Period: label 추가") */
+    lv_obj_t *scale_period_lbl = lv_label_create(overview_header_right);
+    lv_label_set_text(scale_period_lbl, ui_str(STR_LABEL_PERIOD));
+    lv_obj_set_style_text_font(scale_period_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_stats_scale_dd = lv_dropdown_create(overview_header_right);
+    lv_dropdown_set_options(s_stats_scale_dd, ui_str(STR_STATS_SCALE_OPTIONS));
+    lv_dropdown_set_selected(s_stats_scale_dd, 0);
+    lv_obj_set_style_pad_ver(s_stats_scale_dd, 7, 0);
+    lv_obj_set_style_text_font(s_stats_scale_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_stats_scale_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_stats_scale_dd, cb_stats_scale_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    lv_obj_t *overview_sub_row = lv_obj_create(overview_box);
+    lv_obj_set_size(overview_sub_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_sub_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_border_width(overview_sub_row, 0, 0);
+    lv_obj_set_style_pad_all(overview_sub_row, 0, 0);
+    lv_obj_set_style_pad_column(overview_sub_row, 12, 0);
+
+    lv_obj_t *overview_left_box = lv_obj_create(overview_sub_row);
+    lv_obj_set_flex_grow(overview_left_box, 1);
+    lv_obj_set_height(overview_left_box, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_left_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(overview_left_box, 0, 0);
+    lv_obj_set_style_pad_all(overview_left_box, 0, 0);
+
+    /* 2026-09-15(사용자 설계 — "탭해서 토글"/"탭해서 서큘라", "역상으로(누를 수 있다는
+     * 표시)... 콜론까지만") — 탭 가능한 3줄은 [badge(역상 pill, 콜론까지) + value(보통
+     * 스타일)] 가로 배치. 탭 영역은 행 전체(badge+value 둘 다)로 넓게 잡음 */
+    lv_obj_t *temp_row = lv_obj_create(overview_left_box);
+    lv_obj_set_size(temp_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(temp_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(temp_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(temp_row, 0, 0);
+    lv_obj_set_style_pad_all(temp_row, 0, 0);
+    lv_obj_set_style_pad_column(temp_row, 4, 0);
+    lv_obj_add_flag(temp_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(temp_row, cb_overview_air_temp_tap, LV_EVENT_CLICKED, NULL);
+    s_overview_temp_badge = lv_label_create(temp_row);
+    lv_obj_set_style_text_font(s_overview_temp_badge, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_bg_color(s_overview_temp_badge, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_overview_temp_badge, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_overview_temp_badge, lv_color_white(), 0);
+    lv_obj_set_style_pad_all(s_overview_temp_badge, 4, 0);
+    lv_obj_set_style_radius(s_overview_temp_badge, 4, 0);
+    lv_label_set_text(s_overview_temp_badge, "");
+    s_overview_temp_value = lv_label_create(temp_row);
+    lv_obj_set_style_text_font(s_overview_temp_value, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_overview_temp_value, "");
+
+    s_overview_co2_label = lv_label_create(overview_left_box);
+    lv_obj_set_style_text_font(s_overview_co2_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_overview_co2_label, "");
+
+    lv_obj_t *agar_row = lv_obj_create(overview_left_box);
+    lv_obj_set_size(agar_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(agar_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(agar_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(agar_row, 0, 0);
+    lv_obj_set_style_pad_all(agar_row, 0, 0);
+    lv_obj_set_style_pad_column(agar_row, 4, 0);
+    lv_obj_add_flag(agar_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(agar_row, cb_overview_agar_tap, LV_EVENT_CLICKED, NULL);
+    s_overview_agar_badge = lv_label_create(agar_row);
+    lv_obj_set_style_text_font(s_overview_agar_badge, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_bg_color(s_overview_agar_badge, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_overview_agar_badge, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_overview_agar_badge, lv_color_white(), 0);
+    lv_obj_set_style_pad_all(s_overview_agar_badge, 4, 0);
+    lv_obj_set_style_radius(s_overview_agar_badge, 4, 0);
+    lv_label_set_text(s_overview_agar_badge, "");
+    s_overview_agar_value = lv_label_create(agar_row);
+    lv_obj_set_style_text_font(s_overview_agar_value, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_overview_agar_value, "");
+
+    lv_obj_t *overview_right_box = lv_obj_create(overview_sub_row);
+    lv_obj_set_flex_grow(overview_right_box, 1);
+    lv_obj_set_height(overview_right_box, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(overview_right_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(overview_right_box, 0, 0);
+    lv_obj_set_style_pad_all(overview_right_box, 0, 0);
+
+    lv_obj_t *humi_row = lv_obj_create(overview_right_box);
+    lv_obj_set_size(humi_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(humi_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(humi_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(humi_row, 0, 0);
+    lv_obj_set_style_pad_all(humi_row, 0, 0);
+    lv_obj_set_style_pad_column(humi_row, 4, 0);
+    lv_obj_add_flag(humi_row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(humi_row, cb_overview_air_humi_tap, LV_EVENT_CLICKED, NULL);
+    s_overview_humi_badge = lv_label_create(humi_row);
+    lv_obj_set_style_text_font(s_overview_humi_badge, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_bg_color(s_overview_humi_badge, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_overview_humi_badge, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_overview_humi_badge, lv_color_white(), 0);
+    lv_obj_set_style_pad_all(s_overview_humi_badge, 4, 0);
+    lv_obj_set_style_radius(s_overview_humi_badge, 4, 0);
+    lv_label_set_text(s_overview_humi_badge, "");
+    s_overview_humi_value = lv_label_create(humi_row);
+    lv_obj_set_style_text_font(s_overview_humi_value, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_overview_humi_value, "");
+
+    s_overview_nh3_label = lv_label_create(overview_right_box);
+    lv_obj_set_style_text_font(s_overview_nh3_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_overview_nh3_label, "");
+
+    /* 2026-09-15(사용자 설계 — "지금의 테이블과 그래프 오가는 걸 없애고... 모양은 현재로
+     * 유지해도 되") — 페이저/스와이프 제거, 그래프가 통계 팝업에 직접 들어가 항상 보임.
+     * 표는 build_record_tab()의 별도 팝업으로 분리됨 */
+    lv_obj_remove_flag(stats_page, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_stats_graph_view = lv_obj_create(stats_page);
+    lv_obj_set_size(s_stats_graph_view, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(s_stats_graph_view, 1);
     lv_obj_set_flex_flow(s_stats_graph_view, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_border_width(s_stats_graph_view, 0, 0);
     lv_obj_set_style_pad_all(s_stats_graph_view, 4, 0);
     lv_obj_set_style_pad_row(s_stats_graph_view, 4, 0);
-    lv_obj_add_flag(s_stats_graph_view, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_stats_graph_view, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_color_t chart_colors[STATS_GRAPH_SERIES_COUNT] = {
-        lv_palette_main(LV_PALETTE_RED), lv_palette_main(LV_PALETTE_BLUE),
-        lv_color_black(), lv_palette_darken(LV_PALETTE_YELLOW, 2)  /* 짙은 노랑, 2026-09-10 사용자 지시로 청록에서 변경 */
-    };
-    ui_str_id_t series_label_ids[STATS_GRAPH_SERIES_COUNT] = {
-        STR_CHAN_LABEL_TEMP_C, STR_CHAN_LABEL_HUMI_PCT, STR_CHAN_LABEL_CO2_PPM, STR_CHAN_LABEL_NH3_PPM
-    };
+    /* 2026-09-15(사용자 설계 — "Agar도 빨파흑노 중에... 최대 4개", "가스도 빨파 중에") —
+     * 색은 그룹과 무관하게 슬롯 인덱스에 고정(0=빨강 1=파랑 2=검정 3=짙은노랑). 온습도는
+     * 슬롯 0/1(빨/파)만 쓰고, Agar는 최대 4개(STATS_AGAR_MAX_SLOTS) 전부, 가스는 슬롯
+     * 0/1(빨/파, STATS_GAS_MAX_SLOTS)만 써서 우연히 사용자가 원한 배색과 그대로 일치함 */
+    lv_color_t chart_colors_rt[STATS_GRAPH_SERIES_COUNT];
+    chart_colors_rt[0] = lv_palette_main(LV_PALETTE_RED);
+    chart_colors_rt[1] = lv_palette_main(LV_PALETTE_BLUE);
+    chart_colors_rt[2] = lv_color_black();
+    chart_colors_rt[3] = lv_palette_darken(LV_PALETTE_YELLOW, 2);  /* 짙은 노랑, 2026-09-10 사용자 지시로 청록에서 변경 */
 
+    /* 2026-09-15(사용자 설계 — "온습도/Agar/가스 이렇게 세가지로 나눠서 선택", "체크박스
+     * 왼쪽에 드랍다운 같은게 필요할까?" -> 3버튼 세그먼트로 확정) — 그룹 선택은 체크박스
+     * 줄의 맨 앞에 고정 3버튼. 선택된 그룹만 스타일로 구분(진하게) */
     lv_obj_t *chart_checkbox_row = lv_obj_create(s_stats_graph_view);
     lv_obj_set_size(chart_checkbox_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(chart_checkbox_row, LV_FLEX_FLOW_ROW);
+    /* 2026-09-15(사용자 지적 — "체크박스의 세로 정렬이 가운데가 아니네") — cross-axis 정렬
+     * 기본값(START=위쪽 정렬)이라 높이가 서로 다른 위젯들이 안 맞았음 */
+    lv_obj_set_flex_align(chart_checkbox_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(chart_checkbox_row, 0, 0);
     lv_obj_set_style_pad_all(chart_checkbox_row, 0, 0);
     lv_obj_set_style_pad_column(chart_checkbox_row, 8, 0);
 
+    static const stats_view_group_t s_group_btn_order[3] = {
+        STATS_VIEW_GROUP_AIR, STATS_VIEW_GROUP_AGAR, STATS_VIEW_GROUP_GAS
+    };
+    static const ui_str_id_t s_group_btn_label[3] = {
+        STR_VIEW_GROUP_AIR, STR_VIEW_GROUP_AGAR, STR_VIEW_GROUP_GAS
+    };
+    for (int g = 0; g < 3; g++) {
+        s_stats_group_btn[g] = lv_button_create(chart_checkbox_row);
+        /* 2026-09-15(사용자 지시 — "Air, Agar, Gas 단추를 폭을 더 줄이고 높이도 낮춰") —
+         * Scale 드랍다운이 이 줄에 새로 들어오게 되면서 폭이 부족해질 수 있어 더 좁힘.
+         * 2026-09-15(사용자 정정 — "4번은 한칸만 늘리는 거야. 좌우 한칸") — Scale이 다시
+         * Overview로 돌아가면서 여유가 생겨 1px만 늘림 */
+        lv_obj_set_style_pad_hor(s_stats_group_btn[g], 5, 0);
+        lv_obj_set_style_pad_ver(s_stats_group_btn[g], 4, 0);
+        lv_obj_add_event_cb(s_stats_group_btn[g], cb_stats_graph_group_tap, LV_EVENT_CLICKED,
+                             (void *)(intptr_t)s_group_btn_order[g]);
+        lv_obj_t *glbl = lv_label_create(s_stats_group_btn[g]);
+        lv_label_set_text(glbl, ui_str(s_group_btn_label[g]));
+        /* 2026-09-15(사용자 지적 — "버튼이 높이가 높네 << >> 랑 같으면 좋겠어") — pan 버튼
+         * (<</>>)처럼 폰트 명시 안 하고 기본값 그대로 둬야 버튼 높이가 똑같이 맞음 */
+        /* 2026-09-15(사용자 지적 — "버튼 캡션이 센터 정렬이 아니네") — lv_button은 기본
+         * flex가 없어 자식 라벨이 그냥 좌상단(0,0)에 놓임. 폭이 내용에 딱 맞을 땐 안 보이던
+         * 문제가, 바로 아래에서 세 버튼 폭을 Agar 폭으로 통일하면서 드러남 — 명시적으로 중앙
+         * 정렬(LV_ALIGN_CENTER는 이후 폭이 바뀌어도 재계산 때 계속 따라감) */
+        lv_obj_center(glbl);
+    }
+    /* 2026-09-15(사용자 지시 — "Air, Agar, Gas 버튼의 좌우폭을 통일해. Agar가 가장 크니까
+     * 이 크기에 맞춰") — 기본은 라벨 길이에 따라 폭이 제각각(LV_SIZE_CONTENT)이라, 레이아웃을
+     * 강제로 한 번 계산시켜 가장 넓은 Agar(인덱스1) 폭을 읽은 뒤 셋 다 그 폭으로 고정 */
+    lv_obj_update_layout(chart_checkbox_row);
+    int32_t group_btn_w = lv_obj_get_width(s_stats_group_btn[1]);
+    for (int g = 0; g < 3; g++) {
+        lv_obj_set_width(s_stats_group_btn[g], group_btn_w);
+    }
+    /* 2026-09-15(사용자 지적 — "Air, Agar, Gas 모두 선택되어 있어") — 버튼 기본 테마색이
+     * 이미 파란 계열이라 선택 안 된 버튼도 선택된 것처럼 보였던 버그. 기본 그룹 = 온습도
+     * (AIR)라 0번만 파랑, 나머지는 명시적으로 회색으로 깔아야 구분됨 */
+    lv_obj_set_style_bg_color(s_stats_group_btn[1], lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_bg_color(s_stats_group_btn[2], lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_bg_color(s_stats_group_btn[0], lv_palette_main(LV_PALETTE_BLUE), 0);
+    stats_graph_populate_slots_for_group(STATS_VIEW_GROUP_AIR);
+
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
         s_stats_chart_checkbox[s] = lv_checkbox_create(chart_checkbox_row);
-        lv_checkbox_set_text(s_stats_chart_checkbox[s], ui_str(series_label_ids[s]));
+        lv_checkbox_set_text(s_stats_chart_checkbox[s], "");
         lv_obj_add_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED);
         lv_obj_set_style_text_font(s_stats_chart_checkbox[s], ui_font_get(UI_FONT_SIZE_18), 0);
-        lv_obj_set_style_text_color(s_stats_chart_checkbox[s], chart_colors[s], LV_PART_INDICATOR | LV_STATE_CHECKED);
-        lv_obj_set_style_bg_color(s_stats_chart_checkbox[s], chart_colors[s], LV_PART_INDICATOR | LV_STATE_CHECKED);
+        lv_obj_set_style_text_color(s_stats_chart_checkbox[s], chart_colors_rt[s], LV_PART_INDICATOR | LV_STATE_CHECKED);
+        lv_obj_set_style_bg_color(s_stats_chart_checkbox[s], chart_colors_rt[s], LV_PART_INDICATOR | LV_STATE_CHECKED);
         lv_obj_add_event_cb(s_stats_chart_checkbox[s], cb_stats_chart_series_toggle, LV_EVENT_VALUE_CHANGED,
                              (void *)(intptr_t)s);
     }
+
+    /* 2026-09-15(사용자 지시 — "체크박스를 탭하면 끄고, 체크박스 글씨를 탭하면 정밀/기본이
+     * 바껴야... 바의 공간이 모자라") — 별도 스왑 버튼은 공간 문제로 제거, 체크박스 하나로
+     * 통합(cb_stats_chart_series_toggle에서 탭 x좌표로 인디케이터/글씨 구분) */
 
     /* 2026-09-11(사용자 지시 — "스와이프, 더블탭 다 없애고 그냥 버튼으로 해야겠다") — 제스처/
      * 더블탭 둘 다 실기에서 인식이 안 되거나 불안정해서 완전히 버리고, 가장 단순/확실한
@@ -6719,12 +7382,16 @@ static void build_stats_tab(void)
     lv_obj_set_size(pan_btn_spacer, 1, 1);
     lv_obj_set_flex_grow(pan_btn_spacer, 1);
 
+    /* 2026-09-15(사용자 지시 — "<< >> 버튼 크기, 색상도 테이블 이동처럼") — 통계 표
+     * prev/next 버튼과 동일한 style_inverted_control() 재사용 */
     lv_obj_t *pan_left_btn = lv_button_create(chart_checkbox_row);
+    style_inverted_control(pan_left_btn);
     lv_obj_t *pan_left_lbl = lv_label_create(pan_left_btn);
     lv_label_set_text(pan_left_lbl, "<<");
     lv_obj_add_event_cb(pan_left_btn, cb_stats_graph_pan_left_tap, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *pan_right_btn = lv_button_create(chart_checkbox_row);
+    style_inverted_control(pan_right_btn);
     lv_obj_t *pan_right_lbl = lv_label_create(pan_right_btn);
     lv_label_set_text(pan_right_lbl, ">>");
     lv_obj_add_event_cb(pan_right_btn, cb_stats_graph_pan_right_tap, LV_EVENT_CLICKED, NULL);
@@ -6738,7 +7405,7 @@ static void build_stats_tab(void)
     lv_chart_set_div_line_count(s_stats_chart, 3, 0);
     lv_obj_add_event_cb(s_stats_chart, cb_stats_chart_tap, LV_EVENT_CLICKED, NULL);
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
-        s_stats_chart_series[s] = lv_chart_add_series(s_stats_chart, chart_colors[s], LV_CHART_AXIS_PRIMARY_Y);
+        s_stats_chart_series[s] = lv_chart_add_series(s_stats_chart, chart_colors_rt[s], LV_CHART_AXIS_PRIMARY_Y);
     }
     /* 2026-09-11(사용자 지적 — "상단에 4계열 최대값, 하단에 4계열 최소값") — 정규화상
      * 100=그 계열의 실제 최대, 0=실제 최소라서 차트 맨 위/맨 아래와 항상 일치. 표시여부/
@@ -6766,7 +7433,7 @@ static void build_stats_tab(void)
         s_stats_graph_max_label[s] = lv_label_create(s_stats_graph_max_row);
         lv_obj_add_flag(s_stats_graph_max_label[s], LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_text_font(s_stats_graph_max_label[s], ui_font_get(UI_FONT_SIZE_12), 0);
-        lv_obj_set_style_text_color(s_stats_graph_max_label[s], chart_colors[s], 0);
+        lv_obj_set_style_text_color(s_stats_graph_max_label[s], chart_colors_rt[s], 0);
         lv_obj_set_style_bg_color(s_stats_graph_max_label[s], lv_color_white(), 0);
         /* 2026-09-15(사용자 지적 — "여기 선이 있으면 글씨가 덮혀서 잘 안보여") — 이제 추세선이
          * 창 전체에 거의 항상 이어져 그려져서, 80% 불투명(LV_OPA_80)이던 배경 뒤로 선이 비치는
@@ -6784,7 +7451,7 @@ static void build_stats_tab(void)
         s_stats_graph_min_label[s] = lv_label_create(s_stats_graph_min_row);
         lv_obj_add_flag(s_stats_graph_min_label[s], LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_text_font(s_stats_graph_min_label[s], ui_font_get(UI_FONT_SIZE_12), 0);
-        lv_obj_set_style_text_color(s_stats_graph_min_label[s], chart_colors[s], 0);
+        lv_obj_set_style_text_color(s_stats_graph_min_label[s], chart_colors_rt[s], 0);
         lv_obj_set_style_bg_color(s_stats_graph_min_label[s], lv_color_white(), 0);
         lv_obj_set_style_bg_opa(s_stats_graph_min_label[s], LV_OPA_COVER, 0);
         lv_obj_set_style_pad_all(s_stats_graph_min_label[s], 4, 0);
@@ -6826,7 +7493,7 @@ static void build_stats_tab(void)
     lv_obj_set_style_width(s_stats_gap_chart, 0, LV_PART_INDICATOR);
     lv_obj_set_style_height(s_stats_gap_chart, 0, LV_PART_INDICATOR);
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
-        s_stats_gap_series[s] = lv_chart_add_series(s_stats_gap_chart, chart_colors[s], LV_CHART_AXIS_PRIMARY_Y);
+        s_stats_gap_series[s] = lv_chart_add_series(s_stats_gap_chart, chart_colors_rt[s], LV_CHART_AXIS_PRIMARY_Y);
     }
 
     /* 2026-09-12(사용자 지시 — 좌상단 고정 박스는 지우고 탭 위치에 다시 만듦, "연한 노란색은
@@ -6874,18 +7541,14 @@ static void build_stats_tab(void)
         lv_label_set_text(s_stats_graph_x_labels[i], "");
     }
 
-    lv_obj_t *graph_to_table_btn = lv_button_create(s_stats_graph_view);
-    /* 2026-09-10(사용자 지적 — "그래프 아래 좌측에 있어... 우측 가운데로 옮겨") — 그래프뷰가
-     * 체크박스행+차트+탭라벨 때문에 COLUMN flex가 됐는데, 이 버튼은 IGNORE_LAYOUT 없이
-     * lv_obj_align()만 줘서 flex가 정렬을 덮어씀(테이블 쪽 "<<" 버튼과 동일하게 고쳐야 함) */
-    lv_obj_add_flag(graph_to_table_btn, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_align(graph_to_table_btn, LV_ALIGN_RIGHT_MID, -2, 0);
-    lv_obj_add_event_cb(graph_to_table_btn, cb_switch_to_table_tap, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *graph_to_table_lbl = lv_label_create(graph_to_table_btn);
-    lv_label_set_text(graph_to_table_lbl, ">>");
-    lv_obj_set_style_text_font(graph_to_table_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 2026-09-15(사용자 설계) — ">>"(표로 전환) 버튼 삭제, Record 버튼(제목바)이 그 역할 대체 */
 
     s_stats_page_timer = lv_timer_create(refresh_stats_page, 2000, NULL);
+    /* 2026-09-15(사용자 지적 — "그래프가, 띄우자마자는 안 나오는 버그") — lv_timer_create()는
+     * 주기의 첫 실행을 바로 하지 않고 2000ms 뒤로 미루므로, 팝업을 열자마자는 직전 상태(보통
+     * 빈 차트)가 그대로 보임. 타이머와 별개로 지금 한 번 직접 그림 */
+    s_stats_graph_force_refresh = true;
+    refresh_stats_page(NULL);
     /* 2026-09-15 — "그리기 완료" 실측용, 한 번만 등록(디스플레이 전체 리프레시 이벤트라
      * 차트 객체가 아니라 디스플레이에 건다) */
     lv_display_add_event_cb(lv_display_get_default(), cb_stats_draw_refr_ready, LV_EVENT_REFR_READY, NULL);

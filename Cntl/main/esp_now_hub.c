@@ -1232,12 +1232,22 @@ bool esp_now_hub_is_reconnect_stuck(const uint8_t *mac)
     return stuck;
 }
 
+/* 2026-09-15 — ACTIVE의 의미를 "conn_state==PAIRED(페어링된 이후 타임아웃 전까지 계속 참)"에서
+ * "지금 막 실제로 통신했음"으로 좁힘. 실측 로그: WAKE_HELLO 수신부터 SLEEP_NOW 완료까지 실제
+ * 통신 구간은 보통 1초 미만(재시도 포함 최악 ~900ms), 그 외 나머지(~9초 이상)는 그냥 자는
+ * 중 — 기존 로직은 그 자는 구간까지도 ACTIVE(파랑)로 남아있어 슬립해도 파랑이 안 바뀌는
+ * 버그였음. 통신 버스트 이후 이 창(margin 포함) 안에서만 파랑, 그 외엔(페어링은 유지된 채)
+ * 초록 */
+#define HUB_NODE_ACTIVE_WINDOW_MS 3000
+
 hub_conn_state_t esp_now_hub_get_conn_state(const uint8_t *mac)
 {
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     esp_now_hub_node_t *n = find_node(mac);
     bool ever_paired = n && n->ever_paired;
     bool radio_paired = n && (n->conn_state == NODE_CONN_PAIRED);
+    bool recently_active = n && (now_ms - n->last_seen_ms < HUB_NODE_ACTIVE_WINDOW_MS);
     bool user_unpaired = n && n->user_unpaired;
     xSemaphoreGive(s_nodes_mutex);
 
@@ -1247,7 +1257,7 @@ hub_conn_state_t esp_now_hub_get_conn_state(const uint8_t *mac)
      * 끊김은 성격이 다른데 같은 타임아웃으로 취급하고 있었음(실기에서 확인: 연결해제 버튼을
      * 눌러도 화면이 몇~수십 초 동안 "연결됨"으로 남아있던 원인) */
     if (!ever_paired || user_unpaired || esp_now_hub_is_reconnect_stuck(mac)) return HUB_CONN_STATE_WAITING;
-    return radio_paired ? HUB_CONN_STATE_ACTIVE : HUB_CONN_STATE_PAIRED;
+    return (radio_paired && recently_active) ? HUB_CONN_STATE_ACTIVE : HUB_CONN_STATE_PAIRED;
 }
 
 #define PAIR_REQUEST_RETRY_TIMEOUT_MS 500

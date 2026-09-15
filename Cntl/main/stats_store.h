@@ -28,9 +28,11 @@ typedef struct __attribute__((packed)) {
     uint8_t  chan_index;  /* 그 노드 chan_type[]/chan_val[] 배열에서의 인덱스(0..4) —
                             * 레거시 콤보처럼 같은 chan_type이 한 노드에 2개 이상일 때 구분용 */
     float    value;
-} stats_record_t;  /* 16바이트 고정 — 페이지번호*20*16 = 파일 오프셋 */
+} stats_record_t;  /* 16바이트 고정 — 페이지번호*STATS_STORE_PAGE_SIZE*16 = 파일 오프셋 */
 
-#define STATS_STORE_PAGE_SIZE 20
+/* 2026-09-15(사용자 지시 — "전화면이 되면서... 지금 10개 row로 되어 있는데, 4개는 더
+ * 들어갈 듯") — 2열 x 14행 = 28 */
+#define STATS_STORE_PAGE_SIZE 28
 
 /* 2026-09-11(재설계 — SD 신뢰성 항목4/5, [[project_cntl_sd_reliability_redesign_2026_09_10]]) —
  * 예전엔 채널 하나당 fopen/fwrite/fclose를 따로 했음(WAKE_HELLO_SENS 1건에 최대 5채널이면
@@ -109,6 +111,14 @@ bool stats_store_had_io_error(void);
  * 합성/평균 없이 그대로 저장 — 좁은 스케일이 넓은 스케일보다 더 극단적일 수 없다는 부등식이
  * (합성값이 아예 없으므로) 자동으로 지켜짐. 실측값이 없는 나머지 슬롯은 렌더링 시점
  * (ui_main.c refresh_stats_graph)에 국소 회귀로 추세선을 채움 — 저장 단계에선 안 함.
+ *
+ * 2026-09-15(사용자 설계 — "kind 추가해야지. 계열이 다르다고 보면 되. 같은 온도라도. Agar
+ * 쪽도 마찬가지... 특히 Agar는 각 기기마다 하나의 계열로 봐야해") — 사전집계 키에 mac을
+ * 추가함(chan_type만으로는 SCD41/SHT45가 같은 온도를 보낼 때 서로 다른 장치의 값이 한
+ * 버킷 스트림에 섞여 들어가 구분이 불가능했음). "종류(SCD41군)" 단위 블렌딩이나 Agar의
+ * "혼합" 항목처럼 여러 mac을 하나로 합쳐 보여줘야 하는 화면은, 이 mac 단위 읽기 함수를
+ * 장치마다 한 번씩 호출해 호출부(ui_main.c)에서 조합함 — 저장소 자체는 항상 mac 단위로만
+ * 쪼개 저장.
  * ════════════════════════════════════════════════════════════ */
 
 /* ui_main.c의 그래프 스케일 드롭다운(1H/12H/1D/3D/1W) 순서와 반드시 일치 —
@@ -122,20 +132,23 @@ extern const uint32_t STATS_SCALE_SECONDS[STATS_SCALE_COUNT];  /* 3600/43200/864
 
 typedef struct __attribute__((packed)) {
     uint32_t bucket_start_unix;  /* 벽시계 정렬(unix_time/버킷폭*버킷폭) — 그 버킷의 시작 */
+    uint8_t  mac[6];             /* 2026-09-15(사용자 지시 — "kind 추가해야지... Agar는 각
+                                     기기마다 하나의 계열") — 장치까지 키에 포함. SCD41/SHT45가
+                                     둘 다 온도를 보내도 서로 다른 계열로 분리 저장됨 */
     uint8_t  chan_type;
     uint8_t  sample_count;       /* 진단용 — 이 버킷 구간에 실제로 들어온 실측값 개수(평균에
                                      쓰이지 않음, 대표값 선정과 무관) */
     float    avg_value;          /* "평균"이 아니라 버킷 중앙시각에 가장 가까운 실측값 그대로
                                      (필드명은 하위호환을 위해 유지, 의미만 바뀜) */
-} stats_bucket_t;  /* 10바이트 고정 */
+} stats_bucket_t;  /* 16바이트 고정(mac 추가로 10->16) */
 
 /* scale_idx(0..4)의 사전집계 저장에서, [window_start_unix, window_end_unix) 범위 안의
- * chan_type 버킷들을 out에 채움(파일에 쓰인 순서=시간순 그대로). 실제 채운 개수 반환.
+ * mac+chan_type 버킷들을 out에 채움(파일에 쓰인 순서=시간순 그대로). 실제 채운 개수 반환.
  * 각 버킷이 스케일 안의 몇 번째 슬롯인지는 호출부가
  * (bucket_start_unix - window_start_unix) / (STATS_SCALE_SECONDS[scale_idx] /
  * STATS_AGG_POINTS_PER_SCALE)로 직접 계산 — 없는 슬롯(원본 기록이 아예 없던 구간)은 이
  * 함수가 채워주지 않으므로 호출부가 "데이터 없음"으로 처리 */
-uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type,
+uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type, const uint8_t mac[6],
                                 uint32_t window_start_unix, uint32_t window_end_unix,
                                 stats_bucket_t *out, uint32_t out_cap);
 

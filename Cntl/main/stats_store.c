@@ -32,19 +32,42 @@ static bool s_last_io_error = false;
  * ════════════════════════════════════════════════════════════ */
 const uint32_t STATS_SCALE_SECONDS[STATS_SCALE_COUNT] = { 3600, 43200, 86400, 259200, 604800 };
 
+/* 2026-09-15(사용자 지시 — "kind 추가해야지... Agar는 각 기기마다 하나의 계열") — mac을
+ * 저장 키에 추가하면서 레코드 크기가 바뀜(10->16바이트) — 예전 포맷 파일을 잘못 읽지
+ * 않도록 파일명 자체를 바꿔서 예전 파일은 그냥 고아로 남김(신뢰성 항목들과 동일하게
+ * "조용히 잘못 읽는 것"보다 "그냥 새로 시작"이 안전) */
 static const char *s_agg_file_path[STATS_SCALE_COUNT] = {
-    SD_STORAGE_MOUNT_POINT "/stats/agg_1h.bin",
-    SD_STORAGE_MOUNT_POINT "/stats/agg_12h.bin",
-    SD_STORAGE_MOUNT_POINT "/stats/agg_1d.bin",
-    SD_STORAGE_MOUNT_POINT "/stats/agg_3d.bin",
-    SD_STORAGE_MOUNT_POINT "/stats/agg_1w.bin",
+    SD_STORAGE_MOUNT_POINT "/stats/agg_1h_v2.bin",
+    SD_STORAGE_MOUNT_POINT "/stats/agg_12h_v2.bin",
+    SD_STORAGE_MOUNT_POINT "/stats/agg_1d_v2.bin",
+    SD_STORAGE_MOUNT_POINT "/stats/agg_3d_v2.bin",
+    SD_STORAGE_MOUNT_POINT "/stats/agg_1w_v2.bin",
 };
 
 /* chan_type은 sensor_channel_type_t(esp_now_link.h)인데 이 파일은 저수준이라 그 헤더에
  * 의존 안 함 — 그냥 작은 고정크기 배열로 충분(현재 SENSOR_CHAN_TYPE_COUNT=5, 여유있게 8) */
 #define STATS_AGG_MAX_CHAN_TYPES 8
 
-/* 각 (스케일, chan_type)마다 "지금 채워지는 중인" 버킷 하나만 RAM에 유지 — 재부팅하면
+/* ESP_NOW_HUB_MAX_NODES(esp_now_hub.h)와 같은 값이지만 이 파일은 저수준이라 그 헤더에
+ * 의존 안 함(위 chan_type과 동일 원칙) — 실제 페어링 가능한 노드 수 이상은 어차피 안 옴 */
+#define STATS_AGG_MAX_MACS 8
+
+static uint8_t s_agg_known_macs[STATS_AGG_MAX_MACS][6];
+static int     s_agg_known_mac_count = 0;
+
+/* mac -> 누적 슬롯 인덱스. 처음 보는 mac이면 새로 등록, 꽉 찼으면 -1(그 장치의 사전집계는
+ * 포기 — 원본 로그(values.bin)엔 여전히 남으므로 데이터 유실은 아님, 표시만 못 함) */
+static int agg_mac_slot(const uint8_t mac[6])
+{
+    for (int i = 0; i < s_agg_known_mac_count; i++) {
+        if (memcmp(s_agg_known_macs[i], mac, 6) == 0) return i;
+    }
+    if (s_agg_known_mac_count >= STATS_AGG_MAX_MACS) return -1;
+    memcpy(s_agg_known_macs[s_agg_known_mac_count], mac, 6);
+    return s_agg_known_mac_count++;
+}
+
+/* 각 (스케일, chan_type, mac)마다 "지금 채워지는 중인" 버킷 하나만 RAM에 유지 — 재부팅하면
  * 그냥 리셋(진행 중이던 버킷은 유실, 사용자 설계: "다 채워진 후"에만 보이므로 문제 없음) */
 typedef struct {
     uint32_t bucket_start;   /* 0 = 아직 시작 안 함 */
@@ -54,11 +77,12 @@ typedef struct {
     uint16_t seen_count;     /* 이 버킷에 실제로 들어온 실측값 개수(진단용, sample_count로 기록) */
 } agg_accum_t;
 
-static agg_accum_t s_agg_accum[STATS_SCALE_COUNT][STATS_AGG_MAX_CHAN_TYPES];
+static agg_accum_t s_agg_accum[STATS_SCALE_COUNT][STATS_AGG_MAX_CHAN_TYPES][STATS_AGG_MAX_MACS];
 
 /* 방금 닫힌 버킷 하나를 그 스케일의 파일에 씀 — 실패해도 로그만(치명적 아님, 원본 기록
  * 자체는 이미 성공한 뒤라 데이터 유실은 이 사전집계 한 포인트뿐) */
-static void agg_flush_bucket(uint8_t scale_idx, uint8_t chan_type, const agg_accum_t *acc)
+static void agg_flush_bucket(uint8_t scale_idx, uint8_t chan_type, const uint8_t mac[6],
+                              const agg_accum_t *acc)
 {
     if (!acc->have_value) return;
     stats_bucket_t rec = {
@@ -67,6 +91,7 @@ static void agg_flush_bucket(uint8_t scale_idx, uint8_t chan_type, const agg_acc
         .sample_count       = (acc->seen_count > 255) ? 255 : (uint8_t)acc->seen_count,
         .avg_value          = acc->best_value,
     };
+    memcpy(rec.mac, mac, 6);
     FILE *f = fopen(s_agg_file_path[scale_idx], "ab");
     if (!f) {
         ESP_LOGW(TAG, "사전집계 버킷 열기 실패(scale=%u) — 이 포인트만 유실", (unsigned)scale_idx);
@@ -87,17 +112,19 @@ static void agg_flush_bucket(uint8_t scale_idx, uint8_t chan_type, const agg_acc
  *     우연히 들어온 값이 항상 이겨서 구조적으로 편향됨(사용자 질문 "지난 값을 하는 경우
  *     놓치는 경우가 있을까봐" — 그 우려대로).
  * stats_agg_update()가 raw 기록 성공 직후 레코드마다 호출 */
-static void stats_agg_update(uint8_t chan_type, uint32_t unix_time, float value)
+static void stats_agg_update(const uint8_t mac[6], uint8_t chan_type, uint32_t unix_time, float value)
 {
     if (chan_type >= STATS_AGG_MAX_CHAN_TYPES) return;
+    int mac_slot = agg_mac_slot(mac);
+    if (mac_slot < 0) return;  /* STATS_AGG_MAX_MACS 초과 — 이 장치는 사전집계만 스킵(원본은 남음) */
     for (int scale = 0; scale < STATS_SCALE_COUNT; scale++) {
         uint32_t bucket_width = STATS_SCALE_SECONDS[scale] / STATS_AGG_POINTS_PER_SCALE;
         if (bucket_width == 0) bucket_width = 1;
         uint32_t bucket_start = (unix_time / bucket_width) * bucket_width;  /* 벽시계 정렬 */
 
-        agg_accum_t *acc = &s_agg_accum[scale][chan_type];
+        agg_accum_t *acc = &s_agg_accum[scale][chan_type][mac_slot];
         if (acc->have_value && acc->bucket_start != bucket_start) {
-            agg_flush_bucket((uint8_t)scale, chan_type, acc);
+            agg_flush_bucket((uint8_t)scale, chan_type, mac, acc);
             acc->have_value  = false;
             acc->seen_count  = 0;
         }
@@ -121,7 +148,7 @@ static bool agg_read_bucket_at(FILE *f, uint32_t idx, stats_bucket_t *out)
     return fread(out, sizeof(*out), 1, f) == 1;
 }
 
-uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type,
+uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type, const uint8_t mac[6],
                                 uint32_t window_start_unix, uint32_t window_end_unix,
                                 stats_bucket_t *out, uint32_t out_cap)
 {
@@ -160,7 +187,7 @@ uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type,
     stats_bucket_t rec;
     while (picked < out_cap && fread(&rec, sizeof(rec), 1, f) == 1) {
         if (rec.bucket_start_unix >= window_end_unix) break;
-        if (rec.chan_type == chan_type) out[picked++] = rec;
+        if (rec.chan_type == chan_type && memcmp(rec.mac, mac, 6) == 0) out[picked++] = rec;
     }
     fclose(f);
     return picked;
@@ -216,7 +243,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
      * 갱신(항목12: 이건 각 스케일이 독립 파일이라 "여러 파일에 걸친 모아쓰기"는 의미가 없고
      * — 한 스케일이 한 번에 닫는 버킷은 사실상 항상 최대 1개뿐이라 애초에 모아쓸 게 없음) */
     for (uint32_t i = 0; i < count; i++) {
-        stats_agg_update(records[i].chan_type, records[i].unix_time, records[i].value);
+        stats_agg_update(records[i].mac, records[i].chan_type, records[i].unix_time, records[i].value);
     }
 
     s_stats_append_call_count++;
