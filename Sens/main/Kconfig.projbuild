@@ -45,7 +45,7 @@ menu "Sens Sensor Node"
     config SENS_DEEPSLEEP_ENABLE
         bool "Deep Sleep 주기적 웨이크 사용"
         default y
-        depends on SENS_SENSOR_SCD41 || SENS_SENSOR_MQ137 || SENS_SENSOR_SC05
+        depends on SENS_SENSOR_SCD41 || SENS_SENSOR_MQ137 || SENS_SENSOR_SC05 || SENS_SENSOR_SHT45
         help
             꺼면 상시 동작 상태로 남음(콘솔/벤치 작업 시 매 사이클 USB 재열거를 안 겪기 위한
             개발용 이스케이프 해치, CAM의 CAM_DEEPSLEEP_ENABLE과 동일 이유). 켜면 CNTL이
@@ -54,7 +54,7 @@ menu "Sens Sensor Node"
     config SENS_DEEPSLEEP_AWAKE_MARGIN_SEC
         int "RWDT 깨어있는 시간 마진(초)"
         default 30
-        depends on (SENS_SENSOR_SCD41 || SENS_SENSOR_MQ137 || SENS_SENSOR_SC05) && SENS_DEEPSLEEP_ENABLE
+        depends on (SENS_SENSOR_SCD41 || SENS_SENSOR_MQ137 || SENS_SENSOR_SC05 || SENS_SENSOR_SHT45) && SENS_DEEPSLEEP_ENABLE
         help
             RWDT 예산 = 샘플 주기(딥슬립 주기) + 이 마진. Sens는 사진전송 등 무거운 작업이
             없어 CAM(기본 90)보다 깨어있는 시간이 훨씬 짧아서 기본값을 30으로 낮춤 — 페어링/

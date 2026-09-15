@@ -12,7 +12,7 @@
 # SRCS(빌드 단계에서 재평가됨)만 가르고 두 파일을 동시에 REQUIRES에 넣지는 않음(esp_now_node.h가
 # 둘 다에서 쓰는 공용 선언부).
 if(CONFIG_SENS_BUILD_HEADLESS)
-    if(CONFIG_SENS_SENSOR_SCD41 OR CONFIG_SENS_SENSOR_MQ137 OR CONFIG_SENS_SENSOR_SC05)
+    if(CONFIG_SENS_SENSOR_SCD41 OR CONFIG_SENS_SENSOR_MQ137 OR CONFIG_SENS_SENSOR_SC05 OR CONFIG_SENS_SENSOR_SHT45)
         # 2026-09-12(사용자 지시 — "장치 종류가 달라도 프로토콜/루틴은 동일해야 한다") —
         # 캐스크(딥슬립) 루틴은 이제 SCD41 전용이 아니라, 이 루틴을 쓰는 모든 센서 종류가
         # 공유함(sens_deep_sleep_node.c 안에서 #if CONFIG_SENS_SENSOR_*로만 갈림)

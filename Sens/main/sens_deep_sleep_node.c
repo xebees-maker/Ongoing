@@ -72,8 +72,15 @@
     static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
         SENSOR_CHAN_NH3_PPM,   /* 2026-09-15 — YYS SC05-NH3, 전기화학식, sc05.h 참고 */
     };
+#elif CONFIG_SENS_SENSOR_SHT45
+    #include "sht4x.h"
+    #define SENSOR_KIND_CURRENT  SENSOR_KIND_SHT45
+    #define SENSOR_CHAN_COUNT    2
+    static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
+        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT,
+    };
 #else
-    #error "sens_deep_sleep_node.c는 SCD41/MQ137/SC05만 지원 — 다른 센서를 캐스크로 옮기려면 여기 분기 추가"
+    #error "sens_deep_sleep_node.c는 SCD41/MQ137/SC05/SHT45만 지원 — 다른 센서를 캐스크로 옮기려면 여기 분기 추가"
 #endif
 
 static const char *TAG = "sens_deep_sleep_node";
@@ -380,6 +387,10 @@ static bool measure_sensor(float out[SENSOR_CHAN_COUNT])
     /* Auto 모드(공장 기본값)라 트리거 없이 그냥 다음 프레임을 기다려서 잡음 —
      * 1초마다 쏘므로 2500ms면 최소 2번의 기회를 보장(sc05.h 파일 설명 참고) */
     return sc05_read(&out[0], 2500);
+#elif CONFIG_SENS_SENSOR_SHT45
+    /* sht4x_read()는 명령전송→10ms 대기→수신까지 자체 블로킹으로 끝남(트리거/폴링 분리 없음,
+     * sht4x.c 참고) — SCD41처럼 별도 대기/폴링 루프가 필요 없음 */
+    return sht4x_read(&out[0], &out[1]);
 #endif
 }
 
@@ -459,6 +470,12 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
             int sc05_ppm_x100 = (int)(s_cached_vals[0] * 100.0f + 0.5f);
             ESP_LOGI(TAG, "MEASMARK 측정 성공 — 측정ID=%u NH3=%d.%02dppm",
                      (unsigned)s_measurement_id, sc05_ppm_x100 / 100, sc05_ppm_x100 % 100);
+#elif CONFIG_SENS_SENSOR_SHT45
+            int sht_temp_x10 = (int)(s_cached_vals[0] * 10.0f + 0.5f);
+            int sht_humi_x10 = (int)(s_cached_vals[1] * 10.0f + 0.5f);
+            ESP_LOGI(TAG, "MEASMARK 측정 성공 — 측정ID=%u temp=%d.%d humi=%d.%d",
+                     (unsigned)s_measurement_id, sht_temp_x10 / 10, sht_temp_x10 % 10,
+                     sht_humi_x10 / 10, sht_humi_x10 % 10);
 #endif
         } else {
             ESP_LOGW(TAG, "MEASMARK 판독 실패 — 직전 캐시값(측정ID=%u) 재사용", (unsigned)s_measurement_id);
@@ -522,6 +539,12 @@ void app_main(void)
         ESP_LOGW(TAG, "SCD41 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
     }
     vTaskDelay(pdMS_TO_TICKS(1000));  /* 싱글샷용 전원안정화 지연(위 주석 참고) */
+#elif CONFIG_SENS_SENSOR_SHT45
+    /* SHT4x는 SCD41과 달리 전원안정화 지연 요구사항이 문서화돼있지 않음(예전 sensor_node.c도
+     * 지연 없이 바로 init) — I2C 버스 공유(BSP_C3_I2C_*)는 SCD41과 동일 자리 */
+    if (!sht4x_init(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) {
+        ESP_LOGW(TAG, "SHT45 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
+    }
 #endif
     /* 2026-09-12(MQ137 추가) — AO 채널 설정에 공유 ADC 유닛 핸들이 필요한데, 그 핸들은
      * battery_init() 이후에나 생기므로 여기서는 못 함(아래 battery_init()+VIN 채널 설정
