@@ -65,8 +65,15 @@
     static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
         SENSOR_CHAN_NH3_PPM,   /* 2026-09-12 — 아직 진짜 ppm 아님, mq137.h 참고 */
     };
+#elif CONFIG_SENS_SENSOR_SC05
+    #include "sc05.h"
+    #define SENSOR_KIND_CURRENT  SENSOR_KIND_SC05
+    #define SENSOR_CHAN_COUNT    1
+    static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
+        SENSOR_CHAN_NH3_PPM,   /* 2026-09-15 — YYS SC05-NH3, 전기화학식, sc05.h 참고 */
+    };
 #else
-    #error "sens_deep_sleep_node.c는 SCD41/MQ137만 지원 — 다른 센서를 캐스크로 옮기려면 여기 분기 추가"
+    #error "sens_deep_sleep_node.c는 SCD41/MQ137/SC05만 지원 — 다른 센서를 캐스크로 옮기려면 여기 분기 추가"
 #endif
 
 static const char *TAG = "sens_deep_sleep_node";
@@ -369,6 +376,10 @@ static bool measure_sensor(float out[SENSOR_CHAN_COUNT])
     bool ok = mq137_read(&out[0], &do_alarm);
     if (ok && do_alarm) ESP_LOGW(TAG, "MQ137 DO 임계값 초과 알림");
     return ok;
+#elif CONFIG_SENS_SENSOR_SC05
+    /* Auto 모드(공장 기본값)라 트리거 없이 그냥 다음 프레임을 기다려서 잡음 —
+     * 1초마다 쏘므로 2500ms면 최소 2번의 기회를 보장(sc05.h 파일 설명 참고) */
+    return sc05_read(&out[0], 2500);
 #endif
 }
 
@@ -444,6 +455,10 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
             int ppm_x10 = (int)(s_cached_vals[0] * 10.0f + 0.5f);
             ESP_LOGI(TAG, "MEASMARK 측정 성공 — 측정ID=%u NH3=%d.%dppm(잠정계수)",
                      (unsigned)s_measurement_id, ppm_x10 / 10, ppm_x10 % 10);
+#elif CONFIG_SENS_SENSOR_SC05
+            int sc05_ppm_x100 = (int)(s_cached_vals[0] * 100.0f + 0.5f);
+            ESP_LOGI(TAG, "MEASMARK 측정 성공 — 측정ID=%u NH3=%d.%02dppm",
+                     (unsigned)s_measurement_id, sc05_ppm_x100 / 100, sc05_ppm_x100 % 100);
 #endif
         } else {
             ESP_LOGW(TAG, "MEASMARK 판독 실패 — 직전 캐시값(측정ID=%u) 재사용", (unsigned)s_measurement_id);
@@ -544,6 +559,13 @@ void app_main(void)
     if (!mq137_init(s_vin_adc, BSP_C3_MQ137_AO_ADC_CHANNEL, BSP_C3_MQ137_AO_ADC_ATTEN,
                     BSP_C3_MQ137_DO_PIN)) {
         ESP_LOGW(TAG, "MQ137 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
+    }
+#elif CONFIG_SENS_SENSOR_SC05
+    /* 2026-09-15 — 공유 ADC 핸들 의존성 없음(UART), MQ137과 달리 battery_init() 이후로
+     * 미룰 필요는 없지만 위치 일관성을 위해 같은 자리에 둠 */
+    if (!sc05_init(BSP_C3_SC05_UART_PORT, BSP_C3_SC05_UART_RX, BSP_C3_SC05_UART_TX,
+                   BSP_C3_SC05_UART_BAUD)) {
+        ESP_LOGW(TAG, "SC05 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
     }
 #endif
 

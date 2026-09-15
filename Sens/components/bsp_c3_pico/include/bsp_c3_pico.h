@@ -49,6 +49,24 @@ extern "C" {
 #define BSP_C3_MQ137_DO_PIN          GPIO_NUM_4
 
 /* ════════════════════════════════════════════════════════════
+ * SC05-NH3 (YYS, 전기화학식 암모니아, UART) — 2026-09-15 실험용 배선.
+ * 이 보드는 J3 헤더(GND/VIN/IO6/IO8/IO10 등이 한 줄에 나옴, WeMos 공식
+ * sch_c3_pico_v1.0.0.pdf 확인) 하나에서 GND/VIN/RX/TX를 전부 뽑음 — 납땜 편의상
+ * GPIO0/4(J2 쪽) 대신 GPIO6/8(J3 쪽)로 선택(사용자 확인). U0TXD/U0RXD(GPIO20/21)는
+ * 콘솔 UART0가 이미 쓰고 있어서 제외(sdkconfig CONFIG_ESP_CONSOLE_UART_NUM=0).
+ * 전원은 VIN(배터리/USB 합류, 실측 3.7~4.7V) — SC05 동작전압 3.7~5.5V 범위 안.
+ * 단, 배터리 단독 방전 시 3.7V 밑으로 내려가면 스펙 밖이라, 이 노드는 MQ137처럼
+ * 상시전원(USB) 전제(사용자 확인, "배터리 단독 안 된다"는 결론까지 나눈 대화 참고).
+ * 통신은 Auto 모드(공장 기본값, 별도 명령 없이 1초마다 9바이트 프레임을 그냥 쏨)를
+ * 그대로 씀 — Non-Auto 전환 명령 바이트가 데이터시트 내에서도 서로 안 맞아
+ * (Table5=0x40 vs Table6=0x41/prose="0x03,0x04") 신뢰 안 하기로 함.
+ * ════════════════════════════════════════════════════════════ */
+#define BSP_C3_SC05_UART_PORT   1
+#define BSP_C3_SC05_UART_RX     GPIO_NUM_8   /* SC05 Pin6/T(TXD) <- 여기로 들어옴 */
+#define BSP_C3_SC05_UART_TX     GPIO_NUM_6   /* SC05 Pin5/R(RXD) <- 여기로 나감(Auto 모드라 실제로 안 씀) */
+#define BSP_C3_SC05_UART_BAUD   9600
+
+/* ════════════════════════════════════════════════════════════
  * 배터리 ADC — 보드 내장 분압(R7/R10 100k+100k, JP1 "BAT_AD" 점퍼로 GPIO3에 연결)
  * ════════════════════════════════════════════════════════════ */
 #define BSP_C3_BATTERY_ADC_UNIT     ADC_UNIT_1

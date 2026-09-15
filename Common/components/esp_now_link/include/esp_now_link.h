@@ -292,15 +292,22 @@ typedef enum {
     SENSOR_CHAN_TYPE_COUNT,   /* 배열 크기용 — 새 채널 종류 추가 시 항상 마지막에 유지 */
 } sensor_channel_type_t;
 
-/* 노드에 붙은 센서 모델 — Cntl UI에서 라벨 표시용, 채널 해석에는 안 씀 */
+/* 노드에 붙은 센서 모델 — Cntl UI에서 라벨 표시용, 채널 해석에는 안 씀.
+ * 2026-09-15(사용자 지시 — "이 작업 이후 또 센서를 추가할텐데 정리하고") — MQ137/SC05를
+ * 중간에 끼워넣으면서 SENSOR_KIND_DHT22_SCD41_COMBO 값이 밀리는 문제가 있었음(엔트리
+ * 순서에 값이 암묵적으로 매겨지는 구조라 중간 삽입마다 재발). 앞으로도 센서가 계속
+ * 추가될 걸 전제로, 모든 값을 명시적 숫자로 고정 — 이후 새 센서는 끝에 새 숫자만 추가하면
+ * 되고, 기존 값은 순서와 무관하게 절대 안 밀림 */
 typedef enum {
-    SENSOR_KIND_UNKNOWN = 0,
-    SENSOR_KIND_SCD41,
-    SENSOR_KIND_DHT22,
-    SENSOR_KIND_SHT45,
-    SENSOR_KIND_SHT40,
-    SENSOR_KIND_MQ137,               /* 2026-09-12 — 암모니아, 아날로그(AO)+디지털(DO) */
-    SENSOR_KIND_DHT22_SCD41_COMBO,   /* 레거시 Waveshare LCD 콤보 앱 전용 */
+    SENSOR_KIND_UNKNOWN            = 0,
+    SENSOR_KIND_SCD41               = 1,
+    SENSOR_KIND_DHT22               = 2,
+    SENSOR_KIND_SHT45               = 3,
+    SENSOR_KIND_SHT40               = 4,
+    SENSOR_KIND_DHT22_SCD41_COMBO   = 5,   /* 레거시 Waveshare LCD 콤보 앱 전용 */
+    SENSOR_KIND_MQ137               = 6,   /* 2026-09-12 — 암모니아, 아날로그(AO)+디지털(DO) */
+    SENSOR_KIND_SC05                = 7,   /* 2026-09-15 — 암모니아(YYS SC05-NH3), 전기화학식, UART */
+    /* 새 센서 추가 시 여기(끝)에 다음 숫자로만 추가 — 기존 항목 순서/값 절대 변경 금지 */
 } sensor_kind_t;
 
 typedef struct __attribute__((packed)) {

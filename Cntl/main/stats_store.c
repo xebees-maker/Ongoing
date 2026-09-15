@@ -47,9 +47,11 @@ static const char *s_agg_file_path[STATS_SCALE_COUNT] = {
 /* 각 (스케일, chan_type)마다 "지금 채워지는 중인" 버킷 하나만 RAM에 유지 — 재부팅하면
  * 그냥 리셋(진행 중이던 버킷은 유실, 사용자 설계: "다 채워진 후"에만 보이므로 문제 없음) */
 typedef struct {
-    uint32_t bucket_start;  /* 0 = 아직 시작 안 함 */
-    double   sum;
-    uint16_t count;
+    uint32_t bucket_start;   /* 0 = 아직 시작 안 함 */
+    bool     have_value;     /* 이 버킷에 후보값이 하나라도 들어왔는지 */
+    uint32_t best_dist_abs;  /* 지금까지의 최적 후보가 버킷 중앙에서 떨어진 거리(초, 절대값) */
+    float    best_value;     /* 버킷 중앙시각에 가장 가까운 실측값(합성/평균 없음) */
+    uint16_t seen_count;     /* 이 버킷에 실제로 들어온 실측값 개수(진단용, sample_count로 기록) */
 } agg_accum_t;
 
 static agg_accum_t s_agg_accum[STATS_SCALE_COUNT][STATS_AGG_MAX_CHAN_TYPES];
@@ -58,12 +60,12 @@ static agg_accum_t s_agg_accum[STATS_SCALE_COUNT][STATS_AGG_MAX_CHAN_TYPES];
  * 자체는 이미 성공한 뒤라 데이터 유실은 이 사전집계 한 포인트뿐) */
 static void agg_flush_bucket(uint8_t scale_idx, uint8_t chan_type, const agg_accum_t *acc)
 {
-    if (acc->count < 2) return;  /* "절대 단일 샘플 아님"(사용자 설계) — 2개 미만이면 그냥 버림 */
+    if (!acc->have_value) return;
     stats_bucket_t rec = {
         .bucket_start_unix = acc->bucket_start,
         .chan_type          = chan_type,
-        .sample_count       = (acc->count > 255) ? 255 : (uint8_t)acc->count,
-        .avg_value          = (float)(acc->sum / (double)acc->count),
+        .sample_count       = (acc->seen_count > 255) ? 255 : (uint8_t)acc->seen_count,
+        .avg_value          = acc->best_value,
     };
     FILE *f = fopen(s_agg_file_path[scale_idx], "ab");
     if (!f) {
@@ -74,17 +76,17 @@ static void agg_flush_bucket(uint8_t scale_idx, uint8_t chan_type, const agg_acc
     fclose(f);
 }
 
-/* 2026-09-12(사용자 지시 — "1H를 2개로 했으면 12H도 2개로... 니 맘대로 주기가 길면 샘플을
- * 더하란 얘기가 아니야") — 평균에 들어가는 원본 샘플 개수는 스케일과 무관하게 항상 고정(2개)
- * 이어야 함. 그래야 "좁은 스케일 최대 <= 넓은 스케일 최대"가 항상 보장됨(넓은 구간일수록
- * 표본이 늘어나 순간 극값이 희석되면 이 부등식이 깨짐 — 실측으로 확인된 버그) */
-#define STATS_AGG_FIXED_SAMPLE_COUNT 2
-
-/* stats_store_append_batch()가 raw 기록 성공 직후 레코드마다 호출 — 5개 스케일 전부의
- * 진행 중 구간에 이 값을 반영, 시간 경계를 넘었으면 그 스케일만 먼저 닫아서 씀. 구간 폭
- * (시간)은 스케일마다 다르지만(파일 읽기 비용 때문에 그대로 둠), 그 구간에서 실제 평균에
- * 들어가는 표본 수는 STATS_AGG_FIXED_SAMPLE_COUNT로 고정 — 그 이후 도착하는 값은 같은
- * 구간이 닫힐 때까지 버림(평균에 안 넣음) */
+/* 2026-09-15(사용자 설계 — 그래프 결측/보간 대화, "평균 내지 않는다") — 예전엔 버킷당
+ * 항상 고정 2표본을 평균했지만(2026-09-12), 렌더링 시점에 국소 회귀로 추세선을 그리는
+ * 쪽으로 설계가 바뀌면서 평균 자체가 필요 없어짐 — 대신 그 버킷 구간에 들어온 실측값들
+ * 중 "버킷 중앙시각에 가장 가까운 값" 하나를 그대로(합성 없이) 저장한다. 이러면:
+ *   - 저장값이 항상 실제 있었던 실측값 그 자체라서, 좁은 스케일의 값이 넓은 스케일보다
+ *     더 극단적일 수 없다는 부등식이 자동으로 지켜짐(평균/합성이 없으니 다시 깨질 수가
+ *     없음 — 2026-09-12에 고생해서 고친 문제의 재발 없이 해결).
+ *   - "마지막 값" 대신 "중앙에 가장 가까운 값"을 쓰는 이유: 마지막 값은 버킷 후반부에
+ *     우연히 들어온 값이 항상 이겨서 구조적으로 편향됨(사용자 질문 "지난 값을 하는 경우
+ *     놓치는 경우가 있을까봐" — 그 우려대로).
+ * stats_agg_update()가 raw 기록 성공 직후 레코드마다 호출 */
 static void stats_agg_update(uint8_t chan_type, uint32_t unix_time, float value)
 {
     if (chan_type >= STATS_AGG_MAX_CHAN_TYPES) return;
@@ -94,15 +96,20 @@ static void stats_agg_update(uint8_t chan_type, uint32_t unix_time, float value)
         uint32_t bucket_start = (unix_time / bucket_width) * bucket_width;  /* 벽시계 정렬 */
 
         agg_accum_t *acc = &s_agg_accum[scale][chan_type];
-        if (acc->count > 0 && acc->bucket_start != bucket_start) {
+        if (acc->have_value && acc->bucket_start != bucket_start) {
             agg_flush_bucket((uint8_t)scale, chan_type, acc);
-            acc->count = 0;
-            acc->sum = 0.0;
+            acc->have_value  = false;
+            acc->seen_count  = 0;
         }
         acc->bucket_start = bucket_start;
-        if (acc->count < STATS_AGG_FIXED_SAMPLE_COUNT) {
-            acc->sum += (double)value;
-            acc->count++;
+
+        uint32_t center = bucket_start + bucket_width / 2;
+        uint32_t dist = (unix_time > center) ? (unix_time - center) : (center - unix_time);
+        acc->seen_count++;
+        if (!acc->have_value || dist < acc->best_dist_abs) {
+            acc->have_value    = true;
+            acc->best_dist_abs = dist;
+            acc->best_value    = value;
         }
     }
 }

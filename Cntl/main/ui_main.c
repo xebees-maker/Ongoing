@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#include <math.h>
 #include "esp_wifi.h"
 #include "esp_lv_adapter.h"
 #include "lvgl.h"
@@ -449,6 +450,14 @@ static lv_obj_t *s_stats_delete_lbl  = NULL;
  * 정규화해서 그리고, 탭하면 정규화 전 실제 값을 보여줌(s_stats_chart_real_values에 원본 보관) */
 #define STATS_GRAPH_POINT_COUNT   STATS_AGG_POINTS_PER_SCALE  /* stats_store.h가 정본(60) */
 #define STATS_GRAPH_SERIES_COUNT  4
+/* 2026-09-15(사용자 설계 — 그래프 결측/추세선 대화) — 국소 회귀에 쓸 최근접 실측 버킷
+ * 개수. 실기 실측(회귀 계산은 전체~400ms 사이클 중 계열당 ~2ms, 약 2% 수준으로 무시할
+ * 만함 확인) 후 사용자 확정: "5점으로 확정하자" */
+#define STATS_GRAPH_REGR_N        5
+/* 이 슬롯의 가장 가까운 실측값까지 거리(슬롯 단위)가 이보다 크면 "근거 부족" — 겹침
+ * 차트(s_stats_gap_chart)를 점선 스타일 선으로 표시(LV_PART_ITEMS의 line_dash_width/gap,
+ * lv_chart.c가 이 스타일을 그대로 벡터 드로잉에 반영함 확인) */
+#define STATS_GRAPH_LOW_SUPPORT_SLOTS 3
 static lv_obj_t          *s_stats_chart               = NULL;  /* 실데이터 — 선만(점마커 숨김) */
 static lv_obj_t          *s_stats_gap_chart           = NULL;  /* 2026-09-11(그래프 재설계) —
     * "값이 없는 슬롯마다 그 자리에 계열 고정높이로 점만" — s_stats_chart의 자식으로 만들어
@@ -478,6 +487,21 @@ static lv_obj_t          *s_stats_graph_min_label[STATS_GRAPH_SERIES_COUNT];
  * 다시 12시간 전 창을 보여줘야 한다") — 절대시각을 저장하지 않음 */
 static int                  s_stats_graph_offset = 0;
 static bool                  s_stats_graph_force_refresh = false;  /* 스와이프 직후 즉시 반영용 */
+/* 2026-09-15(사용자 지시 — "SD 읽기, 회귀 계산, 그리기 완료 이 3가지로 나누어 로그로 측정")
+ * — 3/3: 실제 픽셀 그리기 완료. lv_chart_set_series_values() 직후 타임스탬프를 찍어두고,
+ * LV_EVENT_REFR_READY(디스플레이 전체 리프레시가 실제 flush까지 끝난 시점, lv_refr.c 확인)
+ * 콜백에서 그 차이를 로그 — 이게 "실제 그리기 시간"의 정의 */
+static volatile bool         s_stats_draw_pending    = false;
+static volatile int64_t      s_stats_draw_request_us = 0;
+
+static void cb_stats_draw_refr_ready(lv_event_t *e)
+{
+    (void)e;
+    if (!s_stats_draw_pending) return;
+    s_stats_draw_pending = false;
+    int64_t now_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "STATSGRAPH 그리기완료 실측: %lldus", (long long)(now_us - s_stats_draw_request_us));
+}
 /* 2026-09-11(사용자 지시 — "기기 반응이 느린 편... 스와이프 인식됨을 알려야") — 제스처
  * 인식 즉시(느릴 수 있는 실제 갱신 전에) 잠깐 보여주는 방향 힌트 */
 static lv_obj_t          *s_stats_graph_swipe_hint     = NULL;
@@ -3130,12 +3154,21 @@ static bool  s_stats_minmax_cache_valid[STATS_GRAPH_SERIES_COUNT];
  * "SD 조회 fail이면, 다른 값도 믿을 수 없어. 즉시 중단이지") */
 
 /* chan_type별 min/max/avg를 개요판넬 라벨에 반영. 리턴값 false = SD 자체 오류(그 틱 중단) */
+/* 2026-09-15(사용자 지적 — "드랍다운이 열리는 속도 자체가 늦어... 사전 집계만 열면 되도록")
+ * — 예전엔 stats_store_get_min_max_avg_since()로 그 창 범위의 원본 로그를 전부 순차
+ * 스캔했음(파일 헤더 주석: "1주 창 기준 추정 26초+"를 피하려고 사전집계를 만들었는데 정작
+ * 이 개괄판넬은 안 옮겨져 있었음). 게다가 cb_stats_scale_changed()가 이걸 동기 호출이라
+ * 드랍다운 값변경 직후(그래프 async 갱신보다도 먼저) UI 스레드를 그대로 막고 있었음 — 그래프
+ * 자신이 이미 쓰는 사전집계 버킷(stats_agg_read_window)으로 바꿔서 원본 스캔을 없앰. 최대
+ * 60개 버킷만 보므로 min/max/avg가 원본 전수 스캔 대비 근사치지만, 그래프에 실제로 표시되는
+ * 값과 동일한 소스라 오히려 일관성 있음 */
 static bool refresh_stats_overview_panel(void)
 {
     uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
-    uint32_t scale_sec = (idx < STATS_SCALE_COUNT) ? STATS_SCALE_SECONDS[idx] : STATS_SCALE_SECONDS[0];
+    if (idx >= STATS_SCALE_COUNT) idx = 0;
+    uint32_t scale_sec = STATS_SCALE_SECONDS[idx];
     uint32_t now = rtc_sync_get_unix_time();
-    uint32_t cutoff = (now > scale_sec) ? now - scale_sec : 0;
+    uint32_t window_start = (now > scale_sec) ? now - scale_sec : 0;
 
     struct { uint8_t chan_type; lv_obj_t *label; } rows[] = {
         { SENSOR_CHAN_TEMP_C,   s_overview_temp_label },
@@ -3143,16 +3176,31 @@ static bool refresh_stats_overview_panel(void)
         { SENSOR_CHAN_CO2_PPM,  s_overview_co2_label  },
         { SENSOR_CHAN_NH3_PPM,  s_overview_nh3_label  },
     };
+    static stats_bucket_t buf[STATS_GRAPH_POINT_COUNT];
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
         ui_str_id_t label_id, unit_id;
         if (!chan_type_to_strs(rows[i].chan_type, &label_id, &unit_id)) continue;
 
+        uint32_t got = stats_agg_read_window((uint8_t)idx, rows[i].chan_type, window_start, now,
+                                              buf, STATS_GRAPH_POINT_COUNT);
+        if (got == 0 && stats_store_had_io_error()) return false;  /* SD 자체 문제 — 즉시 중단 */
+
         char line[128];
-        float mn, mx, avg;
-        bool have_range = stats_store_get_min_max_avg_since(cutoff, rows[i].chan_type, &mn, &mx, &avg);
-        if (!have_range && stats_store_had_io_error()) return false;  /* SD 자체 문제 — 즉시 중단 */
+        bool have_range = false;
+        float mn = 0.0f, mx = 0.0f;
+        double sum = 0.0;
+        for (uint32_t b = 0; b < got; b++) {
+            float v = buf[b].avg_value;
+            if (!have_range) { mn = mx = v; have_range = true; }
+            else {
+                if (v < mn) mn = v;
+                if (v > mx) mx = v;
+            }
+            sum += (double)v;
+        }
         s_stats_minmax_cache_valid[i] = have_range;
         if (have_range) {
+            float avg = (float)(sum / (double)got);
             s_stats_minmax_cache_mn[i] = mn;
             s_stats_minmax_cache_mx[i] = mx;
             int mx_s = (int)(mx * 100.0f + 0.5f);
@@ -3321,12 +3369,84 @@ static void refresh_stats_graph_x_labels(uint16_t scale_idx, uint32_t offset_sec
     }
 }
 
+/* 2026-09-15(사용자 설계 — 그래프 결측/추세선 대화) — 슬롯 하나의 추세값을 주변 실측
+ * 버킷값 중 가장 가까운 최대 STATS_GRAPH_REGR_N개로 국소 최소제곱 2차회귀해서 구함.
+ * 실측값을 정확히 지나지 않고 문맥(양옆)에 맞게 눌리는 진짜 추세선(사용자 지시: "꼭지점
+ * 밑에서 꺽이는 포물선") — 3점을 정확히 지나는 라그랑주 보간과 달리, N개 초과결정
+ * (overdetermined) 최소제곱이라 피크가 주변 문맥에 맞게 스무딩됨. x=슬롯인덱스-slot으로
+ * 중심화해서 풀면 구하려는 값(x=0에서의 y)이 정규방정식의 상수항 c 하나뿐이라 a,b는
+ * 안 풀어도 됨(Cramer's rule, 3x3). out_nearest_dist=가장 가까운 실측 슬롯까지 거리
+ * (슬롯 단위, 실선/저신뢰 판단용). 반환값 false = 이 창에 실측값이 하나도 없음 */
+static bool stats_graph_local_trend(const bool has[], const float vals[], int point_count,
+                                     int slot, int *out_nearest_dist, float *out_value)
+{
+    int idx_used[STATS_GRAPH_REGR_N];
+    int used = 0;
+    int nearest = -1;
+
+    for (int radius = 0; radius < point_count && used < STATS_GRAPH_REGR_N; radius++) {
+        int lo = slot - radius;
+        int hi = slot + radius;
+        if (lo == hi) {
+            if (lo >= 0 && lo < point_count && has[lo]) {
+                idx_used[used++] = lo;
+                if (nearest < 0) nearest = radius;
+            }
+            continue;
+        }
+        if (lo >= 0 && lo < point_count && has[lo] && used < STATS_GRAPH_REGR_N) {
+            idx_used[used++] = lo;
+            if (nearest < 0) nearest = radius;
+        }
+        if (hi >= 0 && hi < point_count && has[hi] && used < STATS_GRAPH_REGR_N) {
+            idx_used[used++] = hi;
+            if (nearest < 0) nearest = radius;
+        }
+    }
+    if (used == 0) return false;
+    if (out_nearest_dist) *out_nearest_dist = nearest;
+
+    if (used < 3) {
+        double sum = 0.0;
+        for (int k = 0; k < used; k++) sum += (double)vals[idx_used[k]];
+        *out_value = (float)(sum / used);
+        return true;
+    }
+
+    double Sx0 = (double)used, Sx1 = 0, Sx2 = 0, Sx3 = 0, Sx4 = 0, Sy0 = 0, Sy1 = 0, Sy2 = 0;
+    for (int k = 0; k < used; k++) {
+        double x  = (double)(idx_used[k] - slot);
+        double y  = (double)vals[idx_used[k]];
+        double x2 = x * x, x3 = x2 * x, x4 = x2 * x2;
+        Sx1 += x; Sx2 += x2; Sx3 += x3; Sx4 += x4;
+        Sy0 += y; Sy1 += x * y; Sy2 += x2 * y;
+    }
+    double M[3][3] = { {Sx0, Sx1, Sx2}, {Sx1, Sx2, Sx3}, {Sx2, Sx3, Sx4} };
+    double R[3] = { Sy0, Sy1, Sy2 };
+    double det = M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1])
+               - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0])
+               + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+    if (fabs(det) < 1e-9) {
+        double sum = 0.0;
+        for (int k = 0; k < used; k++) sum += (double)vals[idx_used[k]];
+        *out_value = (float)(sum / used);
+        return true;
+    }
+    double detc = R[0]    * (M[1][1] * M[2][2] - M[1][2] * M[2][1])
+                - M[0][1] * (R[1]    * M[2][2] - M[1][2] * R[2])
+                + M[0][2] * (R[1]    * M[2][1] - M[1][1] * R[2]);
+    *out_value = (float)(detc / det);
+    return true;
+}
+
 /* 2026-09-10/11(재설계 — 라인그래프, 계열 4개 온도/습도/CO2/암모니아, 스케일별 사전집계
  * 저장에서 읽음, [[project_cntl_stats_graph_redesign_2026_09_10]]) — 계열마다 실제 단위/
- * 범위가 달라서 각 계열을 그 창 안의 최소~최대 기준 0~100으로 정규화. 값이 없는 슬롯은
- * 계열별 고정 높이(s_stats_gap_ref_height)에 점만 찍음(별도 겹침 차트, 사용자 지시: "값이
- * 없는 영역은... 찍어야 할 위치마다 찍는거야"). 테이블 보고 있을 때는 SD 조회 생략.
- * 리턴값 false = SD 자체 오류(그 틱 중단) */
+ * 범위가 달라서 각 계열을 그 창 안의 최소~최대 기준 0~100으로 정규화.
+ * 2026-09-15(재설계 — 그래프 결측/추세선 대화) — 값이 없는 슬롯도 이제 고정 점만 찍지
+ * 않고 stats_graph_local_trend()로 추세선을 채워서 선이 끊기지 않게 함(사용자 지시:
+ * "측정 주기가 길면... 선이 끊기고 점이 나오지" 문제 해결). 근처에 실측값이 너무 멀면
+ * (STATS_GRAPH_LOW_SUPPORT_SLOTS 초과) 그 지점만 겹침 차트로 "저신뢰" 표시. 테이블 보고
+ * 있을 때는 SD 조회 생략. 리턴값 false = SD 자체 오류(그 틱 중단) */
 static bool refresh_stats_graph(void)
 {
     if (!s_stats_chart) return true;
@@ -3334,10 +3454,14 @@ static bool refresh_stats_graph(void)
 
     /* 2026-09-11(사용자 지시 — 실측 137ms 안팎 확인 후 "갱신 주기는 15초로 결정") — 틱카운트
      * 나눗셈(2s 타이머라 5의 배수만 가능)으론 15000ms를 못 맞춰서 경과시간 직접 비교로 변경.
-     * 스와이프/스케일변경 직후엔 force로 즉시 반영 */
+     * 스와이프/스케일변경 직후엔 force로 즉시 반영.
+     * 2026-09-15(사용자 지적 — "60초(최단, 1H가 가장 짧은 주기니까) 이내는 갱신해봤자 아닌가?")
+     * — 1H 스케일 버킷폭(60초)이 전체 스케일 중 가장 좁은 단위라, 그보다 자주 갱신해도
+     * 대부분 같은 데이터를 다시 그리는 것뿐 — 15초는 "데이터가 실제로 바뀔 수 있는 최소
+     * 간격"과 무관하게 정했던 값이라 60초로 늘림(불필요한 갱신 횟수 1/4로 감소) */
     static uint32_t s_graph_last_refresh_tick = 0;
     uint32_t now_tick_ms = lv_tick_get();
-    if (!s_stats_graph_force_refresh && (now_tick_ms - s_graph_last_refresh_tick) < 15000) return true;
+    if (!s_stats_graph_force_refresh && (now_tick_ms - s_graph_last_refresh_tick) < 60000) return true;
     s_graph_last_refresh_tick = now_tick_ms;
     s_stats_graph_force_refresh = false;
 
@@ -3361,6 +3485,10 @@ static bool refresh_stats_graph(void)
         SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM
     };
 
+    /* 2026-09-15(사용자 지시 — "SD 읽기, 회귀 계산, 그리기 완료 이 3가지로 나누어 로그로
+     * 측정해") — 1/3: SD 읽기만 따로 측정(회귀 실측은 아래 계열별 루프에 이미 있음,
+     * 그리기 완료는 함수 끝의 LV_EVENT_REFR_READY 훅에서 별도로 로그) */
+    int64_t t_sdread_start_us = esp_timer_get_time();
     static stats_bucket_t buf[STATS_GRAPH_SERIES_COUNT][STATS_GRAPH_POINT_COUNT];
     uint32_t got[STATS_GRAPH_SERIES_COUNT];
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
@@ -3368,6 +3496,9 @@ static bool refresh_stats_graph(void)
                                         buf[s], STATS_GRAPH_POINT_COUNT);
         if (got[s] == 0 && stats_store_had_io_error()) return false;  /* SD 자체 문제 — 즉시 중단 */
     }
+    int64_t t_sdread_end_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "STATSGRAPH SD읽기 실측(계열%d개, 스케일idx=%u): %lldus", STATS_GRAPH_SERIES_COUNT,
+             (unsigned)idx, (long long)(t_sdread_end_us - t_sdread_start_us));
 
     lv_chart_set_point_count(s_stats_chart, STATS_GRAPH_POINT_COUNT);
     lv_chart_set_point_count(s_stats_gap_chart, STATS_GRAPH_POINT_COUNT);
@@ -3401,20 +3532,64 @@ static bool refresh_stats_graph(void)
         }
         float span = (have_range && mx > mn) ? (mx - mn) : 0.0f;
 
+        /* 2026-09-15 — 회귀 계산 구간만 따로 실측(사용자 요청: "연산 속도가 얼마나 걸릴 지도
+         * 모르겠고") — SD읽기~차트세팅 전체 실측(t_start_us, 아래)과는 별개로 이 부분만 */
+        int64_t t_regr_start_us = esp_timer_get_time();
+
         int32_t norm_vals[STATS_GRAPH_POINT_COUNT];
         int32_t gap_vals[STATS_GRAPH_POINT_COUNT];
+        bool    slot_has_trend[STATS_GRAPH_POINT_COUNT];
+        bool    slot_low_conf[STATS_GRAPH_POINT_COUNT];
+        int32_t slot_norm[STATS_GRAPH_POINT_COUNT];
+
+        /* 1차 패스 — 슬롯마다 추세값/저신뢰 여부만 구함(아직 어느 시리즈에 넣을지는 안 정함,
+         * 경계 슬롯 판단에 양옆 슬롯의 저신뢰 여부가 필요해서 2차 패스로 분리) */
         for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
             if (has[i]) {
                 s_stats_chart_real_values[s][i] = vals[i];
                 s_stats_chart_has_value[s][i] = true;
-                norm_vals[i] = (span > 0.0f) ? (int32_t)(((vals[i] - mn) / span) * 100.0f + 0.5f) : 50;
-                gap_vals[i] = LV_CHART_POINT_NONE;
             } else {
-                s_stats_chart_has_value[s][i] = false;
-                norm_vals[i] = LV_CHART_POINT_NONE;
-                gap_vals[i] = s_stats_gap_ref_height[s];
+                s_stats_chart_has_value[s][i] = false;  /* 탭-값 표시는 실측일 때만(추세값 아님) */
+            }
+
+            int nearest_dist = -1;
+            float trend_val = 0.0f;
+            slot_has_trend[i] = stats_graph_local_trend(has, vals, STATS_GRAPH_POINT_COUNT,
+                                                          (int)i, &nearest_dist, &trend_val);
+            if (slot_has_trend[i]) {
+                int32_t n = (span > 0.0f) ? (int32_t)(((trend_val - mn) / span) * 100.0f + 0.5f) : 50;
+                if (n < 0) n = 0;
+                if (n > 100) n = 100;
+                slot_norm[i] = n;
+                slot_low_conf[i] = (nearest_dist > STATS_GRAPH_LOW_SUPPORT_SLOTS);
+            } else {
+                slot_low_conf[i] = false;  /* 안 씀(그릴 값 자체가 없는 케이스) */
             }
         }
+
+        /* 2026-09-15(사용자 지적 — "실선와 점선이 함께 나와... 내가 의도한 건 점을 찍는 게
+         * 아니고 선의 스타일이 점으로 바뀌는 건데") — 2차 패스: 한 슬롯이 실선/점선 두 시리즈에
+         * 동시에 값을 갖지 않도록 상호배타적으로 배정(그래야 겹쳐 보이는 버그가 없음). 단,
+         * 저신뢰 구간과 맞닿는 "경계"의 확신 슬롯 하나는 양쪽 시리즈에 다 넣어서 실선<->점선이
+         * 끊김 없이 이어붙게 함 */
+        for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
+            if (!slot_has_trend[i]) {
+                /* 이 창에 실측값이 하나도 없음 — 창 평균조차 없으니 옛 계열별 고정높이로 폴백 */
+                norm_vals[i] = LV_CHART_POINT_NONE;
+                gap_vals[i] = s_stats_gap_ref_height[s];
+                continue;
+            }
+            bool neighbor_low = (i > 0 && slot_low_conf[i - 1] && slot_has_trend[i - 1]) ||
+                                 (i + 1 < STATS_GRAPH_POINT_COUNT && slot_low_conf[i + 1] && slot_has_trend[i + 1]);
+            bool on_dashed = slot_low_conf[i] || neighbor_low;
+            bool on_solid  = !slot_low_conf[i];
+            norm_vals[i] = on_solid  ? slot_norm[i] : LV_CHART_POINT_NONE;
+            gap_vals[i]  = on_dashed ? slot_norm[i] : LV_CHART_POINT_NONE;
+        }
+        int64_t t_regr_end_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "STATSGRAPH 회귀 실측(계열%d, %d슬롯): %lldus", s, STATS_GRAPH_POINT_COUNT,
+                 (long long)(t_regr_end_us - t_regr_start_us));
+
         lv_chart_set_series_values(s_stats_chart, s_stats_chart_series[s], norm_vals, STATS_GRAPH_POINT_COUNT);
         lv_chart_set_series_values(s_stats_gap_chart, s_stats_gap_series[s], gap_vals, STATS_GRAPH_POINT_COUNT);
 
@@ -3449,6 +3624,11 @@ static bool refresh_stats_graph(void)
     }
 
     refresh_stats_graph_x_labels(idx, offset_sec);
+
+    /* 2026-09-15 — 차트 데이터 세팅이 끝난 지금 시점을 "그리기 요청 시각"으로 찍음. 실제
+     * 완료는 cb_stats_draw_refr_ready()가 다음 LV_EVENT_REFR_READY에서 로그 */
+    s_stats_draw_request_us = esp_timer_get_time();
+    s_stats_draw_pending = true;
 
     int64_t t_end_us = esp_timer_get_time();
     ESP_LOGW(TAG, "MEMDIAG 그래프 윈도 1회 갱신(읽기~차트데이터세팅) 소요시간: %lld us (스케일idx=%u)",
@@ -6588,7 +6768,10 @@ static void build_stats_tab(void)
         lv_obj_set_style_text_font(s_stats_graph_max_label[s], ui_font_get(UI_FONT_SIZE_12), 0);
         lv_obj_set_style_text_color(s_stats_graph_max_label[s], chart_colors[s], 0);
         lv_obj_set_style_bg_color(s_stats_graph_max_label[s], lv_color_white(), 0);
-        lv_obj_set_style_bg_opa(s_stats_graph_max_label[s], LV_OPA_80, 0);
+        /* 2026-09-15(사용자 지적 — "여기 선이 있으면 글씨가 덮혀서 잘 안보여") — 이제 추세선이
+         * 창 전체에 거의 항상 이어져 그려져서, 80% 불투명(LV_OPA_80)이던 배경 뒤로 선이 비치는
+         * 일이 잦아짐 — 완전 불투명으로 변경 */
+        lv_obj_set_style_bg_opa(s_stats_graph_max_label[s], LV_OPA_COVER, 0);
         lv_obj_set_style_pad_all(s_stats_graph_max_label[s], 4, 0);
         lv_obj_set_style_radius(s_stats_graph_max_label[s], 4, 0);
         /* 2026-09-12(사용자 지시 — "암모니아는 잘 안보일 수 있잖아. 글씨에 까만 테두리
@@ -6603,7 +6786,7 @@ static void build_stats_tab(void)
         lv_obj_set_style_text_font(s_stats_graph_min_label[s], ui_font_get(UI_FONT_SIZE_12), 0);
         lv_obj_set_style_text_color(s_stats_graph_min_label[s], chart_colors[s], 0);
         lv_obj_set_style_bg_color(s_stats_graph_min_label[s], lv_color_white(), 0);
-        lv_obj_set_style_bg_opa(s_stats_graph_min_label[s], LV_OPA_80, 0);
+        lv_obj_set_style_bg_opa(s_stats_graph_min_label[s], LV_OPA_COVER, 0);
         lv_obj_set_style_pad_all(s_stats_graph_min_label[s], 4, 0);
         lv_obj_set_style_radius(s_stats_graph_min_label[s], 4, 0);
         lv_obj_set_style_text_outline_stroke_color(s_stats_graph_min_label[s], lv_color_black(), 0);
@@ -6631,9 +6814,17 @@ static void build_stats_tab(void)
     lv_chart_set_point_count(s_stats_gap_chart, STATS_GRAPH_POINT_COUNT);
     lv_chart_set_axis_range(s_stats_gap_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
     lv_chart_set_div_line_count(s_stats_gap_chart, 0, 0);
-    lv_obj_set_style_line_width(s_stats_gap_chart, 0, LV_PART_ITEMS);  /* 선 숨김 */
-    lv_obj_set_style_width(s_stats_gap_chart, 2, LV_PART_INDICATOR);
-    lv_obj_set_style_height(s_stats_gap_chart, 2, LV_PART_INDICATOR);
+    /* 2026-09-15(사용자 지적 — "내가 의도한 건 점을 찍는 게 아니고, 선의 스타일이 점으로
+     * 바뀌는 건데") — 점마커 오버레이 대신 점선 스타일의 선으로 변경. LVGL 차트는 LV_PART_
+     * ITEMS에 line_dash_width/line_dash_gap을 읽어서 그대로 점선 렌더링함(lv_chart.c 확인).
+     * 실데이터 차트(s_stats_chart)와 저신뢰 구간이 겹쳐 그려지던 버그(실선+점 동시 표시)도
+     * refresh_stats_graph()에서 두 시리즈가 같은 슬롯에 동시에 값을 안 갖도록 상호배타적으로
+     * 고침 — 경계 슬롯 하나씩만 겹쳐서 실선<->점선이 끊김 없이 이어지게 함 */
+    lv_obj_set_style_line_width(s_stats_gap_chart, 2, LV_PART_ITEMS);
+    lv_obj_set_style_line_dash_width(s_stats_gap_chart, 6, LV_PART_ITEMS);
+    lv_obj_set_style_line_dash_gap(s_stats_gap_chart, 5, LV_PART_ITEMS);
+    lv_obj_set_style_width(s_stats_gap_chart, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_height(s_stats_gap_chart, 0, LV_PART_INDICATOR);
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
         s_stats_gap_series[s] = lv_chart_add_series(s_stats_gap_chart, chart_colors[s], LV_CHART_AXIS_PRIMARY_Y);
     }
@@ -6695,6 +6886,9 @@ static void build_stats_tab(void)
     lv_obj_set_style_text_font(graph_to_table_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_stats_page_timer = lv_timer_create(refresh_stats_page, 2000, NULL);
+    /* 2026-09-15 — "그리기 완료" 실측용, 한 번만 등록(디스플레이 전체 리프레시 이벤트라
+     * 차트 객체가 아니라 디스플레이에 건다) */
+    lv_display_add_event_cb(lv_display_get_default(), cb_stats_draw_refr_ready, LV_EVENT_REFR_READY, NULL);
 
     /* 이 시점까지 만들어진 통계 팝업 전체(테이블뷰+그래프뷰 포함)를 순회하며 스크롤 완전 차단.
      * 테이블 행(refresh_stats_table)은 이후 주기적으로 새로 생성되지만 그쪽은 생성 시점에
