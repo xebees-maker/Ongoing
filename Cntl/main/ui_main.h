@@ -2,12 +2,19 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "power_relay.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 void ui_init(void);
+
+/* 2026-09-16 — SR(Power Control) 판정 루프(power_relay.c)가 매 주기 호출. cfg가 가리키는
+ * 소스(그룹 통계 또는 개별 장치)의 현재 값을 ui_main.c의 기존 분류/집계 로직(stats_classify,
+ * stats_collect_group_macs, stats_blend_macs)으로 구해 돌려줌 — 그 로직 자체는 static이라
+ * power_relay.c가 직접 못 쓰므로 이 함수 하나로만 연결 */
+bool ui_main_query_power_source_value(const power_relay_config_t *cfg, float *out_value);
 
 /* 2026-08-29 — WIFI_EVENT_SCAN_DONE 핸들러 등록. 기본 이벤트루프가 생긴 뒤(esp_now_hub_init()
  * 호출 이후)에 app_main()에서 불러야 함 — ui_init()보다 먼저는 절대 안 됨 */

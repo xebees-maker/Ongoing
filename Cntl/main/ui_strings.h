@@ -316,6 +316,46 @@ typedef enum {
      * % (MB free)]") — SD 상태 라인의 범례(각 카테고리 뒤에 오는 "pct(remainMB)" 형식을
      * 설명하는 고정 텍스트, 실제 숫자 아님) */
     STR_LABEL_STORAGE_LEGEND,    /* "[사용 %(여유 MB)]" / "[Used % (MB free)]" */
+
+    /* 2026-09-16(SR/Power Control, 사용자 설계 대화) */
+    STR_PANEL_POWER_CONTROL,     /* 주화면 판넬 제목/팝업 제목: "전원제어" / "Power Control" */
+    STR_RELAY_DEFAULT_NAME_FMT,  /* Alias 미지정 시 기본표시(snprintf용): "릴레이 %d" / "Relay %d" */
+    STR_STATUS_RELAY_ON,         /* "On" / "On" */
+    STR_STATUS_RELAY_OFF,        /* "Off" / "Off" */
+    STR_LABEL_CHAN_TYPE,         /* "측정 항목:" / "Channel:" */
+    STR_OPT_CHAN_TYPE_LIST,      /* 드랍다운 옵션(줄바꿈 구분): "온도\n이산화탄소" / "Temperature\nCO2" */
+    STR_LABEL_SOURCE_KIND,       /* "기준 소스:" / "Source:" */
+    STR_OPT_SOURCE_KIND_LIST,    /* "그룹\n특정 장치" / "Group\nSpecific device" */
+    STR_LABEL_SOURCE_STAT,       /* "통계:" / "Statistic:" */
+    STR_OPT_SOURCE_STAT_LIST,    /* "평균\n최대\n최소" / "Average\nMax\nMin" */
+    STR_LABEL_PRECISION,         /* "정밀도:" / "Precision:" */
+    STR_OPT_PRECISION_LIST,      /* "정밀\n간이" / "Fine\nBasic" */
+    STR_LABEL_SOURCE_DEVICE,     /* "장치:" / "Device:" */
+    STR_LABEL_DIRECTION,         /* "방향:" / "Direction:" */
+    STR_OPT_DIRECTION_LIST,      /* "오르면 On\n내리면 On" / "On when rising\nOn when falling" */
+    STR_LABEL_ON_THRESHOLD,      /* "On 임계값:" / "On threshold:" */
+    STR_LABEL_OFF_THRESHOLD,     /* "Off 임계값:" / "Off threshold:" */
+    STR_LABEL_MIN_HOLD,          /* "최소 유지(초):" / "Min hold (sec):" */
+    STR_LABEL_TREND_ENABLE,      /* "추세 반영:" / "Trend:" */
+    STR_LABEL_TREND_LOOKAHEAD,   /* "추세 예측(초):" / "Trend lookahead (sec):" */
+    STR_MSG_NO_SOURCE_DEVICE,    /* 장치 소스인데 후보가 없을 때: "붙은 장치 없음" / "No device available" */
+
+    /* 2026-09-16(SR 팝업 재설계 — "공학 관점에선 좋은데 사용자 관점에선 쓰기 힘들어") —
+     * 문장형 골격 + AI On/Off 토글 */
+    STR_LABEL_AI_MODE,           /* "AI:" / "AI:" */
+    STR_OPT_RISE_FALL_LIST,      /* 문장 골격 Y칸: "오르면\n내리면" / "Rises\nFalls" */
+    STR_OPT_TURN_ACTION_LIST,    /* 문장 골격 Z칸: "켜\n꺼" / "Turns On\nTurns Off" */
+    STR_SENTENCE_IF,             /* 문장 맨 앞: "만약" / "If" */
+    STR_SENTENCE_ARROW,          /* Y칸과 Z칸 사이: "→" / "→" */
+    STR_LABEL_CENTER,            /* "기준값:" / "Center:" */
+    STR_LABEL_MARGIN,            /* "오차(±):" / "Margin (±):" */
+    STR_UNIT_TEMP,                /* "도" / "°C" */
+    STR_UNIT_CO2,                 /* "ppm" / "ppm" */
+    STR_LABEL_BASED_ON,          /* "기준:" / "Based on:" (예전 STR_LABEL_SOURCE_KIND 대체) */
+    STR_OPT_BASEDON_LIST,        /* "그룹\n장치" / "Group\nDevice" */
+    STR_OPT_GROUP_CHOICE_TEMP_LIST, /* "공기 온도(기본)\n공기 온도(정밀)\nAgar 온도" / "Air T (Basic)\nAir T (Fine)\nAgar" */
+    STR_LABEL_TREND_WINDOW,      /* "판단기간(초):" / "Trend window (sec):" */
+
     STR_COUNT,
 } ui_str_id_t;
 

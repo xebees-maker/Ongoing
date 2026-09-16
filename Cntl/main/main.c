@@ -22,6 +22,7 @@
 #include "device_config.h"
 #include "sd_storage.h"
 #include "stats_store.h"
+#include "power_relay.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -667,6 +668,8 @@ void app_main(void)
     /* CAM/SENS 원격 설정값(Cntl이 주인, 2026-08-08 설계) — UI 생성 전에 로드해야 설정탭
      * 드롭다운이 처음부터 저장된 값을 보여줌(부팅 시 "값 미리 로드" 요구사항) */
     device_config_load();
+    /* SR(Power Control) 설정(2026-09-16) — 같은 이유로 UI 생성 전에 로드 */
+    power_relay_load();
 
     const esp_lv_adapter_rotation_t rotation = ESP_LV_ADAPTER_ROTATE_0;
     const esp_lv_adapter_tear_avoid_mode_t tear_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_DEFAULT_RGB;
@@ -768,6 +771,11 @@ void app_main(void)
     esp_now_hub_init();  /* 내부에서 esp_netif_init()+esp_event_loop_create_default() 호출 —
                              아래 이벤트 등록은 반드시 그 다음이어야 함 */
     esp_now_tx_init();
+
+    /* SR(Power Control) 판정 루프 시작(2026-09-16) — GPIO 초기화 + 15초 주기 태스크.
+     * ui_main_query_power_source_value()가 esp_now_hub 노드 테이블/SD 집계를 읽으므로 그
+     * 둘이 갖춰진 뒤(SD는 위에서 이미 마운트됨, esp_now_hub는 방금 init)가 안전 */
+    power_relay_start();
 
     /* 웹 대시보드는 실제로 IP를 받은 뒤에 시작(위 ip_event_handler 참고, 5005 버그 수정) */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,

@@ -13,6 +13,7 @@ idf_component_register(
         "device_config.c"
         "sd_storage.c"
         "stats_store.c"
+        "power_relay.c"
         "../components/waveshare_rgb_lcd_port.c"
         "../components/ch422g.c"
     INCLUDE_DIRS
@@ -33,6 +34,7 @@ idf_component_register(
         sdmmc
         esp_driver_sdspi
         esp_driver_spi
+        esp_driver_gpio
     PRIV_REQUIRES
         esp_new_jpeg)
 

@@ -320,6 +320,46 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_TITLE_RECORD] = { "기록", "Record" },
     [STR_LABEL_PERIOD] = { "기간:", "Period:" },
     [STR_LABEL_STORAGE_LEGEND] = { "[사용 %(여유 MB)]", "[Used % (MB free)]" },
+
+    /* 2026-09-16(SR/Power Control) */
+    [STR_PANEL_POWER_CONTROL]  = { "전원제어", "Power Control" },
+    [STR_RELAY_DEFAULT_NAME_FMT] = { "릴레이 %d", "Relay %d" },
+    [STR_STATUS_RELAY_ON]      = { "On", "On" },
+    [STR_STATUS_RELAY_OFF]     = { "Off", "Off" },
+    [STR_LABEL_CHAN_TYPE]      = { "측정 항목:", "Channel:" },
+    [STR_OPT_CHAN_TYPE_LIST]   = { "온도\n이산화탄소", "Temperature\nCO2" },
+    [STR_LABEL_SOURCE_KIND]    = { "기준 소스:", "Source:" },
+    [STR_OPT_SOURCE_KIND_LIST] = { "그룹\n특정 장치", "Group\nSpecific device" },
+    [STR_LABEL_SOURCE_STAT]    = { "통계:", "Statistic:" },
+    [STR_OPT_SOURCE_STAT_LIST] = { "평균\n최대\n최소", "Average\nMax\nMin" },
+    [STR_LABEL_PRECISION]      = { "정밀도:", "Precision:" },
+    [STR_OPT_PRECISION_LIST]   = { "정밀\n간이", "Fine\nBasic" },
+    [STR_LABEL_SOURCE_DEVICE]  = { "장치:", "Device:" },
+    [STR_LABEL_DIRECTION]      = { "방향:", "Direction:" },
+    [STR_OPT_DIRECTION_LIST]   = { "오르면 On\n내리면 On", "On when rising\nOn when falling" },
+    [STR_LABEL_ON_THRESHOLD]   = { "On 임계값:", "On threshold:" },
+    [STR_LABEL_OFF_THRESHOLD]  = { "Off 임계값:", "Off threshold:" },
+    [STR_LABEL_MIN_HOLD]       = { "최소 유지(초):", "Min hold (sec):" },
+    [STR_LABEL_TREND_ENABLE]   = { "추세 반영:", "Trend:" },
+    [STR_LABEL_TREND_LOOKAHEAD] = { "추세 예측(초):", "Trend lookahead (sec):" },
+    [STR_MSG_NO_SOURCE_DEVICE] = { "붙은 장치 없음", "No device available" },
+
+    /* 2026-09-16(SR 팝업 재설계) */
+    [STR_LABEL_AI_MODE]        = { "AI:", "AI:" },
+    [STR_OPT_RISE_FALL_LIST]   = { "오르면\n내리면", "Rises\nFalls" },
+    [STR_OPT_TURN_ACTION_LIST] = { "켜\n꺼", "Turns On\nTurns Off" },
+    [STR_SENTENCE_IF]          = { "만약", "If" },
+    /* 2026-09-16(사용자 지적 — "글 깨짐이 있고") — 비트맵 폰트(Montserrat, 영문 ASCII만)에
+     * 없는 특수기호(→/±/°)를 썼다가 미싱글리프로 깨져 보였던 문제, 순수 ASCII로 교체 */
+    [STR_SENTENCE_ARROW]       = { "->", "->" },
+    [STR_LABEL_CENTER]         = { "기준값", "Center" },
+    [STR_LABEL_MARGIN]         = { "오차(+/-)", "Margin (+/-)" },
+    [STR_UNIT_TEMP]            = { "도", "C" },
+    [STR_UNIT_CO2]             = { "ppm", "ppm" },
+    [STR_LABEL_BASED_ON]       = { "기준:", "Based on:" },
+    [STR_OPT_BASEDON_LIST]     = { "그룹\n장치", "Group\nDevice" },
+    [STR_OPT_GROUP_CHOICE_TEMP_LIST] = { "공기 온도(기본)\n공기 온도(정밀)\nAgar 온도", "Air T (Basic)\nAir T (Fine)\nAgar" },
+    [STR_LABEL_TREND_WINDOW]   = { "판단기간(초):", "Trend window (sec):" },
 };
 
 void ui_lang_load(void)

@@ -83,7 +83,7 @@ static lv_obj_t *s_group_title[STR_GROUP_SYSTEM - STR_GROUP_CNTL + 1];
 
 /* 상황판 판넬 3개(요약/측정기/카메라) — refresh_lang_texts()가 참조하므로 그 정의보다
  * 먼저 선언돼야 함(파일 스코프 static은 선언 지점 이후부터만 참조 가능) */
-static lv_obj_t          *s_dash_title[3];  /* 0=요약, 1=측정기, 2=카메라 */
+static lv_obj_t          *s_dash_title[4];  /* 0=요약, 1=측정기, 2=카메라, 3=전원제어(2026-09-16) */
 static bool               s_camera_title_enabled_prev = false;  /* 2026-09-08 — Camera 역상 회색/흰색 전환용 */
 static lv_obj_t          *s_web_url_label       = NULL;  /* 2026-08-21 — 요약 맨 윗줄, 웹 대시보드 접속 URL(사용자 지시) */
 static lv_obj_t          *s_web_row             = NULL;  /* 2026-09-09 — "Web " 접두문구+URL 둘로 분리(접두문구는 밑줄 없음) 위 행 래퍼 */
@@ -153,6 +153,14 @@ static lv_obj_t *s_sensor_dash_row_signal[ESP_NOW_HUB_MAX_NODES];
  * 밀착시켜야 해서(사용자 지시) 라벨을 쪼갬 */
 static lv_obj_t *s_sensor_dash_row_value[ESP_NOW_HUB_MAX_NODES];
 static char      s_sensor_dash_row_last_value_text[ESP_NOW_HUB_MAX_NODES][96];
+
+/* 2026-09-16(SR/Power Control) — Sens/CAM과 달리 페어링이 아니라 콘 고정 GPIO 2개(항상
+ * 존재, project_cntl_sr_power_control_plan_2026_09_15 참고). 그래서 sens_dash처럼 "대상
+ * 목록을 매번 재구성"할 필요 없이 ui_init()에서 딱 한 번 2행을 만들고, 주기적으로 텍스트만
+ * 갱신 */
+static lv_obj_t *s_power_dash_row_label[POWER_RELAY_COUNT];
+static lv_obj_t *s_power_dash_row_status[POWER_RELAY_COUNT];
+static char      s_power_dash_row_last_text[POWER_RELAY_COUNT][64];
 
 static uint8_t            s_selected_cam_mac[6];
 static bool               s_has_selected_cam = false;  /* 지금촬영/목록/삭제 등이 쏠 대상 —
@@ -286,6 +294,9 @@ static void cb_camera_btn_tap(lv_event_t *e);
  * s_sens_measure_dd 등 기존 측정주기 위젯/로직을 그대로 재사용(설정탭에서 이 팝업 안으로
  * 옮겨오는 것뿐, 로직 자체는 안 바뀜)하므로 그보다 뒤에 정의되지만 여기서 fwd 필요 */
 static void build_device_popup(const uint8_t *mac, const char *name, bool is_sensor);
+static void build_relay_popup(int idx);  /* 2026-09-16(SR/Power Control) */
+static void cb_power_dash_row_clicked(lv_event_t *e);
+static void refresh_power_control_panel(void);
 static void teardown_device_popup(void);
 static void cb_camera_dash_row_clicked(lv_event_t *e);
 static void cb_sensor_dash_row_clicked(lv_event_t *e);
@@ -569,6 +580,48 @@ static char               s_device_alias_applied_text[DEVICE_CONFIG_ALIAS_MAX_LE
 static bool                s_device_popup_is_sensor = false;
 static esp_now_hub_node_t  s_device_popup_node;
 
+/* 2026-09-16(SR/Power Control, 순수 대화로 재설계 — "공학 관점에선 좋은데 사용자 관점에선
+ * 쓰기 힘들다") — 문장형 골격("(채널)가 (오르면/내리면) (켜/꺼)라") + AI On/Off 토글.
+ * AI On이면 아래 상세 항목(Based on/통계/추세/최소유지)은 화면에서 아예 숨기고 스마트
+ * 기본값으로 채움 — 서로 의존적인 필드가 많아 필드별 개별 Apply 대신 버튼 하나로 일괄 저장 */
+static lv_obj_t  *s_relay_popup       = NULL;
+static lv_obj_t  *s_relay_popup_title = NULL;
+static lv_obj_t  *s_relay_keyboard    = NULL;
+static int        s_relay_popup_idx  = -1;
+
+static lv_obj_t  *s_relay_alias_ta         = NULL;
+static lv_obj_t  *s_relay_alias_apply_btn  = NULL;
+static char       s_relay_alias_applied_text[POWER_RELAY_ALIAS_MAX_LEN];
+
+static lv_obj_t  *s_relay_ai_switch       = NULL;
+
+/* 문장형 골격 3칸: (채널) 가 (오르면/내리면) 면 (켜/꺼) 라 */
+static lv_obj_t  *s_relay_chan_dd          = NULL;
+static lv_obj_t  *s_relay_direction_word_dd = NULL;  /* 오르면/내리면 */
+static lv_obj_t  *s_relay_action_word_dd    = NULL;  /* 켜/꺼 */
+
+/* 몇도( 기준 ) 전후( 오차 ) — AI On/Off 무관 항상 표시 */
+static lv_obj_t  *s_relay_unit_lbl1        = NULL;  /* "몇도(" 등 채널에 따라 단위가 바뀜 */
+static lv_obj_t  *s_relay_center_ta        = NULL;
+static lv_obj_t  *s_relay_unit_lbl2        = NULL;  /* ") 전후(" */
+static lv_obj_t  *s_relay_margin_ta        = NULL;
+
+/* AI Off일 때만 보이는 상세 묶음 */
+static lv_obj_t  *s_relay_advanced_box    = NULL;
+static lv_obj_t  *s_relay_basedon_dd      = NULL;   /* Group/Device */
+static lv_obj_t  *s_relay_group_choice_row = NULL;  /* Based on == Group일 때만 */
+static lv_obj_t  *s_relay_group_choice_dd  = NULL;  /* Air T(Basic)/Air T(Fine)/Agar */
+static lv_obj_t  *s_relay_device_row      = NULL;   /* Based on == Device일 때만 */
+static lv_obj_t  *s_relay_device_dd       = NULL;
+static uint8_t    s_relay_device_dd_macs[ESP_NOW_HUB_MAX_NODES][6];
+static int        s_relay_device_dd_count = 0;
+static lv_obj_t  *s_relay_source_stat_dd  = NULL;   /* Max/Min/Avg — Group/Device 공통 */
+static lv_obj_t  *s_relay_trend_switch       = NULL;
+static lv_obj_t  *s_relay_trend_window_ta    = NULL;
+static lv_obj_t  *s_relay_min_hold_ta        = NULL;
+static lv_obj_t  *s_relay_apply_btn          = NULL;
+static lv_obj_t  *s_relay_apply_lbl          = NULL;
+
 /* ds_cycle_count 하나만 비교하면 됨(2026-08-10) — 매 리포트가 항상 새 사이클이라 Light
  * Sleep 시절처럼 여러 필드를 같이 diff할 필요가 없어짐(단조증가 카운터) */
 typedef struct {
@@ -744,6 +797,7 @@ static void refresh_lang_texts(void)
     lv_label_set_text(s_dash_title[0], ui_str(STR_PANEL_SUMMARY));
     lv_label_set_text(s_dash_title[1], ui_str(STR_GROUP_SENSOR));
     lv_label_set_text(s_dash_title[2], ui_str(STR_GROUP_CAMERA));
+    lv_label_set_text(s_dash_title[3], ui_str(STR_PANEL_POWER_CONTROL));
     lv_label_set_text(s_sensor_empty, ui_str(STR_PANEL_NO_SENSOR));
     lv_label_set_text(s_camera_empty, ui_str(STR_PANEL_NO_CAMERA));
     lv_label_set_text_fmt(s_web_prefix_label, "%s: ", ui_str(STR_LABEL_WEB));
@@ -3307,6 +3361,37 @@ static bool stats_blend_macs(uint8_t scale_idx, uint8_t chan_type,
     return true;
 }
 
+/* 2026-09-16(ui_main.h 선언 참고) — SR 판정 루프용 다리 함수. Overview 패널과 똑같은 분류/
+ * 집계 로직을 재사용하되, 실시간 판정에 맞게 짧은 창(최근 5분, 1H 스케일=가장 촘촘한
+ * 60초 버킷)만 봄 — Scale 드롭다운으로 고르는 긴 기간 통계와는 별개 */
+bool ui_main_query_power_source_value(const power_relay_config_t *cfg, float *out_value)
+{
+    if (!cfg) return false;
+    uint32_t now = rtc_sync_get_unix_time();
+    uint32_t window_start = (now > 300) ? now - 300 : 0;
+    uint32_t window_end = now;
+
+    float mn = 0, mx = 0, avg = 0;
+    bool have = false;
+    if (cfg->source_kind == POWER_SRC_SINGLE_DEVICE) {
+        have = stats_read_mac_window_stat(0, cfg->chan_type, cfg->device_mac,
+                                           window_start, window_end, &mn, &mx, &avg);
+    } else {
+        uint8_t macs[STATS_AGG_MAX_MACS_UI][6];
+        int n = stats_collect_group_macs((stats_view_group_t)cfg->group, cfg->chan_type,
+                                          cfg->precise, macs, STATS_AGG_MAX_MACS_UI);
+        have = (n > 0) && stats_blend_macs(0, cfg->chan_type, macs, n,
+                                            window_start, window_end, &mn, &mx, &avg);
+    }
+    if (!have) return false;
+    switch (cfg->stat) {
+        case POWER_STAT_MAX: *out_value = mx; break;
+        case POWER_STAT_MIN: *out_value = mn; break;
+        default:             *out_value = avg; break;
+    }
+    return true;
+}
+
 /* 개괄 판넬(2026-09-07 재설계, 구 "최대/최소 판넬") — 좌=온도/이산화탄소,
  * 우=습도/암모니아. Scale 드롭다운으로 고른 기간 기준으로 재계산(사용자 확정:
  * "스케일마다 계산해야되"). Max/Min/Average 범례는 제목(STR_PANEL_STATS_OVERVIEW)에
@@ -4400,9 +4485,35 @@ static void update_signal_widget(lv_obj_t *box, bool has_rssi, int8_t rssi, bool
     }
 }
 
+/* 2026-09-16(SR/Power Control) — 고정 2행 텍스트/색만 갱신(구조 재구성 없음, 페어링 목록이
+ * 아니라서 Sensor/Camera처럼 dash_changed 재빌드가 필요 없음) */
+static void refresh_power_control_panel(void)
+{
+    for (int i = 0; i < POWER_RELAY_COUNT; i++) {
+        if (!s_power_dash_row_label[i]) continue;
+        const power_relay_config_t *cfg = power_relay_get_config(i);
+        char default_name[POWER_RELAY_ALIAS_MAX_LEN];
+        snprintf(default_name, sizeof(default_name), ui_str(STR_RELAY_DEFAULT_NAME_FMT), i + 1);
+        const char *disp = (cfg && cfg->alias[0] != '\0') ? cfg->alias : default_name;
+        bool on = power_relay_get_commanded_on(i);
+
+        char buf[96];
+        snprintf(buf, sizeof(buf), "%s|%d", disp, on ? 1 : 0);
+        if (strcmp(buf, s_power_dash_row_last_text[i]) == 0) continue;
+        strncpy(s_power_dash_row_last_text[i], buf, sizeof(s_power_dash_row_last_text[i]) - 1);
+        s_power_dash_row_last_text[i][sizeof(s_power_dash_row_last_text[i]) - 1] = '\0';
+
+        lv_label_set_text(s_power_dash_row_label[i], disp);
+        lv_label_set_text(s_power_dash_row_status[i], on ? ui_str(STR_STATUS_RELAY_ON) : ui_str(STR_STATUS_RELAY_OFF));
+        lv_obj_set_style_text_color(s_power_dash_row_status[i],
+                                     on ? lv_palette_main(LV_PALETTE_GREEN) : lv_palette_main(LV_PALETTE_GREY), 0);
+    }
+}
+
 static void refresh_dashboard(lv_timer_t *t)
 {
     (void)t;
+    refresh_power_control_panel();
 
     /* 2026-09-11(SD 신뢰성 재설계 항목4) — 쓰기경로(esp_now_hub.c recv_cb, LVGL 태스크 아님)가
      * SD I/O 실패를 만났으면 여기(LVGL 태스크, 매 틱)서 test-and-clear로 가져와 회로차단기를
@@ -6597,6 +6708,51 @@ void ui_init(void)
      * 문자로 찍혔던 버그가 있었음, 이번엔 잊지 않음) */
     lv_label_set_recolor(s_storage_status_label, true);
 
+    /* 2026-09-16(SR/Power Control, 순수 대화로 설계) — Summary와 Sensor 사이. Sens/CAM과
+     * 달리 페어링 목록이 아니라 콘 고정 GPIO 2개라 항상 2행 — Sensor 판넬처럼 매 틱 재구성할
+     * 필요 없이 여기서 딱 한 번 만들고, refresh_power_control_panel()이 텍스트/색만 갱신 */
+    lv_obj_t *power_box = create_dashboard_panel(dashboard_page, STR_PANEL_POWER_CONTROL, 3);
+    lv_obj_t *power_list = lv_obj_create(power_box);
+    lv_obj_set_size(power_list, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(power_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(power_list, 0, 0);
+    lv_obj_set_style_bg_opa(power_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(power_list, 0, 0);
+    lv_obj_set_style_pad_row(power_list, 10, 0);
+    for (int i = 0; i < POWER_RELAY_COUNT; i++) {
+        lv_obj_t *row = lv_obj_create(power_list);
+        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_set_style_pad_ver(row, 8, 0);  /* Sensor/Camera 판넬과 동일(2026-09-15 통일) */
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(row, 8, 0);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_user_data(row, (void *)(uintptr_t)i);
+        lv_obj_add_event_cb(row, cb_power_dash_row_clicked, LV_EVENT_CLICKED, NULL);
+        lv_obj_set_style_bg_color(row, lv_palette_main(LV_PALETTE_GREY), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(row, LV_OPA_30, LV_STATE_PRESSED);
+
+        lv_obj_t *status = lv_label_create(row);
+        lv_obj_set_style_text_font(status, ui_font_get(UI_FONT_SIZE_18), 0);
+        s_power_dash_row_status[i] = status;
+
+        lv_obj_t *label = lv_label_create(row);
+        lv_obj_set_flex_grow(label, 1);
+        lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
+        s_power_dash_row_label[i] = label;
+
+        lv_obj_t *chevron = lv_label_create(row);
+        lv_label_set_text(chevron, ">");
+        lv_obj_set_style_text_font(chevron, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_add_style(chevron, &style_text_muted, 0);
+
+        s_power_dash_row_last_text[i][0] = '\0';
+    }
+
     /* 2026-09-15(사용자 지시 — "주화면에서 현재 4계열 표시를 없애고... 바탕판넬도"[제거]) —
      * Summary의 온도/습도/CO2/암모니아 실시간값 + 회색 배경 패널을 통째로 제거. 이유:
      * 장치가 늘면 "어느 장치 값인지" 모호해지는 문제(오늘 Stats 쪽에서 겪은 것과 동일) —
@@ -7892,6 +8048,553 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
     lv_obj_set_style_text_font(disconnect_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     ESP_LOGW(TAG, "MEMDIAG 개별설정 팝업 완성 t=%u", (unsigned)lv_tick_get());
+}
+
+/* ════════════════════════════════════════════════════════════
+ * SR(Power Control) 릴레이 설정 팝업(2026-09-16, 순수 대화로 설계)
+ * ════════════════════════════════════════════════════════════ */
+
+static const sensor_channel_type_t s_relay_chan_type_values[] = { SENSOR_CHAN_TEMP_C, SENSOR_CHAN_CO2_PPM };
+static const ui_str_id_t s_relay_unit_values[] = { STR_UNIT_TEMP, STR_UNIT_CO2 };
+
+static void cb_relay_ta_focused(lv_event_t *e)
+{
+    lv_obj_t *ta = lv_event_get_target(e);
+    if (!s_relay_keyboard) return;
+    lv_keyboard_set_textarea(s_relay_keyboard, ta);
+    lv_obj_remove_flag(s_relay_keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void cb_relay_numeric_ta_focused(lv_event_t *e)
+{
+    if (s_relay_keyboard) lv_keyboard_set_mode(s_relay_keyboard, LV_KEYBOARD_MODE_NUMBER);
+    cb_relay_ta_focused(e);
+}
+
+static void cb_relay_text_ta_focused(lv_event_t *e)
+{
+    if (s_relay_keyboard) lv_keyboard_set_mode(s_relay_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+    cb_relay_ta_focused(e);
+}
+
+static void cb_relay_keyboard_hide(lv_event_t *e)
+{
+    (void)e;
+    if (s_relay_keyboard) lv_obj_add_flag(s_relay_keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void cb_relay_alias_ta_changed(lv_event_t *e)
+{
+    (void)e;
+    const char *cur = lv_textarea_get_text(s_relay_alias_ta);
+    bool changed = strcmp(cur, s_relay_alias_applied_text) != 0;
+    if (changed) lv_obj_remove_state(s_relay_alias_apply_btn, LV_STATE_DISABLED);
+    else lv_obj_add_state(s_relay_alias_apply_btn, LV_STATE_DISABLED);
+}
+
+static void cb_relay_alias_apply_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (s_relay_popup_idx < 0) return;
+    power_relay_config_t cfg = *power_relay_get_config(s_relay_popup_idx);
+    const char *text = lv_textarea_get_text(s_relay_alias_ta);
+    strncpy(cfg.alias, text, sizeof(cfg.alias) - 1);
+    cfg.alias[sizeof(cfg.alias) - 1] = '\0';
+    power_relay_set_config(s_relay_popup_idx, &cfg);
+    strncpy(s_relay_alias_applied_text, cfg.alias, sizeof(s_relay_alias_applied_text) - 1);
+    s_relay_alias_applied_text[sizeof(s_relay_alias_applied_text) - 1] = '\0';
+    lv_obj_add_state(s_relay_alias_apply_btn, LV_STATE_DISABLED);
+}
+
+/* 소스=장치일 때만 보이는 장치 드랍다운 — 지금 선택된 채널(온도/CO2)을 실제로 보고하는
+ * 페어링 이력 있는 Sens 노드만 후보로 나열(find_node_name_by_mac()과 동일 소스라 잠든
+ * 장치도 잡힘) */
+static void relay_rebuild_device_dropdown(void)
+{
+    if (!s_relay_device_dd) return;
+    uint16_t chan_idx = lv_dropdown_get_selected(s_relay_chan_dd);
+    if (chan_idx >= sizeof(s_relay_chan_type_values) / sizeof(s_relay_chan_type_values[0])) chan_idx = 0;
+    uint8_t want_chan = (uint8_t)s_relay_chan_type_values[chan_idx];
+
+    esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
+    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, ESP_NOW_HUB_MAX_NODES);
+    char options[ESP_NOW_HUB_MAX_NODES * (ESP_NOW_LINK_NAME_LEN + 1) + 1];
+    options[0] = '\0';
+    s_relay_device_dd_count = 0;
+    for (int i = 0; i < total && s_relay_device_dd_count < ESP_NOW_HUB_MAX_NODES; i++) {
+        bool has_chan = false;
+        for (int c = 0; c < nodes[i].chan_count; c++) {
+            if (nodes[i].chan_type[c] == want_chan) { has_chan = true; break; }
+        }
+        if (!has_chan) continue;
+        const char *alias = device_config_get_alias(nodes[i].mac);
+        const char *disp = (alias[0] != '\0') ? alias : nodes[i].name;
+        if (s_relay_device_dd_count > 0) strncat(options, "\n", sizeof(options) - strlen(options) - 1);
+        strncat(options, disp, sizeof(options) - strlen(options) - 1);
+        memcpy(s_relay_device_dd_macs[s_relay_device_dd_count], nodes[i].mac, 6);
+        s_relay_device_dd_count++;
+    }
+    if (s_relay_device_dd_count == 0) {
+        lv_dropdown_set_options(s_relay_device_dd, ui_str(STR_MSG_NO_SOURCE_DEVICE));
+    } else {
+        lv_dropdown_set_options(s_relay_device_dd, options);
+    }
+}
+
+/* 2026-09-16(사용자 설계 — "AI On/Off"가 상세항목 표시를 좌우) — AI On이면 s_relay_advanced_box
+ * 전체를 숨김(스마트 기본값으로 채움), AI Off면 보이고 그 안에서 다시 Based on(그룹/장치)에
+ * 따라 그룹선택/장치선택 행이 서로 갈림. 그룹선택 행은 채널이 온도일 때만 의미가 있음
+ * (CO2는 그룹이 Gas 하나뿐이라 고를 게 없음) */
+static void relay_apply_row_visibility(void)
+{
+    bool ai_on = lv_obj_has_state(s_relay_ai_switch, LV_STATE_CHECKED);
+    if (ai_on) lv_obj_add_flag(s_relay_advanced_box, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(s_relay_advanced_box, LV_OBJ_FLAG_HIDDEN);
+
+    uint16_t basedon_idx = lv_dropdown_get_selected(s_relay_basedon_dd);
+    bool is_group = (basedon_idx == POWER_SRC_GROUP_STAT);
+
+    uint16_t chan_idx = lv_dropdown_get_selected(s_relay_chan_dd);
+    bool is_temp = (chan_idx < sizeof(s_relay_chan_type_values) / sizeof(s_relay_chan_type_values[0])) &&
+                   (s_relay_chan_type_values[chan_idx] == SENSOR_CHAN_TEMP_C);
+
+    if (is_group && is_temp) lv_obj_remove_flag(s_relay_group_choice_row, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_relay_group_choice_row, LV_OBJ_FLAG_HIDDEN);
+    if (!is_group) lv_obj_remove_flag(s_relay_device_row, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_relay_device_row, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void relay_update_units(void)
+{
+    uint16_t chan_idx = lv_dropdown_get_selected(s_relay_chan_dd);
+    if (chan_idx >= sizeof(s_relay_chan_type_values) / sizeof(s_relay_chan_type_values[0])) chan_idx = 0;
+    const char *unit = ui_str(s_relay_unit_values[chan_idx]);
+    lv_label_set_text_fmt(s_relay_unit_lbl1, "%s (%s):", ui_str(STR_LABEL_CENTER), unit);
+    lv_label_set_text_fmt(s_relay_unit_lbl2, "%s (%s):", ui_str(STR_LABEL_MARGIN), unit);
+}
+
+static void cb_relay_ai_switch_changed(lv_event_t *e)
+{
+    (void)e;
+    relay_apply_row_visibility();
+}
+
+static void cb_relay_basedon_changed(lv_event_t *e)
+{
+    (void)e;
+    relay_apply_row_visibility();
+}
+
+static void cb_relay_chan_changed(lv_event_t *e)
+{
+    (void)e;
+    relay_apply_row_visibility();
+    relay_rebuild_device_dropdown();
+    relay_update_units();
+}
+
+/* 나머지 필드는 전부 이 버튼 하나로 한꺼번에 저장(2026-09-16 — 서로 의존적인 값들이라
+ * 필드별 개별 Apply보다 단순). AI On이면 상세항목은 화면에 없으므로 안 읽고 스마트
+ * 기본값으로 채움(사용자 설계 대화: "정밀 우선", "추세 On", "평균") */
+static void cb_relay_apply_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (s_relay_popup_idx < 0) return;
+    power_relay_config_t cfg = *power_relay_get_config(s_relay_popup_idx);
+
+    uint16_t chan_idx = lv_dropdown_get_selected(s_relay_chan_dd);
+    if (chan_idx >= sizeof(s_relay_chan_type_values) / sizeof(s_relay_chan_type_values[0])) chan_idx = 0;
+    cfg.chan_type = s_relay_chan_type_values[chan_idx];
+
+    /* 문장형 골격: (채널) 가 (Y:오르면/내리면) [화살표] (Z:켜/꺼) — Y/Z 두 드랍다운의 조합에서
+     * 방향(direction)을 역산. "오르면-켜"와 "내리면-꺼"는 같은 ON_ABOVE를 다르게 말한 것뿐 */
+    uint16_t y_idx = lv_dropdown_get_selected(s_relay_direction_word_dd);  /* 0=오르면(Rises) 1=내리면(Falls) */
+    uint16_t z_idx = lv_dropdown_get_selected(s_relay_action_word_dd);    /* 0=켜(On) 1=꺼(Off) */
+    bool y_rises = (y_idx == 0);
+    bool z_turns_on = (z_idx == 0);
+    cfg.direction = (z_turns_on == y_rises) ? POWER_DIR_ON_ABOVE : POWER_DIR_ON_BELOW;
+
+    /* 몇도(기준) 전후(오차) -> 방향에 따라 On/Off 임계값으로 환산(2026-09-16 사용자 설계) */
+    float center = (float)atof(lv_textarea_get_text(s_relay_center_ta));
+    float margin = fabsf((float)atof(lv_textarea_get_text(s_relay_margin_ta)));
+    if (cfg.direction == POWER_DIR_ON_ABOVE) {
+        cfg.on_threshold  = center + margin;
+        cfg.off_threshold = center - margin;
+    } else {
+        cfg.on_threshold  = center - margin;
+        cfg.off_threshold = center + margin;
+    }
+
+    /* 2026-09-16(실기 크래시 수정) — configured는 이제 power_relay_set_config()가 아니라
+     * 호출부 책임: 본 설정 Apply(이 함수)만 true로 세팅 — Alias 전용 Apply는 이 필드를 안
+     * 건드려서 기존 값을 그대로 유지함 */
+    cfg.configured = true;
+    cfg.ai_mode = lv_obj_has_state(s_relay_ai_switch, LV_STATE_CHECKED);
+    if (cfg.ai_mode) {
+        cfg.source_kind = POWER_SRC_GROUP_STAT;
+        cfg.group = (cfg.chan_type == SENSOR_CHAN_TEMP_C) ? POWER_GROUP_AIR : POWER_GROUP_GAS;
+        cfg.stat  = POWER_STAT_AVG;
+        if (cfg.chan_type == SENSOR_CHAN_TEMP_C) {
+            /* "정밀 우선" — Fine(SHT45류)을 보고하는 장치가 하나라도 있으면 정밀, 없으면 기본 */
+            uint8_t macs[STATS_AGG_MAX_MACS_UI][6];
+            int n = stats_collect_group_macs(STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C, true,
+                                              macs, STATS_AGG_MAX_MACS_UI);
+            cfg.precise = (n > 0);
+        } else {
+            cfg.precise = false;
+        }
+        cfg.trend_enable = true;
+        /* trend_window_sec/min_hold_sec은 화면에 없으므로 안 건드림 — 이전 값(최초엔 기본
+         * 60초) 유지 */
+    } else {
+        uint16_t basedon_idx = lv_dropdown_get_selected(s_relay_basedon_dd);
+        cfg.source_kind = (power_source_kind_t)basedon_idx;
+        if (cfg.source_kind == POWER_SRC_GROUP_STAT) {
+            if (cfg.chan_type == SENSOR_CHAN_TEMP_C) {
+                uint16_t gc = lv_dropdown_get_selected(s_relay_group_choice_dd);  /* 0=Air기본 1=Air정밀 2=Agar */
+                cfg.group = (gc == 2) ? POWER_GROUP_AGAR : POWER_GROUP_AIR;
+                cfg.precise = (gc == 1);
+            } else {
+                cfg.group = POWER_GROUP_GAS;
+                cfg.precise = false;
+            }
+        } else if (s_relay_device_dd_count > 0) {
+            uint16_t dev_idx = lv_dropdown_get_selected(s_relay_device_dd);
+            if (dev_idx < s_relay_device_dd_count) {
+                memcpy(cfg.device_mac, s_relay_device_dd_macs[dev_idx], 6);
+            }
+        }
+        cfg.stat = (power_source_stat_t)lv_dropdown_get_selected(s_relay_source_stat_dd);
+        cfg.trend_enable = lv_obj_has_state(s_relay_trend_switch, LV_STATE_CHECKED);
+        cfg.trend_window_sec = (uint32_t)atoi(lv_textarea_get_text(s_relay_trend_window_ta));
+        cfg.min_hold_sec = (uint32_t)atoi(lv_textarea_get_text(s_relay_min_hold_ta));
+    }
+
+    power_relay_set_config(s_relay_popup_idx, &cfg);
+}
+
+static void teardown_relay_popup(void)
+{
+    if (!s_relay_popup) return;
+    if (s_relay_keyboard) { lv_obj_delete(s_relay_keyboard); s_relay_keyboard = NULL; }
+    lv_obj_delete(s_relay_popup);
+    s_relay_popup = NULL;
+    s_relay_popup_title = NULL;
+    s_relay_alias_ta = NULL;
+    s_relay_alias_apply_btn = NULL;
+    s_relay_ai_switch = NULL;
+    s_relay_chan_dd = NULL;
+    s_relay_direction_word_dd = NULL;
+    s_relay_action_word_dd = NULL;
+    s_relay_unit_lbl1 = NULL;
+    s_relay_center_ta = NULL;
+    s_relay_unit_lbl2 = NULL;
+    s_relay_margin_ta = NULL;
+    s_relay_advanced_box = NULL;
+    s_relay_basedon_dd = NULL;
+    s_relay_group_choice_row = NULL;
+    s_relay_group_choice_dd = NULL;
+    s_relay_device_row = NULL;
+    s_relay_device_dd = NULL;
+    s_relay_source_stat_dd = NULL;
+    s_relay_min_hold_ta = NULL;
+    s_relay_trend_switch = NULL;
+    s_relay_trend_window_ta = NULL;
+    s_relay_apply_btn = NULL;
+    s_relay_apply_lbl = NULL;
+    s_relay_popup_idx = -1;
+}
+
+static void cb_close_relay_popup(lv_event_t *e)
+{
+    (void)e;
+    teardown_relay_popup();
+}
+
+/* 2026-09-16(사용자 지시 — "설정이 한 화면을 넘어가는데, 두 줄로 만들 수 있을까?") — 필드
+ * 하나당 한 줄이던 걸 두 개씩 한 줄에 배치. relay_make_pair_row()가 좌우 절반씩 나눠먹는
+ * 가로줄을 만들고, 그 안에 relay_field_group()으로 [라벨+컨트롤] 묶음을 하나씩 넣음 */
+static lv_obj_t *relay_make_pair_row(lv_obj_t *parent)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 16, 0);
+    return row;
+}
+
+static lv_obj_t *relay_field_group(lv_obj_t *pair_row, ui_str_id_t label_id)
+{
+    lv_obj_t *group = lv_obj_create(pair_row);
+    lv_obj_set_flex_grow(group, 1);
+    lv_obj_set_height(group, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(group, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(group, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(group, 0, 0);
+    lv_obj_set_style_pad_all(group, 0, 0);
+
+    lv_obj_t *lbl = lv_label_create(group);
+    lv_label_set_text(lbl, ui_str(label_id));
+    lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    return group;
+}
+
+static lv_obj_t *relay_popup_dropdown_field(lv_obj_t *pair_row, ui_str_id_t label_id, const char *options,
+                                              lv_event_cb_t changed_cb)
+{
+    lv_obj_t *group = relay_field_group(pair_row, label_id);
+    lv_obj_t *dd = lv_dropdown_create(group);
+    lv_obj_set_style_pad_ver(dd, 7, 0);
+    lv_dropdown_set_options(dd, options);
+    lv_obj_set_style_text_font(dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    if (changed_cb) lv_obj_add_event_cb(dd, changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    return dd;
+}
+
+static lv_obj_t *relay_popup_number_field(lv_obj_t *pair_row, ui_str_id_t label_id, const char *default_text)
+{
+    lv_obj_t *group = relay_field_group(pair_row, label_id);
+    lv_obj_t *ta = lv_textarea_create(group);
+    lv_textarea_set_one_line(ta, true);
+    lv_textarea_set_max_length(ta, 10);
+    lv_obj_set_width(ta, 90);
+    lv_textarea_set_text(ta, default_text);
+    lv_obj_set_style_text_font(ta, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(ta, cb_relay_numeric_ta_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(ta, cb_relay_numeric_ta_focused, LV_EVENT_CLICKED, NULL);
+    return ta;
+}
+
+static void build_relay_popup(int idx)
+{
+    if (s_relay_popup) return;  /* 이미 열려있음 */
+    if (idx < 0 || idx >= POWER_RELAY_COUNT) return;
+    s_relay_popup_idx = idx;
+    const power_relay_config_t *cfg = power_relay_get_config(idx);
+
+    lv_obj_t *popup = create_page_popup();
+    s_relay_popup = popup;
+    add_page_popup_header(popup, ui_str(STR_PANEL_POWER_CONTROL), cb_close_relay_popup, &s_relay_popup_title);
+    lv_obj_set_style_pad_hor(popup, 12, 0);
+
+    char default_name[POWER_RELAY_ALIAS_MAX_LEN];
+    snprintf(default_name, sizeof(default_name), ui_str(STR_RELAY_DEFAULT_NAME_FMT), idx + 1);
+
+    /* Alias 행 — build_device_popup()과 동일 패턴(즉시 Apply) */
+    lv_obj_t *alias_row = lv_obj_create(popup);
+    lv_obj_set_size(alias_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(alias_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(alias_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(alias_row, 0, 0);
+    lv_obj_set_style_pad_all(alias_row, 0, 0);
+    lv_obj_set_style_pad_column(alias_row, 6, 0);
+
+    lv_obj_t *alias_lbl = lv_label_create(alias_row);
+    lv_label_set_text_fmt(alias_lbl, "%s:", ui_str(STR_LABEL_ALIAS));
+    lv_obj_set_style_text_font(alias_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_relay_alias_ta = lv_textarea_create(alias_row);
+    lv_textarea_set_one_line(s_relay_alias_ta, true);
+    lv_textarea_set_max_length(s_relay_alias_ta, POWER_RELAY_ALIAS_MAX_LEN - 1);
+    lv_textarea_set_placeholder_text(s_relay_alias_ta, default_name);
+    if (cfg->alias[0] != '\0') lv_textarea_set_text(s_relay_alias_ta, cfg->alias);
+    lv_obj_set_flex_grow(s_relay_alias_ta, 1);
+    lv_obj_set_style_text_font(s_relay_alias_ta, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_relay_alias_ta, cb_relay_text_ta_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(s_relay_alias_ta, cb_relay_text_ta_focused, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(s_relay_alias_ta, cb_relay_alias_ta_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    strncpy(s_relay_alias_applied_text, cfg->alias, sizeof(s_relay_alias_applied_text) - 1);
+    s_relay_alias_applied_text[sizeof(s_relay_alias_applied_text) - 1] = '\0';
+    s_relay_alias_apply_btn = lv_button_create(alias_row);
+    lv_obj_add_event_cb(s_relay_alias_apply_btn, cb_relay_alias_apply_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_state(s_relay_alias_apply_btn, LV_STATE_DISABLED);
+    lv_obj_t *alias_apply_lbl = lv_label_create(s_relay_alias_apply_btn);
+    lv_label_set_text(alias_apply_lbl, ui_str(STR_BTN_APPLY));
+    lv_obj_set_style_text_font(alias_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    if (!s_relay_keyboard) {
+        s_relay_keyboard = lv_keyboard_create(lv_screen_active());
+        lv_obj_add_event_cb(s_relay_keyboard, cb_relay_keyboard_hide, LV_EVENT_READY, NULL);
+        lv_obj_add_event_cb(s_relay_keyboard, cb_relay_keyboard_hide, LV_EVENT_CANCEL, NULL);
+    }
+    lv_obj_add_flag(s_relay_keyboard, LV_OBJ_FLAG_HIDDEN);
+
+    /* AI On/Off — 이 아래 문장 골격/임계값은 항상 보이고, 그 뒤 상세묶음(s_relay_advanced_box)은
+     * 이 스위치가 좌우함(2026-09-16 설계) */
+    lv_obj_t *ai_row = lv_obj_create(popup);
+    lv_obj_set_size(ai_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(ai_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ai_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(ai_row, 0, 0);
+    lv_obj_set_style_pad_all(ai_row, 0, 0);
+    lv_obj_t *ai_lbl = lv_label_create(ai_row);
+    lv_label_set_text(ai_lbl, ui_str(STR_LABEL_AI_MODE));
+    lv_obj_set_style_text_font(ai_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_relay_ai_switch = lv_switch_create(ai_row);
+    if (cfg->ai_mode) lv_obj_add_state(s_relay_ai_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(s_relay_ai_switch, cb_relay_ai_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* 문장형 골격(2026-09-16 사용자 설계 — "사람이 생각하는 순서대로"): If (채널) (오르면/내리면)
+     * → (켜/꺼). direction 하나가 Y/Z 두 조합 중 어느 쪽으로도 표현 가능해서, 표시는 항상
+     * Y="오르면" 고정형으로 정준화(재현성) — Apply 시엔 실제 선택된 Y/Z 조합에서 역산 */
+    lv_obj_t *sentence_row = lv_obj_create(popup);
+    lv_obj_set_size(sentence_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(sentence_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(sentence_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(sentence_row, 0, 0);
+    lv_obj_set_style_pad_all(sentence_row, 0, 0);
+    lv_obj_set_style_pad_column(sentence_row, 6, 0);
+
+    lv_obj_t *if_lbl = lv_label_create(sentence_row);
+    lv_label_set_text(if_lbl, ui_str(STR_SENTENCE_IF));
+    lv_obj_set_style_text_font(if_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-09-16(사용자 지적 — "글씨와 다운화살표가 겹쳐") — lv_dropdown 기본폭은 내용에 안
+     * 맞춰지는 고정 130px(LV_DPI_DEF, lv_dropdown.c의 width_def 확인) — 옵션 문구가 길면
+     * 화살표와 겹침. 기존 s_camera_select_dd(LV_DPI_DEF+50)와 동일하게 명시적으로 넓힘 */
+    s_relay_chan_dd = lv_dropdown_create(sentence_row);
+    lv_obj_set_width(s_relay_chan_dd, 150);
+    lv_obj_set_style_pad_ver(s_relay_chan_dd, 7, 0);
+    lv_dropdown_set_options(s_relay_chan_dd, ui_str(STR_OPT_CHAN_TYPE_LIST));
+    lv_obj_set_style_text_font(s_relay_chan_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_relay_chan_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_relay_chan_dd, cb_relay_chan_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    for (size_t i = 0; i < sizeof(s_relay_chan_type_values) / sizeof(s_relay_chan_type_values[0]); i++) {
+        if (s_relay_chan_type_values[i] == cfg->chan_type) { lv_dropdown_set_selected(s_relay_chan_dd, i); break; }
+    }
+
+    s_relay_direction_word_dd = lv_dropdown_create(sentence_row);
+    lv_obj_set_width(s_relay_direction_word_dd, 100);
+    lv_obj_set_style_pad_ver(s_relay_direction_word_dd, 7, 0);
+    lv_dropdown_set_options(s_relay_direction_word_dd, ui_str(STR_OPT_RISE_FALL_LIST));
+    lv_obj_set_style_text_font(s_relay_direction_word_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_relay_direction_word_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_dropdown_set_selected(s_relay_direction_word_dd, 0);  /* 항상 "오르면"으로 정준화 */
+
+    lv_obj_t *arrow_lbl = lv_label_create(sentence_row);
+    lv_label_set_text(arrow_lbl, ui_str(STR_SENTENCE_ARROW));
+    lv_obj_set_style_text_font(arrow_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_relay_action_word_dd = lv_dropdown_create(sentence_row);
+    lv_obj_set_width(s_relay_action_word_dd, 140);
+    lv_obj_set_style_pad_ver(s_relay_action_word_dd, 7, 0);
+    lv_dropdown_set_options(s_relay_action_word_dd, ui_str(STR_OPT_TURN_ACTION_LIST));
+    lv_obj_set_style_text_font(s_relay_action_word_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_relay_action_word_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    /* Y="오르면" 고정이므로: ON_ABOVE->Z=켜(0), ON_BELOW->Z=꺼(1) */
+    lv_dropdown_set_selected(s_relay_action_word_dd, (cfg->direction == POWER_DIR_ON_ABOVE) ? 0 : 1);
+
+    /* 몇도(기준) 전후(오차) — AI On/Off 무관 항상 표시(2026-09-16 사용자 설계) */
+    char num_buf[16];
+    float center0 = (cfg->on_threshold + cfg->off_threshold) / 2.0f;
+    float margin0 = fabsf(cfg->on_threshold - cfg->off_threshold) / 2.0f;
+
+    lv_obj_t *threshold_row = relay_make_pair_row(popup);
+    s_relay_unit_lbl1 = NULL;  /* relay_field_group이 만들 라벨을 아래서 캡처 */
+    lv_obj_t *center_group = relay_field_group(threshold_row, STR_LABEL_CENTER);
+    s_relay_unit_lbl1 = lv_obj_get_child(center_group, 0);
+    s_relay_center_ta = lv_textarea_create(center_group);
+    lv_textarea_set_one_line(s_relay_center_ta, true);
+    lv_textarea_set_max_length(s_relay_center_ta, 10);
+    lv_obj_set_width(s_relay_center_ta, 90);
+    format_value_capped(num_buf, sizeof(num_buf), center0);
+    lv_textarea_set_text(s_relay_center_ta, num_buf);
+    lv_obj_set_style_text_font(s_relay_center_ta, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_relay_center_ta, cb_relay_numeric_ta_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(s_relay_center_ta, cb_relay_numeric_ta_focused, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *margin_group = relay_field_group(threshold_row, STR_LABEL_MARGIN);
+    s_relay_unit_lbl2 = lv_obj_get_child(margin_group, 0);
+    s_relay_margin_ta = lv_textarea_create(margin_group);
+    lv_textarea_set_one_line(s_relay_margin_ta, true);
+    lv_textarea_set_max_length(s_relay_margin_ta, 10);
+    lv_obj_set_width(s_relay_margin_ta, 90);
+    format_value_capped(num_buf, sizeof(num_buf), margin0);
+    lv_textarea_set_text(s_relay_margin_ta, num_buf);
+    lv_obj_set_style_text_font(s_relay_margin_ta, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_relay_margin_ta, cb_relay_numeric_ta_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(s_relay_margin_ta, cb_relay_numeric_ta_focused, LV_EVENT_CLICKED, NULL);
+
+    relay_update_units();
+
+    /* AI Off일 때만 보이는 상세 묶음 */
+    s_relay_advanced_box = lv_obj_create(popup);
+    lv_obj_set_size(s_relay_advanced_box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_relay_advanced_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(s_relay_advanced_box, 0, 0);
+    lv_obj_set_style_pad_all(s_relay_advanced_box, 0, 0);
+    lv_obj_set_style_pad_row(s_relay_advanced_box, 10, 0);
+
+    s_relay_basedon_dd = relay_popup_dropdown_field(relay_make_pair_row(s_relay_advanced_box), STR_LABEL_BASED_ON,
+                                                      ui_str(STR_OPT_BASEDON_LIST), cb_relay_basedon_changed);
+    lv_obj_set_width(s_relay_basedon_dd, 120);
+    lv_dropdown_set_selected(s_relay_basedon_dd, (uint16_t)cfg->source_kind);
+
+    s_relay_group_choice_row = lv_obj_create(s_relay_advanced_box);
+    lv_obj_set_size(s_relay_group_choice_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_relay_group_choice_row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(s_relay_group_choice_row, 0, 0);
+    lv_obj_set_style_pad_all(s_relay_group_choice_row, 0, 0);
+    s_relay_group_choice_dd = lv_dropdown_create(s_relay_group_choice_row);
+    lv_obj_set_width(s_relay_group_choice_dd, 190);
+    lv_obj_set_style_pad_ver(s_relay_group_choice_dd, 7, 0);
+    lv_dropdown_set_options(s_relay_group_choice_dd, ui_str(STR_OPT_GROUP_CHOICE_TEMP_LIST));
+    lv_obj_set_style_text_font(s_relay_group_choice_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_relay_group_choice_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    {
+        int gc_idx = (cfg->group == POWER_GROUP_AGAR) ? 2 : (cfg->precise ? 1 : 0);
+        lv_dropdown_set_selected(s_relay_group_choice_dd, (uint16_t)gc_idx);
+    }
+
+    s_relay_device_row = lv_obj_create(s_relay_advanced_box);
+    lv_obj_set_size(s_relay_device_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_relay_device_row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(s_relay_device_row, 0, 0);
+    lv_obj_set_style_pad_all(s_relay_device_row, 0, 0);
+    s_relay_device_dd = relay_popup_dropdown_field(relay_make_pair_row(s_relay_device_row),
+                                                     STR_LABEL_SOURCE_DEVICE, "", NULL);
+    lv_obj_set_width(s_relay_device_dd, 220);  /* Alias/장치명은 길 수 있음 */
+    relay_rebuild_device_dropdown();
+    for (int i = 0; i < s_relay_device_dd_count; i++) {
+        if (memcmp(s_relay_device_dd_macs[i], cfg->device_mac, 6) == 0) { lv_dropdown_set_selected(s_relay_device_dd, i); break; }
+    }
+
+    s_relay_source_stat_dd = relay_popup_dropdown_field(relay_make_pair_row(s_relay_advanced_box), STR_LABEL_SOURCE_STAT,
+                                                          ui_str(STR_OPT_SOURCE_STAT_LIST), NULL);
+    lv_obj_set_width(s_relay_source_stat_dd, 110);
+    lv_dropdown_set_selected(s_relay_source_stat_dd, (uint16_t)cfg->stat);
+
+    lv_obj_t *trend_pair = relay_make_pair_row(s_relay_advanced_box);
+    lv_obj_t *trend_switch_group = relay_field_group(trend_pair, STR_LABEL_TREND_ENABLE);
+    s_relay_trend_switch = lv_switch_create(trend_switch_group);
+    if (cfg->trend_enable) lv_obj_add_state(s_relay_trend_switch, LV_STATE_CHECKED);
+
+    char int_buf[16];
+    snprintf(int_buf, sizeof(int_buf), "%u", (unsigned)cfg->trend_window_sec);
+    s_relay_trend_window_ta = relay_popup_number_field(trend_pair, STR_LABEL_TREND_WINDOW, int_buf);
+
+    snprintf(int_buf, sizeof(int_buf), "%u", (unsigned)cfg->min_hold_sec);
+    s_relay_min_hold_ta = relay_popup_number_field(relay_make_pair_row(s_relay_advanced_box), STR_LABEL_MIN_HOLD, int_buf);
+
+    relay_apply_row_visibility();
+
+    s_relay_apply_btn = lv_button_create(popup);
+    lv_obj_add_event_cb(s_relay_apply_btn, cb_relay_apply_clicked, LV_EVENT_CLICKED, NULL);
+    s_relay_apply_lbl = lv_label_create(s_relay_apply_btn);
+    lv_label_set_text(s_relay_apply_lbl, ui_str(STR_BTN_APPLY));
+    lv_obj_set_style_text_font(s_relay_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+}
+
+static void cb_power_dash_row_clicked(lv_event_t *e)
+{
+    lv_obj_t *row = lv_event_get_target(e);
+    uintptr_t idx = (uintptr_t)lv_obj_get_user_data(row);
+    if ((int)idx >= POWER_RELAY_COUNT) return;
+    build_relay_popup((int)idx);
 }
 
 /* 2026-09-08(재설계) — 설정 콘텐츠만 지움(s_option_content 안 자식들, lv_obj_clean) — 팝업

@@ -1,0 +1,87 @@
+== 2026-09-16 작업 요약: CNTL SR(Power Control) 첫 구현 + 팝업 UX 재설계(순수 대화) +
+   실기 크래시 조사/수정 ==
+
+[ 한 일 — SR(Power Control) 데이터 모델/제어루프/주화면 판넬 첫 구현 ]
+
+1. power_relay.h/.c 신규 — SR 2개 고정 슬롯(Sens/CAM과 달리 페어링 아님, 콘 하드웨어 자체
+   고정 GPIO), 파일 기반 영구저장(power_relay.bin), GPIO 드라이버(실제 핀은 자리표시
+   GPIO_NUM_NC — 물리 배선 전 확정 필요).
+2. 판정 로직: 히스테리시스 + 최소유지시간 + 추세("Puzzy", 어제 설계 대화 정리) — raw/
+   predicted 값을 On쪽/Off쪽으로 다르게 조합(ON_ABOVE 기준 On평가=max(raw,predicted),
+   Off평가=predicted)해서 "추세가 같은 방향이면 빨리 반응, 반대면 신중하게" 구현.
+3. ui_main.c에 다리 함수(ui_main_query_power_source_value) 추가 — Overview 패널과 동일한
+   그룹/개별장치 분류·집계 로직(stats_classify 등, static이라 power_relay.c가 직접 못 씀)을
+   재사용해서 SR 판정에 값을 공급. 실시간 판정용으로 최근 5분 창(1H 스케일, 가장 촘촘한
+   60초 버킷)만 봄 — Scale 드롭다운 기준 긴 기간 통계와는 별개.
+4. 주화면에 "Power Control" 판넬 신설(Summary와 Sensor 사이), 고정 2행(Relay 1/Relay 2,
+   Alias 가능, On/Off 상태 색상 표시), 탭하면 설정 팝업.
+5. 팝업 v1: 채널/소스/통계/정밀도/장치/방향/임계값(On/Off)/최소유지/추세 필드를 개별
+   드랍다운/입력창으로 나열, 한 버튼으로 일괄 저장.
+
+[ 한 일 — 팝업 UX 재설계(순수 대화, "공학 관점에선 좋은데 사용자 관점에선 쓰기 힘들어") ]
+
+6. 사용자 피드백: 필드 9개를 켜기도 전에 다 채워야 하는 구조가 부담스럽다 — "탑다운" 접근
+   제안: X(채널)가 Y(오르면/내리면)면 Z(켜/꺼)라 라는 문장형 골격 + 각 빈칸의 서브선택
+   (사람이 생각하는 순서대로). "AI ON" 옵션으로 서브 항목(정밀도/소스/추세/최소유지)을
+   스마트 기본값으로 자동 채우는 아이디어로 정리(진짜 LLM 아님 — 부류가 여러 가지인 "AI"
+   단어의 폭넓은 의미 중 규칙기반 자동화 쪽, "AI"가 LLM으로 왜곡될까봐 스마트팜(센서+
+   액츄에이터) 구조와 생육주기 기반 자동화 비전까지 길게 설명하심 — 최종목표는 별도 정리).
+7. 구현: AI On/Off 토글(On이면 상세 항목 전체 숨김), 문장 골격 드랍다운 3개(채널/오르면·
+   내리면/켜·꺼 — 두 드랍다운의 조합에서 방향을 역산), Center+Margin(±) 값을 방향에 따라
+   On/Off 임계값으로 환산, Based on(그룹/장치) → 그룹이면 (Air T Basic/Air T Fine/Agar)
+   통합 드랍다운(정밀도를 별도로 안 묻고 하나로 합침) 또는 장치 목록 → 공통 Max/Min/Avg,
+   추세 On/Off+판단기간(초). power_relay_config_t의 trend_lookahead_sec를
+   trend_window_sec로 통합(판단기간=예측폭, "본 만큼만 내다본다").
+8. 문장 표현은 사용자가 직접 다듬음 — 최종: "Turn (On/Off) if (Temperature/CO2/Humidity)
+   (Up to/Below) [값] +/- [오차] [단위]" — Center/Margin이라는 라벨 단어 자체도 빼고 값만
+   문장에 바로 넣기로 함(오늘 구현판은 아직 "Center:"/"Margin:" 라벨 붙어있음 — 할일 참고).
+
+[ 한 일 — 실기 크래시 조사 및 수정 ]
+
+9. "콘이 계속 리붓" 신고 — Guru Meditation(InstrFetchProhibited), PC=A0=EXCVADDR로 매우
+   낮은 주소, 백트레이스 CORRUPTED. 사용자 단서("Alias만 줬는데") + 재부팅마다 재현되는
+   패턴으로 원인 추적: power_relay_set_config()가 호출부 무관하게 항상 configured=true로
+   만들어서, Alias 전용 Apply(cb_relay_alias_apply_clicked)도 채널/임계값이 전부 기본값
+   (0)인 미완성 설정을 "완료됨"으로 활성화시켜 판정 루프가 그걸 실제로 평가해버림 —
+   호출부 책임으로 이관(본 설정 Apply만 명시적으로 true)해서 수정.
+10. 방어 가드 추가: chan_type==SENSOR_CHAN_NONE이면 evaluate_relay()가 평가 자체를 건너뜀
+    (이미 저장된 잘못된 상태에도 안전).
+11. power_relay_task 스택을 4096→8192로 확대(httpd 핸들러가 같은 종류 호출로 스택 부족
+    겪었던 전례와 동일 소지).
+12. "글 깨짐"(사용자는 한글 유입 의심) 조사 — 실제로는 비트맵 폰트(Montserrat, 영문
+    ASCII만)에 없는 특수기호(→/±/°)가 미싱글리프로 깨진 것, 한글 아니었음 — 전부 ASCII
+    (->,  +/-, C)로 교체.
+13. "드랍다운 화살표와 글씨가 겹침"(반복 지적) 조사 — LVGL 소스(lv_dropdown.c) 직접 확인:
+    width_def가 130px(LV_DPI_DEF) 고정, 내용에 자동으로 안 맞춰짐. 옵션 텍스트가 길면
+    겹침 — 새 드랍다운들에 명시적 폭 지정해서 해결, 메모리에 기록(반복 실수 방지).
+14. "메모리 35K까지 줄었어, 위험해" 신고 — 실측(MEMDIAG 로그): power_relay_start()의
+    xTaskCreate()가 8192바이트 스택을 내부RAM에서 할당하고 있었음. xTaskCreateStatic()+
+    PSRAM 버퍼(heap_caps_malloc(MALLOC_CAP_SPIRAM))로 교체 — 실측 소모 0바이트 확인
+    (esp_lv_adapter의 stack_in_psram=true와 동일 원리). 이후 45초 캡처 동안 내부메모리
+    50~65K대 유지, 패닉 없음.
+
+[ 할 일 — 내일 ]
+
+1. Trend window를 "초" 단위 대신 "측정 횟수" 기준으로 재설계 — 지금은 SR 태스크 자신의
+   15초 평가주기 기준 최근 T초 창이라, 센서 리포트 주기가 길면(예: 10분마다) 그 창 안에
+   새 값이 하나도 없어 추세 계산이 무의미해질 수 있음(사용자 지적). 센서의 실제 측정ID
+   (esp_now_hub_node_t.sensor_measurement_id) 변화를 추적해서 "진짜 새 측정값 N개"를
+   기준으로 삼는 구조로 손봐야 함.
+2. Center/Margin(및 필요하면 다른 숫자 입력들) 컨트롤을 텍스트박스 대신 롤러(lv_roller,
+   이미 CONFIG_LV_USE_ROLLER=y로 활성화 확인됨)로 교체 — 필요하면 탭했을 때 팝업으로 롤러
+   띄우는 방식. 온도/습도는 소수점 1자리(0.0), CO2는 소수점 없는 정수 4자리(0000).
+3. AI Off 상세 섹션의 "Based on(그룹/장치 선택)+그 하위선택(Air Basic/Fine/Agar 또는 장치)
+   +통계(Max/Min/Avg)"를 한 줄로 합치고, "Statistic:" 라벨 텍스트는 제거(드랍다운만).
+4. Trend 스위치가 Off면 Trend window 입력 필드를 비활성화(지금은 상관없이 항상 입력 가능).
+5. 문장 골격 최종 문구로 재작성: "Turn (On/Off) if (Temperature/CO2/Humidity) (Up to/
+   Below) [값] +/- [오차] [단위(C 등)]" — 지금의 "If ~ -> ~", "Center:"/"Margin:" 라벨을
+   전부 이 형태로 교체.
+6. Apply 버튼(본 설정)이 값이 실제로 안 바뀌어도 항상 활성화돼있는 버그 수정 — Alias
+   Apply처럼 변경 여부 추적해서 비활성/활성 토글해야 함.
+7. Apply 버튼이 적용하는 전체 필드(Turn On/Off부터 마지막 필드까지)를 밝은 회색 배경
+   판넬로 시각적으로 묶고, Apply 버튼 자체는 그 판넬의 우측 상단으로 재배치.
+8. 주화면 Power Control 판넬 — Sensor 판넬의 T/H/C/A 값 표기처럼, 각 릴레이 행에 지금
+   설정된 값 요약을 나열. 요약 범위는 문장의 "Turn ~ Up to [값]"까지만(Margin/오차 이후는
+   제외) — 예: "Turn On if Temperature Up to 30.0".
+9. (이전 항목 유지) SC05-NH3 필드 보정, MQ137 재보정(보류), SCD41 간헐적 실패(재현시),
+   그래프 국소회귀 임계값 지켜보기, Sens/sdkconfig SHT45 상태 — 전부 그대로 미해결.
