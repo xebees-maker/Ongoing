@@ -106,8 +106,10 @@ static void send_cask_sleep_now(esp_now_hub_node_t *n)
      * 설정)은 캠과 동일하게 절대 안 재우는 특수값이라 MIN 계산 없이 그대로 0 유지 */
     uint32_t base_sleep_sec;
     if (n->kind == HUB_NODE_KIND_SENS) {
+        /* 2026-09-18 — getter가 이제 미설정이어도 항상 유효한 디폴트를 반환하므로 여기서
+         * 0-체크 폴백 불필요(과거엔 이 15가 ui_main.c의 폴백값(한때 60)과 서로 달라서
+         * 불일치가 생겼음) */
         uint32_t measure_sec = device_config_get_sens_sample_interval_sec(n->mac);
-        if (measure_sec == 0) measure_sec = 15;  /* push_sens_config_to()와 동일 기본값 */
         uint32_t response_sec = device_config_get_response_interval_sec();
         if (response_sec == 0) {
             base_sleep_sec = 0;
@@ -305,12 +307,11 @@ static void push_cam_config_to(const uint8_t *mac)
 /* 2026-09-05 — push_cam_config_to()와 동일 위치/원칙(CASK "항상 먼저" 단계, 설정 로컬
  * 미저장이라 매 사이클 재전송), 다만 샘플링 주기는 노드마다(붙은 센서에 따라) 다를 수
  * 있어(사용자 지시 — "센스마다 만들 필요도 있겠는데") 전역 하나가 아니라 이 mac에 저장된
- * 값을 그때그때 조회해서 보냄. 미설정(0)이면 15초 기본값으로 폴백(Sens Kconfig 기본과
- * 일치, Cntl이 처음 보는 노드도 즉시 정상 주기로 동작하게) */
+ * 값을 그때그때 조회해서 보냄. 2026-09-18: getter가 미설정이어도 항상 유효한 디폴트를
+ * 반환하므로 여기서 0-체크 폴백 불필요(중복 기본값 정의 제거) */
 static void push_sens_config_to(const uint8_t *mac)
 {
     uint32_t interval_sec = device_config_get_sens_sample_interval_sec(mac);
-    if (interval_sec == 0) interval_sec = 15;
 
     esp_now_sens_config_t cfg = {
         .version             = ESP_NOW_LINK_VERSION,

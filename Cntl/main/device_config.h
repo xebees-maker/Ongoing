@@ -80,10 +80,13 @@ uint8_t device_config_get_nack_max_rounds(void);
 
 /* Sens 노드별 샘플링 주기(초, 2026-09-05) — 붙은 센서 종류가 노드마다 달라서(온도/습도/
  * CO2/암모니아 등) 캠의 촬영주기처럼 전역 하나로 두지 않고 STA 자격증명과 같은 mac 키
- * 슬롯 배열로 저장(사용자 지시: "센스마다 만들 필요도 있겠는데"). 없는 mac을 조회하면
- * 0을 반환(미설정) — 호출부(esp_now_hub.c push_sens_config_to)가 기본값으로 폴백 */
+ * 슬롯 배열로 저장(사용자 지시: "센스마다 만들 필요도 있겠는데"). 2026-09-18: 없는 mac을
+ * 조회해도 0(sentinel) 대신 항상 유효한 디폴트를 반환 — 호출부는 반환값을 그대로 신뢰할 것,
+ * 0-체크로 각자 폴백하지 말 것(과거에 esp_now_hub.c/ui_main.c가 서로 다른 폴백값을 써서
+ * 불일치가 생겼던 문제). "명시적으로 설정한 적 있는가"는 아래 _is_set()으로 따로 확인 */
 uint32_t device_config_get_sens_sample_interval_sec(const uint8_t *mac);
 void     device_config_set_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec);
+bool     device_config_sens_sample_interval_is_set(const uint8_t *mac);
 
 /* Alias(2026-09-08, 사용자 설계) — 장치별 사용자 지정 표시 이름("Sens xxxxxx" 대신 임의
  * 문자열). sens_interval과 같은 mac 키 슬롯 배열이지만 이 슬롯의 존재 자체가 "이번에 처음이

@@ -237,7 +237,10 @@ static int       s_xclk_applied_idx = -1;
  * sample_interval_sec) — 대상은 s_selected_sensor_mac(위 참고). 선택된 센서가 바뀔 때마다
  * applied_idx를 그 센서의 저장값으로 다시 맞춰야 함(카메라는 대상이 하나뿐이라 이 재조정이
  * 필요 없었음 — select_sensor() 참고) */
-static const uint32_t s_sens_measure_interval_values[] = { 10, 30, 60, 300, 1800 };
+/* 2026-09-18 — 15(디폴트, SENS_SAMPLE_INTERVAL_SEC_DEFAULT)를 목록에 추가 — 디폴트값이
+ * 프리셋에 실재하지 않으면 find_value_index()가 못 찾는 문제(오늘 지적받은 근본원인)가
+ * 재발하므로, 디폴트는 항상 이 목록의 멤버여야 함 */
+static const uint32_t s_sens_measure_interval_values[] = { 10, 15, 30, 60, 300, 1800 };
 static lv_obj_t *s_sens_measure_dd          = NULL;
 static lv_obj_t *s_sens_measure_apply_btn   = NULL;
 static lv_obj_t *s_sens_measure_label       = NULL;
@@ -1802,16 +1805,12 @@ static void select_sensor(const uint8_t *mac)
     s_has_selected_sensor = true;
 
     if (s_sens_measure_dd) {
-        /* 2026-09-17(모델-뷰-Dirty 원칙 감사) — 0(미설정)은 프리셋 목록{10,30,60,300,1800}에
-         * 없어서 find_value_index가 -1을 반환하고, 드랍다운은 index 0(10s)으로 보이는데
-         * applied_idx는 -1이라 아무 것도 안 건드렸는데 Apply가 활성화돼 보였음. 미설정이면
-         * 프리셋에 실재하는 디폴트(60s)로 간주해서 드랍다운/applied_idx를 서로 일치시킴 —
-         * 실제 저장값(0)은 안 건드림, 여기선 초기 표시용으로만 씀 */
-        uint32_t stored_sec = device_config_get_sens_sample_interval_sec(mac);
-        uint32_t effective_sec = (stored_sec > 0) ? stored_sec : 60;
+        /* 2026-09-18(모델 라이프사이클 원칙 리팩토링) — getter가 이제 미설정이어도 항상
+         * 유효한 값(프리셋 목록에 실재하는 디폴트)을 반환하므로, 여기서 0-체크/별도 폴백
+         * 없이 그대로 신뢰. find_value_index가 -1을 반환할 일이 구조적으로 없어짐 */
         s_sens_measure_applied_idx = find_value_index(s_sens_measure_interval_values,
             sizeof(s_sens_measure_interval_values) / sizeof(s_sens_measure_interval_values[0]),
-            effective_sec);
+            device_config_get_sens_sample_interval_sec(mac));
         lv_dropdown_set_selected(s_sens_measure_dd,
             (uint16_t)(s_sens_measure_applied_idx >= 0 ? s_sens_measure_applied_idx : 0));
         update_sens_measure_apply_enabled();
@@ -4759,8 +4758,12 @@ static void refresh_dashboard(lv_timer_t *t)
         int n = snprintf(buf, sizeof(buf), "%s", display_name);
         /* 2026-09-15(사용자 지시 — "Measure 10S => M 10S, Battery xxxx -> Bat xx%만 남기면,
          * 공간이 많이 확보되니까") — 값 블록(T/H/C/A) 넣을 공간 확보용 압축 */
+        /* 2026-09-18 — getter는 이제 미설정이어도 항상 유효한 값(디폴트)을 반환하므로,
+         * "명시적으로 설정했는가"는 별도 is_set()으로 확인(interval_sec>0으로는 더 이상
+         * 구분 불가 — 디폴트도 항상 0보다 큼) */
         uint32_t interval_sec = device_config_get_sens_sample_interval_sec(s_sensor_dash_row_macs[i]);
-        if (interval_sec > 0 && n > 0 && (size_t)n < sizeof(buf)) {
+        bool interval_explicit = device_config_sens_sample_interval_is_set(s_sensor_dash_row_macs[i]);
+        if (interval_explicit && n > 0 && (size_t)n < sizeof(buf)) {
             n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %us",
                           ui_str(STR_LABEL_MEASURE_TINY), (unsigned)interval_sec);
         }
@@ -6172,8 +6175,10 @@ static void cb_apply_sens_measure_interval(lv_event_t *e)
         return;
     }
     uint16_t idx = lv_dropdown_get_selected(s_sens_measure_dd);
+    /* idx는 LVGL 드랍다운 자체 옵션 개수로 이미 제한되므로 이 배열 범위를 벗어날 일이
+     * 실질적으로 없음 — 그래도 방어코드는 별도 숫자가 아니라 배열 자체를 참조 */
     uint32_t sec = (idx < (sizeof(s_sens_measure_interval_values) / sizeof(s_sens_measure_interval_values[0])))
-                   ? s_sens_measure_interval_values[idx] : 15;
+                   ? s_sens_measure_interval_values[idx] : s_sens_measure_interval_values[0];
     esp_now_hub_apply_sens_sample_interval_sec(s_selected_sensor_mac, sec);
     s_sens_measure_applied_idx = idx;
     update_sens_measure_apply_enabled();
@@ -6206,7 +6211,7 @@ static void cb_apply_response_interval(lv_event_t *e)
     (void)e;
     uint16_t idx = lv_dropdown_get_selected(s_response_interval_dd);
     uint32_t sec = (idx < (sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0])))
-                   ? s_response_interval_values[idx] : 0;
+                   ? s_response_interval_values[idx] : s_response_interval_values[0];
     s_config_apply_target = CONFIG_APPLY_TARGET_RESPONSE;
     s_config_apply_pending_idx = idx;
     /* 2026-08-23 — CAM은 새 값이 아니라 옛 값(지금 이 순간 저장돼있는 값)만큼 자고 있을 수

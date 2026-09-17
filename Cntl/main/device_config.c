@@ -64,6 +64,11 @@ typedef struct __attribute__((packed)) {
                                  still-cut 비교 테스트에서 10MHz가 화질 최적점으로 확인됨
                                  (20MHz부터 노이즈 심해짐). UI 드롭다운은 그대로 5/10/20/24MHz
                                  유지, 빌드 시 기본값만 변경(사용자 지시) */
+/* 2026-09-18(모델 라이프사이클 원칙 리팩토링) — Sens 측정주기가 미설정일 때 쓸 디폴트.
+ * esp_now_hub.c와 ui_main.c가 각자 "0이면 내가 아는 숫자로" 하드코딩했던 게(15와 60, 서로
+ * 다른 값!) 오늘 지적받은 문제의 원인 — 이 #define은 딱 한 번, 아래 s_sens_sample_interval_
+ * default_sec 초기화에만 쓰이고, 그 외 모든 코드는 이 변수(또는 getter)만 읽음 */
+#define SENS_SAMPLE_INTERVAL_SEC_DEFAULT 15
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;
@@ -84,6 +89,9 @@ typedef struct __attribute__((packed)) {
 static uint32_t s_cam_capture_interval_sec = CAM_CAPTURE_INTERVAL_SEC_DEFAULT;
 static uint32_t s_response_interval_sec    = RESPONSE_INTERVAL_SEC_DEFAULT;
 static uint32_t s_adaptive_response_sec    = ADAPTIVE_RESPONSE_SEC_DEFAULT;
+/* Sens 측정주기 전역 디폴트 — MAC별 슬롯이 없는 센서에 대해 device_config_get_sens_sample_
+ * interval_sec()가 반환하는 값. #define을 여기서 딱 한 번만 참조(2026-09-18) */
+static uint32_t s_sens_sample_interval_default_sec = SENS_SAMPLE_INTERVAL_SEC_DEFAULT;
 static bool     s_agc_enable               = AGC_ENABLE_DEFAULT;
 static bool     s_aec_enable               = AEC_ENABLE_DEFAULT;
 static uint8_t  s_xclk_mhz                 = XCLK_MHZ_DEFAULT;
@@ -304,16 +312,21 @@ const char *device_config_find_sta_password(const char *ssid)
 
 uint8_t device_config_get_nack_max_rounds(void) { return NACK_MAX_ROUNDS_DEFAULT; }
 
-/* 없으면 0(미설정) 반환 — 호출부가 기본값(15)으로 폴백 */
+/* 2026-09-18(모델 라이프사이클 원칙 리팩토링 — "값이 없음"이라는 상태 자체를 없앰) — 예전엔
+ * 미설정 시 0(sentinel)을 반환해서, 호출부(esp_now_hub.c/ui_main.c)가 각자 따로 "0이면
+ * 내 나름의 기본값" 폴백을 하드코딩했고 그 값이 서로 달랐던 게(15 vs 60) 오늘 지적받은
+ * 근본원인. 이제 미설정이어도 항상 유효한 값(s_sens_sample_interval_default_sec)을 반환 —
+ * 호출부는 반환값을 그대로 신뢰하면 됨. "명시적으로 설정한 적 있는가"가 별도로 필요하면
+ * device_config_sens_sample_interval_is_set()을 쓸 것 */
 uint32_t device_config_get_sens_sample_interval_sec(const uint8_t *mac)
 {
-    if (!s_sens_intervals || !mac) return 0;
+    if (!s_sens_intervals || !mac) return s_sens_sample_interval_default_sec;
     for (int i = 0; i < SENS_INTERVAL_SLOTS; i++) {
         if (s_sens_intervals[i].in_use && memcmp(s_sens_intervals[i].mac, mac, 6) == 0) {
             return s_sens_intervals[i].sample_interval_sec;
         }
     }
-    return 0;
+    return s_sens_sample_interval_default_sec;
 }
 
 void device_config_set_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec)
@@ -333,6 +346,18 @@ void device_config_set_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec
     s_sens_intervals[slot].in_use = 1;
     s_sens_intervals[slot].sample_interval_sec = sec;
     device_config_save();
+}
+
+/* 2026-09-18 — "값이 뭔가"(항상 유효, 위 getter)와 "사용자가 명시적으로 설정한 적 있는가"는
+ * 별개 질문이라 분리. 대시보드가 "이 센서만 커스텀 주기를 쓴다"를 표시할 때처럼, 디폴트값과
+ * 우연히 같은 값을 명시적으로 골랐을 수도 있는 경우를 구분해야 하는 호출부용 */
+bool device_config_sens_sample_interval_is_set(const uint8_t *mac)
+{
+    if (!s_sens_intervals || !mac) return false;
+    for (int i = 0; i < SENS_INTERVAL_SLOTS; i++) {
+        if (s_sens_intervals[i].in_use && memcmp(s_sens_intervals[i].mac, mac, 6) == 0) return true;
+    }
+    return false;
 }
 
 static alias_entry_t *find_alias_slot(const uint8_t *mac)
