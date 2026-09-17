@@ -52,6 +52,10 @@ static bool     s_commanded_on[POWER_RELAY_COUNT];
 static uint32_t s_last_transition_ms[POWER_RELAY_COUNT];
 static uint32_t s_last_data_ms[POWER_RELAY_COUNT];
 static power_trend_buf_t s_trend[POWER_RELAY_COUNT];
+/* 2026-09-17 — "진짜 새 측정값"만 추세 샘플로 인정하기 위한 직전값 캐시(측정횟수 기준
+ * 재설계, power_relay.h의 trend_sample_count 주석 참고) */
+static float    s_trend_last_value[POWER_RELAY_COUNT];
+static bool     s_trend_has_last_value[POWER_RELAY_COUNT];
 
 static void power_relay_save(void)
 {
@@ -71,8 +75,16 @@ void power_relay_load(void)
     memset(s_relay_cfg, 0, sizeof(s_relay_cfg));
     for (int i = 0; i < POWER_RELAY_COUNT; i++) {
         s_relay_cfg[i].min_hold_sec = 60;          /* 기본 1분 — 사용자가 팝업에서 조정 */
-        s_relay_cfg[i].trend_window_sec = 60;
+        s_relay_cfg[i].trend_sample_count = 5;
         s_relay_cfg[i].ai_mode = true;  /* 2026-09-16 — 기본은 AI On(간단한 화면) */
+        s_relay_cfg[i].y_rises = true;     /* 기본 표시: 도달(Up to) */
+        s_relay_cfg[i].z_turns_on = true;  /* 기본 표시: 켜짐(On) — direction 기본값(ON_ABOVE=0)과 일치 */
+        /* 2026-09-17(사용자 지시 — "OnOff=On, 계열=온도, Up/Below=Up, 온도값 20도, 온도오차
+         * 2도") — 채널/중심/오차 디폴트. ui_main.c의 relay_default_center_margin_for_channel()과
+         * 같은 숫자(20±2, 온도) — 이 파일은 UI 헬퍼를 모르므로 그대로 재기술 */
+        s_relay_cfg[i].chan_type = SENSOR_CHAN_TEMP_C;
+        s_relay_cfg[i].on_threshold = 22.0f;   /* center(20) + margin(2), direction=ON_ABOVE */
+        s_relay_cfg[i].off_threshold = 18.0f;  /* center(20) - margin(2) */
     }
 
     FILE *f = fopen(POWER_RELAY_FILE_PATH, "rb");
@@ -113,6 +125,7 @@ void power_relay_set_config(int idx, const power_relay_config_t *cfg)
     /* 설정이 바뀌면 추세 이력/최근전환시각을 리셋 — 새 소스/방향/임계값 기준으로 처음부터
      * 다시 판단해야지, 이전 소스 기준으로 쌓인 샘플을 섞어 쓰면 안 됨 */
     memset(&s_trend[idx], 0, sizeof(s_trend[idx]));
+    s_trend_has_last_value[idx] = false;
     s_last_transition_ms[idx] = 0;
     power_relay_save();
 }
@@ -143,25 +156,35 @@ static void power_relay_command(int idx, bool on, uint32_t now_ms)
 
 /* 최소제곱 1차회귀 기울기(값/ms) — 추세(방향+속도)만 필요하므로 1차식으로 충분(그래프의
  * 2차 국소회귀와 달리 여기선 "부드러운 곡선"이 아니라 "지금 어느 쪽으로 얼마나 빠르게
- * 가는지"만 필요). 2026-09-16 — window_ms보다 오래된 샘플은 회귀에서 제외("판단기간"을
- * 사용자가 직접 지정) */
-static float trend_slope_per_ms(const power_trend_buf_t *buf, uint32_t now_ms, uint32_t window_ms)
+ * 가는지"만 필요).
+ * 2026-09-17(사용자 지적 — "측정 주기가 길면 60초래봐야 하나도 없을 수 있는데? 측정
+ * 횟수 아니야?") — 시간 창 대신, 링버퍼에 실제로 쌓인 것 중 가장 최근 sample_count개를
+ * 그대로 씀(trend_push가 "값이 바뀐 진짜 새 측정값"만 넣으므로, 여기 있는 건 전부 유효한
+ * 서로 다른 샘플). 링버퍼가 원형이라 buf->next 바로 앞(가장 최근)부터 거꾸로 훑음.
+ * out_span_ms에 실제로 쓴 샘플들이 걸친 시간폭을 같이 반환(예측폭으로 재사용) */
+static float trend_slope_per_ms(const power_trend_buf_t *buf, uint32_t now_ms, int sample_count,
+                                 uint32_t *out_span_ms)
 {
+    if (out_span_ms) *out_span_ms = 0;
+    int n = (sample_count < buf->count) ? sample_count : buf->count;
+    if (n < 2) return 0.0f;
+
     double sum_t = 0, sum_v = 0, sum_tt = 0, sum_tv = 0;
-    int n_used = 0;
-    for (int i = 0; i < buf->count; i++) {
-        if ((now_ms - buf->t_ms[i]) > window_ms) continue;
-        double t = (double)(buf->t_ms[i] - now_ms);  /* now_ms 기준 상대시각(항상 <=0) —
-                                                          정밀도 손실 방지 + t0 슬라이딩 불필요 */
-        double v = (double)buf->v[i];
+    int idx = (buf->next - 1 + POWER_TREND_SAMPLES) % POWER_TREND_SAMPLES;
+    uint32_t oldest_used_t = buf->t_ms[idx];
+    for (int i = 0; i < n; i++) {
+        double t = (double)(buf->t_ms[idx] - now_ms);  /* now_ms 기준 상대시각(항상 <=0) —
+                                                            정밀도 손실 방지 */
+        double v = (double)buf->v[idx];
         sum_t += t; sum_v += v; sum_tt += t * t; sum_tv += t * v;
-        n_used++;
+        oldest_used_t = buf->t_ms[idx];
+        idx = (idx - 1 + POWER_TREND_SAMPLES) % POWER_TREND_SAMPLES;
     }
-    if (n_used < 2) return 0.0f;
-    double n = (double)n_used;
-    double denom = n * sum_tt - sum_t * sum_t;
+    if (out_span_ms) *out_span_ms = now_ms - oldest_used_t;
+    double dn = (double)n;
+    double denom = dn * sum_tt - sum_t * sum_t;
     if (fabs(denom) < 1e-6) return 0.0f;
-    return (float)((n * sum_tv - sum_t * sum_v) / denom);
+    return (float)((dn * sum_tv - sum_t * sum_v) / denom);
 }
 
 static void trend_push(power_trend_buf_t *buf, uint32_t now_ms, float value)
@@ -200,14 +223,21 @@ static void evaluate_relay(int idx, uint32_t now_ms)
         return;  /* 짧은 끊김은 이번 주기 판정만 건너뜀(무시) */
     }
     s_last_data_ms[idx] = now_ms;
-    trend_push(&s_trend[idx], now_ms, value);
+    /* 2026-09-17 — 값이 실제로 바뀐 경우만 "새 측정값"으로 인정해서 추세 샘플에 넣음(같은
+     * 값이 반복 수신되는 건 센서가 그냥 안 자고 있을 뿐 새 정보가 아니므로 카운트 안 함) */
+    if (!s_trend_has_last_value[idx] || value != s_trend_last_value[idx]) {
+        trend_push(&s_trend[idx], now_ms, value);
+        s_trend_last_value[idx] = value;
+        s_trend_has_last_value[idx] = true;
+    }
 
     float predicted = value;
     if (cfg->trend_enable) {
-        uint32_t window_ms = cfg->trend_window_sec * 1000;
-        float slope_per_ms = trend_slope_per_ms(&s_trend[idx], now_ms, window_ms);
-        /* 2026-09-16(사용자 정리) — "판단기간"을 그대로 예측폭으로도 씀(본 만큼만 내다봄) */
-        predicted = value + slope_per_ms * (float)window_ms;
+        uint32_t span_ms = 0;
+        float slope_per_ms = trend_slope_per_ms(&s_trend[idx], now_ms, (int)cfg->trend_sample_count, &span_ms);
+        /* 2026-09-16 원칙 유지("본 만큼만 내다본다") — 이제 그 "본 만큼"은 실제 관측된
+         * 시간폭(span_ms)으로 적응적으로 정해짐(고정 초 값 아님) */
+        predicted = value + slope_per_ms * (float)span_ms;
     }
 
     bool currently_on = s_commanded_on[idx];

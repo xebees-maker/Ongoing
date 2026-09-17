@@ -322,6 +322,7 @@ typedef enum {
     STR_RELAY_DEFAULT_NAME_FMT,  /* Alias 미지정 시 기본표시(snprintf용): "릴레이 %d" / "Relay %d" */
     STR_STATUS_RELAY_ON,         /* "On" / "On" */
     STR_STATUS_RELAY_OFF,        /* "Off" / "Off" */
+    STR_RELAY_NOT_CONFIGURED,    /* 주화면 요약칸: 아직 Apply 전(configured=false)일 때 표시(2026-09-17) */
     STR_LABEL_CHAN_TYPE,         /* "측정 항목:" / "Channel:" */
     STR_OPT_CHAN_TYPE_LIST,      /* 드랍다운 옵션(줄바꿈 구분): "온도\n이산화탄소" / "Temperature\nCO2" */
     STR_LABEL_SOURCE_KIND,       /* "기준 소스:" / "Source:" */
@@ -354,7 +355,19 @@ typedef enum {
     STR_LABEL_BASED_ON,          /* "기준:" / "Based on:" (예전 STR_LABEL_SOURCE_KIND 대체) */
     STR_OPT_BASEDON_LIST,        /* "그룹\n장치" / "Group\nDevice" */
     STR_OPT_GROUP_CHOICE_TEMP_LIST, /* "공기 온도(기본)\n공기 온도(정밀)\nAgar 온도" / "Air T (Basic)\nAir T (Fine)\nAgar" */
-    STR_LABEL_TREND_WINDOW,      /* "판단기간(초):" / "Trend window (sec):" */
+    STR_LABEL_TREND_WINDOW,      /* "판단횟수:" / "Trend samples:" (2026-09-17: 초 대신 측정횟수 기준) */
+
+    /* 2026-09-17(사용자 재작성 — "Turn On if Temperature Up to [값] +/- [오차] [단위]") */
+    STR_SENTENCE_TURN,           /* 문장 맨 앞, Action 드랍다운 앞: "" / "Turn" */
+    STR_SENTENCE_PLUSMINUS,      /* Center/Margin 값 사이: "+/-" / "+/-" */
+    STR_UNIT_HUMI,                /* 습도 단위(향후 채널 추가용): "%" / "%" */
+    /* 2026-09-17(주화면 Power Control 행 요약용 — "Turn On if Temperature Up to 30.0") —
+     * STR_OPT_CHAN_TYPE_LIST/STR_OPT_RISE_FALL_LIST는 드랍다운용 "\n" 결합 문자열이라
+     * 요약 문장에 한 단어만 꺼내 쓰기 어려워 별도로 둠 */
+    STR_CHANNEL_NAME_TEMP,       /* "온도" / "Temperature" */
+    STR_CHANNEL_NAME_CO2,        /* "이산화탄소" / "CO2" */
+    STR_DIRECTION_NAME_UPTO,     /* "도달" / "Up to" */
+    STR_DIRECTION_NAME_BELOW,    /* "미만" / "Below" */
 
     STR_COUNT,
 } ui_str_id_t;

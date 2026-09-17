@@ -326,6 +326,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_RELAY_DEFAULT_NAME_FMT] = { "릴레이 %d", "Relay %d" },
     [STR_STATUS_RELAY_ON]      = { "On", "On" },
     [STR_STATUS_RELAY_OFF]     = { "Off", "Off" },
+    [STR_RELAY_NOT_CONFIGURED] = { "아직 설정 전", "Not configured yet" },
     [STR_LABEL_CHAN_TYPE]      = { "측정 항목:", "Channel:" },
     [STR_OPT_CHAN_TYPE_LIST]   = { "온도\n이산화탄소", "Temperature\nCO2" },
     [STR_LABEL_SOURCE_KIND]    = { "기준 소스:", "Source:" },
@@ -346,20 +347,30 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
 
     /* 2026-09-16(SR 팝업 재설계) */
     [STR_LABEL_AI_MODE]        = { "AI:", "AI:" },
-    [STR_OPT_RISE_FALL_LIST]   = { "오르면\n내리면", "Rises\nFalls" },
-    [STR_OPT_TURN_ACTION_LIST] = { "켜\n꺼", "Turns On\nTurns Off" },
-    [STR_SENTENCE_IF]          = { "만약", "If" },
+    /* 2026-09-17(사용자 최종 문구 — "Turn On if Temperature Up to") */
+    [STR_OPT_RISE_FALL_LIST]   = { "도달\n미만", "Up to\nBelow" },
+    [STR_OPT_TURN_ACTION_LIST] = { "켜짐\n꺼짐", "On\nOff" },
+    [STR_SENTENCE_IF]          = { "만약", "if" },
     /* 2026-09-16(사용자 지적 — "글 깨짐이 있고") — 비트맵 폰트(Montserrat, 영문 ASCII만)에
      * 없는 특수기호(→/±/°)를 썼다가 미싱글리프로 깨져 보였던 문제, 순수 ASCII로 교체 */
     [STR_SENTENCE_ARROW]       = { "->", "->" },
     [STR_LABEL_CENTER]         = { "기준값", "Center" },
     [STR_LABEL_MARGIN]         = { "오차(+/-)", "Margin (+/-)" },
-    [STR_UNIT_TEMP]            = { "도", "C" },
+    [STR_UNIT_TEMP]            = { "°C", "°C" },  /* 2026-09-17: 한/영 통일 — 비트맵 폰트에 ° 글리프 확인됨(U+00B0) */
     [STR_UNIT_CO2]             = { "ppm", "ppm" },
     [STR_LABEL_BASED_ON]       = { "기준:", "Based on:" },
     [STR_OPT_BASEDON_LIST]     = { "그룹\n장치", "Group\nDevice" },
     [STR_OPT_GROUP_CHOICE_TEMP_LIST] = { "공기 온도(기본)\n공기 온도(정밀)\nAgar 온도", "Air T (Basic)\nAir T (Fine)\nAgar" },
-    [STR_LABEL_TREND_WINDOW]   = { "판단기간(초):", "Trend window (sec):" },
+    [STR_LABEL_TREND_WINDOW]   = { "판단횟수:", "Trend samples:" },
+
+    /* 2026-09-17(사용자 재작성 — "Turn On if Temperature Up to [값] +/- [오차] [단위]") */
+    [STR_SENTENCE_TURN]        = { "", "Turn" },
+    [STR_SENTENCE_PLUSMINUS]   = { "+/-", "+/-" },
+    [STR_UNIT_HUMI]            = { "%", "%" },
+    [STR_CHANNEL_NAME_TEMP]    = { "온도", "Temperature" },
+    [STR_CHANNEL_NAME_CO2]     = { "이산화탄소", "CO2" },
+    [STR_DIRECTION_NAME_UPTO]  = { "도달", "Up to" },
+    [STR_DIRECTION_NAME_BELOW] = { "미만", "Below" },
 };
 
 void ui_lang_load(void)
