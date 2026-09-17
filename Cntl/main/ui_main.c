@@ -1802,9 +1802,16 @@ static void select_sensor(const uint8_t *mac)
     s_has_selected_sensor = true;
 
     if (s_sens_measure_dd) {
+        /* 2026-09-17(모델-뷰-Dirty 원칙 감사) — 0(미설정)은 프리셋 목록{10,30,60,300,1800}에
+         * 없어서 find_value_index가 -1을 반환하고, 드랍다운은 index 0(10s)으로 보이는데
+         * applied_idx는 -1이라 아무 것도 안 건드렸는데 Apply가 활성화돼 보였음. 미설정이면
+         * 프리셋에 실재하는 디폴트(60s)로 간주해서 드랍다운/applied_idx를 서로 일치시킴 —
+         * 실제 저장값(0)은 안 건드림, 여기선 초기 표시용으로만 씀 */
+        uint32_t stored_sec = device_config_get_sens_sample_interval_sec(mac);
+        uint32_t effective_sec = (stored_sec > 0) ? stored_sec : 60;
         s_sens_measure_applied_idx = find_value_index(s_sens_measure_interval_values,
             sizeof(s_sens_measure_interval_values) / sizeof(s_sens_measure_interval_values[0]),
-            device_config_get_sens_sample_interval_sec(mac));
+            effective_sec);
         lv_dropdown_set_selected(s_sens_measure_dd,
             (uint16_t)(s_sens_measure_applied_idx >= 0 ? s_sens_measure_applied_idx : 0));
         update_sens_measure_apply_enabled();
@@ -4572,7 +4579,7 @@ static void refresh_power_control_panel(void)
 
         lv_label_set_text(s_power_dash_row_label[i], disp);
         lv_label_set_text(s_power_dash_row_value[i], value_buf);
-        lv_label_set_text(s_power_dash_row_status[i], on ? ui_str(STR_STATUS_RELAY_ON) : ui_str(STR_STATUS_RELAY_OFF));
+        /* 2026-09-17(사용자 지시 — 전원 심볼 아이콘) — 텍스트는 고정, 색만 On/Off로 토글 */
         lv_obj_set_style_text_color(s_power_dash_row_status[i],
                                      on ? lv_palette_main(LV_PALETTE_GREEN) : lv_palette_main(LV_PALETTE_GREY), 0);
     }
@@ -6842,8 +6849,12 @@ void ui_init(void)
         lv_obj_set_style_bg_color(row, lv_palette_main(LV_PALETTE_GREY), LV_STATE_PRESSED);
         lv_obj_set_style_bg_opa(row, LV_OPA_30, LV_STATE_PRESSED);
 
+        /* 2026-09-17(사용자 지시 — "On, Off를 센서 와이파이처럼 시각적으로... 전원 심볼") —
+         * 텍스트("On"/"Off") 대신 LV_SYMBOL_POWER 아이콘을 색으로 구분(초록=On/회색=Off,
+         * 기존 텍스트 색 컨벤션 그대로 재사용) */
         lv_obj_t *status = lv_label_create(row);
         lv_obj_set_style_text_font(status, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_label_set_text(status, LV_SYMBOL_POWER);
         s_power_dash_row_status[i] = status;
 
         lv_obj_t *label = lv_label_create(row);

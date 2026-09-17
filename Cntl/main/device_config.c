@@ -50,7 +50,12 @@ typedef struct __attribute__((packed)) {
 } alias_entry_t;
 
 #define CAM_CAPTURE_INTERVAL_SEC_DEFAULT 1800  /* CAM Kconfig 기본(30분)과 동일 */
-#define RESPONSE_INTERVAL_SEC_DEFAULT    2
+/* 2026-09-17(모델-뷰-Dirty 원칙 감사 — "파일/디폴트/Dirty/model/view가 원칙대로") — 예전
+ * 값(2)이 실제 드랍다운 프리셋 목록(ui_main.c의 s_response_interval_values = {0,3,10,30,60})에
+ * 없어서, 한 번도 설정 안 한 상태에서 팝업을 열면 드랍다운은 0으로 보이는데 applied_idx는
+ * -1(못 찾음)이라 Apply가 손 안 댔는데도 활성화돼 보였음(값 비교 자체는 정상 동작 — 클릭을
+ * 못 먹는 심각한 버그는 아니었음). 프리셋에 실제로 있는 값으로 맞춤 */
+#define RESPONSE_INTERVAL_SEC_DEFAULT    3
 #define ADAPTIVE_RESPONSE_SEC_DEFAULT    10    /* 적응형 반응시간(2026-08-10) — 마지막 사용자
                                                    조작 후 이만큼 조용하면 CAM에 SLEEP_NOW */
 #define AGC_ENABLE_DEFAULT true   /* 센서 전원인가 기본값과 일치(2026-08-21) */
