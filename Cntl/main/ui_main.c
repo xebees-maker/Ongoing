@@ -1040,13 +1040,15 @@ static void create_modal_title(lv_obj_t *box, ui_str_id_t title_id, modal_kind_t
 {
     lv_obj_set_style_clip_corner(box, true, 0);
 
-    /* 2026-09-18(사용자 지적 — "타이틀이 팝업 상단/좌우에 1픽셀씩 덜 차서 배경이 보임") —
-     * card 테마의 border_width만큼 덜 밀려나서 생긴 틈. padding뿐 아니라 border도 상쇄해야
-     * box 바깥 가장자리까지 정확히 닿음 */
-    lv_coord_t border_w  = lv_obj_get_style_border_width(box, LV_PART_MAIN);
-    lv_coord_t pad_top   = lv_obj_get_style_pad_top(box, LV_PART_MAIN) + border_w;
-    lv_coord_t pad_left  = lv_obj_get_style_pad_left(box, LV_PART_MAIN) + border_w;
-    lv_coord_t pad_right = lv_obj_get_style_pad_right(box, LV_PART_MAIN) + border_w;
+    /* 2026-09-18(사용자 지적 — "1픽셀 정도 배경이 남아보인다") — border_width를 margin으로
+     * 상쇄하는 계산은 여전히 미세한 틈을 남김(경계선 자체의 안티에일리어싱/좌표계 오차로
+     * 추정). 근본적으로 border를 아예 없애서(box 테두리는 검정 오버레이 위 bg_color 대비로도
+     * 충분히 구분됨) 상쇄 대상 자체를 지워 틈이 생길 여지를 없앰 */
+    lv_obj_set_style_border_width(box, 0, 0);
+
+    lv_coord_t pad_top   = lv_obj_get_style_pad_top(box, LV_PART_MAIN);
+    lv_coord_t pad_left  = lv_obj_get_style_pad_left(box, LV_PART_MAIN);
+    lv_coord_t pad_right = lv_obj_get_style_pad_right(box, LV_PART_MAIN);
 
     lv_color_t bg_color   = (kind == MODAL_KIND_WARNING) ? lv_palette_main(LV_PALETTE_YELLOW) : lv_palette_main(LV_PALETTE_BLUE);
     lv_color_t text_color = (kind == MODAL_KIND_WARNING) ? lv_color_black() : lv_color_white();
@@ -9254,25 +9256,31 @@ static void build_relay_popup(int idx)
  * 2026-09-18(재설계, 사용자 지시) — 버튼 3개(Cancel/Off/On) 대신 문구 끝에 On/Off 스위치
  * (초기값=현재 릴레이 상태) + Yes/No 2개로 변경. No는 스위치가 뭐든 전부 취소 */
 static int s_override_popup_idx = -1;
-static lv_obj_t *s_override_on_icon = NULL;
-static lv_obj_t *s_override_off_icon = NULL;
+static lv_obj_t *s_override_on_word = NULL;
+static lv_obj_t *s_override_off_word = NULL;
+static lv_obj_t *s_override_icon = NULL;
 static bool s_override_selected_on = false;
 
-/* 2026-09-18(사용자 지시 — "On Off 스위치가 직관적이지 않아... 파워아이콘과 색을 그대로")
- * — 스위치 대신 주화면 상태아이콘과 동일한 LV_SYMBOL_POWER+색(초록=On/회색=Off)을 쓰는 2택
- * 아이콘. 선택된 쪽만 사각형 배경(원형 아님, 사용자 지시)으로 강조 */
-static void relay_override_update_icon_highlight(void)
+/* 2026-09-18(사용자 지시, 여러 차례 재설계 끝에 확정) — 문장은 "Do you want to override as
+ * On or Off?" 그대로 두고(아이콘을 문장 중간에 끼우지 않음), 아이콘 1개는 문장 뒤에 별도로
+ * 옴(주화면 상태아이콘처럼 초록=On/회색=Off). "On"/"Off" 단어는 둘 다 항상 각진 연회색
+ * 배경(탭 가능 표시)을 갖고, 선택된 쪽만 2px 파란 테두리가 추가로 붙음 — 순수 검정 역상은
+ * "눌림" 상태처럼 보여서 뺌(사용자 지적). border_width는 항상 2로 고정하고 opa만 토글해서
+ * 선택 전환 시 레이아웃이 흔들리지 않게 함 */
+static void relay_override_update_choice_visual(void)
 {
-    if (!s_override_on_icon || !s_override_off_icon) return;
-    lv_obj_set_style_bg_opa(s_override_on_icon, s_override_selected_on ? LV_OPA_30 : LV_OPA_TRANSP, 0);
-    lv_obj_set_style_bg_opa(s_override_off_icon, s_override_selected_on ? LV_OPA_TRANSP : LV_OPA_30, 0);
+    if (!s_override_on_word || !s_override_off_word || !s_override_icon) return;
+    lv_obj_set_style_border_opa(s_override_on_word, s_override_selected_on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_opa(s_override_off_word, s_override_selected_on ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(s_override_icon,
+        s_override_selected_on ? lv_palette_main(LV_PALETTE_GREEN) : lv_palette_main(LV_PALETTE_GREY), 0);
 }
 
 static void cb_override_choice_tap(lv_event_t *e)
 {
-    lv_obj_t *icon = lv_event_get_target(e);
-    s_override_selected_on = (icon == s_override_on_icon);
-    relay_override_update_icon_highlight();
+    lv_obj_t *target = lv_event_get_target(e);
+    s_override_selected_on = (target == s_override_on_word);
+    relay_override_update_choice_visual();
 }
 
 static void relay_apply_override(int idx, bool want_on)
@@ -9299,16 +9307,18 @@ static void relay_apply_override(int idx, bool want_on)
 static void cb_override_no(lv_event_t *e)
 {
     if (s_relay_manual_switch) lv_obj_remove_state(s_relay_manual_switch, LV_STATE_CHECKED);
-    s_override_on_icon = NULL;
-    s_override_off_icon = NULL;
+    s_override_on_word = NULL;
+    s_override_off_word = NULL;
+    s_override_icon = NULL;
     cb_modal_close(e);
 }
 
 static void cb_override_yes(lv_event_t *e)
 {
     if (s_override_popup_idx >= 0) relay_apply_override(s_override_popup_idx, s_override_selected_on);
-    s_override_on_icon = NULL;
-    s_override_off_icon = NULL;
+    s_override_on_word = NULL;
+    s_override_off_word = NULL;
+    s_override_icon = NULL;
     cb_modal_close(e);
 }
 
@@ -9319,53 +9329,68 @@ static void show_override_confirm_popup(int idx)
     /* 2026-09-18(팝업 타이틀바 컨벤션) — 공용 헬퍼로 교체, 최상단에 여백 없이 붙음 */
     create_modal_title(box, STR_TITLE_WARNING, MODAL_KIND_WARNING);
 
+    /* 2026-09-18(사용자 지적) — 경고문(1행)과 아이콘 낀 질문 문장(2행)을 분리 */
+    lv_obj_t *line1 = lv_label_create(box);
+    lv_label_set_text(line1, ui_str(STR_MSG_OVERRIDE_WARNING));
+    lv_label_set_long_mode(line1, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(line1, LV_PCT(100));
+    lv_obj_set_style_text_font(line1, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-09-18(사용자 확정 — "Do you want to override as On or Off?" 문장 그대로, 아이콘은
+     * 문장 뒤에 별도) — 조각(prefix/On단어/or/Off단어/아이콘)을 전부 같은 ROW_WRAP 컨테이너의
+     * 형제로 둬서 자연스럽게 줄바꿈되는 한 문장처럼 읽히게 함 */
     lv_obj_t *msg_row = lv_obj_create(box);
     lv_obj_set_size(msg_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(msg_row, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(msg_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(msg_row, 0, 0);
     lv_obj_set_style_pad_all(msg_row, 0, 0);
-    lv_obj_set_style_pad_column(msg_row, 8, 0);
+    lv_obj_set_style_pad_column(msg_row, 4, 0);
+    lv_obj_set_style_pad_row(msg_row, 4, 0);
 
-    /* 2026-09-18(사용자 지적 — "wordwrap 안 되서 스크롤 생겼어") — long_mode/폭을 빠뜨렸던
-     * 실수 수정. flex_grow로 스위치 옆 남는 폭만큼 감싸도록 */
-    lv_obj_t *msg = lv_label_create(msg_row);
-    lv_label_set_text(msg, ui_str(STR_MSG_OVERRIDE_WARNING));
-    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
-    lv_obj_set_flex_grow(msg, 1);
-    lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_t *prefix = lv_label_create(msg_row);
+    lv_label_set_text(prefix, ui_str(STR_MSG_OVERRIDE_PREFIX));
+    lv_obj_set_style_text_font(prefix, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    lv_obj_t *choice_row = lv_obj_create(msg_row);
-    lv_obj_set_size(choice_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(choice_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(choice_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(choice_row, 0, 0);
-    lv_obj_set_style_bg_opa(choice_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(choice_row, 0, 0);
-    lv_obj_set_style_pad_column(choice_row, 8, 0);
+    s_override_on_word = lv_label_create(msg_row);
+    lv_label_set_text(s_override_on_word, ui_str(STR_STATUS_RELAY_ON));
+    lv_obj_set_style_text_font(s_override_on_word, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_radius(s_override_on_word, 0, 0);  /* 각짐(2026-09-18 사용자 지시) */
+    lv_obj_set_style_bg_opa(s_override_on_word, LV_OPA_20, 0);
+    lv_obj_set_style_bg_color(s_override_on_word, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_border_width(s_override_on_word, 2, 0);  /* 항상 2 — opa만 토글해 레이아웃 안 흔들림 */
+    lv_obj_set_style_border_color(s_override_on_word, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_set_style_pad_hor(s_override_on_word, 6, 0);
+    lv_obj_set_style_pad_ver(s_override_on_word, 2, 0);
+    lv_obj_add_flag(s_override_on_word, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_override_on_word, cb_override_choice_tap, LV_EVENT_CLICKED, NULL);
 
-    s_override_on_icon = lv_label_create(choice_row);
-    lv_label_set_text(s_override_on_icon, LV_SYMBOL_POWER);
-    lv_obj_set_style_text_font(s_override_on_icon, ui_font_get(UI_FONT_SIZE_24), 0);
-    lv_obj_set_style_text_color(s_override_on_icon, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_radius(s_override_on_icon, 0, 0);  /* 사각형 강조(2026-09-18 사용자 지시) */
-    lv_obj_set_style_pad_hor(s_override_on_icon, 10, 0);
-    lv_obj_set_style_pad_ver(s_override_on_icon, 6, 0);
-    lv_obj_add_flag(s_override_on_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_override_on_icon, cb_override_choice_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *or_lbl = lv_label_create(msg_row);
+    lv_label_set_text(or_lbl, ui_str(STR_MSG_OVERRIDE_OR));
+    lv_obj_set_style_text_font(or_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_override_off_icon = lv_label_create(choice_row);
-    lv_label_set_text(s_override_off_icon, LV_SYMBOL_POWER);
-    lv_obj_set_style_text_font(s_override_off_icon, ui_font_get(UI_FONT_SIZE_24), 0);
-    lv_obj_set_style_text_color(s_override_off_icon, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_radius(s_override_off_icon, 0, 0);
-    lv_obj_set_style_pad_hor(s_override_off_icon, 10, 0);
-    lv_obj_set_style_pad_ver(s_override_off_icon, 6, 0);
-    lv_obj_add_flag(s_override_off_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_override_off_icon, cb_override_choice_tap, LV_EVENT_CLICKED, NULL);
+    s_override_off_word = lv_label_create(msg_row);
+    char off_buf[16];
+    snprintf(off_buf, sizeof(off_buf), "%s?", ui_str(STR_STATUS_RELAY_OFF));
+    lv_label_set_text(s_override_off_word, off_buf);
+    lv_obj_set_style_text_font(s_override_off_word, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_radius(s_override_off_word, 0, 0);
+    lv_obj_set_style_bg_opa(s_override_off_word, LV_OPA_20, 0);
+    lv_obj_set_style_bg_color(s_override_off_word, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_border_width(s_override_off_word, 2, 0);
+    lv_obj_set_style_border_color(s_override_off_word, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_set_style_pad_hor(s_override_off_word, 6, 0);
+    lv_obj_set_style_pad_ver(s_override_off_word, 2, 0);
+    lv_obj_add_flag(s_override_off_word, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_override_off_word, cb_override_choice_tap, LV_EVENT_CLICKED, NULL);
+
+    /* 문장 뒤 별도 아이콘(2026-09-18 사용자 확정) — 색은 현재 선택을 따라감 */
+    s_override_icon = lv_label_create(msg_row);
+    lv_label_set_text(s_override_icon, LV_SYMBOL_POWER);
+    lv_obj_set_style_text_font(s_override_icon, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_override_selected_on = power_relay_get_commanded_on(idx);
-    relay_override_update_icon_highlight();
+    relay_override_update_choice_visual();
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
     add_modal_button(btn_row, STR_BTN_NO, cb_override_no, NULL);

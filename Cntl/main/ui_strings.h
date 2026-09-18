@@ -327,7 +327,11 @@ typedef enum {
     STR_MSG_RELAY_VALUE_CLAMPED, /* Fine/Basic 전환 등으로 값이 센서 범위를 벗어나 자동 조정됐을 때 토스트(2026-09-18) */
     STR_LABEL_MANUAL_MODE,       /* Manual On/Off 스위치 라벨(2026-09-18): "수동" / "Manual" */
     STR_TITLE_WARNING,           /* Override 확인팝업 제목(2026-09-18, 노란색): "경고" / "Warning" */
-    STR_MSG_OVERRIDE_WARNING,    /* Override 확인팝업 경고문(2026-09-18) */
+    STR_MSG_OVERRIDE_WARNING,    /* Override 확인팝업 경고문 1행(2026-09-18) */
+    /* 2026-09-18(사용자 지시 — "Do you want to override as (On아이콘)On or (Off아이콘)Off?")
+     * — 문장 중간에 아이콘이 끼어들어가므로 문구를 조각냄. STR_STATUS_RELAY_ON/OFF 재사용 */
+    STR_MSG_OVERRIDE_PREFIX,     /* "오버라이드할까요, " / "Do you want to override as " */
+    STR_MSG_OVERRIDE_OR,         /* " 또는 " / " or " */
     STR_MSG_OVERRIDE_ON_SUMMARY, /* 주화면 요약: "On by manual override" (2026-09-18) */
     STR_MSG_OVERRIDE_OFF_SUMMARY, /* 주화면 요약: "Off by manual override" (2026-09-18) */
     STR_LABEL_CHAN_TYPE,         /* "측정 항목:" / "Channel:" */
