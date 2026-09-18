@@ -8958,39 +8958,18 @@ static void build_relay_popup(int idx)
 
     /* AI On/Off — 이 아래 회색판넬(문장골격+임계값+상세묶음) 전체와 무관하게 항상 보임.
      * 판넬 안 상세묶음(s_relay_advanced_box) 표시 여부만 이 스위치가 좌우함(2026-09-16 설계) */
-    lv_obj_t *ai_row = lv_obj_create(popup);
-    lv_obj_set_size(ai_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(ai_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(ai_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(ai_row, 0, 0);
-    lv_obj_set_style_pad_all(ai_row, 0, 0);
-    lv_obj_t *ai_cluster = lv_obj_create(ai_row);
-    lv_obj_set_size(ai_cluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(ai_cluster, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(ai_cluster, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(ai_cluster, 0, 0);
-    lv_obj_set_style_pad_all(ai_cluster, 0, 0);
-    lv_obj_set_style_pad_column(ai_cluster, 6, 0);
-    lv_obj_t *ai_lbl = lv_label_create(ai_cluster);
-    lv_label_set_text(ai_lbl, ui_str(STR_LABEL_AI_MODE));
-    lv_obj_set_style_text_font(ai_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-    s_relay_ai_switch = lv_switch_create(ai_cluster);
+    /* 2026-09-18(사용자 지시 — "(좌정렬)AI (우정렬)On off (좌정렬)Manual (우정렬)On Off로
+     * 배치") — Trend/Min Hold 줄과 같은 relay_make_pair_row+relay_field_group 패턴(절반씩,
+     * 각 절반은 label-왼쪽/control-오른쪽) 재사용 */
+    lv_obj_t *ai_row = relay_make_pair_row(popup);
+    lv_obj_t *ai_group = relay_field_group(ai_row, STR_LABEL_AI_MODE);
+    s_relay_ai_switch = lv_switch_create(ai_group);
     if (cfg->ai_mode) lv_obj_add_state(s_relay_ai_switch, LV_STATE_CHECKED);
     lv_obj_add_event_cb(s_relay_ai_switch, cb_relay_ai_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    /* 2026-09-18(Manual Override, 사용자 설계 — "그 옆에 AI On Off | Manual On Off를 추가") —
-     * AI와 나란히, 상호배타 스위치 */
-    lv_obj_t *manual_cluster = lv_obj_create(ai_row);
-    lv_obj_set_size(manual_cluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(manual_cluster, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(manual_cluster, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(manual_cluster, 0, 0);
-    lv_obj_set_style_pad_all(manual_cluster, 0, 0);
-    lv_obj_set_style_pad_column(manual_cluster, 6, 0);
-    lv_obj_t *manual_lbl = lv_label_create(manual_cluster);
-    lv_label_set_text(manual_lbl, ui_str(STR_LABEL_MANUAL_MODE));
-    lv_obj_set_style_text_font(manual_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-    s_relay_manual_switch = lv_switch_create(manual_cluster);
+    /* 2026-09-18(Manual Override, 사용자 설계) — AI와 나란히, 상호배타 스위치 */
+    lv_obj_t *manual_group = relay_field_group(ai_row, STR_LABEL_MANUAL_MODE);
+    s_relay_manual_switch = lv_switch_create(manual_group);
     if (cfg->manual_override) lv_obj_add_state(s_relay_manual_switch, LV_STATE_CHECKED);
     lv_obj_add_event_cb(s_relay_manual_switch, cb_relay_manual_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
@@ -9191,7 +9170,16 @@ static void build_relay_popup(int idx)
     }
     if (!cfg->trend_enable) lv_obj_add_state(s_relay_trend_window_dd, LV_STATE_DISABLED);
 
-    s_relay_min_hold_dd = relay_popup_dropdown_field(relay_make_pair_row(s_relay_advanced_box), STR_LABEL_MIN_HOLD,
+    /* 2026-09-18(사용자 지시 — "Min hold도 trend처럼... 오른쪽에") — 왼쪽 칸은 지금은
+     * 비워두고(나중에 채울 수 있게) Min Hold를 Trend Samples와 같은 오른쪽 칸에 배치 */
+    lv_obj_t *min_hold_pair = relay_make_pair_row(s_relay_advanced_box);
+    lv_obj_t *min_hold_spacer = lv_obj_create(min_hold_pair);
+    lv_obj_set_flex_grow(min_hold_spacer, 1);
+    lv_obj_set_height(min_hold_spacer, LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(min_hold_spacer, 0, 0);
+    lv_obj_set_style_bg_opa(min_hold_spacer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(min_hold_spacer, 0, 0);
+    s_relay_min_hold_dd = relay_popup_dropdown_field(min_hold_pair, STR_LABEL_MIN_HOLD,
                                                         ui_str(STR_OPT_MIN_HOLD_LIST), cb_relay_field_dirty);
     {
         int mi = find_value_index(s_relay_min_hold_values,
@@ -9205,37 +9193,45 @@ static void build_relay_popup(int idx)
 /* 2026-09-18(Manual Override, 사용자 설계) — 주화면 아이콘 탭과 팝업 안 Manual 스위치가
  * 같은 확인팝업을 공유(사용자 확인: "1. 같은 메커니즘이야"). s_relay_manual_switch는
  * 릴레이 팝업이 열려있을 때만 non-NULL이므로, 이 값으로 "팝업 안에서 트리거됐는지"를 그대로
- * 판단 — Cancel 시 그 스위치만 되돌리면 됨(주화면에서 직접 왔으면 되돌릴 스위치가 없음) */
+ * 판단 — No 시 그 스위치만 되돌리면 됨(주화면에서 직접 왔으면 되돌릴 스위치가 없음).
+ * 2026-09-18(재설계, 사용자 지시) — 버튼 3개(Cancel/Off/On) 대신 문구 끝에 On/Off 스위치
+ * (초기값=현재 릴레이 상태) + Yes/No 2개로 변경. No는 스위치가 뭐든 전부 취소 */
 static int s_override_popup_idx = -1;
+static lv_obj_t *s_override_switch = NULL;
 
-static void cb_override_cancel(lv_event_t *e)
+static void relay_apply_override(int idx, bool want_on)
+{
+    power_relay_config_t cfg = *power_relay_get_config(idx);
+    cfg.manual_override = true;
+    cfg.manual_override_on = want_on;
+    power_relay_set_config(idx, &cfg);
+    /* 팝업이 열려있는 채로 트리거된 경우, 팝업의 모델/스냅샷/화면도 같이 맞춤 — Alias-Apply가
+     * s_relay_form/snapshot을 동기화하던 것과 같은 이유(2026-09-17 패턴 재사용): 안 맞추면
+     * 바깥 Apply가 이 변경을 되돌리거나 dirty가 어긋남 */
+    if (s_relay_manual_switch && idx == s_relay_popup_idx) {
+        s_relay_form.manual_override = true;
+        s_relay_form.manual_override_on = want_on;
+        s_relay_form.ai_mode = false;
+        s_relay_popup_snapshot = s_relay_form;
+        lv_obj_add_state(s_relay_manual_switch, LV_STATE_CHECKED);
+        if (s_relay_ai_switch) lv_obj_remove_state(s_relay_ai_switch, LV_STATE_CHECKED);
+        relay_apply_row_visibility();
+        if (s_relay_apply_btn) lv_obj_add_state(s_relay_apply_btn, LV_STATE_DISABLED);
+    }
+}
+
+static void cb_override_no(lv_event_t *e)
 {
     if (s_relay_manual_switch) lv_obj_remove_state(s_relay_manual_switch, LV_STATE_CHECKED);
+    s_override_switch = NULL;
     cb_modal_close(e);
 }
 
-static void cb_override_direction_chosen(lv_event_t *e)
+static void cb_override_yes(lv_event_t *e)
 {
-    bool want_on = (bool)(uintptr_t)lv_event_get_user_data(e);
-    if (s_override_popup_idx >= 0) {
-        power_relay_config_t cfg = *power_relay_get_config(s_override_popup_idx);
-        cfg.manual_override = true;
-        cfg.manual_override_on = want_on;
-        power_relay_set_config(s_override_popup_idx, &cfg);
-        /* 팝업이 열려있는 채로 트리거된 경우, 팝업의 모델/스냅샷/화면도 같이 맞춤 —
-         * Alias-Apply가 s_relay_form/snapshot을 동기화하던 것과 같은 이유(2026-09-17
-         * 패턴 재사용): 안 맞추면 바깥 Apply가 이 변경을 되돌리거나 dirty가 어긋남 */
-        if (s_relay_manual_switch && s_override_popup_idx == s_relay_popup_idx) {
-            s_relay_form.manual_override = true;
-            s_relay_form.manual_override_on = want_on;
-            s_relay_form.ai_mode = false;
-            s_relay_popup_snapshot = s_relay_form;
-            lv_obj_add_state(s_relay_manual_switch, LV_STATE_CHECKED);
-            if (s_relay_ai_switch) lv_obj_remove_state(s_relay_ai_switch, LV_STATE_CHECKED);
-            relay_apply_row_visibility();
-            if (s_relay_apply_btn) lv_obj_add_state(s_relay_apply_btn, LV_STATE_DISABLED);
-        }
-    }
+    bool want_on = s_override_switch && lv_obj_has_state(s_override_switch, LV_STATE_CHECKED);
+    if (s_override_popup_idx >= 0) relay_apply_override(s_override_popup_idx, want_on);
+    s_override_switch = NULL;
     cb_modal_close(e);
 }
 
@@ -9243,16 +9239,31 @@ static void show_override_confirm_popup(int idx)
 {
     s_override_popup_idx = idx;
     lv_obj_t *box = create_modal();
-    lv_obj_t *msg = lv_label_create(box);
+
+    lv_obj_t *title = lv_label_create(box);
+    lv_label_set_text(title, ui_str(STR_TITLE_WARNING));
+    lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_24), 0);
+    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_YELLOW), 0);
+
+    lv_obj_t *msg_row = lv_obj_create(box);
+    lv_obj_set_size(msg_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(msg_row, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(msg_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(msg_row, 0, 0);
+    lv_obj_set_style_pad_all(msg_row, 0, 0);
+    lv_obj_set_style_pad_column(msg_row, 8, 0);
+
+    lv_obj_t *msg = lv_label_create(msg_row);
     lv_label_set_text(msg, ui_str(STR_MSG_OVERRIDE_WARNING));
-    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(msg, LV_PCT(100));
     lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
 
+    s_override_switch = lv_switch_create(msg_row);
+    bool currently_on = power_relay_get_commanded_on(idx);
+    if (currently_on) lv_obj_add_state(s_override_switch, LV_STATE_CHECKED);
+
     lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_CANCEL, cb_override_cancel, NULL);
-    add_modal_button(btn_row, STR_STATUS_RELAY_OFF, cb_override_direction_chosen, (void *)(uintptr_t)false);
-    add_modal_button(btn_row, STR_STATUS_RELAY_ON, cb_override_direction_chosen, (void *)(uintptr_t)true);
+    add_modal_button(btn_row, STR_BTN_NO, cb_override_no, NULL);
+    add_modal_button(btn_row, STR_BTN_YES, cb_override_yes, NULL);
 }
 
 static void cb_power_icon_tap(lv_event_t *e)

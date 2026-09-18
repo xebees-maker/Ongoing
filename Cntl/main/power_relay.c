@@ -19,7 +19,14 @@ static const char *TAG = "power_relay";
 static const gpio_num_t s_relay_gpio[POWER_RELAY_COUNT] = { GPIO_NUM_NC, GPIO_NUM_NC };
 
 #define POWER_RELAY_FILE_PATH   FS_MOUNT_POINT "/power_relay.bin"
-#define POWER_RELAY_FILE_VERSION 1
+/* 2026-09-18(실기에서 발견된 버그 — "저장된 값이 아니라 오버라이드 문구가 뜬다") —
+ * power_relay_config_t는 packed가 아니라 컴파일러가 필드 사이에 정렬 패딩을 넣는데, 오늘
+ * manual_override/manual_override_on을 기존 필드(configured/ai_mode) 사이의 패딩 자리에
+ * 끼워넣으면서 우연히 sizeof()가 안 바뀌었음 — 버전을 여태 안 올려서 예전 파일이 형식
+ * 불일치로 안 걸러지고, 그 구버전 byte들이(예: 예전 ai_mode 값) 새 필드 자리로 그대로
+ * 재해석돼 엉뚱한 값(Override=true)이 됐음. 구조체를 바꿀 때마다(오늘 이미 y_rises/
+ * z_turns_on도 안 올렸었음) 반드시 버전을 올려서 이 클래스의 버그를 원천 차단 */
+#define POWER_RELAY_FILE_VERSION 2
 
 /* 판정 주기(ms) — 응답성 설정과 무관한 이 모듈만의 독립 주기. 짧을수록 반응이 빠르지만
  * stats_agg 집계 버킷(1H 스케일=60초 폭)보다 훨씬 짧게 돌려봤자 대부분 같은 값을 다시

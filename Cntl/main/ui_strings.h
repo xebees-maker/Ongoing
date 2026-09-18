@@ -35,6 +35,7 @@ typedef enum {
     STR_BTN_CANCEL,
     STR_STATUS_CANCEL_PENDING,
     STR_BTN_YES,
+    STR_BTN_NO,
     STR_PANEL_SUMMARY,
     STR_PANEL_NO_SENSOR,
     STR_PANEL_NO_CAMERA,
@@ -325,6 +326,7 @@ typedef enum {
     STR_RELAY_NOT_CONFIGURED,    /* 주화면 요약칸: 아직 Apply 전(configured=false)일 때 표시(2026-09-17) */
     STR_MSG_RELAY_VALUE_CLAMPED, /* Fine/Basic 전환 등으로 값이 센서 범위를 벗어나 자동 조정됐을 때 토스트(2026-09-18) */
     STR_LABEL_MANUAL_MODE,       /* Manual On/Off 스위치 라벨(2026-09-18): "수동" / "Manual" */
+    STR_TITLE_WARNING,           /* Override 확인팝업 제목(2026-09-18, 노란색): "경고" / "Warning" */
     STR_MSG_OVERRIDE_WARNING,    /* Override 확인팝업 경고문(2026-09-18) */
     STR_MSG_OVERRIDE_ON_SUMMARY, /* 주화면 요약: "On by manual override" (2026-09-18) */
     STR_MSG_OVERRIDE_OFF_SUMMARY, /* 주화면 요약: "Off by manual override" (2026-09-18) */
