@@ -310,6 +310,11 @@ typedef enum {
      * 정리 팝업 등)에서도 쓰여서 그대로 두고, 이 행 전용으로 더 짧은 버전을 새로 둠 */
     STR_LABEL_MEASURE_TINY,      /* "측정" / "M" */
     STR_LABEL_BATTERY_TINY,      /* "Bat" / "Bat" */
+    /* 2026-09-18(사용자 지시 — 캠 대시 행에 촬영주기/AGC/AEC 표시, 센스 M/Bat과 동일한 짧은
+     * 태그 패턴) */
+    STR_LABEL_CAPTURE_TINY,      /* "촬영" / "P" (Take Picture/Period) */
+    STR_LABEL_AGC_TINY,          /* "AGC" / "AGC" */
+    STR_LABEL_AEC_TINY,          /* "AEC" / "AEC" */
     STR_BTN_RECORD,              /* 통계 팝업 제목바에서 Record 팝업을 여는 버튼: "기록 보기" / "View Record" */
     STR_TITLE_RECORD,            /* Record 팝업 제목: "기록" / "Record" */
     STR_LABEL_PERIOD,            /* Scale 드랍다운 왼쪽 라벨: "기간:" / "Period:" */

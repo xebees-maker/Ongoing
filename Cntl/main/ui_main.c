@@ -3239,16 +3239,15 @@ static void format_bytes_human(uint32_t bytes, char *buf, size_t buf_size)
     snprintf(buf, buf_size, "%.*f%s", decimals, v, units[u]);
 }
 
-/* 배터리 표시 공용 포맷 함수(2026-08-22, 사용자 지시) — "{배터리/Battery}: x.xx V (yy%)".
- * CAM에 이어 나중에 Sens 요약행에도 그대로 재사용할 목적으로 여기 분리해둠 — 보드마다
- * mV/%%를 얻는 방식(CAM=I2C 익스팬더, Sens=직접 GPIO ADC)은 다르지만 표시 포맷은 공통 */
-static void format_battery_display(char *buf, size_t buf_size, uint16_t battery_mv, uint8_t battery_pct)
+/* 배터리 표시 공용 포맷 함수(2026-08-22 도입 -> 2026-09-18 재설계, 사용자 지시 — "배터리
+ * 표시 스트링을 리턴하는 함수를 공통으로 만들어(센스, 캠, 이후 또 뭐가 붙든)") — 예전엔
+ * 캠만 이 함수를 쓰고 센스는 자기 나름대로 인라인으로 "Bat xx%"를 만들어서 서로 포맷이
+ * 달랐음(캠="Battery 4.32V (100%)", 센스="Bat 85%") — 센스 쪽 짧은 포맷 하나로 통일하고
+ * 캠도 그대로 재사용. mV는 더 이상 표시 안 함(연결됨 행에서 다른 항목과 " / "로 나란히
+ * 붙는 자리라 퍼센트만으로 충분, 사용자 확인) */
+static void format_battery_tiny(char *buf, size_t buf_size, uint8_t battery_pct)
 {
-    /* 2026-09-09(사용자 지적 — "배터리만 Battery : 4.32V (100%) 로 길게 나와") — 연결됨
-     * 행에서 다른 항목(예: "Measure 10s")과 나란히 " / "로 이어붙는 짧은 형식이라, 콜론+
-     * "V" 앞 공백을 빼서 통일감 있게 함(이 함수는 지금 그 행 표시 용도로만 씀) */
-    snprintf(buf, buf_size, "%s %d.%02dV (%u%%)", ui_str(STR_LABEL_BATTERY),
-             battery_mv / 1000, (battery_mv % 1000) / 10, (unsigned)battery_pct);
+    snprintf(buf, buf_size, "%s %u%%", ui_str(STR_LABEL_BATTERY_TINY), (unsigned)battery_pct);
 }
 
 /* 2026-09-05(사용자 설계) — sensor_channel_type_t(esp_now_link.h) enum -> 콘 로컬 라벨/단위.
@@ -4858,8 +4857,9 @@ static void refresh_dashboard(lv_timer_t *t)
         for (int j = 0; j < sens_count; j++) {
             if (memcmp(sens_macs[j], s_sensor_dash_row_macs[i], 6) != 0) continue;
             if (sens_nodes[j].has_deepsleep_stats && n > 0 && (size_t)n < sizeof(buf)) {
-                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %u%%",
-                              ui_str(STR_LABEL_BATTERY_TINY), (unsigned)sens_nodes[j].battery_pct);
+                char batt[24];
+                format_battery_tiny(batt, sizeof(batt), sens_nodes[j].battery_pct);
+                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", batt);
             }
             /* 2026-09-15(사용자 설계 — "각 센서별로 T, H, C, A로 값을 표기") — 그 기기가
              * 실제로 보고하는 채널만, chan_type 순서 그대로 */
@@ -5002,18 +5002,39 @@ static void refresh_dashboard(lv_timer_t *t)
         char buf[96];
         const char *display_name = (s_camera_dash_row_alias[i][0] != '\0')
                                     ? s_camera_dash_row_alias[i] : s_camera_dash_row_names[i];
-        int n = snprintf(buf, sizeof(buf), "%s (%s)", display_name,
-                 ui_str(st == HUB_CONN_STATE_ACTIVE ? STR_STATUS_ACTIVE : STR_STATUS_PAIRED));
+        /* 2026-09-18(사용자 지시 — "와이파이 기호가... 센스와 통일해") — "(Active)"/"(Paired)"
+         * 텍스트 제거, 센스와 동일하게 신호 아이콘 색으로만 표현. 이어서 촬영주기(P)/Bat%/
+         * AGC/AEC — 순서와 태그 전부 사용자 확정("이름 / 촬영주기 / Bat% / AGC / AEC") */
+        int n = snprintf(buf, sizeof(buf), "%s", display_name);
+        uint32_t capture_interval_sec = device_config_get_cam_capture_interval_sec(s_camera_dash_row_macs[i]);
+        if (n > 0 && (size_t)n < sizeof(buf)) {
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %us",
+                          ui_str(STR_LABEL_CAPTURE_TINY), (unsigned)capture_interval_sec);
+        }
         for (int j = 0; j < cam_count; j++) {
             if (memcmp(cam_macs[j], s_camera_dash_row_macs[i], 6) != 0) continue;
             /* 2026-09-08(사용자 설계 — "센서, 캠 연결을 주화면에서 하면... Summary에 있던
              * 배터리, 전계강도를 각 sensor, camera panel로 옮기고") */
             if (cam_nodes[j].has_deepsleep_stats && n > 0 && (size_t)n < sizeof(buf)) {
-                char batt[32];
-                format_battery_display(batt, sizeof(batt), cam_nodes[j].battery_mv, cam_nodes[j].battery_pct);
-                snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", batt);
+                char batt[24];
+                format_battery_tiny(batt, sizeof(batt), cam_nodes[j].battery_pct);
+                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", batt);
             }
-            update_signal_widget(s_camera_dash_row_signal[i], cam_nodes[j].has_rssi, cam_nodes[j].rssi, true, false);
+            /* AGC/AEC는 On일 때만("On" 글자 없이 태그만) — 사용자 지시 */
+            if (device_config_get_agc_enable(s_camera_dash_row_macs[i]) && n > 0 && (size_t)n < sizeof(buf)) {
+                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", ui_str(STR_LABEL_AGC_TINY));
+            }
+            if (device_config_get_aec_enable(s_camera_dash_row_macs[i]) && n > 0 && (size_t)n < sizeof(buf)) {
+                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", ui_str(STR_LABEL_AEC_TINY));
+            }
+            /* 2026-09-18(사용자 지적 — is_active를 true로 하드코딩해서 실제 상태와 무관하게
+             * 표시되던 버그) — 센스의 near_orphan 계산과 동일 패턴으로 실제 상태 반영 */
+            uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            uint32_t timeout_ms = esp_now_hub_node_timeout_ms(&cam_nodes[j]);
+            uint32_t elapsed_ms = now_ms - cam_nodes[j].last_seen_ms;
+            bool near_orphan = (timeout_ms > 0) && ((uint64_t)elapsed_ms * 10 >= (uint64_t)timeout_ms * 8);
+            update_signal_widget(s_camera_dash_row_signal[i], cam_nodes[j].has_rssi, cam_nodes[j].rssi,
+                                  st == HUB_CONN_STATE_ACTIVE, near_orphan);
             break;
         }
         if (strcmp(s_camera_dash_row_last_text[i], buf) != 0) {
