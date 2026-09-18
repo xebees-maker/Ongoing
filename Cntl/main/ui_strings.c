@@ -381,6 +381,11 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_CHANNEL_NAME_CO2]     = { "이산화탄소", "CO2" },
     [STR_DIRECTION_NAME_UPTO]  = { "도달", "Up to" },
     [STR_DIRECTION_NAME_BELOW] = { "미만", "Below" },
+
+    [STR_TITLE_CONFIRM]  = { "확인", "Confirm" },
+    [STR_TITLE_SETTING]  = { "설정", "Setting" },
+    [STR_TITLE_NOTICE]   = { "알림", "Notice" },
+    [STR_TITLE_PROGRESS] = { "진행 중", "In Progress" },
 };
 
 void ui_lang_load(void)

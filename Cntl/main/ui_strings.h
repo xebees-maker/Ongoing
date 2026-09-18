@@ -378,6 +378,12 @@ typedef enum {
     STR_DIRECTION_NAME_UPTO,     /* "도달" / "Up to" */
     STR_DIRECTION_NAME_BELOW,    /* "미만" / "Below" */
 
+    /* 2026-09-18(팝업 타이틀바 컨벤션 — 종류/타이틀문구/색상/버튼 표) */
+    STR_TITLE_CONFIRM,           /* 파랑/흰색, 버튼 OK/Cancel: "확인" / "Confirm" */
+    STR_TITLE_SETTING,           /* 파랑/흰색, 버튼 OK/Cancel: "설정" / "Setting" */
+    STR_TITLE_NOTICE,            /* 파랑/흰색(경고색일 수도 있음), 버튼 Close만: "알림" / "Notice" */
+    STR_TITLE_PROGRESS,          /* 파랑/흰색, 버튼 Cancel만: "진행 중" / "In Progress" */
+
     STR_COUNT,
 } ui_str_id_t;
 

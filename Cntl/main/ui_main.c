@@ -1022,6 +1022,50 @@ static lv_obj_t *create_modal(void)
     return box;
 }
 
+/* 팝업 타이틀바 색상 분류(2026-09-18 컨벤션 — 종류/타이틀문구/색상/버튼 표) — Warning은
+ * 파괴적/되돌리기 부담있는 조치, 일반은 정보전달/일상적 선택. 색상과 버튼구조는 독립적인
+ * 축이라(예: SD 실패 알림은 Warning색이지만 버튼은 알림구조인 Close 하나) kind는 색상만
+ * 결정하고 버튼은 각 호출부가 STR_BTN_*로 직접 고름 */
+typedef enum {
+    MODAL_KIND_WARNING,
+    MODAL_KIND_NORMAL,
+} modal_kind_t;
+
+/* box 최상단에 여백 없이 좌우 끝까지 붙는 타이틀바(Windows 팝업 스타일, 2026-09-18 사용자
+ * 지시) — box의 기본 패딩을 음수 마진으로 상쇄해서 가장자리까지 닿게 하고, clip_corner로
+ * box의 둥근 모서리를 타이틀바 위쪽 모서리가 자동으로 따라가게 함(각 팝업마다 radius를
+ * 따로 맞출 필요 없음). create_modal() 직후, 다른 자식을 추가하기 전에 호출해야
+ * 첫 자식이 되어 최상단에 옴 */
+static void create_modal_title(lv_obj_t *box, ui_str_id_t title_id, modal_kind_t kind)
+{
+    lv_obj_set_style_clip_corner(box, true, 0);
+
+    lv_coord_t pad_top   = lv_obj_get_style_pad_top(box, LV_PART_MAIN);
+    lv_coord_t pad_left  = lv_obj_get_style_pad_left(box, LV_PART_MAIN);
+    lv_coord_t pad_right = lv_obj_get_style_pad_right(box, LV_PART_MAIN);
+
+    lv_color_t bg_color   = (kind == MODAL_KIND_WARNING) ? lv_palette_main(LV_PALETTE_YELLOW) : lv_palette_main(LV_PALETTE_BLUE);
+    lv_color_t text_color = (kind == MODAL_KIND_WARNING) ? lv_color_black() : lv_color_white();
+
+    lv_obj_t *title_bar = lv_obj_create(box);
+    lv_obj_set_width(title_bar, LV_PCT(100));
+    lv_obj_set_height(title_bar, LV_SIZE_CONTENT);
+    lv_obj_set_style_margin_top(title_bar, -pad_top, 0);
+    lv_obj_set_style_margin_left(title_bar, -pad_left, 0);
+    lv_obj_set_style_margin_right(title_bar, -pad_right, 0);
+    lv_obj_set_style_radius(title_bar, 0, 0);
+    lv_obj_set_style_bg_color(title_bar, bg_color, 0);
+    lv_obj_set_style_bg_opa(title_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(title_bar, 0, 0);
+    lv_obj_set_style_pad_hor(title_bar, 12, 0);
+    lv_obj_set_style_pad_ver(title_bar, 6, 0);
+
+    lv_obj_t *title = lv_label_create(title_bar);
+    lv_label_set_text(title, ui_str(title_id));
+    lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_24), 0);
+    lv_obj_set_style_text_color(title, text_color, 0);
+}
+
 /* 2026-09-08 — 통계/설정 전체화면 팝업 전용 배경. create_modal()과 같은 이유(레이어버퍼
  * malloc 회피)로 완전 불투명이지만, 420px 고정폭 대화상자가 아니라 화면 전체를 채우는
  * 콘텐츠 컨테이너라 별도 헬퍼로 분리. lv_tabview가 없어졌으므로 이 팝업들이 이제 유일한
@@ -1265,10 +1309,7 @@ static void cb_logo_title_tap(lv_event_t *e)
 {
     (void)e;
     lv_obj_t *box = create_modal();
-
-    lv_obj_t *title = lv_label_create(box);
-    lv_label_set_text(title, ui_str(STR_TITLE_WEB_QR));
-    lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_18), 0);
+    create_modal_title(box, STR_TITLE_WEB_QR, MODAL_KIND_NORMAL);
 
     const char *ip = esp_now_hub_get_own_ip_str();
     if (ip[0] == '\0') {
@@ -1292,7 +1333,7 @@ static void cb_logo_title_tap(lv_event_t *e)
     }
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_modal_close, NULL);
+    add_modal_button(btn_row, STR_BTN_CLOSE, cb_modal_close, NULL);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -1319,12 +1360,16 @@ static void cb_confirm_yes_trampoline(lv_event_t *e)
     if (fn) fn(ctx);
 }
 
-static void show_confirm_popup(const char *message, confirm_yes_fn_t on_yes, void *ctx)
+/* kind(2026-09-18 팝업 컨벤션) — WARNING: 파괴적/되돌리기 부담있는 조치(삭제/포맷/재시작
+ * 등), 버튼 Yes/No. NORMAL: 일상적 선택(연결해제 등), 버튼 OK/Cancel. 문구 자체는 호출부가
+ * 준비해서 넘기므로 Yes/No든 OK/Cancel이든 답할 수 있게 서술하는 건 호출부 책임 */
+static void show_confirm_popup(const char *message, modal_kind_t kind, confirm_yes_fn_t on_yes, void *ctx)
 {
     s_confirm_state.fn  = on_yes;
     s_confirm_state.ctx = ctx;
 
     lv_obj_t *box = create_modal();
+    create_modal_title(box, kind == MODAL_KIND_WARNING ? STR_TITLE_WARNING : STR_TITLE_CONFIRM, kind);
 
     lv_obj_t *msg = lv_label_create(box);
     lv_label_set_text(msg, message);
@@ -1333,16 +1378,22 @@ static void show_confirm_popup(const char *message, confirm_yes_fn_t on_yes, voi
     lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_YES, cb_confirm_yes_trampoline, &s_confirm_state);
-    add_modal_button(btn_row, STR_BTN_CANCEL, cb_modal_close, NULL);
+    if (kind == MODAL_KIND_WARNING) {
+        add_modal_button(btn_row, STR_BTN_YES, cb_confirm_yes_trampoline, &s_confirm_state);
+        add_modal_button(btn_row, STR_BTN_NO, cb_modal_close, NULL);
+    } else {
+        add_modal_button(btn_row, STR_BTN_CONFIRM, cb_confirm_yes_trampoline, &s_confirm_state);
+        add_modal_button(btn_row, STR_BTN_CANCEL, cb_modal_close, NULL);
+    }
 }
 
 /* 2026-09-10(사용자 설계 — "할당된 용량의 90%가 될 때 10%만큼 오래된 걸 지우겠다는 팝업을
  * 띄운다") — 확인/취소가 아니라 이미 실행된 정리를 알리는 안내뿐(show_confirm_popup과
- * 달리 버튼 하나, QR팝업과 동일 패턴) */
+ * 달리 버튼 하나, QR팝업과 동일 패턴). 제목=알림(2026-09-18 컨벤션)이라 버튼도 Close만 */
 static void show_storage_cleanup_popup(const char *category_name, uint32_t deleted_count)
 {
     lv_obj_t *box = create_modal();
+    create_modal_title(box, STR_TITLE_NOTICE, MODAL_KIND_NORMAL);
 
     lv_obj_t *msg = lv_label_create(box);
     lv_label_set_text_fmt(msg, ui_str(STR_MSG_STORAGE_CLEANUP), category_name, (unsigned)deleted_count);
@@ -1351,7 +1402,7 @@ static void show_storage_cleanup_popup(const char *category_name, uint32_t delet
     lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_modal_close, NULL);
+    add_modal_button(btn_row, STR_BTN_CLOSE, cb_modal_close, NULL);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -1515,9 +1566,13 @@ static void report_sd_io_fail(const char *context)
 
 /* 단순 안내(버튼 1개) 공용 — show_storage_cleanup_popup과 동일 구조지만 포맷 인자 없이
  * 완성된 문자열 그대로 표시(재연결/포맷 결과 안내용) */
-static void show_alert_popup(const char *message)
+/* kind(2026-09-18 컨벤션) — 통보(알림 구조, 실제 선택이 아님)라 버튼은 항상 Close 하나뿐.
+ * 색상만 성공/정보(NORMAL)와 실패/경고(WARNING)로 갈림 — Windows 알림처럼 색은 다양해도
+ * 버튼구조는 동일 */
+static void show_alert_popup(const char *message, modal_kind_t kind)
 {
     lv_obj_t *box = create_modal();
+    create_modal_title(box, kind == MODAL_KIND_WARNING ? STR_TITLE_WARNING : STR_TITLE_NOTICE, kind);
 
     lv_obj_t *msg = lv_label_create(box);
     lv_label_set_text(msg, message);
@@ -1526,7 +1581,7 @@ static void show_alert_popup(const char *message)
     lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_modal_close, NULL);
+    add_modal_button(btn_row, STR_BTN_CLOSE, cb_modal_close, NULL);
 }
 
 /* 2026-09-11(사용자 지적 — "리마운트, 포맷 실패시 팝업이 모두 다 닫히네, 직전으로
@@ -1539,9 +1594,9 @@ static void cb_sd_reconnect_tap(lv_event_t *e)
     if (err == ESP_OK && sd_verify_healthy()) {
         clear_sd_io_fail();
         cb_modal_close(e);  /* 성공 — 해결 팝업도 같이 닫음 */
-        show_alert_popup(ui_str(STR_MSG_SD_RECONNECT_OK));
+        show_alert_popup(ui_str(STR_MSG_SD_RECONNECT_OK), MODAL_KIND_NORMAL);
     } else {
-        show_alert_popup(ui_str(STR_MSG_SD_RECONNECT_FAIL));  /* 실패 — 해결 팝업은 그대로 둠 */
+        show_alert_popup(ui_str(STR_MSG_SD_RECONNECT_FAIL), MODAL_KIND_WARNING);  /* 실패 — 해결 팝업은 그대로 둠 */
     }
     refresh_storage_status_label();
 }
@@ -1560,9 +1615,9 @@ static void cb_sd_format_confirmed(void *ctx)
             lv_obj_delete(resolve_overlay);
             resume_bg_timers();
         }
-        show_alert_popup(ui_str(STR_MSG_SD_FORMAT_OK));
+        show_alert_popup(ui_str(STR_MSG_SD_FORMAT_OK), MODAL_KIND_NORMAL);
     } else {
-        show_alert_popup(ui_str(STR_MSG_SD_FORMAT_FAIL));  /* 실패 — 해결 팝업은 그대로 둠 */
+        show_alert_popup(ui_str(STR_MSG_SD_FORMAT_FAIL), MODAL_KIND_WARNING);  /* 실패 — 해결 팝업은 그대로 둠 */
     }
     refresh_storage_status_label();
 }
@@ -1573,7 +1628,7 @@ static void cb_sd_format_tap(lv_event_t *e)
      * 닫게 함(위 주석 참고) — 되돌릴 수 없는 동작이라 확인팝업이 먼저 뜸 */
     lv_obj_t *btn = lv_event_get_target(e);
     lv_obj_t *resolve_overlay = lv_obj_get_parent(lv_obj_get_parent(lv_obj_get_parent(btn)));
-    show_confirm_popup(ui_str(STR_MSG_SD_FORMAT_CONFIRM), cb_sd_format_confirmed, resolve_overlay);
+    show_confirm_popup(ui_str(STR_MSG_SD_FORMAT_CONFIRM), MODAL_KIND_WARNING, cb_sd_format_confirmed, resolve_overlay);
 }
 
 /* 2026-09-11(재설계 — 사용자 지시: "단순 재시도만으론... 무한루프잖아", "Resolve 누르면
@@ -1635,6 +1690,7 @@ static void cb_unpair_confirm(void *ctx)
 static void show_pair_confirm_popup(esp_now_hub_node_t *node)
 {
     lv_obj_t *box = create_modal();
+    create_modal_title(box, STR_TITLE_CONFIRM, MODAL_KIND_NORMAL);
 
     lv_obj_t *msg = lv_label_create(box);
     lv_label_set_text_fmt(msg, "%s\n%s", node->name, ui_str(STR_MSG_PAIR_CONFIRM));
@@ -1651,7 +1707,7 @@ static void show_unpair_confirm_popup(esp_now_hub_node_t *node)
 {
     char msg[64];
     snprintf(msg, sizeof(msg), "%s\n%s", node->name, ui_str(STR_MSG_UNPAIR_CONFIRM));
-    show_confirm_popup(msg, cb_unpair_confirm, node);
+    show_confirm_popup(msg, MODAL_KIND_NORMAL, cb_unpair_confirm, node);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -2154,7 +2210,7 @@ static void cb_photo_delete_confirm(void *ctx)
 
 static void show_photo_delete_confirm(uint32_t file_id)
 {
-    show_confirm_popup(ui_str(STR_MSG_DELETE_PHOTO_CONFIRM), cb_photo_delete_confirm, (void *)(uintptr_t)file_id);
+    show_confirm_popup(ui_str(STR_MSG_DELETE_PHOTO_CONFIRM), MODAL_KIND_WARNING, cb_photo_delete_confirm, (void *)(uintptr_t)file_id);
 }
 
 static void cb_photo_delete_btn(lv_event_t *e)
@@ -2564,6 +2620,7 @@ static lv_obj_t *show_progress_popup(progress_tick_fn_t tick_fn)
         close_progress_popup();
     }
     lv_obj_t *box = create_modal();  /* pause_bg_timers()도 여기서 같이 됨 */
+    create_modal_title(box, STR_TITLE_PROGRESS, MODAL_KIND_NORMAL);
     s_progress_popup_overlay = lv_obj_get_parent(box);
     s_progress_popup_box = box;
     s_progress_tick_fn = tick_fn;
@@ -3066,7 +3123,7 @@ static void cb_delete_all(lv_event_t *e)
 {
     (void)e;
     if (!s_has_selected_cam) return;
-    show_confirm_popup(ui_str(STR_MSG_DELETE_ALL_CONFIRM), cb_delete_all_confirmed, NULL);
+    show_confirm_popup(ui_str(STR_MSG_DELETE_ALL_CONFIRM), MODAL_KIND_WARNING, cb_delete_all_confirmed, NULL);
 }
 
 /* CAM 연결이 끊기는 그 순간에 목록/사진개수/SD사용량/미리보기를 전부 비움(2026-08-01,
@@ -4418,7 +4475,7 @@ static void cb_delete_stats_confirmed(void *ctx)
 static void cb_delete_stats_tap(lv_event_t *e)
 {
     (void)e;
-    show_confirm_popup(ui_str(STR_CONFIRM_DELETE_STATS), cb_delete_stats_confirmed, NULL);
+    show_confirm_popup(ui_str(STR_CONFIRM_DELETE_STATS), MODAL_KIND_WARNING, cb_delete_stats_confirmed, NULL);
 }
 
 /* 2026-09-15(사용자 설계 — "지금의 테이블과 그래프 오가는 걸 없애고") — 표<->그래프 전환
@@ -5499,7 +5556,7 @@ static void cb_restart_confirmed(void *ctx)
 static void cb_restart_btn(lv_event_t *e)
 {
     (void)e;
-    show_confirm_popup(ui_str(STR_MSG_RESTART_CONFIRM), cb_restart_confirmed, NULL);
+    show_confirm_popup(ui_str(STR_MSG_RESTART_CONFIRM), MODAL_KIND_WARNING, cb_restart_confirmed, NULL);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -5527,6 +5584,7 @@ static void cb_network_mode_cancel(lv_event_t *e)
 static void show_network_mode_confirm_popup(bool new_ap_mode)
 {
     lv_obj_t *box = create_modal();
+    create_modal_title(box, STR_TITLE_WARNING, MODAL_KIND_WARNING);
 
     lv_obj_t *msg = lv_label_create(box);
     lv_label_set_text(msg, ui_str(STR_MSG_NETWORK_MODE_RESTART_CONFIRM));
@@ -5536,7 +5594,7 @@ static void show_network_mode_confirm_popup(bool new_ap_mode)
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
     add_modal_button(btn_row, STR_BTN_YES, cb_confirm_yes_trampoline, &s_confirm_state);
-    add_modal_button(btn_row, STR_BTN_CANCEL, cb_network_mode_cancel, NULL);
+    add_modal_button(btn_row, STR_BTN_NO, cb_network_mode_cancel, NULL);
 
     s_confirm_state.fn  = cb_network_mode_restart_confirmed;
     s_confirm_state.ctx = (void *)(uintptr_t)new_ap_mode;
@@ -5750,6 +5808,7 @@ static void cb_wifi_ssid_selected(lv_event_t *e)
      * 화면 하단에 도킹돼서 큰 면적을 차지함. 중앙에 있으면 팝업 하단(연결/취소 버튼)이
      * 키보드에 가려짐 — 위쪽으로 옮겨서 키보드와 안 겹치게 함 */
     lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 20);
+    create_modal_title(box, STR_TITLE_SETTING, MODAL_KIND_NORMAL);
 
     /* 2026-08-29(사용자 지적: "SSID-비번창 한 줄에 배치") — 세로로 4개 쌓이던 걸 한 줄로
      * 줄여서 키보드가 떠도 아래 연결/취소 버튼이 안 가리게 함 */
@@ -7879,7 +7938,7 @@ static void cb_stats_btn_tap(lv_event_t *e)
      * 불량이라 통계 팝업을 열 수 없다고 알려야되") — SD I/O 에러 활성 중엔 팝업 자체를
      * 안 열고 안내만 표시 */
     if (s_sd_io_fail_active) {
-        show_alert_popup(ui_str(STR_MSG_STATS_BLOCKED_SD_FAIL));
+        show_alert_popup(ui_str(STR_MSG_STATS_BLOCKED_SD_FAIL), MODAL_KIND_WARNING);
         return;
     }
     build_stats_tab();
@@ -8012,7 +8071,7 @@ static void cb_device_disconnect_clicked(lv_event_t *e)
     (void)e;
     char msg[64];
     snprintf(msg, sizeof(msg), "%s\n%s", s_device_popup_node.name, ui_str(STR_MSG_UNPAIR_CONFIRM));
-    show_confirm_popup(msg, cb_device_disconnect_confirm, &s_device_popup_node);
+    show_confirm_popup(msg, MODAL_KIND_NORMAL, cb_device_disconnect_confirm, &s_device_popup_node);
 }
 
 static void cb_close_device_popup(lv_event_t *e)
@@ -8662,6 +8721,7 @@ static void open_value_roller_popup(lv_obj_t *target_lbl, float *target_var, boo
     s_value_roller_decimals = spec.decimals;
 
     lv_obj_t *box = create_modal();
+    create_modal_title(box, STR_TITLE_SETTING, MODAL_KIND_NORMAL);
 
     if (spec.decimals > 0) {
         /* 2026-09-17(사용자 설계 — "폰처럼 반응이 빠르지 않아서... 온도는 2개(정수, 소수
@@ -9243,20 +9303,8 @@ static void show_override_confirm_popup(int idx)
 {
     s_override_popup_idx = idx;
     lv_obj_t *box = create_modal();
-
-    /* 2026-09-18(사용자 지시 — "타이틀 바는 못 만들어? 글씨는 까망이고") — 단순 색글씨가
-     * 아니라 배경색 있는 실제 타이틀 바(노란 배경 + 검은 글씨) */
-    lv_obj_t *title_bar = lv_obj_create(box);
-    lv_obj_set_size(title_bar, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(title_bar, lv_palette_main(LV_PALETTE_YELLOW), 0);
-    lv_obj_set_style_bg_opa(title_bar, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(title_bar, 0, 0);
-    lv_obj_set_style_pad_hor(title_bar, 12, 0);
-    lv_obj_set_style_pad_ver(title_bar, 6, 0);
-    lv_obj_t *title = lv_label_create(title_bar);
-    lv_label_set_text(title, ui_str(STR_TITLE_WARNING));
-    lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_24), 0);
-    lv_obj_set_style_text_color(title, lv_color_black(), 0);
+    /* 2026-09-18(팝업 타이틀바 컨벤션) — 공용 헬퍼로 교체, 최상단에 여백 없이 붙음 */
+    create_modal_title(box, STR_TITLE_WARNING, MODAL_KIND_WARNING);
 
     lv_obj_t *msg_row = lv_obj_create(box);
     lv_obj_set_size(msg_row, LV_PCT(100), LV_SIZE_CONTENT);
