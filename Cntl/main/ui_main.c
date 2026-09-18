@@ -9933,12 +9933,13 @@ static void build_option_tab(void)
      * 2026-09-09(사용자 지적 — "세팅 단추를 누르면 콘이 죽어") — s_sens_measure_apply_btn은
      * 측정주기 위젯이 개별설정 팝업으로 옮겨가면서 여기서 더 이상 안 만들어짐(NULL) —
      * lv_obj_set_width(NULL, ...)가 태스크워치독 타임아웃(lvgl 태스크 무한루프로 보임)을
-     * 일으켰음. 배열에서 제거 — 그 버튼은 이제 개별설정 팝업 안에서 다른 버튼들처럼
-     * 자연폭(LV_SIZE_CONTENT)으로 그려짐(공용 s_action_btn_width 미적용, 시각적 차이는
-     * 미미해서 지금은 그대로 둠) */
+     * 일으켰음. 배열에서 제거.
+     * 2026-09-18(같은 버그 재발 — 사용자 리포트 "5007 나오고 콘 죽었어") — 촬영주기/XCLK
+     * 버튼도 같은 이유로 개별설정 팝업(카메라)으로 옮겨가면서 여기선 항상 NULL이 됨. 위와
+     * 동일하게 배열에서 제거 — 두 버튼도 이제 개별설정 팝업 안에서 자연폭으로 그려짐 */
     lv_obj_t *option_action_buttons[] = {
-        restart_btn, s_capture_apply_btn, s_response_apply_btn, s_adaptive_apply_btn,
-        time_set_btn, s_xclk_apply_btn, log_view_btn,
+        restart_btn, s_response_apply_btn, s_adaptive_apply_btn,
+        time_set_btn, log_view_btn,
     };
     lv_obj_update_layout(lv_screen_active());
     for (size_t i = 0; i < sizeof(option_action_buttons) / sizeof(option_action_buttons[0]); i++) {
