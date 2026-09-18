@@ -106,7 +106,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_MSG_RESTART_CONFIRM]        = { "정말 재시작하시겠습니까?",     "Do you want restart?" },
     /* 영문일 때는 단위를 S/M/H로 축약(2026-08-08, 사용자 지시) — 값(초 단위)은
      * s_capture_interval_values/s_response_interval_values와 순서가 반드시 같아야 함 */
-    [STR_OPT_CAPTURE_INTERVAL_LIST]  = { "끄기\n30분\n1시간\n3시간\n10시간", "Off\n30M\n1H\n3H\n10H" },
+    [STR_OPT_CAPTURE_INTERVAL_LIST]  = { "끄기\n10초\n30초\n30분\n1시간\n3시간\n10시간", "Off\n10S\n30S\n30M\n1H\n3H\n10H" },
     /* 2026-08-10 CAM Deep Sleep 전환 — 값 구간 재정의(1/3/10/30/1800초), 짧은 라벨만
      * 표시하고 뜻은 별도 도움말 텍스트로(STR_RESPONSE_HELP_0..4, 아래) — 순서는
      * ui_main.c의 s_response_interval_values와 반드시 같이 맞출 것 */
