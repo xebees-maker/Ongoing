@@ -303,6 +303,8 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
 static void build_relay_popup(int idx);  /* 2026-09-16(SR/Power Control) */
 static void teardown_relay_popup(void);  /* 2026-09-17 — Apply 클릭 시 팝업 닫기용 fwd */
 static void cb_power_dash_row_clicked(lv_event_t *e);
+static void cb_power_icon_tap(lv_event_t *e);  /* 2026-09-18 — Manual Override 확인팝업 트리거 */
+static void cb_relay_manual_switch_changed(lv_event_t *e);  /* 2026-09-18 — build_relay_popup()이 더 앞에서 씀 */
 static void refresh_power_control_panel(void);
 static void teardown_device_popup(void);
 static void cb_camera_dash_row_clicked(lv_event_t *e);
@@ -615,6 +617,7 @@ static lv_obj_t  *s_relay_alias_apply_btn  = NULL;
 static char       s_relay_alias_applied_text[POWER_RELAY_ALIAS_MAX_LEN];
 
 static lv_obj_t  *s_relay_ai_switch       = NULL;
+static lv_obj_t  *s_relay_manual_switch   = NULL;  /* 2026-09-18: Manual Override, AI와 상호배타 */
 
 /* 2026-09-17(사용자 재작성) — 밝은 회색 판넬 하나에 Apply 대상 전체(문장골격~최소유지)를
  * 담고, Apply는 그 판넬 우측 상단 */
@@ -639,8 +642,8 @@ static uint8_t    s_relay_device_dd_macs[ESP_NOW_HUB_MAX_NODES][6];
 static int        s_relay_device_dd_count = 0;
 static lv_obj_t  *s_relay_source_stat_dd  = NULL;   /* Max/Min/Avg — Group/Device 공통, 라벨 없음 */
 static lv_obj_t  *s_relay_trend_switch       = NULL;
-static lv_obj_t  *s_relay_trend_window_ta    = NULL;
-static lv_obj_t  *s_relay_min_hold_ta        = NULL;
+static lv_obj_t  *s_relay_trend_window_dd    = NULL;  /* 2026-09-18: 텍스트입력 -> 드랍다운 */
+static lv_obj_t  *s_relay_min_hold_dd        = NULL;  /* 2026-09-18: 텍스트입력 -> 드랍다운 */
 static lv_obj_t  *s_relay_apply_btn          = NULL;
 static lv_obj_t  *s_relay_apply_lbl          = NULL;
 
@@ -657,6 +660,9 @@ static int        s_value_roller_r1_min     = 0;  /* 롤러1(정수부)의 0번 
 static lv_obj_t  *s_value_roller_target_lbl = NULL;
 static float     *s_value_roller_target_var = NULL;
 static float      s_value_roller_min        = 0.0f;
+/* 2026-09-18 — CO2 3-롤러(천/백/십의 자리)는 각 자리가 독립이라 조합 결과가 spec.min_v
+ * (예: 400)보다 작아질 수 있음(예: 0-0-0 = 0). 확정 시 이 범위로 clamp */
+static float      s_value_roller_max        = 0.0f;
 static float      s_value_roller_step       = 1.0f;
 static int        s_value_roller_decimals   = 0;
 
@@ -4543,7 +4549,11 @@ static void refresh_power_control_panel(void)
          * 참고) — 여기서 별도 헬퍼 함수를 안 쓰는 이유는 그 헬퍼들이 이 함수보다 파일 뒤쪽
          * (팝업 섹션)에 있어서 순방향 선언 없이는 못 씀, 그래서 최소한만 직접 계산 */
         char value_buf[64] = "";
-        if (cfg && cfg->configured) {
+        if (cfg && cfg->manual_override) {
+            /* 2026-09-18(Manual Override, 사용자 설계 — "On by manual override" 식) */
+            snprintf(value_buf, sizeof(value_buf), "%s",
+                     ui_str(cfg->manual_override_on ? STR_MSG_OVERRIDE_ON_SUMMARY : STR_MSG_OVERRIDE_OFF_SUMMARY));
+        } else if (cfg && cfg->configured) {
             /* 2026-09-17(근본 재설계 — Y·Z는 독립값, direction에서 역산 안 함) — 팝업과
              * 똑같이 cfg->y_rises/z_turns_on을 그대로 읽음. direction으로부터 되짚어 만들면
              * 사용자가 실제로 고른 조합과 다른 문장이 나오는 게 반복 재현된 버그였음 */
@@ -6856,10 +6866,20 @@ void ui_init(void)
 
         /* 2026-09-17(사용자 지시 — "On, Off를 센서 와이파이처럼 시각적으로... 전원 심볼") —
          * 텍스트("On"/"Off") 대신 LV_SYMBOL_POWER 아이콘을 색으로 구분(초록=On/회색=Off,
-         * 기존 텍스트 색 컨벤션 그대로 재사용) */
+         * 기존 텍스트 색 컨벤션 그대로 재사용).
+         * 2026-09-18(Manual Override, 사용자 설계 — "온오프 아이콘을 클릭 -> 팝업") — 이
+         * 아이콘을 별도 탭 대상으로 만듦. LVGL9는 LV_OBJ_FLAG_EVENT_BUBBLE을 명시적으로
+         * 안 켜면 자식 이벤트가 부모로 안 올라가므로(lv_obj.h 확인), 여기 안 켜면 행 전체
+         * 클릭(설정 팝업 열기)과 자동으로 안 섞임 — 별도 처리 불필요. 탭 영역 확보용으로
+         * 역상 컨트롤과 동일한 패딩만 추가(색은 아래서 계속 토글하므로 배경색은 안 씀) */
         lv_obj_t *status = lv_label_create(row);
         lv_obj_set_style_text_font(status, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_set_style_pad_hor(status, 8, 0);
+        lv_obj_set_style_pad_ver(status, 4, 0);
         lv_label_set_text(status, LV_SYMBOL_POWER);
+        lv_obj_add_flag(status, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_user_data(status, (void *)(uintptr_t)i);
+        lv_obj_add_event_cb(status, cb_power_icon_tap, LV_EVENT_CLICKED, NULL);
         s_power_dash_row_status[i] = status;
 
         lv_obj_t *label = lv_label_create(row);
@@ -8183,21 +8203,29 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
  * ════════════════════════════════════════════════════════════ */
 
 static const sensor_channel_type_t s_relay_chan_type_values[] = { SENSOR_CHAN_TEMP_C, SENSOR_CHAN_CO2_PPM };
+/* 2026-09-18(사용자 지시 — "자유로울 필요가 없어보여서 드랍다운이 좋겠어") — 자유입력
+ * 텍스트박스 대신 프리셋 드랍다운. 디폴트(5, 60)가 둘 다 목록 안에 있음(모델-뷰-Dirty
+ * 원칙 — 디폴트가 프리셋에 없어서 생기던 오늘의 버그들과 같은 실수 반복 방지) */
+static const uint32_t s_relay_trend_sample_values[] = { 3, 5, 10 };
+static const uint32_t s_relay_min_hold_values[] = { 30, 60, 180, 300 };
 static const ui_str_id_t s_relay_unit_values[] = { STR_UNIT_TEMP, STR_UNIT_CO2 };
 
-/* 2026-09-17(사용자 지시 — "온도는 0.0 수준... 이산화탄소도 0000.야, 0.0 안해") — 채널별
- * 롤러 범위/간격/소수자리. 습도(STR_UNIT_HUMI)는 채널 목록엔 아직 없지만(내일할일 범위 밖,
- * "향후 포함") 같은 표를 그대로 확장하면 되게 함수 형태로 둠 */
+/* 2026-09-18(사용자 지시 — "상한이 센서 스펙에 달려있어") — 롤러 상/하한은 실제 부착
+ * 가능한 센서의 공식 데이터시트 스펙을 따름:
+ *  - SHT45(Fine): 전체 동작범위 -40~125°C, 0~100%RH(Sensirion SHT4x 데이터시트)
+ *  - SCD41(Basic, 부가 온습도 리포트): 동작범위 -10~60°C, CO2 측정범위 400~5000ppm
+ * 다만 온도 하한은 "실사용에서 0도 이하를 쓸 일이 없다"(사용자 지시)는 이유로 센서 스펙과
+ * 무관하게 항상 0.0 고정. 습도는 채널 목록엔 아직 없지만("향후 포함") 같은 표를 그대로
+ * 확장하면 되게 함수 형태로 둠 — SCD41의 습도 스펙은 미확인이라 임시로 SHT45와 동일하게 둠 */
 typedef struct { float min_v, max_v, step; int decimals; } relay_roller_spec_t;
-static relay_roller_spec_t relay_roller_spec_for_channel(sensor_channel_type_t chan)
+static relay_roller_spec_t relay_roller_spec_for_channel(sensor_channel_type_t chan, bool precise)
 {
     if (chan == SENSOR_CHAN_CO2_PPM) {
-        relay_roller_spec_t s = { 0.0f, 5000.0f, 10.0f, 0 };  /* 정수 4자리(0000) */
+        relay_roller_spec_t s = { 400.0f, 5000.0f, 10.0f, 0 };  /* SCD41 측정범위 */
         return s;
     }
-    /* 2026-09-17(사용자 지시 — "온도를 마이너스로 지정할 일이 없으니 롤러에서 빼... 그냥
-     * 온도는 0도가 하한선") — 하한 -10.0 -> 0.0 */
-    relay_roller_spec_t s = { 0.0f, 60.0f, 0.1f, 1 };  /* 온도/습도 공통: 소수 1자리(0.0) */
+    float max_v = precise ? 125.0f : 60.0f;  /* Fine(SHT45)=125, Basic(SCD41)=60 */
+    relay_roller_spec_t s = { 0.0f, max_v, 0.1f, 1 };  /* 온도/습도 공통: 소수 1자리(0.0) */
     return s;
 }
 
@@ -8219,12 +8247,6 @@ static void cb_relay_ta_focused(lv_event_t *e)
     if (!s_relay_keyboard) return;
     lv_keyboard_set_textarea(s_relay_keyboard, ta);
     lv_obj_remove_flag(s_relay_keyboard, LV_OBJ_FLAG_HIDDEN);
-}
-
-static void cb_relay_numeric_ta_focused(lv_event_t *e)
-{
-    if (s_relay_keyboard) lv_keyboard_set_mode(s_relay_keyboard, LV_KEYBOARD_MODE_NUMBER);
-    cb_relay_ta_focused(e);
 }
 
 static void cb_relay_text_ta_focused(lv_event_t *e)
@@ -8299,8 +8321,34 @@ static void relay_rebuild_device_dropdown(void)
     }
     if (s_relay_device_dd_count == 0) {
         lv_dropdown_set_options(s_relay_device_dd, ui_str(STR_MSG_NO_SOURCE_DEVICE));
+        ui_dropdown_apply_variable_width(s_relay_device_dd, ui_str(STR_MSG_NO_SOURCE_DEVICE));
     } else {
         lv_dropdown_set_options(s_relay_device_dd, options);
+        ui_dropdown_apply_variable_width(s_relay_device_dd, options);
+    }
+}
+
+/* 2026-09-18(Manual Override) — Manual On이면 회색판넬 안의 모든 콘트롤을 비활성화(사용자
+ * 지시: "이하 설정도 모두 Disable"). LVGL은 부모 DISABLED가 자식에 자동 전파 안 되므로
+ * (lv_indev.c의 클릭가능판정이 대상 위젯 자기 상태만 봄) 알려진 위젯을 직접 나열해서 처리 */
+static void relay_set_gray_panel_controls_disabled(bool disabled)
+{
+    lv_obj_t *widgets[] = {
+        s_relay_action_word_dd, s_relay_chan_dd, s_relay_direction_word_dd,
+        s_relay_value_lbl, s_relay_margin_lbl,
+        s_relay_basedon_dd, s_relay_group_choice_dd, s_relay_device_dd, s_relay_source_stat_dd,
+        s_relay_trend_switch, s_relay_trend_window_dd, s_relay_min_hold_dd,
+    };
+    for (size_t i = 0; i < sizeof(widgets) / sizeof(widgets[0]); i++) {
+        if (!widgets[i]) continue;
+        if (disabled) lv_obj_add_state(widgets[i], LV_STATE_DISABLED);
+        else lv_obj_remove_state(widgets[i], LV_STATE_DISABLED);
+    }
+    /* trend_window_dd는 trend_switch 상태에 종속된 별도 규칙이 있어서, 블랭킷 재활성화 뒤
+     * 다시 맞춤(트렌드가 꺼져있으면 재활성화 안 함) */
+    if (!disabled && s_relay_trend_switch && s_relay_trend_window_dd &&
+        !lv_obj_has_state(s_relay_trend_switch, LV_STATE_CHECKED)) {
+        lv_obj_add_state(s_relay_trend_window_dd, LV_STATE_DISABLED);
     }
 }
 
@@ -8325,6 +8373,9 @@ static void relay_apply_row_visibility(void)
     else lv_obj_add_flag(s_relay_group_choice_dd, LV_OBJ_FLAG_HIDDEN);
     if (!is_group) lv_obj_remove_flag(s_relay_device_dd, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(s_relay_device_dd, LV_OBJ_FLAG_HIDDEN);
+
+    bool manual_on = s_relay_manual_switch && lv_obj_has_state(s_relay_manual_switch, LV_STATE_CHECKED);
+    relay_set_gray_panel_controls_disabled(manual_on);
 }
 
 static void relay_format_value(char *buf, size_t buf_size, float v, int decimals)
@@ -8347,7 +8398,9 @@ static void relay_update_units(void)
     if (chan_idx >= sizeof(s_relay_chan_type_values) / sizeof(s_relay_chan_type_values[0])) chan_idx = 0;
     lv_label_set_text(s_relay_unit_lbl, ui_str(s_relay_unit_values[chan_idx]));
 
-    relay_roller_spec_t spec = relay_roller_spec_for_channel(s_relay_chan_type_values[chan_idx]);
+    /* decimals만 쓰므로 precise 여부는 표시에 영향 없지만, 시그니처 일관성을 위해 현재
+     * 모델값을 그대로 전달(2026-09-18) */
+    relay_roller_spec_t spec = relay_roller_spec_for_channel(s_relay_chan_type_values[chan_idx], s_relay_form.precise);
     char buf[16];
     relay_format_value(buf, sizeof(buf), s_relay_center_value, spec.decimals);
     lv_label_set_text(s_relay_value_lbl, buf);
@@ -8366,6 +8419,12 @@ static void relay_sync_form_from_widgets(void)
     uint16_t chan_idx = lv_dropdown_get_selected(s_relay_chan_dd);
     if (chan_idx >= sizeof(s_relay_chan_type_values) / sizeof(s_relay_chan_type_values[0])) chan_idx = 0;
     s_relay_form.chan_type = s_relay_chan_type_values[chan_idx];
+
+    /* 2026-09-18(Manual Override) — manual_override_on(방향)은 확인팝업에서만 정해지므로
+     * 여기선 안 건드림. 모드 플래그만 스위치 상태와 항상 일치시켜둠(방어적 동기화) */
+    if (s_relay_manual_switch) {
+        s_relay_form.manual_override = lv_obj_has_state(s_relay_manual_switch, LV_STATE_CHECKED);
+    }
 
     /* 문장형 골격: (Z:켜짐/꺼짐) if (채널) (Y:도달/미만) — Y·Z는 각각 독립적으로 그대로
      * 모델에 저장(2026-09-17, "고정/역산 없음" 재설계). direction은 판정루프 전용 파생값으로
@@ -8420,13 +8479,48 @@ static void relay_sync_form_from_widgets(void)
             uint16_t dev_idx = lv_dropdown_get_selected(s_relay_device_dd);
             if (dev_idx < s_relay_device_dd_count) {
                 memcpy(s_relay_form.device_mac, s_relay_device_dd_macs[dev_idx], 6);
+                /* 2026-09-18(발견 — 롤러 범위를 Fine/Basic 센서 스펙 기준으로 정하려면
+                 * precise가 항상 정확해야 하는데, Device 소스일 땐 여태 안 채워지고 있었음 */
+                bool is_precise = false;
+                stats_classify(s_relay_form.device_mac, (uint8_t)s_relay_form.chan_type, NULL, &is_precise);
+                s_relay_form.precise = is_precise;
             }
         }
         s_relay_form.stat = (power_source_stat_t)lv_dropdown_get_selected(s_relay_source_stat_dd);
         s_relay_form.trend_enable = lv_obj_has_state(s_relay_trend_switch, LV_STATE_CHECKED);
-        s_relay_form.trend_sample_count = (uint32_t)atoi(lv_textarea_get_text(s_relay_trend_window_ta));
-        s_relay_form.min_hold_sec = (uint32_t)atoi(lv_textarea_get_text(s_relay_min_hold_ta));
+        /* 2026-09-18: 텍스트입력 대신 프리셋 드랍다운 — 인덱스를 값으로 변환(범위는 항상
+         * 배열 안이므로 별도 -1 처리 불필요) */
+        {
+            uint16_t ti = lv_dropdown_get_selected(s_relay_trend_window_dd);
+            if (ti < sizeof(s_relay_trend_sample_values) / sizeof(s_relay_trend_sample_values[0])) {
+                s_relay_form.trend_sample_count = s_relay_trend_sample_values[ti];
+            }
+            uint16_t mi = lv_dropdown_get_selected(s_relay_min_hold_dd);
+            if (mi < sizeof(s_relay_min_hold_values) / sizeof(s_relay_min_hold_values[0])) {
+                s_relay_form.min_hold_sec = s_relay_min_hold_values[mi];
+            }
+        }
     }
+}
+
+/* 2026-09-18(사용자 지시 — "값을 사용자가 이미 지정했는데... 최대 값을 넘으면 강제로
+ * 낮추면서 사용자에게 알려야") — Fine/Basic(정밀/기본) 전환 등으로 롤러 유효범위가
+ * 줄어들면(예: SHT45 125도 -> SCD41 60도) 기존 지정값이 범위를 벗어날 수 있음. 매 dirty체크
+ * 때마다 현재 채널·precise 기준 범위로 clamp하고, 실제로 바뀌었으면 토스트로 알림 */
+static bool relay_clamp_center_margin_to_spec(void)
+{
+    uint16_t chan_idx = lv_dropdown_get_selected(s_relay_chan_dd);
+    if (chan_idx >= sizeof(s_relay_chan_type_values) / sizeof(s_relay_chan_type_values[0])) chan_idx = 0;
+    relay_roller_spec_t spec = relay_roller_spec_for_channel(s_relay_chan_type_values[chan_idx], s_relay_form.precise);
+    bool clamped = false;
+    if (s_relay_center_value > spec.max_v) { s_relay_center_value = spec.max_v; clamped = true; }
+    if (s_relay_center_value < spec.min_v) { s_relay_center_value = spec.min_v; clamped = true; }
+    if (s_relay_margin_value > spec.max_v) { s_relay_margin_value = spec.max_v; clamped = true; }
+    if (clamped) {
+        relay_update_units();
+        show_toast(ui_str(STR_MSG_RELAY_VALUE_CLAMPED), lv_palette_main(LV_PALETTE_ORANGE));
+    }
+    return clamped;
 }
 
 /* dirty = 모델을 방금 값으로 다시 채운 뒤 스냅샷(팝업 연 시점)과 실제로 다른가 — "이벤트가
@@ -8434,7 +8528,11 @@ static void relay_sync_form_from_widgets(void)
 static void cb_relay_field_dirty(lv_event_t *e)
 {
     (void)e;
-    relay_sync_form_from_widgets();
+    relay_sync_form_from_widgets();  /* precise를 먼저 최신화 */
+    if (relay_clamp_center_margin_to_spec()) {
+        /* clamp로 center/margin이 바뀌었으면 on/off_threshold도 그 새 값 기준으로 재계산 */
+        relay_sync_form_from_widgets();
+    }
     if (!s_relay_apply_btn) return;
     bool dirty = (memcmp(&s_relay_form, &s_relay_popup_snapshot, sizeof(s_relay_form)) != 0);
     if (dirty) lv_obj_remove_state(s_relay_apply_btn, LV_STATE_DISABLED);
@@ -8443,6 +8541,12 @@ static void cb_relay_field_dirty(lv_event_t *e)
 
 static void cb_relay_ai_switch_changed(lv_event_t *e)
 {
+    /* 2026-09-18(Manual Override, 사용자 확인 — "AI ON을 누르면 Manual은 Off 되면서") —
+     * AI/Manual 상호배타 */
+    if (lv_obj_has_state(s_relay_ai_switch, LV_STATE_CHECKED) && s_relay_manual_switch) {
+        lv_obj_remove_state(s_relay_manual_switch, LV_STATE_CHECKED);
+        s_relay_form.manual_override = false;
+    }
     relay_apply_row_visibility();
     cb_relay_field_dirty(e);
 }
@@ -8472,8 +8576,8 @@ static void cb_relay_chan_changed(lv_event_t *e)
 static void cb_relay_trend_switch_changed(lv_event_t *e)
 {
     bool on = lv_obj_has_state(s_relay_trend_switch, LV_STATE_CHECKED);
-    if (on) lv_obj_remove_state(s_relay_trend_window_ta, LV_STATE_DISABLED);
-    else lv_obj_add_state(s_relay_trend_window_ta, LV_STATE_DISABLED);
+    if (on) lv_obj_remove_state(s_relay_trend_window_dd, LV_STATE_DISABLED);
+    else lv_obj_add_state(s_relay_trend_window_dd, LV_STATE_DISABLED);
     cb_relay_field_dirty(e);
 }
 
@@ -8512,6 +8616,10 @@ static void cb_value_roller_confirm(lv_event_t *e)
             uint16_t sel = lv_roller_get_selected(s_value_roller);
             value = s_value_roller_min + (float)sel * s_value_roller_step;
         }
+        /* 2026-09-18 — CO2 3-롤러는 자리마다 독립이라 조합 결과가 spec 범위(예: 400~5000)를
+         * 벗어날 수 있음(예: 0-0-0=0) — 확정 값을 실제 유효범위로 clamp */
+        if (value < s_value_roller_min) value = s_value_roller_min;
+        if (value > s_value_roller_max) value = s_value_roller_max;
         if (s_value_roller_target_var) *s_value_roller_target_var = value;
         if (s_value_roller_target_lbl) {
             char buf[16];
@@ -8536,12 +8644,16 @@ static void open_value_roller_popup(lv_obj_t *target_lbl, float *target_var, boo
     if (s_value_roller) return;
     uint16_t chan_idx = lv_dropdown_get_selected(s_relay_chan_dd);
     if (chan_idx >= sizeof(s_relay_chan_type_values) / sizeof(s_relay_chan_type_values[0])) chan_idx = 0;
-    relay_roller_spec_t spec = relay_roller_spec_for_channel(s_relay_chan_type_values[chan_idx]);
+    /* 2026-09-18 — 모델을 먼저 최신화해서 현재 Fine/Basic 선택이 반영된 s_relay_form.precise를
+     * 씀(롤러 상한이 센서 스펙에 따라 달라짐) */
+    relay_sync_form_from_widgets();
+    relay_roller_spec_t spec = relay_roller_spec_for_channel(s_relay_chan_type_values[chan_idx], s_relay_form.precise);
     if (is_margin) spec.min_v = 0.0f;
 
     s_value_roller_target_lbl = target_lbl;
     s_value_roller_target_var = target_var;
     s_value_roller_min = spec.min_v;
+    s_value_roller_max = spec.max_v;
     s_value_roller_step = spec.step;
     s_value_roller_decimals = spec.decimals;
 
@@ -8711,6 +8823,7 @@ static void teardown_relay_popup(void)
     s_relay_alias_ta = NULL;
     s_relay_alias_apply_btn = NULL;
     s_relay_ai_switch = NULL;
+    s_relay_manual_switch = NULL;
     s_relay_gray_panel = NULL;
     s_relay_action_word_dd = NULL;
     s_relay_chan_dd = NULL;
@@ -8723,9 +8836,9 @@ static void teardown_relay_popup(void)
     s_relay_group_choice_dd = NULL;
     s_relay_device_dd = NULL;
     s_relay_source_stat_dd = NULL;
-    s_relay_min_hold_ta = NULL;
+    s_relay_min_hold_dd = NULL;
     s_relay_trend_switch = NULL;
-    s_relay_trend_window_ta = NULL;
+    s_relay_trend_window_dd = NULL;
     s_relay_apply_btn = NULL;
     s_relay_apply_lbl = NULL;
     s_relay_popup_idx = -1;
@@ -8778,22 +8891,9 @@ static lv_obj_t *relay_popup_dropdown_field(lv_obj_t *pair_row, ui_str_id_t labe
     lv_dropdown_set_options(dd, options);
     lv_obj_set_style_text_font(dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    ui_dropdown_apply_variable_width(dd, options);
     if (changed_cb) lv_obj_add_event_cb(dd, changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
     return dd;
-}
-
-static lv_obj_t *relay_popup_number_field(lv_obj_t *pair_row, ui_str_id_t label_id, const char *default_text)
-{
-    lv_obj_t *group = relay_field_group(pair_row, label_id);
-    lv_obj_t *ta = lv_textarea_create(group);
-    lv_textarea_set_one_line(ta, true);
-    lv_textarea_set_max_length(ta, 10);
-    lv_obj_set_width(ta, 90);
-    lv_textarea_set_text(ta, default_text);
-    lv_obj_set_style_text_font(ta, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_add_event_cb(ta, cb_relay_numeric_ta_focused, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(ta, cb_relay_numeric_ta_focused, LV_EVENT_CLICKED, NULL);
-    return ta;
 }
 
 static void build_relay_popup(int idx)
@@ -8864,12 +8964,35 @@ static void build_relay_popup(int idx)
     lv_obj_set_flex_align(ai_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(ai_row, 0, 0);
     lv_obj_set_style_pad_all(ai_row, 0, 0);
-    lv_obj_t *ai_lbl = lv_label_create(ai_row);
+    lv_obj_t *ai_cluster = lv_obj_create(ai_row);
+    lv_obj_set_size(ai_cluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(ai_cluster, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ai_cluster, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(ai_cluster, 0, 0);
+    lv_obj_set_style_pad_all(ai_cluster, 0, 0);
+    lv_obj_set_style_pad_column(ai_cluster, 6, 0);
+    lv_obj_t *ai_lbl = lv_label_create(ai_cluster);
     lv_label_set_text(ai_lbl, ui_str(STR_LABEL_AI_MODE));
     lv_obj_set_style_text_font(ai_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-    s_relay_ai_switch = lv_switch_create(ai_row);
+    s_relay_ai_switch = lv_switch_create(ai_cluster);
     if (cfg->ai_mode) lv_obj_add_state(s_relay_ai_switch, LV_STATE_CHECKED);
     lv_obj_add_event_cb(s_relay_ai_switch, cb_relay_ai_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* 2026-09-18(Manual Override, 사용자 설계 — "그 옆에 AI On Off | Manual On Off를 추가") —
+     * AI와 나란히, 상호배타 스위치 */
+    lv_obj_t *manual_cluster = lv_obj_create(ai_row);
+    lv_obj_set_size(manual_cluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(manual_cluster, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(manual_cluster, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(manual_cluster, 0, 0);
+    lv_obj_set_style_pad_all(manual_cluster, 0, 0);
+    lv_obj_set_style_pad_column(manual_cluster, 6, 0);
+    lv_obj_t *manual_lbl = lv_label_create(manual_cluster);
+    lv_label_set_text(manual_lbl, ui_str(STR_LABEL_MANUAL_MODE));
+    lv_obj_set_style_text_font(manual_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_relay_manual_switch = lv_switch_create(manual_cluster);
+    if (cfg->manual_override) lv_obj_add_state(s_relay_manual_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(s_relay_manual_switch, cb_relay_manual_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     /* 2026-09-17(사용자 지시 — "Apply의 대상들 전체를 밝은 회색 판넬 위에 올리고, Apply는
      * 상단 우측으로") — 문장골격부터 마지막 필드(최소유지)까지 전부 이 판넬 안 */
@@ -9011,20 +9134,20 @@ static void build_relay_popup(int idx)
     lv_obj_set_style_text_font(basedon_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_relay_basedon_dd = lv_dropdown_create(basedon_row);
-    lv_obj_set_width(s_relay_basedon_dd, 100);
     lv_obj_set_style_pad_ver(s_relay_basedon_dd, 7, 0);
     lv_dropdown_set_options(s_relay_basedon_dd, ui_str(STR_OPT_BASEDON_LIST));
     lv_obj_set_style_text_font(s_relay_basedon_dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_relay_basedon_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    ui_dropdown_apply_variable_width(s_relay_basedon_dd, ui_str(STR_OPT_BASEDON_LIST));
     lv_obj_add_event_cb(s_relay_basedon_dd, cb_relay_basedon_changed, LV_EVENT_VALUE_CHANGED, NULL);
     lv_dropdown_set_selected(s_relay_basedon_dd, (uint16_t)cfg->source_kind);
 
     s_relay_group_choice_dd = lv_dropdown_create(basedon_row);
-    lv_obj_set_width(s_relay_group_choice_dd, 170);
     lv_obj_set_style_pad_ver(s_relay_group_choice_dd, 7, 0);
     lv_dropdown_set_options(s_relay_group_choice_dd, ui_str(STR_OPT_GROUP_CHOICE_TEMP_LIST));
     lv_obj_set_style_text_font(s_relay_group_choice_dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_relay_group_choice_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    ui_dropdown_apply_variable_width(s_relay_group_choice_dd, ui_str(STR_OPT_GROUP_CHOICE_TEMP_LIST));
     lv_obj_add_event_cb(s_relay_group_choice_dd, cb_relay_field_dirty, LV_EVENT_VALUE_CHANGED, NULL);
     {
         int gc_idx = (cfg->group == POWER_GROUP_AGAR) ? 2 : (cfg->precise ? 1 : 0);
@@ -9032,7 +9155,6 @@ static void build_relay_popup(int idx)
     }
 
     s_relay_device_dd = lv_dropdown_create(basedon_row);
-    lv_obj_set_width(s_relay_device_dd, 190);
     lv_obj_set_style_pad_ver(s_relay_device_dd, 7, 0);
     lv_obj_set_style_text_font(s_relay_device_dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_relay_device_dd), ui_font_get(UI_FONT_SIZE_18), 0);
@@ -9044,11 +9166,11 @@ static void build_relay_popup(int idx)
 
     /* 2026-09-17(사용자 지시 — "Statistic 라벨 텍스트는 제거") */
     s_relay_source_stat_dd = lv_dropdown_create(basedon_row);
-    lv_obj_set_width(s_relay_source_stat_dd, 100);
     lv_obj_set_style_pad_ver(s_relay_source_stat_dd, 7, 0);
     lv_dropdown_set_options(s_relay_source_stat_dd, ui_str(STR_OPT_SOURCE_STAT_LIST));
     lv_obj_set_style_text_font(s_relay_source_stat_dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_relay_source_stat_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    ui_dropdown_apply_variable_width(s_relay_source_stat_dd, ui_str(STR_OPT_SOURCE_STAT_LIST));
     lv_obj_add_event_cb(s_relay_source_stat_dd, cb_relay_field_dirty, LV_EVENT_VALUE_CHANGED, NULL);
     lv_dropdown_set_selected(s_relay_source_stat_dd, (uint16_t)cfg->stat);
 
@@ -9058,17 +9180,105 @@ static void build_relay_popup(int idx)
     if (cfg->trend_enable) lv_obj_add_state(s_relay_trend_switch, LV_STATE_CHECKED);
     lv_obj_add_event_cb(s_relay_trend_switch, cb_relay_trend_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    char int_buf[16];
-    snprintf(int_buf, sizeof(int_buf), "%u", (unsigned)cfg->trend_sample_count);
-    s_relay_trend_window_ta = relay_popup_number_field(trend_pair, STR_LABEL_TREND_WINDOW, int_buf);
-    lv_obj_add_event_cb(s_relay_trend_window_ta, cb_relay_field_dirty, LV_EVENT_VALUE_CHANGED, NULL);
-    if (!cfg->trend_enable) lv_obj_add_state(s_relay_trend_window_ta, LV_STATE_DISABLED);
+    /* 2026-09-18(사용자 지시 — "자유로울 필요가 없어보여서 드랍다운이 좋겠어") — 텍스트입력
+     * 대신 프리셋 드랍다운(코드 자체가 "값은 항상 목록 안"을 강제 — 오늘 배운 원칙) */
+    s_relay_trend_window_dd = relay_popup_dropdown_field(trend_pair, STR_LABEL_TREND_WINDOW,
+                                                            ui_str(STR_OPT_TREND_SAMPLE_LIST), cb_relay_field_dirty);
+    {
+        int ti = find_value_index(s_relay_trend_sample_values,
+            sizeof(s_relay_trend_sample_values) / sizeof(s_relay_trend_sample_values[0]), cfg->trend_sample_count);
+        lv_dropdown_set_selected(s_relay_trend_window_dd, (uint16_t)(ti >= 0 ? ti : 0));
+    }
+    if (!cfg->trend_enable) lv_obj_add_state(s_relay_trend_window_dd, LV_STATE_DISABLED);
 
-    snprintf(int_buf, sizeof(int_buf), "%u", (unsigned)cfg->min_hold_sec);
-    s_relay_min_hold_ta = relay_popup_number_field(relay_make_pair_row(s_relay_advanced_box), STR_LABEL_MIN_HOLD, int_buf);
-    lv_obj_add_event_cb(s_relay_min_hold_ta, cb_relay_field_dirty, LV_EVENT_VALUE_CHANGED, NULL);
+    s_relay_min_hold_dd = relay_popup_dropdown_field(relay_make_pair_row(s_relay_advanced_box), STR_LABEL_MIN_HOLD,
+                                                        ui_str(STR_OPT_MIN_HOLD_LIST), cb_relay_field_dirty);
+    {
+        int mi = find_value_index(s_relay_min_hold_values,
+            sizeof(s_relay_min_hold_values) / sizeof(s_relay_min_hold_values[0]), cfg->min_hold_sec);
+        lv_dropdown_set_selected(s_relay_min_hold_dd, (uint16_t)(mi >= 0 ? mi : 0));
+    }
 
     relay_apply_row_visibility();
+}
+
+/* 2026-09-18(Manual Override, 사용자 설계) — 주화면 아이콘 탭과 팝업 안 Manual 스위치가
+ * 같은 확인팝업을 공유(사용자 확인: "1. 같은 메커니즘이야"). s_relay_manual_switch는
+ * 릴레이 팝업이 열려있을 때만 non-NULL이므로, 이 값으로 "팝업 안에서 트리거됐는지"를 그대로
+ * 판단 — Cancel 시 그 스위치만 되돌리면 됨(주화면에서 직접 왔으면 되돌릴 스위치가 없음) */
+static int s_override_popup_idx = -1;
+
+static void cb_override_cancel(lv_event_t *e)
+{
+    if (s_relay_manual_switch) lv_obj_remove_state(s_relay_manual_switch, LV_STATE_CHECKED);
+    cb_modal_close(e);
+}
+
+static void cb_override_direction_chosen(lv_event_t *e)
+{
+    bool want_on = (bool)(uintptr_t)lv_event_get_user_data(e);
+    if (s_override_popup_idx >= 0) {
+        power_relay_config_t cfg = *power_relay_get_config(s_override_popup_idx);
+        cfg.manual_override = true;
+        cfg.manual_override_on = want_on;
+        power_relay_set_config(s_override_popup_idx, &cfg);
+        /* 팝업이 열려있는 채로 트리거된 경우, 팝업의 모델/스냅샷/화면도 같이 맞춤 —
+         * Alias-Apply가 s_relay_form/snapshot을 동기화하던 것과 같은 이유(2026-09-17
+         * 패턴 재사용): 안 맞추면 바깥 Apply가 이 변경을 되돌리거나 dirty가 어긋남 */
+        if (s_relay_manual_switch && s_override_popup_idx == s_relay_popup_idx) {
+            s_relay_form.manual_override = true;
+            s_relay_form.manual_override_on = want_on;
+            s_relay_form.ai_mode = false;
+            s_relay_popup_snapshot = s_relay_form;
+            lv_obj_add_state(s_relay_manual_switch, LV_STATE_CHECKED);
+            if (s_relay_ai_switch) lv_obj_remove_state(s_relay_ai_switch, LV_STATE_CHECKED);
+            relay_apply_row_visibility();
+            if (s_relay_apply_btn) lv_obj_add_state(s_relay_apply_btn, LV_STATE_DISABLED);
+        }
+    }
+    cb_modal_close(e);
+}
+
+static void show_override_confirm_popup(int idx)
+{
+    s_override_popup_idx = idx;
+    lv_obj_t *box = create_modal();
+    lv_obj_t *msg = lv_label_create(box);
+    lv_label_set_text(msg, ui_str(STR_MSG_OVERRIDE_WARNING));
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(msg, LV_PCT(100));
+    lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_CANCEL, cb_override_cancel, NULL);
+    add_modal_button(btn_row, STR_STATUS_RELAY_OFF, cb_override_direction_chosen, (void *)(uintptr_t)false);
+    add_modal_button(btn_row, STR_STATUS_RELAY_ON, cb_override_direction_chosen, (void *)(uintptr_t)true);
+}
+
+static void cb_power_icon_tap(lv_event_t *e)
+{
+    lv_obj_t *icon = lv_event_get_target(e);
+    uintptr_t idx = (uintptr_t)lv_obj_get_user_data(icon);
+    if ((int)idx >= POWER_RELAY_COUNT) return;
+    show_override_confirm_popup((int)idx);
+}
+
+/* 2026-09-18(Manual Override) — 팝업 안 Manual 스위치. On으로 켜면 같은 확인팝업을 띄우고
+ * (그 안에서 방향까지 결정), Off로 끄면(=해제) 즉시 자동모드로 복귀 — AI는 그대로 둠
+ * (사용자 확인: "Manual Off를 누르면... AI는 여전히 off일 테니까") */
+static void cb_relay_manual_switch_changed(lv_event_t *e)
+{
+    bool on = lv_obj_has_state(s_relay_manual_switch, LV_STATE_CHECKED);
+    if (on) {
+        /* 확인 전까지는 아직 확정 아님 — 스위치는 눌렸지만 Cancel되면 cb_override_cancel이
+         * 다시 꺼둠. 확인 대화상자가 뜨는 동안 아래 설정을 만지지 못하게 미리 비활성화 */
+        relay_apply_row_visibility();
+        show_override_confirm_popup(s_relay_popup_idx);
+    } else {
+        s_relay_form.manual_override = false;
+        cb_relay_field_dirty(e);
+        relay_apply_row_visibility();
+    }
 }
 
 static void cb_power_dash_row_clicked(lv_event_t *e)

@@ -52,6 +52,14 @@ static bool     s_commanded_on[POWER_RELAY_COUNT];
 static uint32_t s_last_transition_ms[POWER_RELAY_COUNT];
 static uint32_t s_last_data_ms[POWER_RELAY_COUNT];
 static power_trend_buf_t s_trend[POWER_RELAY_COUNT];
+
+/* 2026-09-18(사용자 설계 — "부팅 때에는... 설정이 되있더라도 오프로 시작... 설정에 의해
+ * 온 되는 시간이 필요") — 원인(자동규칙/Override) 무관하게 부팅 후 최초 1회 On 전환만
+ * 이 유예시간만큼 지연. GPIO 자체는 이미 power_relay_start()에서 물리적으로 Low로
+ * 초기화됨 — 이건 그 이후 "언제 처음 켜도 되는가"에 대한 소프트웨어 유예 */
+#define POWER_RELAY_BOOT_ON_DELAY_MS (60 * 1000)
+static uint32_t s_boot_ms_ref;
+static bool     s_ever_on_since_boot[POWER_RELAY_COUNT];
 /* 2026-09-17 — "진짜 새 측정값"만 추세 샘플로 인정하기 위한 직전값 캐시(측정횟수 기준
  * 재설계, power_relay.h의 trend_sample_count 주석 참고) */
 static float    s_trend_last_value[POWER_RELAY_COUNT];
@@ -110,6 +118,9 @@ const power_relay_config_t *power_relay_get_config(int idx)
     return &s_relay_cfg[idx];
 }
 
+/* relay_set_gpio()/power_relay_command() 본문보다 앞에서 쓰여서 fwd 필요 */
+static void power_relay_apply_override_immediate(int idx);
+
 /* 2026-09-16(실기에서 발견된 잘못 — "Alias만 줬는데 재부팅") — 예전엔 여기서 무조건
  * configured=true로 만들었음. Alias 전용 Apply(cb_relay_alias_apply_clicked)도 내부적으로
  * 이 함수를 호출하는데, 그러면 채널/임계값 등 나머지 필드가 전부 기본값(0)인 채로 판정
@@ -128,6 +139,9 @@ void power_relay_set_config(int idx, const power_relay_config_t *cfg)
     s_trend_has_last_value[idx] = false;
     s_last_transition_ms[idx] = 0;
     power_relay_save();
+    /* 2026-09-18(Manual Override, 사용자 설계) — Override를 켠 순간(팝업 OK) 다음 15초
+     * 판정주기까지 안 기다리고 바로 반영 */
+    power_relay_apply_override_immediate(idx);
 }
 
 bool power_relay_get_commanded_on(int idx)
@@ -152,6 +166,22 @@ static void power_relay_command(int idx, bool on, uint32_t now_ms)
     s_last_transition_ms[idx] = now_ms;
     relay_set_gpio(idx, on);
     ESP_LOGI(TAG, "릴레이%d(%s) -> %s", idx, s_relay_cfg[idx].alias, on ? "On" : "Off");
+}
+
+static void power_relay_apply_override_immediate(int idx)
+{
+    power_relay_config_t *cfg = &s_relay_cfg[idx];
+    if (!cfg->manual_override) return;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    bool want_on = cfg->manual_override_on;
+    if (want_on == s_commanded_on[idx]) return;
+    /* Override라도 부팅 유예는 그대로 존중(원인 무관 규칙, 사용자 지시) */
+    if (want_on && !s_ever_on_since_boot[idx] &&
+        (now_ms - s_boot_ms_ref) < POWER_RELAY_BOOT_ON_DELAY_MS) {
+        return;
+    }
+    power_relay_command(idx, want_on, now_ms);
+    if (want_on) s_ever_on_since_boot[idx] = true;
 }
 
 /* 최소제곱 1차회귀 기울기(값/ms) — 추세(방향+속도)만 필요하므로 1차식으로 충분(그래프의
@@ -254,15 +284,30 @@ static void evaluate_relay(int idx, uint32_t now_ms)
         else if (currently_on && off_eval >= cfg->off_threshold) want_on = false;
     }
 
-    if (want_on == currently_on) return;
+    /* 2026-09-18(Manual Override, 사용자 설계) — 자동판정(want_on)은 Override 중에도 그대로
+     * 계속 계산해서 추세 이력을 살아있게 두되("Override 해제 순간 이미 쌓인 추세로 바로
+     * 판단"), 실제 명령은 Override 중이면 그 방향으로 덮어씀 */
+    bool effective_want_on = cfg->manual_override ? cfg->manual_override_on : want_on;
 
-    /* 채터링 방지 — 직전 전환 후 최소유지시간이 안 지났으면 이번 전환은 보류(다음 주기에
-     * 다시 판단, 값이 그때도 같은 방향이면 그때 반영됨) */
-    if (s_last_transition_ms[idx] != 0 &&
-        (now_ms - s_last_transition_ms[idx]) < (uint32_t)cfg->min_hold_sec * 1000) {
+    if (effective_want_on == currently_on) return;
+
+    /* 부팅 후 최초 On 전환은 원인(자동규칙/Override) 무관하게 이 유예시간만큼 지연 —
+     * "설정에 의해 온 되는 시간이 필요해"(사용자 지시). Off로의 전환은 제약 없음 */
+    if (effective_want_on && !s_ever_on_since_boot[idx] &&
+        (now_ms - s_boot_ms_ref) < POWER_RELAY_BOOT_ON_DELAY_MS) {
         return;
     }
-    power_relay_command(idx, want_on, now_ms);
+
+    /* 채터링 방지(최소유지시간)는 자동판정 전환에만 적용 — Override는 사용자의 직접 명령이라
+     * 최소유지시간 대상이 아님(즉시 반영) */
+    if (!cfg->manual_override) {
+        if (s_last_transition_ms[idx] != 0 &&
+            (now_ms - s_last_transition_ms[idx]) < (uint32_t)cfg->min_hold_sec * 1000) {
+            return;
+        }
+    }
+    power_relay_command(idx, effective_want_on, now_ms);
+    if (effective_want_on) s_ever_on_since_boot[idx] = true;
 }
 
 static void power_relay_task(void *arg)
@@ -279,6 +324,8 @@ static void power_relay_task(void *arg)
 
 void power_relay_start(void)
 {
+    /* 2026-09-18(Manual Override 부팅유예 기준시각) */
+    s_boot_ms_ref = (uint32_t)(esp_timer_get_time() / 1000);
     /* 2026-09-16(사용자 지적 — "메모리 35K까지 줄었어, 위험해") — 태스크 생성이 실제로
      * 내부RAM을 얼마나 쓰는지 추측 대신 실측(기존 MEMDIAG 관례와 동일) */
     size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);

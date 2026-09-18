@@ -323,6 +323,11 @@ typedef enum {
     STR_STATUS_RELAY_ON,         /* "On" / "On" */
     STR_STATUS_RELAY_OFF,        /* "Off" / "Off" */
     STR_RELAY_NOT_CONFIGURED,    /* 주화면 요약칸: 아직 Apply 전(configured=false)일 때 표시(2026-09-17) */
+    STR_MSG_RELAY_VALUE_CLAMPED, /* Fine/Basic 전환 등으로 값이 센서 범위를 벗어나 자동 조정됐을 때 토스트(2026-09-18) */
+    STR_LABEL_MANUAL_MODE,       /* Manual On/Off 스위치 라벨(2026-09-18): "수동" / "Manual" */
+    STR_MSG_OVERRIDE_WARNING,    /* Override 확인팝업 경고문(2026-09-18) */
+    STR_MSG_OVERRIDE_ON_SUMMARY, /* 주화면 요약: "On by manual override" (2026-09-18) */
+    STR_MSG_OVERRIDE_OFF_SUMMARY, /* 주화면 요약: "Off by manual override" (2026-09-18) */
     STR_LABEL_CHAN_TYPE,         /* "측정 항목:" / "Channel:" */
     STR_OPT_CHAN_TYPE_LIST,      /* 드랍다운 옵션(줄바꿈 구분): "온도\n이산화탄소" / "Temperature\nCO2" */
     STR_LABEL_SOURCE_KIND,       /* "기준 소스:" / "Source:" */
@@ -336,7 +341,9 @@ typedef enum {
     STR_OPT_DIRECTION_LIST,      /* "오르면 On\n내리면 On" / "On when rising\nOn when falling" */
     STR_LABEL_ON_THRESHOLD,      /* "On 임계값:" / "On threshold:" */
     STR_LABEL_OFF_THRESHOLD,     /* "Off 임계값:" / "Off threshold:" */
-    STR_LABEL_MIN_HOLD,          /* "최소 유지(초):" / "Min hold (sec):" */
+    STR_LABEL_MIN_HOLD,          /* "최소 유지:" / "Min hold:" (2026-09-18: 드랍다운 전환, 단위는 옵션 텍스트에) */
+    STR_OPT_MIN_HOLD_LIST,       /* 드랍다운 옵션(2026-09-18): "30초\n1분\n3분\n5분" / "30S\n1M\n3M\n5M" */
+    STR_OPT_TREND_SAMPLE_LIST,   /* 드랍다운 옵션(2026-09-18): "3\n5\n10" / "3\n5\n10" */
     STR_LABEL_TREND_ENABLE,      /* "추세 반영:" / "Trend:" */
     STR_LABEL_TREND_LOOKAHEAD,   /* "추세 예측(초):" / "Trend lookahead (sec):" */
     STR_MSG_NO_SOURCE_DEVICE,    /* 장치 소스인데 후보가 없을 때: "붙은 장치 없음" / "No device available" */

@@ -57,6 +57,13 @@ typedef struct {
     char    alias[POWER_RELAY_ALIAS_MAX_LEN];
     bool    configured;  /* 사용자가 아직 한 번도 설정 안 했으면 false(팝업에서 기본값 유도) */
 
+    /* 2026-09-18(사용자 설계 — Manual Override) — true면 아래 규칙 기반 판정 결과를 무시하고
+     * manual_override_on으로 강제 명령. AI/자동 규칙과 상호배타(둘 중 하나 On이면 다른 하나는
+     * 자동으로 Off) — Manual On이면 판정루프(evaluate_relay)는 계속 추세만 갱신하고 최종
+     * 명령출력만 이 값으로 덮어씀. 재부팅 후에도 유지되고 그대로 재적용됨(파일 저장) */
+    bool    manual_override;
+    bool    manual_override_on;  /* Override 중일 때 강제할 방향 */
+
     /* 2026-09-16(순수 대화로 재설계 — "공학 관점에선 좋은데 사용자 관점에선 쓰기 힘들다") —
      * AI On이면 팝업이 Based on/통계/추세/최소유지 항목을 안 보여주고 여기 저장된 값을
      * 스마트 기본값으로 채움(정밀 우선, 추세 On, 평균). AI Off면 전부 사용자가 직접 지정 —
