@@ -1040,9 +1040,13 @@ static void create_modal_title(lv_obj_t *box, ui_str_id_t title_id, modal_kind_t
 {
     lv_obj_set_style_clip_corner(box, true, 0);
 
-    lv_coord_t pad_top   = lv_obj_get_style_pad_top(box, LV_PART_MAIN);
-    lv_coord_t pad_left  = lv_obj_get_style_pad_left(box, LV_PART_MAIN);
-    lv_coord_t pad_right = lv_obj_get_style_pad_right(box, LV_PART_MAIN);
+    /* 2026-09-18(사용자 지적 — "타이틀이 팝업 상단/좌우에 1픽셀씩 덜 차서 배경이 보임") —
+     * card 테마의 border_width만큼 덜 밀려나서 생긴 틈. padding뿐 아니라 border도 상쇄해야
+     * box 바깥 가장자리까지 정확히 닿음 */
+    lv_coord_t border_w  = lv_obj_get_style_border_width(box, LV_PART_MAIN);
+    lv_coord_t pad_top   = lv_obj_get_style_pad_top(box, LV_PART_MAIN) + border_w;
+    lv_coord_t pad_left  = lv_obj_get_style_pad_left(box, LV_PART_MAIN) + border_w;
+    lv_coord_t pad_right = lv_obj_get_style_pad_right(box, LV_PART_MAIN) + border_w;
 
     lv_color_t bg_color   = (kind == MODAL_KIND_WARNING) ? lv_palette_main(LV_PALETTE_YELLOW) : lv_palette_main(LV_PALETTE_BLUE);
     lv_color_t text_color = (kind == MODAL_KIND_WARNING) ? lv_color_black() : lv_color_white();
@@ -1226,29 +1230,36 @@ static void cb_dismiss_warn_row(lv_event_t *e)
  * 닫힘(하단 확인버튼 없음). create_modal()의 고정폭(420px)은 이 용도엔 좁아서(재연결+포맷
  * 버튼이 한 행에 다 안 들어감) 재사용 안 하고 화면비율 기반으로 직접 만듦(사용자 지시 —
  * "화면이 바뀔 수 있으니 고정폭 대신 비율로") */
+/* 2026-09-18(사용자 지시 — "전화면 팝업 형태가 낫겠어") — 80% 폭 박스가 어두운 배경 위에
+ * 뜬 유사 모달이 아니라, Settings/Stats/Set Time과 동일하게 화면을 완전히 채우는 진짜
+ * 전체화면 셸. create_modal()류의 3단계 부모워크(cb_modal_close)를 못 쓰므로 static
+ * 핸들+전용 닫기 콜백 패턴(다른 전체화면 팝업들과 동일)을 씀 */
+static lv_obj_t *s_error_warn_popup = NULL;
+
+static void cb_close_error_warn_popup(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_delete(s_error_warn_popup);
+    s_error_warn_popup = NULL;
+    resume_bg_timers();
+}
+
 static void cb_logo_warning_tap(lv_event_t *e)
 {
     (void)e;
+    if (s_error_warn_popup) return;  /* 이미 열려있음 */
+
     int err_codes[UI_ERR_HISTORY_CAP];
     int err_n = ui_log_get_error_history(err_codes, UI_ERR_HISTORY_CAP);
     int warn_codes[UI_WARN_HISTORY_CAP];
     int warn_n = ui_log_get_warn_history(warn_codes, UI_WARN_HISTORY_CAP);
 
     pause_bg_timers();
-    lv_obj_t *overlay = lv_obj_create(lv_screen_active());
-    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(overlay, 0, 0);
-    lv_obj_set_style_radius(overlay, 0, 0);
-
-    lv_obj_t *box = lv_obj_create(overlay);
-    lv_obj_set_size(box, LV_PCT(80), LV_SIZE_CONTENT);
-    lv_obj_center(box);
-    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
+    s_error_warn_popup = create_page_popup();
+    lv_obj_t *box = s_error_warn_popup;
     s_last_modal = box;
 
-    add_page_popup_header(box, ui_str(STR_TITLE_ERROR_LIST), cb_modal_close, NULL);
+    add_page_popup_header(box, ui_str(STR_TITLE_ERROR_LIST), cb_close_error_warn_popup, NULL);
 
     if (err_n == 0 && warn_n == 0) {
         lv_obj_t *lbl = lv_label_create(box);
@@ -1378,12 +1389,13 @@ static void show_confirm_popup(const char *message, modal_kind_t kind, confirm_y
     lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
+    /* 2026-09-18(사용자 지시 — "요즘은 긍정이 오른쪽임. No-Yes, Cancel-OK로 통일") */
     if (kind == MODAL_KIND_WARNING) {
-        add_modal_button(btn_row, STR_BTN_YES, cb_confirm_yes_trampoline, &s_confirm_state);
         add_modal_button(btn_row, STR_BTN_NO, cb_modal_close, NULL);
+        add_modal_button(btn_row, STR_BTN_YES, cb_confirm_yes_trampoline, &s_confirm_state);
     } else {
-        add_modal_button(btn_row, STR_BTN_CONFIRM, cb_confirm_yes_trampoline, &s_confirm_state);
         add_modal_button(btn_row, STR_BTN_CANCEL, cb_modal_close, NULL);
+        add_modal_button(btn_row, STR_BTN_CONFIRM, cb_confirm_yes_trampoline, &s_confirm_state);
     }
 }
 
@@ -1637,7 +1649,7 @@ static void cb_sd_format_tap(lv_event_t *e)
  * [[project_cntl_popup_close_vs_action_buttons]] */
 static void cb_sd_resolve_tap(lv_event_t *e)
 {
-    cb_modal_close(e);  /* 에러목록 팝업부터 닫고 선택팝업으로 교체 */
+    cb_close_error_warn_popup(e);  /* 에러목록 팝업부터 닫고 선택팝업으로 교체 */
 
     pause_bg_timers();
     lv_obj_t *overlay = lv_obj_create(lv_screen_active());
@@ -1697,8 +1709,8 @@ static void show_pair_confirm_popup(esp_now_hub_node_t *node)
     lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_pair_confirm, node);
     add_modal_button(btn_row, STR_BTN_CANCEL, cb_modal_close, NULL);
+    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_pair_confirm, node);
 }
 
 /* 연결된 장치를 탭했을 때 — 지금은 장치별 설정 항목이 없어서 연결 해제 확인만 함
@@ -5439,17 +5451,8 @@ typedef struct {
 } settime_popup_state_t;
 
 static settime_popup_state_t s_settime_state;
-static lv_obj_t *s_settime_popup = NULL;
-
 /* 2026-09-08(사용자 지시 — "시간설정 팝업... 이것도 전화면으로") — create_modal() 대신
  * 전체화면 셸이라 부모 체인 워크(cb_modal_close)를 못 씀, 직접 삭제 */
-static void cb_close_settime_popup(lv_event_t *e)
-{
-    (void)e;
-    lv_obj_delete(s_settime_popup);
-    s_settime_popup = NULL;
-}
-
 static void cb_settime_confirm(lv_event_t *e)
 {
     settime_popup_state_t *st = &s_settime_state;
@@ -5464,28 +5467,33 @@ static void cb_settime_confirm(lv_event_t *e)
         ui_log_add_err(UI_ERR_RTC_SET_FAILED, "RTC time set failed: %s", esp_err_to_name(err));
     }
     refresh_clock(NULL);  /* 로고부제 + 이 행의 표시값을 새 시각으로 즉시 갱신(다음 1초 tick까지 안 기다림) */
-    cb_close_settime_popup(e);
+    cb_modal_close(e);
 }
 
-/* 팝업 안에 [라벨][드롭다운] 한 쌍을 만드는 헬퍼 — 연/월/일/시/분 다섯 번 반복돼서 공통화 */
+/* 팝업 안에 [라벨][드롭다운] 한 쌍을 만드는 헬퍼 — 연/월/일/시/분 다섯 번 반복돼서 공통화.
+ * 2026-09-18(사용자 지시) — 하드코딩 폭 대신 가변폭(ui_dropdown_apply_variable_width) */
 static lv_obj_t *add_settime_dropdown(lv_obj_t *row, int start, int count, const char *fmt,
-                                       int selected, int width)
+                                       int selected)
 {
     char options[256];
     build_numeric_options(options, sizeof(options), start, count, fmt);
 
     lv_obj_t *dd = lv_dropdown_create(row);
-    lv_dropdown_set_options(dd, options);
-    lv_dropdown_set_selected(dd, (uint16_t)selected);
-    lv_obj_set_width(dd, width);
     lv_obj_set_style_text_font(dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_dropdown_set_options(dd, options);
+    lv_dropdown_set_selected(dd, (uint16_t)selected);
+    ui_dropdown_apply_variable_width(dd, options);
     /* 2026-09-07(사용자 지시 — "위아래 패딩을 반으로") — 기본테마 pad_small(14px 상하좌우)
      * 중 상하만 절반(7px)으로, 좌우는 그대로 */
     lv_obj_set_style_pad_ver(dd, 7, 0);
     return dd;
 }
 
+/* 2026-09-18(사용자 지시 — "전화면 팝업일 필요가 없다") — WiFi 비밀번호/값 롤러와 동일한
+ * 작은 create_modal() 기반 "설정" 팝업으로 전환(예전엔 전체화면+확인버튼이 닫기까지 겸해서
+ * 유일하게 어색했음). Cancel-OK 버튼으로 통일, 닫기는 이제 create_modal() 패밀리 표준대로
+ * 버튼으로만(전용 X/static 핸들 불필요) */
 static void show_settime_popup(void)
 {
     time_t now = time(NULL);
@@ -5493,50 +5501,35 @@ static void show_settime_popup(void)
     localtime_r(&now, &tm_buf);
     int cur_year = tm_buf.tm_year + 1900;
 
-    if (s_settime_popup) return;  /* 이미 열려있음 */
-
     settime_popup_state_t *st = &s_settime_state;
     st->year_base = cur_year - SETTIME_YEAR_SPAN_BEFORE;
     int year_count = SETTIME_YEAR_SPAN_BEFORE + SETTIME_YEAR_SPAN_AFTER + 1;
 
-    s_settime_popup = create_page_popup();
-    add_page_popup_header(s_settime_popup, ui_str(STR_TITLE_SET_TIME), cb_close_settime_popup, NULL);
+    lv_obj_t *box = create_modal();
+    create_modal_title(box, STR_TITLE_SETTING, MODAL_KIND_NORMAL);
 
-    /* 콘텐츠 영역 — 화면 중앙에 픽커+확인버튼 */
-    lv_obj_t *content = lv_obj_create(s_settime_popup);
-    lv_obj_set_size(content, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_grow(content, 1);
-    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(content, 20, 0);
-    lv_obj_set_style_border_width(content, 0, 0);
-
-    lv_obj_t *picker_row = lv_obj_create(content);
+    lv_obj_t *picker_row = lv_obj_create(box);
     lv_obj_set_size(picker_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(picker_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(picker_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_border_width(picker_row, 0, 0);
     lv_obj_set_style_pad_column(picker_row, 4, 0);
+    lv_obj_align(picker_row, LV_ALIGN_CENTER, 0, 0);
 
-    /* 2026-09-08(사용자 지적 — "숫자와 열림 기호가 겹쳐있고") — 비트맵 폰트(Montserrat)
-     * 숫자 폭이 TTF 때보다 넓어서 고정폭이 부족해 화살표와 겹침, 여유 있게 넓힘 */
     st->year_dd  = add_settime_dropdown(picker_row, st->year_base, year_count, "%04d",
-                                         cur_year - st->year_base, 90);
-    st->month_dd = add_settime_dropdown(picker_row, 1, 12, "%02d", tm_buf.tm_mon, 74);
-    st->day_dd   = add_settime_dropdown(picker_row, 1, 31, "%02d", tm_buf.tm_mday - 1, 74);
+                                         cur_year - st->year_base);
+    st->month_dd = add_settime_dropdown(picker_row, 1, 12, "%02d", tm_buf.tm_mon);
+    st->day_dd   = add_settime_dropdown(picker_row, 1, 31, "%02d", tm_buf.tm_mday - 1);
 
     lv_obj_t *sep = lv_label_create(picker_row);
     lv_label_set_text(sep, " ");
 
-    st->hour_dd  = add_settime_dropdown(picker_row, 0, 24, "%02d", tm_buf.tm_hour, 74);
-    st->min_dd   = add_settime_dropdown(picker_row, 0, 60, "%02d", tm_buf.tm_min, 74);
+    st->hour_dd  = add_settime_dropdown(picker_row, 0, 24, "%02d", tm_buf.tm_hour);
+    st->min_dd   = add_settime_dropdown(picker_row, 0, 60, "%02d", tm_buf.tm_min);
 
-    /* 확인 버튼 하나만 — 취소는 헤더의 닫기(X)가 대신함(통계/설정 팝업과 동일 패턴) */
-    lv_obj_t *confirm_btn = lv_button_create(content);
-    lv_obj_add_event_cb(confirm_btn, cb_settime_confirm, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *confirm_lbl = lv_label_create(confirm_btn);
-    lv_label_set_text(confirm_lbl, ui_str(STR_BTN_CONFIRM));
-    lv_obj_set_style_text_font(confirm_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_CANCEL, cb_modal_close, NULL);
+    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_settime_confirm, NULL);
 }
 
 static void cb_settime_btn(lv_event_t *e)
@@ -5593,8 +5586,8 @@ static void show_network_mode_confirm_popup(bool new_ap_mode)
     lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_YES, cb_confirm_yes_trampoline, &s_confirm_state);
     add_modal_button(btn_row, STR_BTN_NO, cb_network_mode_cancel, NULL);
+    add_modal_button(btn_row, STR_BTN_YES, cb_confirm_yes_trampoline, &s_confirm_state);
 
     s_confirm_state.fn  = cb_network_mode_restart_confirmed;
     s_confirm_state.ctx = (void *)(uintptr_t)new_ap_mode;
@@ -5866,8 +5859,8 @@ static void cb_wifi_ssid_selected(lv_event_t *e)
     }
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
-    s_wifi_connect_btn = add_modal_button(btn_row, STR_BTN_CONNECT, cb_wifi_connect_btn, NULL);
     add_modal_button(btn_row, STR_BTN_CANCEL, cb_wifi_pw_popup_close, NULL);
+    s_wifi_connect_btn = add_modal_button(btn_row, STR_BTN_CONNECT, cb_wifi_connect_btn, NULL);
 
     if (!s_wifi_keyboard) {
         s_wifi_keyboard = lv_keyboard_create(lv_screen_active());
