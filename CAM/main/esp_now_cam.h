@@ -2,8 +2,10 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include "driver/gpio.h"
 #include "esp_now_link.h"
+#include "cam_storage.h"  /* cam_capture_kind_t */
 
 /**
  * CAM의 ESP-NOW 리프 노드 로직 — Sens/main/esp_now_node.c와 광고/채널스캔/페어링 부분은
@@ -30,3 +32,24 @@ bool esp_now_cam_reconnect(void);
 
 /** @brief Green 상태 LED GPIO 등록 (esp_now_cam_init() 이전에 호출) */
 void esp_now_cam_set_status_led(gpio_num_t pin);
+
+/**
+ * @brief 2026-09-18(SD 제거 재설계) — 방금 촬영한 프레임을 CNTL로 즉시 푸시(SD 저장을
+ *        대체). cam_node.c의 camera_capture_one()이 fb->buf/fb->len을 그대로 넘겨 호출 —
+ *        반드시 실제 스택이 있는 태스크에서만 호출할 것(전송 완료까지 블로킹될 수 있음,
+ *        esp_timer 콜백 금지). 페어링 안 돼있으면 즉시 false. file_id는 내부에서 세션 로컬
+ *        카운터로 자동 부여(재부팅마다 리셋 — CNTL이 실제 영구 파일명/순번을 소유하므로
+ *        무관함).
+ * @param buf  JPEG 바이트(카메라 드라이버의 PSRAM 프레임버퍼를 그대로 가리킴)
+ * @param len  JPEG 바이트 수
+ * @param kind CAM_CAPTURE_KIND_MANUAL/AUTO — CNTL이 파일명(M/T 접두사)을 정하는 데 씀
+ * @return 전송(META~DONE_ACK) 성공 여부
+ */
+bool esp_now_cam_push_captured_photo(const uint8_t *buf, size_t len, cam_capture_kind_t kind);
+
+/**
+ * @brief 2026-09-18(SD 제거 재설계) — 주기촬영 타이머 콜백(cam_node.c capture_timer_cb,
+ *        작은 스택의 esp_timer 태스크 컨텍스트)에서 호출. 무거운 작업(촬영+전송)은 직접 하지
+ *        않고 photo_transfer_task(24KB 스택의 전용 태스크)로 큐잉만 함 — 큐가 가득 차 있으면
+ *        (직전 촬영 처리 중) 조용히 버림, 다음 주기가 재시도함 */
+void esp_now_cam_enqueue_auto_capture(void);

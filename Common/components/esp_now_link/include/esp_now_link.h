@@ -348,7 +348,11 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  msg_type;
-    uint32_t file_id;     /* CAM이 부여하는 파일 식별자(타임스탬프 등, 유일하기만 하면 됨) */
+    uint8_t  kind;         /* 2026-09-18(SD 제거 재설계) — cam_capture_kind_t: 'M'(수동/즉시)
+                               또는 'T'(자동/주기). CNTL이 로컬 SD에 저장할 때 자기 파일명
+                               (M/T 접두사)을 정하는 데 씀 — CAM은 더 이상 영구 파일명을 직접
+                               안 쓰므로(SD 제거) file_id는 세션 로컬 카운터일 뿐 */
+    uint32_t file_id;     /* CAM이 부여하는 파일 식별자(세션 로컬 카운터, 유일하기만 하면 됨) */
     uint32_t total_size;  /* 파일 전체 바이트 수 */
     uint16_t total_chunks;
     uint32_t crc32;

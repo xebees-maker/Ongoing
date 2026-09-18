@@ -5,6 +5,7 @@
 #include "device_config.h"
 #include "stats_store.h"
 #include "sd_storage.h"
+#include "photo_storage.h"
 #include "esp_now_photo.h"
 #include "ui_log.h"
 #include "rtc_sync.h"
@@ -1520,7 +1521,8 @@ static void refresh_storage_status_label(void)
 
     uint64_t picture_budget = sd_total * 9 / 10;
     uint64_t measure_budget = sd_total / 10;
-    uint64_t picture_used = 0;  /* TODO(미정): 캠 사진 저장 구현되면 폴더 크기 합산으로 교체 */
+    /* 2026-09-18(SD 제거 재설계 — 캠 사진 콘 SD 저장 구현) — 폴더 크기 합산으로 교체 */
+    uint64_t picture_used = photo_storage_get_used_bytes();
     uint64_t measure_used = stats_store_get_used_bytes();
     /* 2026-09-10(SD fail 회로차단기) — 이 조회 자체가 fopen 등에서 진짜 I/O 실패였다면
      * (단순 "기록 0개"가 아니라) 나머지 계산/표시를 이어가지 말고 즉시 에러 상태로 전환.
@@ -1560,12 +1562,18 @@ static void refresh_storage_status_label(void)
         ui_str(STR_LABEL_TOTAL), (unsigned)total_pct, (unsigned)total_remain_mb);
     set_storage_label_text(detail, false);
 
-    /* 정리 트리거 — Measure가 자기 예산의 90% 이상이면 80%까지 삭제. Picture는
-     * 실사용 0이라 지금은 절대 안 걸림(사진저장 구현 후 동일 패턴으로 확장 예정) */
+    /* 정리 트리거 — Measure/Picture 둘 다 자기 예산의 90% 이상이면 80%까지 삭제
+     * (2026-09-18, Picture도 동일 패턴으로 확장 — photo_storage_trim_to()) */
     if (measure_used * 100 / measure_budget >= 90) {
         uint32_t deleted = stats_store_trim_to(measure_budget * 80 / 100);
         if (deleted > 0) {
             show_storage_cleanup_popup(ui_str(STR_LABEL_MEASURE_SHORT), deleted);
+        }
+    }
+    if (picture_used * 100 / picture_budget >= 90) {
+        uint32_t deleted = photo_storage_trim_to(picture_budget * 80 / 100);
+        if (deleted > 0) {
+            show_storage_cleanup_popup(ui_str(STR_LABEL_PICTURE), deleted);
         }
     }
 }

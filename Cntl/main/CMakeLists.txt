@@ -13,6 +13,7 @@ idf_component_register(
         "device_config.c"
         "sd_storage.c"
         "stats_store.c"
+        "photo_storage.c"
         "power_relay.c"
         "../components/waveshare_rgb_lcd_port.c"
         "../components/ch422g.c"

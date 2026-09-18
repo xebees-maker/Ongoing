@@ -4,6 +4,7 @@
 #include "esp_now_tx.h"
 #include "ui_log.h"
 #include "device_config.h"
+#include "photo_storage.h"
 
 #include <string.h>
 #include "esp_now.h"
@@ -52,6 +53,8 @@ static uint16_t   s_total_chunks = 0;
 static uint32_t   s_expected_crc = 0;
 static uint16_t   s_chunks_received = 0;
 static uint8_t    s_photo_cam_mac[6] = { 0 };  /* NACK을 돌려보낼 대상 — 요청 시점에 저장 */
+static uint8_t    s_recv_kind = 0;  /* 2026-09-18(SD 제거 재설계) — META의 kind('M'/'T'),
+                                        DONE에서 photo_storage_save()의 파일명 접두사로 씀 */
 
 /* 청크 신뢰성 재설계(2026-08-03) — "핸드셰이크처럼 청크마다 응답을 기다리는데 정작 그
  * 응답이 로컬 라디오 ACK일 뿐이라 진짜 확인이 아니었던" 예전 방식을 버리고, 신뢰도 높은
@@ -354,6 +357,7 @@ static void handle_meta(const uint8_t *src_mac, const uint8_t *data, int len)
         return;
     }
     s_file_id         = meta->file_id;
+    s_recv_kind        = meta->kind;
     s_total_size       = meta->total_size;
     s_total_chunks     = meta->total_chunks;
     s_expected_crc     = meta->crc32;
@@ -525,6 +529,17 @@ static void handle_done(const uint8_t *data, int len)
     s_ready_file_id = s_file_id;
     s_state = ESP_NOW_PHOTO_STATE_READY;
     xSemaphoreGive(s_mutex);
+
+    /* 2026-09-18(SD 제거 재설계 — "찍을 때마다 항상 콘에 가져와서 콘의 SD에 저장") — 검증된
+     * 사진을 콘 SD의 카메라별 폴더에 영구 저장. 실패해도(SD 미마운트 등) 치명적이지 않음 —
+     * 캐시 슬롯엔 이미 들어갔으므로 방금 받은 사진 자체는 화면/웹에서 정상 표시됨, 다음
+     * refresh_storage_status_label()이 SD 상태를 알려줌(stats_store 실패와 동일 톨러런스) */
+    uint32_t seq = 0;
+    if (photo_storage_save(s_photo_cam_mac, s_recv_kind, s_recv_buf, s_total_size, &seq)) {
+        ui_log_add("SD저장 완료 file_id=%u -> seq=%u", (unsigned)s_file_id, (unsigned)seq);
+    } else {
+        ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)s_file_id);
+    }
 
     send_done_ack(0, NULL);  /* 완료 통보(2026-08-05, Layer 1) — missing_count=0 */
     ESP_LOGI(TAG, "사진 수신 완료: file_id=%u, %u bytes", (unsigned)s_file_id, (unsigned)s_total_size);

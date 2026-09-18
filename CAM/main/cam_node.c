@@ -149,23 +149,25 @@ static uint8_t s_xclk_target_mhz = (uint8_t)(CAM_VIDEO_XCLK_FREQ_HZ / 1000000);
 void cam_node_set_agc_enable(bool enable) { s_agc_enable = enable; }
 void cam_node_set_aec_enable(bool enable) { s_aec_enable = enable; }
 
-/* 2026-08-08 실기에서 확인된 크래시 안전장치 — capture_interval_sec=10(드롭다운의 "10초")로
+/* 2026-08-08 실기에서 확인된 크래시(과거 안전장치, 값만 완화) — capture_interval_sec=10으로
  * 설정하고 CAM이 마침 ESP-NOW 채널동기/페어링 활동 중일 때 자동촬영 타이머가 겹쳐 발동하면
  * SD 카드 read(enforce_capacity_and_get_next_seq -> scan_all_files)의 DMA 버퍼 할당 도중
  * 힙 자체가 깨지는 LoadProhibited 크래시를 재현/확인함(camera_capture_one/capture_timer_cb
- * 백트레이스로 확정). 게다가 이 값이 SD에 저장되므로 한 번 걸리면 재부팅마다 똑같이
- * 크래시하는 무한 부트루프가 됨 — 재현/원인규명은 했지만 SD와 ESP-NOW의 동시접근 자체를
- * 안전하게 만드는 근본수정은 아직 안 함(오늘 스코프 밖). 그때까지는 실기로 오래 검증된
- * 프로덕션 주기(30분+)만 허용 — 0(끔)은 항상 안전(타이머 자체가 안 돎). 30분보다 짧은
- * 값이 오면 30분으로 올림(거부 대신 클램프 — Cntl이 옛 버전이거나 설정파일이 이 안전장치
- * 이전 값을 들고 있어도 항상 안전측으로 수렴하게). */
-#define CAM_CAPTURE_INTERVAL_MIN_SAFE_SEC 1800
+ * 백트레이스로 확정).
+ * 2026-09-18(SD 제거 재설계) — 이 크래시의 전제조건이었던 "자동촬영 타이머가 SD I/O를
+ * 하는 것" 자체가 없어짐(camera_capture_one()이 이제 SD 대신 CNTL로 푸시, capture_timer_cb는
+ * 큐잉만 하고 실제 촬영은 photo_transfer_task로 넘어감 — 위 주석들 참고). 다만 "실기에서
+ * 확인된 크래시가 근본원인까지 완전히 고쳐졌다"고 성급히 단정하지 않고(이 코드베이스의
+ * 원칙: 하드웨어/타이밍 버그는 재현 조건이 없어졌다고 재검증 없이 완전 해결로 치지 않음),
+ * 최소 안전 여유(5초)만 남겨두고 10초/30초 같은 테스트 값이 통과하게 낮춤. 실기로 장시간
+ * (30-60분+) 재현 시도 후 이상 없으면 더 낮출 수 있음 */
+#define CAM_CAPTURE_INTERVAL_MIN_SAFE_SEC 5
 
 static uint32_t clamp_capture_interval_sec(uint32_t sec)
 {
     if (sec == 0) return 0;
     if (sec < CAM_CAPTURE_INTERVAL_MIN_SAFE_SEC) {
-        ESP_LOGW(TAG, "촬영주기 %us는 실기에서 크래시 확인된 범위 — %us로 올림",
+        ESP_LOGW(TAG, "촬영주기 %us는 최소 안전값(%us) 미만 — 올림",
                  (unsigned)sec, (unsigned)CAM_CAPTURE_INTERVAL_MIN_SAFE_SEC);
         return CAM_CAPTURE_INTERVAL_MIN_SAFE_SEC;
     }
@@ -428,18 +430,14 @@ static esp_err_t camera_init(bool save_warmup_frames)
         s->set_saturation(s, -2);
     }
 
+    /* 2026-09-18(SD 제거 재설계) — 워밍업 프레임 진단 SD 저장 제거(SD 자체가 없어짐, 원래도
+     * "정식 기능 아님" 진단용이었음 — cam_storage.h 주석 참고). 프레임을 실제로 소비하는
+     * 루프 자체(노출 워밍업 목적)는 그대로 유지, save_warmup_frames 파라미터는 이제 이 함수
+     * 안에서 쓸 데가 없어져 사실상 무의미해짐(시그니처는 호출부 다수라 그대로 둠) */
     int64_t warmup_start_us = esp_timer_get_time();
     for (int i = 0; i < CAM_WARMUP_FRAME_COUNT; i++) {
         camera_fb_t *warmup_fb = esp_camera_fb_get();
-        if (warmup_fb) {
-            if (save_warmup_frames && i < 26) {
-                uint32_t warmup_file_id = 0;
-                esp_err_t werr = cam_storage_save_capture(warmup_fb->buf, warmup_fb->len,
-                                                            (cam_capture_kind_t)('A' + i), &warmup_file_id);
-                ESP_LOGI(TAG, "워밍업 프레임 %d(kind=%c) 저장: %s", i, (char)('A' + i), esp_err_to_name(werr));
-            }
-            esp_camera_fb_return(warmup_fb);
-        }
+        if (warmup_fb) esp_camera_fb_return(warmup_fb);
     }
     ESP_LOGI(TAG, "노출 워밍업 %d프레임 소요: %lldms", CAM_WARMUP_FRAME_COUNT,
              (esp_timer_get_time() - warmup_start_us) / 1000);
@@ -503,11 +501,15 @@ static void apply_agc_aec_settings(void)
     if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, s_aec_enable ? 1 : 0);
 }
 
+/* 2026-09-18(SD 제거 재설계 — "찍을 때마다 항상 콘에 가져와서 콘의 SD에 저장") — 반드시
+ * 실제 스택이 있는 태스크 컨텍스트에서만 호출할 것: esp_now_cam_push_captured_photo()가
+ * ESP-NOW 전송 완료까지 블로킹될 수 있음(청크 윈도우+NACK 라운드). 호출부는 정확히 둘뿐 —
+ * cam_node_capture_now_sized()(CAPTURE_NOW, esp_now_cam.c의 photo_transfer_task 컨텍스트)와
+ * cam_node_run_auto_capture()(AUTO_CAPTURE 큐, 역시 photo_transfer_task) — 둘 다 24KB 스택의
+ * 같은 전용 태스크라 안전함. capture_timer_cb()(작은 스택의 esp_timer 콜백)는 이제 이 함수를
+ * 직접 안 부르고 esp_now_cam_enqueue_auto_capture()로 큐잉만 함 */
 static bool camera_capture_one(cam_capture_kind_t kind)
 {
-    /* save_warmup_frames는 수동(MANUAL) 촬영일 때만 true — 자동촬영은 esp_timer 태스크의
-     * 작은 스택에서 도는 데다 무인 반복이라, 진단용 SD 쓰기를 그 경로에 태우지 않음(위
-     * camera_init() 주석 참고) */
     if (ensure_camera_ready(kind == CAM_CAPTURE_KIND_MANUAL) != ESP_OK) return false;
     apply_agc_aec_settings();
 
@@ -531,18 +533,21 @@ static bool camera_capture_one(cam_capture_kind_t kind)
         return false;
     }
 
-    uint32_t file_id = 0;
-    esp_err_t err = cam_storage_save_capture(fb->buf, fb->len, kind, &file_id);
-    bool ok = (err == ESP_OK);
+    bool ok = esp_now_cam_push_captured_photo(fb->buf, fb->len, kind);
     if (ok) {
-        ESP_LOGI(TAG, "SD에 캡처 저장 완료: id=%u, %u bytes", (unsigned)file_id, (unsigned)fb->len);
+        ESP_LOGI(TAG, "CNTL로 푸시 완료: kind=%c, %u bytes", (char)kind, (unsigned)fb->len);
     } else {
-        ESP_LOGW(TAG, "SD 저장 실패: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "CNTL 푸시 실패(kind=%c) — 이번 사진은 버려짐", (char)kind);
     }
     esp_camera_fb_return(fb);
 
     xSemaphoreGive(s_capture_mutex);
     return ok;
+}
+
+bool cam_node_run_auto_capture(void)
+{
+    return camera_capture_one(CAM_CAPTURE_KIND_AUTO);
 }
 
 static bool s_auto_capture_enabled = false;  /* 기본 OFF — 콘솔에서 auto on으로 명시적으로 켜야 함 */
@@ -611,11 +616,11 @@ static void capture_timer_cb(void *arg)
         return;  /* 콘솔의 auto off 명령으로 꺼둔 상태 */
     }
     if (dev_console_auto_capture_paused()) {
-        return;  /* 콘솔 사용 중 — ls로 본 파일이 순환삭제로 사라지지 않게 이번 주기 건너뜀 */
+        return;  /* 콘솔 사용 중 — 이번 주기 건너뜀 */
     }
-    if (!camera_capture_one(CAM_CAPTURE_KIND_AUTO)) {
-        ESP_LOGW(TAG, "이번 캡처 실패 — 다음 주기에 재시도");
-    }
+    /* 2026-09-18(SD 제거 재설계) — 이 콜백은 esp_timer 태스크(작은 스택)에서 돌아서 촬영+
+     * ESP-NOW 전송(블로킹)을 직접 하면 안 됨 — photo_transfer_task로 큐잉만 함 */
+    esp_now_cam_enqueue_auto_capture();
 }
 
 bool cam_node_capture_now(void)

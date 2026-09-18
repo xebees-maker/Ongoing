@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "cam_storage.h"  /* cam_capture_kind_t */
 
 /** @brief 캡처 타이머와 무관하게 즉시 1장 촬영 — 개발 콘솔(dev_console.c)의 shot 명령용 */
 bool cam_node_capture_now(void);
@@ -96,3 +97,10 @@ bool cam_node_ensure_camera_ready(void);
  * @param out_mv  환산된 배터리 전압(mV)
  */
 bool cam_node_read_battery_mv(uint16_t *out_raw, uint16_t *out_mv);
+
+/** @brief 2026-09-18(SD 제거 재설계) — esp_now_cam.c의 photo_transfer_task가 AUTO_CAPTURE
+ *         큐 항목을 처리할 때 부르는 진입점(실제 스택 있는 태스크 컨텍스트). 내부적으로
+ *         camera_capture_one(CAM_CAPTURE_KIND_AUTO)를 그대로 호출 — 촬영+CNTL 푸시까지
+ *         끝내고 반환. 촬영 자체 실패 또는 푸시 실패 시 false(이번 사진은 버려짐, 다음
+ *         주기가 새로 촬영) */
+bool cam_node_run_auto_capture(void);

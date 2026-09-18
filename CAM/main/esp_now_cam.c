@@ -63,10 +63,13 @@ static gpio_num_t s_led_pin = GPIO_NUM_NC;
 /* recv_cb(WiFi 태스크)에서 바로 처리하기엔 무거운 요청(촬영/파일 I/O/여러 건 전송)을
  * 전용 태스크로 넘기는 큐 — PHOTO_REQUEST와 PHOTO_LIST_REQUEST 둘 다 여기로 옴 */
 typedef enum {
-    CAM_TASK_REQ_PHOTO       = 0,
-    CAM_TASK_REQ_LIST        = 1,
-    CAM_TASK_REQ_DELETE_ALL  = 2,
-    CAM_TASK_REQ_BENCH       = 3,
+    CAM_TASK_REQ_PHOTO         = 0,
+    CAM_TASK_REQ_LIST          = 1,
+    CAM_TASK_REQ_DELETE_ALL    = 2,
+    CAM_TASK_REQ_BENCH         = 3,
+    CAM_TASK_REQ_AUTO_CAPTURE  = 4,  /* 2026-09-18(SD 제거 재설계) — 주기촬영 타이머가
+                                        capture_timer_cb(작은 스택)에서 직접 촬영하지 않고
+                                        여기로 큐잉, 이 태스크(24KB 스택)가 촬영+푸시를 함 */
 } cam_task_req_kind_t;
 
 typedef struct {
@@ -232,6 +235,42 @@ static void resend_chunks(uint32_t file_id, const esp_now_photo_chunk_nack_t *na
     }
     fclose(fp);
     ESP_LOGI(TAG, "NACK 재전송 완료: file_id=%u %u개 청크", (unsigned)file_id, (unsigned)nack->missing_count);
+}
+
+/* 2026-09-18(SD 제거 재설계) — resend_chunks()의 메모리 버퍼 버전. SD 파일 대신 카메라
+ * 드라이버의 PSRAM 프레임버퍼(jpeg_buf/jpeg_len)에서 직접 오프셋 계산으로 청크를 잘라 보냄.
+ * 나머지(NO_MEM 재시도, 페이싱, CHANNEL_PING 큐잉 지연 완화)는 resend_chunks()와 동일 */
+static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, uint32_t file_id,
+                                       const esp_now_photo_chunk_nack_t *nack)
+{
+    esp_now_photo_chunk_t chunk = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_CHUNK, .file_id = file_id };
+    for (uint16_t i = 0; i < nack->missing_count; i++) {
+        uint16_t idx;
+        memcpy(&idx, &nack->missing_idx[i], sizeof(idx));
+        size_t offset = (size_t)idx * ESP_NOW_PHOTO_CHUNK_DATA_LEN;
+        if (offset >= jpeg_len) continue;
+        size_t n = jpeg_len - offset;
+        if (n > ESP_NOW_PHOTO_CHUNK_DATA_LEN) n = ESP_NOW_PHOTO_CHUNK_DATA_LEN;
+        memcpy(chunk.data, jpeg_buf + offset, n);
+        chunk.chunk_idx = idx;
+        chunk.chunk_len = (uint16_t)n;
+
+        esp_err_t err;
+        int attempt;
+        for (attempt = 0; attempt < 6; attempt++) {
+            err = esp_now_send(s_hub_mac, (const uint8_t *)&chunk, sizeof(chunk));
+            if (err != ESP_ERR_ESPNOW_NO_MEM) break;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "재전송 실패(buf): chunk[%u] -> %s(시도 %d회)", idx, esp_err_to_name(err), attempt + 1);
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+        if ((i + 1) % CHUNK_QUEUE_DRAIN_INTERVAL == 0) {
+            vTaskDelay(pdMS_TO_TICKS(CHUNK_QUEUE_DRAIN_MS));
+        }
+    }
+    ESP_LOGI(TAG, "NACK 재전송 완료(buf): file_id=%u %u개 청크", (unsigned)file_id, (unsigned)nack->missing_count);
 }
 
 /* file_id 하나를 META + CHUNK*로 스트리밍 전송(2026-08-03 재설계) — 청크마다 응답을
@@ -529,6 +568,141 @@ static bool send_one_photo_sr(uint32_t file_id, uint32_t my_generation)
     return true;
 }
 
+/* 2026-09-18(SD 제거 재설계) — send_one_photo_sr()의 메모리 버퍼 버전. SD 파일을 열어
+ * CRC/전송하는 대신 카메라 드라이버의 PSRAM 프레임버퍼(jpeg_buf/jpeg_len)를 그대로 씀 —
+ * 호출자(cam_node.c의 camera_capture_one())가 esp_camera_fb_get()으로 받은 fb를 이 함수가
+ * 끝날 때까지(META~DONE_ACK 전부) 들고 있어야 함. kind는 META에 실어 CNTL에 전달해서
+ * CNTL이 자기 쪽 파일명(M/T 접두사)을 결정하는 데 씀. 나머지 로직(윈도우/NACK/DONE 라운드)은
+ * send_one_photo_sr()과 완전히 동일 */
+static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, uint32_t file_id,
+                                       cam_capture_kind_t kind, uint32_t my_generation)
+{
+    ESP_LOGI(TAG, "CKPT(SR-push): 시작 file_id=%u kind=%c len=%u", (unsigned)file_id, (char)kind, (unsigned)jpeg_len);
+    uint16_t total_chunks = (uint16_t)((jpeg_len + ESP_NOW_PHOTO_CHUNK_DATA_LEN - 1) / ESP_NOW_PHOTO_CHUNK_DATA_LEN);
+    uint32_t crc = esp_rom_crc32_le(0, jpeg_buf, jpeg_len);
+    ESP_LOGI(TAG, "CKPT(SR-push): CRC 계산 완료 crc=%08x total_chunks=%u", (unsigned)crc, total_chunks);
+
+    esp_now_photo_meta_t meta = {
+        .version      = ESP_NOW_LINK_VERSION,
+        .msg_type     = ESP_NOW_MSG_PHOTO_META,
+        .kind         = (uint8_t)kind,
+        .file_id      = file_id,
+        .total_size   = (uint32_t)jpeg_len,
+        .total_chunks = total_chunks,
+        .crc32        = crc,
+    };
+    static const uint8_t s_meta_ack_types[] = { ESP_NOW_MSG_PHOTO_META_ACK };
+    esp_err_t meta_err = esp_now_reliable_request(s_hub_mac, &meta, sizeof(meta),
+                                                   s_meta_ack_types, 1,
+                                                   800, 3,
+                                                   NULL, 0, NULL);
+    ESP_LOGI(TAG, "CKPT(SR-push): META_ACK: %s", esp_err_to_name(meta_err));
+    if (meta_err != ESP_OK) {
+        ESP_LOGW(TAG, "CKPT(SR-push): META 무응답 — 전송 포기(file_id=%u)", (unsigned)file_id);
+        return false;
+    }
+
+    static esp_now_photo_chunk_nack_t range_req;
+    static esp_now_photo_chunk_nack_t status_ack;
+    uint32_t total_sent_chunks = 0;
+    uint32_t status_requests   = 0;
+
+    for (uint16_t window_base = 0; window_base < total_chunks; ) {
+        if (s_request_generation != my_generation) {
+            ESP_LOGI(TAG, "SR-push: 더 최신 요청으로 대체됨 — 중단(file_id=%u)", (unsigned)file_id);
+            return false;
+        }
+        uint16_t window_count = total_chunks - window_base;
+        if (window_count > SR_WINDOW_SIZE) window_count = SR_WINDOW_SIZE;
+
+        range_req.file_id       = file_id;
+        range_req.missing_count = window_count;
+        for (uint16_t i = 0; i < window_count; i++) range_req.missing_idx[i] = window_base + i;
+        resend_chunks_from_buffer(jpeg_buf, jpeg_len, file_id, &range_req);
+        total_sent_chunks += window_count;
+
+        uint16_t window_end = window_base + window_count;
+
+        esp_now_photo_window_status_req_t req = {
+            .version     = ESP_NOW_LINK_VERSION,
+            .msg_type    = ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST,
+            .file_id     = file_id,
+            .range_start = window_base,
+            .range_count = window_count,
+        };
+        static const uint8_t s_status_ack_types[] = { ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK };
+        size_t reply_len = 0;
+        esp_err_t err = esp_now_reliable_request(s_hub_mac, &req, sizeof(req),
+                                                  s_status_ack_types, 1,
+                                                  SR_STATUS_TIMEOUT_MS, SR_STATUS_MAX_ATTEMPTS,
+                                                  &status_ack, sizeof(status_ack), &reply_len);
+        status_requests++;
+        if (err == ESP_OK) {
+            if (status_ack.missing_count > 0) {
+                resend_chunks_from_buffer(jpeg_buf, jpeg_len, file_id, &status_ack);
+                total_sent_chunks += status_ack.missing_count;
+            }
+        } else {
+            ESP_LOGW(TAG, "SR-push: WINDOW_STATUS_ACK 무응답([%u,%u)) — 다음 윈도우로 진행(끝의 DONE/NACK가 안전망)",
+                     window_base, window_end);
+        }
+        window_base = window_end;
+    }
+    ESP_LOGI(TAG, "CKPT(SR-push): 윈도우 루프 완료 — 총 전송청크(재전송포함)=%u/%u, 상태확인 %u회",
+             (unsigned)total_sent_chunks, (unsigned)total_chunks, (unsigned)status_requests);
+
+    esp_now_photo_done_t done = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_DONE };
+    static const uint8_t s_sr_done_ack_types[] = { ESP_NOW_MSG_PHOTO_DONE_ACK };
+    static esp_now_photo_chunk_nack_t done_ack;
+
+    for (int round = 0; round < s_nack_max_rounds; round++) {
+        if (s_request_generation != my_generation) return false;
+
+        size_t reply_len = 0;
+        esp_err_t err = esp_now_reliable_request(s_hub_mac, &done, sizeof(done),
+                                                  s_sr_done_ack_types, 1,
+                                                  800, 3,
+                                                  &done_ack, sizeof(done_ack), &reply_len);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "CKPT(SR-push): DONE_ACK 무응답(라운드 %d) — 판단 보류", round + 1);
+            return true;
+        }
+        if (done_ack.missing_count == 0) {
+            ESP_LOGI(TAG, "CKPT(SR-push): DONE_ACK 완료 확인(라운드 %d)", round + 1);
+            return true;
+        }
+
+        ESP_LOGI(TAG, "SR-push DONE_ACK: %u개 누락 — 재전송(라운드 %d/%d)", (unsigned)done_ack.missing_count, round + 1, s_nack_max_rounds);
+        resend_chunks_from_buffer(jpeg_buf, jpeg_len, file_id, &done_ack);
+        if (s_request_generation != my_generation) return false;
+    }
+    ESP_LOGW(TAG, "CKPT(SR-push): 재전송 라운드 소진");
+    return true;
+}
+
+/* 2026-09-18(SD 제거 재설계) — 세션 로컬 file_id 카운터(재부팅마다 0부터 — CNTL이 실제
+ * 영구 파일명/순번을 소유하므로 무관함) */
+static uint32_t s_push_file_id_counter = 0;
+
+bool esp_now_cam_push_captured_photo(const uint8_t *buf, size_t len, cam_capture_kind_t kind)
+{
+    if (s_conn_state != CAM_CONN_PAIRED) {
+        ESP_LOGW(TAG, "촬영 푸시 스킵 — 페어링 안 됨");
+        return false;
+    }
+    uint32_t file_id = ++s_push_file_id_counter;
+    return send_photo_from_buffer_sr(buf, len, file_id, kind, s_request_generation);
+}
+
+void esp_now_cam_enqueue_auto_capture(void)
+{
+    if (!s_photo_request_queue) return;
+    cam_task_request_t item = { .kind = CAM_TASK_REQ_AUTO_CAPTURE };
+    if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "AUTO_CAPTURE 큐잉 실패(큐 가득참, 직전 촬영 처리 중) — 이번 주기 건너뜀");
+    }
+}
+
 /* 목록 요청 — 파일 내용 전송 없이 file_id/크기만 알려줌. 최대 500장 처리라
  * recv_cb(WiFi 태스크)에서 바로 안 하고 여기서 처리.
  * 2026-08-11 전면 재설계(사용자 지시) — 예전(2026-08-10 SR 방식: 파일당 1메시지 unreliable
@@ -798,6 +972,21 @@ static void photo_transfer_task(void *arg)
                 } else {
                     run_transfer_bench((esp_now_bench_mode_t)item.bench_mode, item.bench_duration_sec);
                 }
+            }
+            mark_transfer_idle();
+            continue;
+        }
+
+        /* 2026-09-18(SD 제거 재설계) — 주기촬영. capture_timer_cb()가 여기로 큐잉만 하고,
+         * 실제 촬영+CNTL 푸시는 이 태스크(24KB 스택)에서 함 — cam_node_run_auto_capture()가
+         * camera_capture_one(CAM_CAPTURE_KIND_AUTO)를 그대로 호출 */
+        if (item.kind == CAM_TASK_REQ_AUTO_CAPTURE) {
+            if ((s_conn_state == CAM_CONN_PAIRED)) {
+                if (!cam_node_run_auto_capture()) {
+                    ESP_LOGW(TAG, "AUTO_CAPTURE: 촬영 또는 푸시 실패 — 다음 주기에 재시도");
+                }
+            } else {
+                ESP_LOGW(TAG, "AUTO_CAPTURE: 페어링 안 됨 — 이번 주기 건너뜀");
             }
             mark_transfer_idle();
             continue;
