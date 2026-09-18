@@ -9254,7 +9254,26 @@ static void build_relay_popup(int idx)
  * 2026-09-18(재설계, 사용자 지시) — 버튼 3개(Cancel/Off/On) 대신 문구 끝에 On/Off 스위치
  * (초기값=현재 릴레이 상태) + Yes/No 2개로 변경. No는 스위치가 뭐든 전부 취소 */
 static int s_override_popup_idx = -1;
-static lv_obj_t *s_override_switch = NULL;
+static lv_obj_t *s_override_on_icon = NULL;
+static lv_obj_t *s_override_off_icon = NULL;
+static bool s_override_selected_on = false;
+
+/* 2026-09-18(사용자 지시 — "On Off 스위치가 직관적이지 않아... 파워아이콘과 색을 그대로")
+ * — 스위치 대신 주화면 상태아이콘과 동일한 LV_SYMBOL_POWER+색(초록=On/회색=Off)을 쓰는 2택
+ * 아이콘. 선택된 쪽만 사각형 배경(원형 아님, 사용자 지시)으로 강조 */
+static void relay_override_update_icon_highlight(void)
+{
+    if (!s_override_on_icon || !s_override_off_icon) return;
+    lv_obj_set_style_bg_opa(s_override_on_icon, s_override_selected_on ? LV_OPA_30 : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(s_override_off_icon, s_override_selected_on ? LV_OPA_TRANSP : LV_OPA_30, 0);
+}
+
+static void cb_override_choice_tap(lv_event_t *e)
+{
+    lv_obj_t *icon = lv_event_get_target(e);
+    s_override_selected_on = (icon == s_override_on_icon);
+    relay_override_update_icon_highlight();
+}
 
 static void relay_apply_override(int idx, bool want_on)
 {
@@ -9280,15 +9299,16 @@ static void relay_apply_override(int idx, bool want_on)
 static void cb_override_no(lv_event_t *e)
 {
     if (s_relay_manual_switch) lv_obj_remove_state(s_relay_manual_switch, LV_STATE_CHECKED);
-    s_override_switch = NULL;
+    s_override_on_icon = NULL;
+    s_override_off_icon = NULL;
     cb_modal_close(e);
 }
 
 static void cb_override_yes(lv_event_t *e)
 {
-    bool want_on = s_override_switch && lv_obj_has_state(s_override_switch, LV_STATE_CHECKED);
-    if (s_override_popup_idx >= 0) relay_apply_override(s_override_popup_idx, want_on);
-    s_override_switch = NULL;
+    if (s_override_popup_idx >= 0) relay_apply_override(s_override_popup_idx, s_override_selected_on);
+    s_override_on_icon = NULL;
+    s_override_off_icon = NULL;
     cb_modal_close(e);
 }
 
@@ -9315,9 +9335,37 @@ static void show_override_confirm_popup(int idx)
     lv_obj_set_flex_grow(msg, 1);
     lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_override_switch = lv_switch_create(msg_row);
-    bool currently_on = power_relay_get_commanded_on(idx);
-    if (currently_on) lv_obj_add_state(s_override_switch, LV_STATE_CHECKED);
+    lv_obj_t *choice_row = lv_obj_create(msg_row);
+    lv_obj_set_size(choice_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(choice_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(choice_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(choice_row, 0, 0);
+    lv_obj_set_style_bg_opa(choice_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(choice_row, 0, 0);
+    lv_obj_set_style_pad_column(choice_row, 8, 0);
+
+    s_override_on_icon = lv_label_create(choice_row);
+    lv_label_set_text(s_override_on_icon, LV_SYMBOL_POWER);
+    lv_obj_set_style_text_font(s_override_on_icon, ui_font_get(UI_FONT_SIZE_24), 0);
+    lv_obj_set_style_text_color(s_override_on_icon, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_radius(s_override_on_icon, 0, 0);  /* 사각형 강조(2026-09-18 사용자 지시) */
+    lv_obj_set_style_pad_hor(s_override_on_icon, 10, 0);
+    lv_obj_set_style_pad_ver(s_override_on_icon, 6, 0);
+    lv_obj_add_flag(s_override_on_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_override_on_icon, cb_override_choice_tap, LV_EVENT_CLICKED, NULL);
+
+    s_override_off_icon = lv_label_create(choice_row);
+    lv_label_set_text(s_override_off_icon, LV_SYMBOL_POWER);
+    lv_obj_set_style_text_font(s_override_off_icon, ui_font_get(UI_FONT_SIZE_24), 0);
+    lv_obj_set_style_text_color(s_override_off_icon, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_radius(s_override_off_icon, 0, 0);
+    lv_obj_set_style_pad_hor(s_override_off_icon, 10, 0);
+    lv_obj_set_style_pad_ver(s_override_off_icon, 6, 0);
+    lv_obj_add_flag(s_override_off_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_override_off_icon, cb_override_choice_tap, LV_EVENT_CLICKED, NULL);
+
+    s_override_selected_on = power_relay_get_commanded_on(idx);
+    relay_override_update_icon_highlight();
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
     add_modal_button(btn_row, STR_BTN_NO, cb_override_no, NULL);
