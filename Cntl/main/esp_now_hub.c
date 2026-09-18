@@ -274,11 +274,17 @@ hub_config_apply_stage_t esp_now_hub_get_config_apply_stage(void) { return s_con
 void esp_now_hub_config_apply_stage_clear(void) { s_config_apply_stage = HUB_CONFIG_APPLY_IDLE; }
 
 /* 2026-08-08 — device_config(Cntl이 소유하는 CAM 설정)의 "현재 값"을 mac 하나에 그대로
- * 밀어줌. 페어링 시 자동 전송(recv_cb의 PAIR_ACK 핸들러)과, 설정탭 Apply 버튼
+ * 밀어줌. 페어링 시 자동 전송(recv_cb의 PAIR_ACK/WAKE_HELLO 핸들러)과, 설정탭 Apply 버튼
  * (esp_now_hub_apply_*) 둘 다 이 함수 하나로 통일 — "지금 저장된 값을 보낸다"는 의미가
- * 완전히 같으므로 재사용. s_config_apply_stage는 Apply 버튼 진행팝업용(페어링 자동전송
- * 때도 갱신되긴 하지만 그때는 아무도 안 봄 — 무해) */
-static void push_cam_config_to(const uint8_t *mac)
+ * 완전히 같으므로 재사용.
+ * 2026-09-18 버그수정(사용자 리포트 — "4005 뜸") — track_apply_progress 파라미터 추가.
+ * 예전 주석은 "자동전송 때도 s_config_apply_stage가 갱신되지만 그때는 아무도 안 봐서
+ * 무해"였는데, 이 가정이 응답성이 짧을 때(예: 3s) 깨짐 — 자동전송이 1초 안팎으로 자주
+ * 일어나서, 사용자가 Apply를 누른 직후(진행팝업이 이 상태를 실제로 지켜보는 중)에도
+ * 자동전송이 끼어들어 SENT를 다시 덮어써버릴 수 있었음(진행팝업이 원래 요청의 ACK를
+ * 놓쳐 4005로 빠지는 원인으로 의심). 자동전송 호출부는 이제 이 상태를 아예 안 건드림 —
+ * 명시적 Apply 흐름만 진행팝업 상태를 추적 */
+static void push_cam_config_to(const uint8_t *mac, bool track_apply_progress)
 {
     esp_now_cam_config_t cfg = {
         .version                = ESP_NOW_LINK_VERSION,
@@ -296,7 +302,7 @@ static void push_cam_config_to(const uint8_t *mac)
         .unix_time              = rtc_sync_get_unix_time(),
     };
     static const uint8_t s_config_ack_types[] = { ESP_NOW_MSG_CAM_CONFIG_ACK };
-    s_config_apply_stage = HUB_CONFIG_APPLY_SENT;
+    if (track_apply_progress) s_config_apply_stage = HUB_CONFIG_APPLY_SENT;
     esp_now_tx_enqueue(mac, &cfg, sizeof(cfg), s_config_ack_types, 1, 800, 3, "CAM config");
     ESP_LOGI(TAG, "CAM_CONFIG_SET -> 촬영주기=%us 응답성=%us AGC=%d AEC=%d XCLK=%uMHz NACK라운드=%u 큐잉됨",
              (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec,
@@ -524,7 +530,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * 타이밍) — 그래야 재부팅한 CAM이 Kconfig 기본값이 아니라 사용자가 마지막으로
              * Apply한 값으로 곧바로 동작함 */
             if (kind_copy == HUB_NODE_KIND_CAM) {
-                push_cam_config_to(info->src_addr);
+                push_cam_config_to(info->src_addr, false);  /* 자동전송 — 진행팝업 상태 안 건드림 */
             } else if (kind_copy == HUB_NODE_KIND_SENS) {
                 push_sens_config_to(info->src_addr);
             }
@@ -584,7 +590,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * "이번엔 할일 메시지가 오는지 안 오는지" 추측할 필요가 없어짐(esp_now_hub_queue_action
          * 주석 참고) */
         if (n->kind == HUB_NODE_KIND_CAM) {
-            push_cam_config_to(info->src_addr);
+            push_cam_config_to(info->src_addr, false);  /* 자동전송 — 진행팝업 상태 안 건드림 */
         }
         esp_now_hub_pending_action_t action;
         if (dequeue_pending_action_locked(n, &action)) {
@@ -1374,7 +1380,7 @@ void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode)
 void esp_now_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
 {
     device_config_set_cam_capture_interval_sec(mac, sec);
-    push_cam_config_to(mac);
+    push_cam_config_to(mac, true);
 }
 
 void esp_now_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec)
@@ -1387,19 +1393,22 @@ void esp_now_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec
 void esp_now_hub_apply_cam_agc_enable(const uint8_t *mac, bool enable)
 {
     device_config_set_agc_enable(mac, enable);
-    push_cam_config_to(mac);
+    /* AGC/AEC는 진행팝업 없이 즉시반영이라(ui_main.c cb_agc_switch_changed 주석 참고)
+     * s_config_apply_stage를 지켜보는 사람이 없음 — false로 둬서 혹시 동시에 다른 설정
+     * (촬영주기/XCLK)의 진행팝업이 떠있어도 그쪽 추적을 방해 안 하게 함 */
+    push_cam_config_to(mac, false);
 }
 
 void esp_now_hub_apply_cam_aec_enable(const uint8_t *mac, bool enable)
 {
     device_config_set_aec_enable(mac, enable);
-    push_cam_config_to(mac);
+    push_cam_config_to(mac, false);
 }
 
 void esp_now_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz)
 {
     device_config_set_xclk_mhz(mac, mhz);
-    push_cam_config_to(mac);
+    push_cam_config_to(mac, true);
 }
 
 bool esp_now_hub_apply_response_interval_sec(uint32_t sec)
@@ -1419,7 +1428,7 @@ bool esp_now_hub_apply_response_interval_sec(uint32_t sec)
     xSemaphoreGive(s_nodes_mutex);
 
     for (int i = 0; i < target_count; i++) {
-        push_cam_config_to(targets[i]);
+        push_cam_config_to(targets[i], true);
     }
     return target_count > 0;
 }
