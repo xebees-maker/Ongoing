@@ -1,0 +1,94 @@
+== 2026-09-18 작업 요약: SR/Power Control 리팩토링 + Manual Override 기능 신규 구현 +
+   팝업 타이틀/컬러/버튼 컨벤션 전체 적용 ==
+
+[ 한 일 — Model-View-Dirty 원칙 정립 및 리팩토링 ]
+
+1. 세션 초반 허락 없이 코드를 수정한 신뢰 붕괴 사건을 계기로, 사용자가 "Model-View-Dirty"
+   아키텍처 원칙을 소크라테스식 대화로 직접 가르침 — 값의 도메인은 enum이 먼저 정의,
+   전역 static 변수는 시스템 초기화 시 딱 한 번만 채워짐(파일에 저장값 있으면 로드, 없으면
+   디폴트), 이후 모든 소비자(런타임/UI/개별 데이터)는 이 변수만 읽고 씀(#define 상수나
+   자기만의 폴백 로직을 따로 두지 않음), sentinel/null 방어코드가 필요 없어짐, "Dirty"는
+   그 자체로 또 다른 모델값(copy != 스냅샷)이고 Apply 버튼 활성상태는 그 값의 뷰일 뿐.
+2. Sens 측정주기 설정을 이 패턴으로 전면 리팩토링 — device_config.c에
+   SENS_SAMPLE_INTERVAL_SEC_DEFAULT(15) 도입, device_config_get_sens_sample_interval_sec()가
+   항상 유효한 값을 반환(0 sentinel 폐지), esp_now_hub.c에 흩어져있던 중복 폴백(측정주기
+   0이면 15로) 제거, device_config_sens_sample_interval_is_set() 신설(대시보드의 "명시적
+   설정 여부" 판단용).
+
+[ 한 일 — Manual Override 기능 신규 구현 ]
+
+3. power_relay_config_t에 manual_override/manual_override_on 필드 추가.
+   power_relay_apply_override_immediate()로 설정 변경 시 즉시(15초 주기 대기 없이) 반영.
+4. evaluate_relay()에 오버라이드 분기 추가 — 부팅 후 1분 지연(POWER_RELAY_BOOT_ON_DELAY_MS)은
+   릴레이별 최초 On 전환 1회만 적용, min-hold(챠터링 방지)는 오버라이드 시 우회(사용자 직접
+   명령이므로 즉시 반영), 단 자동판정(추세 포함) 계산 자체는 오버라이드 중에도 백그라운드에서
+   계속 돌아감(트렌드 이력 끊김 방지).
+5. 주화면 릴레이 On/Off 아이콘을 행 전체와 별도로 개별 탭 가능하게 만듦 → 탭하면 확인팝업 →
+   Yes 시 오버라이드 적용. 릴레이 설정 팝업 안의 Manual 스위치도 동일 확인팝업을 공유(AI
+   스위치와 상호배타 — Manual On이면 AI Off, 그 반대도 동일하게 강제).
+6. 구조체 패딩 버그 발견/수정 — manual_override 필드 2개(bool*2=2바이트) 삽입 위치가 우연히
+   기존 컴파일러 정렬 패딩을 정확히 채워서 sizeof(power_relay_config_t)가 안 바뀜. 여기에
+   POWER_RELAY_FILE_VERSION을 안 올려서, 구버전 파일이 버전+크기 체크를 통과하고 그대로
+   새 레이아웃으로 재해석되면서 옛 바이트가 우연히 manual_override 필드에 얹혀
+   "설정도 안 했는데 오버라이드됨"처럼 보이는 증상 발생 — 라이브 메모리 조회 없이 수동
+   바이트 오프셋 분석으로 근본원인 확정, FILE_VERSION 1→2로 수정.
+
+[ 한 일 — 센서 스펙 기반 롤러 범위 + UI 드랍다운 전환 ]
+
+7. SHT45/SCD41 데이터시트 조사(WebSearch) — 온도/습도 롤러 상한을 Fine(SHT45, 125도)/
+   Basic(SCD41, 60도)로 분리(하한은 사용 안 하는 영역이라 사용자 지시로 0도 고정, 센서
+   스펙과 무관), CO2 하한을 기존 오기(0)에서 400ppm으로 수정.
+8. Trend Sample Count/Min Hold를 자유 텍스트입력에서 드랍다운(3/5/10, 30초/1분/3분/5분)으로
+   전환, Based on류 드랍다운 전부 가변폭 헬퍼(ui_dropdown_apply_variable_width) 적용.
+9. SINGLE_DEVICE 소스일 때 precise(Fine/Basic) 필드가 설정 안 되던 버그 발견/수정
+   (stats_classify() 재사용).
+
+[ 한 일 — 팝업 타이틀/컬러/버튼 컨벤션 전체 적용 ]
+
+10. create_modal() 폭을 고정 420px에서 화면 2/3(LV_PCT(67))로 전역 변경(예전에 정해뒀던
+    컨벤션을 재확인 후 확정), 높이는 기존처럼 내용 기반 유지.
+11. create_modal_title() 공용 헬퍼 신설 — 타이틀바가 팝업 최상단에 여백 없이 좌우 끝까지
+    붙는 Windows 팝업 스타일. 박스의 기본 padding을 음수 마진으로 상쇄하고 clip_corner로
+    박스의 둥근 모서리를 자동으로 따라가게 함. 1px 잔여 틈은 padding+border 역산으로는
+    안 없어져서, 결국 박스 테두리 자체를 없애 근본적으로 해결(검정 오버레이 위 bg_color
+    대비로도 경계는 충분히 구분됨).
+12. modal_kind_t(Warning=노랑배경/검정글씨, Normal=파랑배경/흰글씨)로 create_modal() 기반
+    팝업 16개 전부 분류. show_confirm_popup()/show_alert_popup()처럼 Warning/Normal이
+    섞여 쓰이던 공용 함수는 kind 파라미터를 추가해 호출부별로 분류.
+13. 버튼 순서를 No/Cancel(왼쪽)-Yes/OK(오른쪽)로 전부 통일(기존엔 팝업마다 제각각).
+    제목별 버튼구조 규칙 확립 — "확인"/"설정" 제목=OK/Cancel, "경고"=Yes/No(드문 예외만
+    OK/Cancel), "알림"/"진행 중"=Close 또는 Cancel만(실제 선택이 아니므로).
+14. 에러/경고 목록 팝업 — 기존엔 전체화면 어두운 배경 위에 80% 폭 박스가 뜬 유사 모달
+    형태였는데, Settings/Stats와 동일한 진짜 전체화면(create_page_popup()) 구조로 전환.
+    전용 static 핸들+닫기 콜백 추가(create_modal() 계열의 3단계 부모워크를 못 쓰므로).
+15. Set Time 팝업 — 반대 방향으로 전환: 기존 전체화면(add_page_popup_header+확인버튼, 유일하게
+    확인버튼이 적용과 닫기를 동시에 하던 팝업)에서 WiFi 비밀번호/값 롤러와 같은 작은
+    create_modal() 기반 "설정" 팝업(파랑 타이틀바, Cancel-OK)으로 전환. 연/월/일/시/분
+    드랍다운 5개도 하드코딩 폭 대신 가변폭 적용.
+16. 오버라이드 확인팝업의 On/Off 선택 UI — 스위치 → 아이콘 2개(선택 시 원형 배경) →
+    아이콘+단어를 그룹으로 묶어 문장 중간에 삽입 → 최종안까지 여러 차례 재설계. 확정된
+    최종 형태: 문장("Do you want to override as On or Off?")은 그대로 두고, 단어 자체가
+    항상 각진 연회색 배경(탭 가능함을 표시)을 갖고 선택된 쪽만 2px 파란 테두리가 추가로
+    붙음(border_width는 항상 2로 고정, opa만 토글해서 선택 전환 시 레이아웃이 안 흔들림).
+    아이콘 1개는 문장 뒤에 별도로 배치되어 선택된 쪽 색(초록=On/회색=Off, 주화면 상태
+    아이콘과 동일 색 규칙)을 따라감. 사용자 터치 확인 완료("제대로 수정됬어").
+
+[ 한 일 — 조사 ]
+
+17. SCD41 습도 스펙 확인(WebSearch) — SCD41이 내장하는 SHT4x 계열 습도센서는 SHT45를
+    포함해 전부 측정범위가 0-100%RH로 동일(정확도 등급만 다름). 기존에 SHT45 값을
+    Basic 채널에도 재사용하던 것이 임시방편이 아니라 실제로 정확한 값이었음 — 코드 수정
+    불필요로 결론.
+
+[ 할 일 — 다음 ]
+
+1. CAM 재설계 — CAM 설정(촬영주기/XCLK/적응형 응답)을 오늘 확립한 Model-View-Dirty
+   패턴으로 리팩토링. "캠 사진을 콘에 저장하기" 작업과 함께 진행 예정(사용자가 CAM/CNTL
+   메모리 하락 조사보다 먼저 하기로 결정 — 패턴이 이미 확립돼있어 범위가 명확함).
+2. (보류, 후순위) CNTL 메모리 하락 원인 조사 — Sens 페어링 재시도(desync) 부하 시 주화면
+   내부메모리가 56K대까지, 때로 32K대까지도 하락. 오늘 작업 이전부터 존재(A/B git stash
+   테스트로 확인됨), 원인 미발견. 급한 장애는 아니라 CAM 재설계 이후로 순서 결정.
+3. 오늘 만든 16개 팝업 타이틀/컬러/버튼 컨벤션 중 오버라이드 팝업 외 나머지(SD 포맷/삭제/
+   재시작/네트워크모드/페어링/연결해제 확인, WiFi 비밀번호, 값 롤러, QR, 저장소 정리,
+   진행중 팝업, 에러/경고 목록 전체화면 전환, Set Time 작은팝업 전환)는 빌드/부팅 확인만
+   됐고 사용자의 실기 터치 확인이 아직 남음.
