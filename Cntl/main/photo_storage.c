@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "photo_storage";
 
@@ -34,6 +35,33 @@ static void camera_dir_path(const uint8_t mac[6], char *out, size_t out_len)
 static bool is_valid_kind(uint8_t kind)
 {
     return kind == 'M' || kind == 'T';
+}
+
+static void file_path_for(const uint8_t mac[6], uint8_t kind, uint32_t seq, char *out, size_t out_len)
+{
+    char dir_path[64];
+    camera_dir_path(mac, dir_path, sizeof(dir_path));
+    snprintf(out, out_len, "%s/%c%0*u.jpg", dir_path, (char)kind, PHOTO_SEQ_DIGITS, (unsigned)seq);
+}
+
+/* 파일명("<kind><8자리>.jpg")을 파싱 — 형식이 아니면 false */
+static bool parse_fname(const char *d_name, uint8_t *out_kind, uint32_t *out_seq)
+{
+    size_t len = strlen(d_name);
+    if (len != PHOTO_FNAME_LEN) return false;
+    if (!is_valid_kind((uint8_t)d_name[0])) return false;
+    if (strcmp(d_name + 1 + PHOTO_SEQ_DIGITS, ".jpg") != 0) return false;
+
+    char seq_str[PHOTO_SEQ_DIGITS + 1];
+    memcpy(seq_str, d_name + 1, PHOTO_SEQ_DIGITS);
+    seq_str[PHOTO_SEQ_DIGITS] = '\0';
+    char *end = NULL;
+    uint32_t seq = (uint32_t)strtoul(seq_str, &end, 10);
+    if (end != seq_str + PHOTO_SEQ_DIGITS) return false;
+
+    *out_kind = (uint8_t)d_name[0];
+    *out_seq = seq;
+    return true;
 }
 
 /* 이 카메라 폴더 안에서 가장 큰 순번+1(비어있으면 0) — 폴더가 아예 없어도 0(첫 저장 때
@@ -189,5 +217,159 @@ uint32_t photo_storage_trim_to(uint64_t target_bytes)
         ESP_LOGI(TAG, "정리로 삭제: %s", oldest);
         deleted++;
     }
+    return deleted;
+}
+
+uint32_t photo_storage_get_count(const uint8_t mac[6])
+{
+    char dir_path[64];
+    camera_dir_path(mac, dir_path, sizeof(dir_path));
+    DIR *dir = opendir(dir_path);
+    if (!dir) return 0;
+
+    uint32_t count = 0;
+    struct dirent *ent;
+    uint8_t kind; uint32_t seq;
+    while ((ent = readdir(dir)) != NULL) {
+        if (parse_fname(ent->d_name, &kind, &seq)) count++;
+    }
+    closedir(dir);
+    return count;
+}
+
+/* seq 내림차순 정렬용(qsort) — 최신(seq 큰 것)이 앞 */
+static int cmp_seq_desc(const void *a, const void *b)
+{
+    uint32_t sa = ((const uint32_t *)a)[0];
+    uint32_t sb = ((const uint32_t *)b)[0];
+    if (sa < sb) return 1;
+    if (sa > sb) return -1;
+    return 0;
+}
+
+uint32_t photo_storage_read_page(const uint8_t mac[6], uint32_t page_index, uint32_t page_size,
+                                  photo_storage_item_t *out, uint32_t out_cap)
+{
+    char dir_path[64];
+    camera_dir_path(mac, dir_path, sizeof(dir_path));
+    DIR *dir = opendir(dir_path);
+    if (!dir) return 0;
+
+    /* 1차: 전체 개수 세기(스크래치 배열 크기 결정용) */
+    uint32_t total = 0;
+    struct dirent *ent;
+    uint8_t kind; uint32_t seq;
+    while ((ent = readdir(dir)) != NULL) {
+        if (parse_fname(ent->d_name, &kind, &seq)) total++;
+    }
+    if (total == 0) { closedir(dir); return 0; }
+
+    /* {seq, kind} 쌍을 uint32_t 2개로 — seq가 정렬 키, kind는 나란히 들고만 감(인코딩 아님,
+     * 정렬 후 짝을 잃지 않기 위한 내부 스크래치 구조일 뿐) */
+    uint32_t *scratch = heap_caps_malloc((size_t)total * 2 * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+    if (!scratch) { closedir(dir); ESP_LOGW(TAG, "read_page: 스크래치 할당 실패(total=%u)", (unsigned)total); return 0; }
+
+    rewinddir(dir);
+    uint32_t filled = 0;
+    while ((ent = readdir(dir)) != NULL && filled < total) {
+        if (!parse_fname(ent->d_name, &kind, &seq)) continue;
+        scratch[filled * 2 + 0] = seq;
+        scratch[filled * 2 + 1] = (uint32_t)kind;
+        filled++;
+    }
+    closedir(dir);
+
+    qsort(scratch, filled, 2 * sizeof(uint32_t), cmp_seq_desc);
+
+    uint64_t start = (uint64_t)page_index * page_size;
+    uint32_t got = 0;
+    for (uint64_t i = start; i < filled && got < page_size && got < out_cap; i++) {
+        uint32_t item_seq  = scratch[i * 2 + 0];
+        uint8_t  item_kind = (uint8_t)scratch[i * 2 + 1];
+
+        char file_path[96];
+        file_path_for(mac, item_kind, item_seq, file_path, sizeof(file_path));
+        struct stat st;
+        if (stat(file_path, &st) != 0) continue;  /* 스캔 이후 삭제됐을 수도 있음(드묾) — 건너뜀 */
+
+        out[got].kind = item_kind;
+        out[got].seq = item_seq;
+        out[got].mtime = st.st_mtime;
+        out[got].file_size = (size_t)st.st_size;
+        got++;
+    }
+
+    heap_caps_free(scratch);
+    return got;
+}
+
+bool photo_storage_read_file(const uint8_t mac[6], uint8_t kind, uint32_t seq,
+                              uint8_t *out_buf, size_t buf_cap, size_t *out_len)
+{
+    char file_path[96];
+    file_path_for(mac, kind, seq, file_path, sizeof(file_path));
+
+    struct stat st;
+    if (stat(file_path, &st) != 0) {
+        ESP_LOGW(TAG, "read_file: 파일 없음: %s", file_path);
+        return false;
+    }
+    if ((size_t)st.st_size > buf_cap) {
+        ESP_LOGW(TAG, "read_file: 버퍼 부족(파일 %u > 버퍼 %u): %s",
+                 (unsigned)st.st_size, (unsigned)buf_cap, file_path);
+        return false;
+    }
+
+    FILE *fp = fopen(file_path, "rb");
+    if (!fp) {
+        ESP_LOGW(TAG, "read_file: 열기 실패: %s", file_path);
+        return false;
+    }
+    size_t read_len = fread(out_buf, 1, (size_t)st.st_size, fp);
+    fclose(fp);
+    if (read_len != (size_t)st.st_size) {
+        ESP_LOGW(TAG, "read_file: 읽기 불완전(%u/%u): %s", (unsigned)read_len, (unsigned)st.st_size, file_path);
+        return false;
+    }
+
+    if (out_len) *out_len = read_len;
+    return true;
+}
+
+bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq)
+{
+    char file_path[96];
+    file_path_for(mac, kind, seq, file_path, sizeof(file_path));
+    if (unlink(file_path) != 0) {
+        ESP_LOGW(TAG, "delete: 실패(errno=%d): %s", errno, file_path);
+        return false;
+    }
+    ESP_LOGI(TAG, "delete: %s", file_path);
+    return true;
+}
+
+uint32_t photo_storage_delete_all(const uint8_t mac[6])
+{
+    char dir_path[64];
+    camera_dir_path(mac, dir_path, sizeof(dir_path));
+    DIR *dir = opendir(dir_path);
+    if (!dir) return 0;
+
+    uint32_t deleted = 0;
+    struct dirent *ent;
+    uint8_t kind; uint32_t seq;
+    while ((ent = readdir(dir)) != NULL) {
+        if (!parse_fname(ent->d_name, &kind, &seq)) continue;
+        /* 320 — get_used_bytes()/find_oldest_file()의 cam_dir[320]과 동일 여유(d_name은
+         * NAME_MAX=255까지 이론상 가능, GCC의 -Wformat-truncation을 만족시키려면 96으로는
+         * 정적으로 증명 불가 — 실제로는 parse_fname()이 이미 PHOTO_FNAME_LEN 고정 길이만
+         * 통과시킴) */
+        char file_path[320];
+        snprintf(file_path, sizeof(file_path), "%s/%s", dir_path, ent->d_name);
+        if (unlink(file_path) == 0) deleted++;
+        else ESP_LOGW(TAG, "delete_all: 실패(errno=%d): %s", errno, file_path);
+    }
+    closedir(dir);
+    ESP_LOGI(TAG, "delete_all: %u개 삭제 (%s)", (unsigned)deleted, dir_path);
     return deleted;
 }

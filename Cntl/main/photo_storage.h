@@ -11,10 +11,22 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* 2026-09-19(사진목록 UI 로컬화) — 목록 한 행에 필요한 정보. file_id 같은 불투명 값
+ * 대신 kind/seq를 그대로 노출(이 파일명 자체가 이미 kind+seq라 인코딩할 이유가 없음,
+ * device_config.h의 "ID에 의미를 담지 않는다" 원칙과는 다른 상황 — 여기 kind/seq는
+ * 애초부터 각각 독립된 필드이지 하나의 ID를 쪼갠 게 아님) */
+typedef struct {
+    uint8_t  kind;       /* 'M'(즉시촬영) 또는 'T'(주기촬영) */
+    uint32_t seq;         /* 카메라 폴더 안에서 유일 — photo_storage_save()의 out_seq와 동일 값 */
+    time_t   mtime;       /* 파일 저장(수정) 시각 */
+    size_t   file_size;   /* 바이트 */
+} photo_storage_item_t;
 
 /* 사진 1장을 해당 카메라(mac) 전용 폴더에 저장 — 폴더가 없으면 생성. kind는
  * cam_capture_kind_t 값을 그대로 받음('M'=수동/즉시, 'T'=자동/주기, esp_now_link.h의
@@ -36,6 +48,27 @@ uint64_t photo_storage_get_used_bytes(void);
  * 전송이라 FAT mtime 해상도 문제가 실질적으로 없음 — cam_storage.c가 seq를 쓰는 이유와는
  * 다른 상황). 실제로 지운 파일 수 반환 */
 uint32_t photo_storage_trim_to(uint64_t target_bytes);
+
+/* 2026-09-19(사진목록 UI 로컬화) — 이 카메라 폴더의 전체 사진 수(페이지 계산용).
+ * stats_store_get_count()와 동일 관례 */
+uint32_t photo_storage_get_count(const uint8_t mac[6]);
+
+/* page_index=0이 가장 최근(seq 큰 것부터) 페이지 — stats_store_read_page()와 동일 관례.
+ * out에 최대 out_cap개 채우고 실제 채운 개수 반환 */
+uint32_t photo_storage_read_page(const uint8_t mac[6], uint32_t page_index, uint32_t page_size,
+                                  photo_storage_item_t *out, uint32_t out_cap);
+
+/* 사진 1장의 원본 JPEG 바이트를 통째로 읽음(디코드는 호출부 책임, 기존
+ * decode_jpeg_scaled()에 그대로 넘길 원본 바이트가 필요해서). buf_cap보다 파일이 크면
+ * 실패(false) — 잘린 채로 디코드 시도하지 않음 */
+bool photo_storage_read_file(const uint8_t mac[6], uint8_t kind, uint32_t seq,
+                              uint8_t *out_buf, size_t buf_cap, size_t *out_len);
+
+/* 사진 1장 삭제 — 성공/실패(이미 없음 포함) 반환 */
+bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq);
+
+/* 이 카메라 폴더의 모든 사진 삭제(폴더 자체는 남김) — 실제로 지운 개수 반환 */
+uint32_t photo_storage_delete_all(const uint8_t mac[6]);
 
 #ifdef __cplusplus
 }

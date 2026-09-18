@@ -75,45 +75,45 @@ static bool decode_mac_hex(const char *hex, uint8_t mac[6])
     return true;
 }
 
-/* 2026-08-30 — ui_main.c의 encode_file_seq_base36()과 동일 인코딩(CAM 실제 파일명 표기)을
- * 웹 목록에도 그대로 미러링 — 웹이 file_id를 화면에 별도 번호로 보여주면서 겪은 혼선(카운트
- * 기반 표시 vs 실제 file_id) 재발 방지, 사용자 지시로 CNTL과 동일한 표기로 통일 */
-static void format_file_tag(char kind, uint32_t file_id, char *out, size_t out_size)
+/* 2026-09-19(SD 제거 재설계) — 예전엔 CAM 실제 파일명 표기(base36 4자리)를 그대로
+ * 미러링해야 했지만, 이제 콘 SD의 실제 파일명 자체가 kind+8자리 십진수라 그걸 그대로 씀
+ * (photo_storage.c의 파일명 규칙과 동일) */
+static void format_file_tag(char kind, uint32_t seq, char *out, size_t out_size)
 {
-    static const char digits[37] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    uint32_t seq = file_id % 1679616u;  /* 36^4 */
-    char seq_str[5];
-    for (int i = 3; i >= 0; i--) {
-        seq_str[i] = digits[seq % 36];
-        seq /= 36;
-    }
-    seq_str[4] = '\0';
-    snprintf(out, out_size, "%c%s", kind, seq_str);
+    snprintf(out, out_size, "%c%08u", kind, (unsigned)seq);
 }
 
-/* 원본 해상도 그대로 원격에서 보기 — Cntl은 캐시된 압축 JPEG 바이트를 그대로 던져줄 뿐,
- * 디코드는 요청한 브라우저가 함(PC/폰은 메모리 여유가 있어서 원본을 그대로 풀 수 있음,
- * Cntl 자체 화면은 PSRAM이 부족해서 못 함 — 2026-08-01). 캐시 전용, 캐시에 없으면 404 */
+/* 원본 해상도 그대로 원격에서 보기 — Cntl은 지금 화면에 선택돼 표시 중인 사진의 압축 JPEG
+ * 바이트를 그대로 던져줄 뿐, 디코드는 요청한 브라우저가 함(PC/폰은 메모리 여유가 있어서
+ * 원본을 그대로 풀 수 있음, Cntl 자체 화면은 PSRAM이 부족해서 못 함 — 2026-08-01).
+ * 2026-09-19(SD 제거 재설계 — "웹은 콘에 기생") — 예전엔 file_id로 독립된 캐시를 조회했지만,
+ * 이제 콘 화면(ui_main.c)이 로컬 SD에서 읽어 들고 있는 바로 그 원본을 그대로 읽어감
+ * (ui_main_get_selected_photo_raw) — kind/seq가 같이 오면 "지금 화면이 보여주는 것"과
+ * 일치하는지 확인해서, 그 사이 다른 선택으로 바뀌었으면 엉뚱한 사진을 내려주지 않고 404 */
 static esp_err_t photo_get_handler(httpd_req_t *req)
 {
     char query[32] = { 0 };
-    char id_str[16] = { 0 };
-    uint32_t file_id = 0;
-    bool has_id = false;
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
-        httpd_query_key_value(query, "id", id_str, sizeof(id_str)) == ESP_OK) {
-        file_id = (uint32_t)strtoul(id_str, NULL, 10);
-        has_id = true;
+    char kind_str[4] = { 0 }, seq_str[16] = { 0 };
+    bool has_kind = false, has_seq = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        has_kind = (httpd_query_key_value(query, "kind", kind_str, sizeof(kind_str)) == ESP_OK);
+        has_seq  = (httpd_query_key_value(query, "seq", seq_str, sizeof(seq_str)) == ESP_OK);
     }
 
-    /* 2026-08-30 — file_id==0은 실제 유효한 사진 ID(가장 오래된 파일)일 수 있어서, "쿼리에
-     * id가 아예 없었는지"는 값이 아니라 has_id로 따로 판단해야 함(버그: 예전엔 file_id==0을
-     * "id 없음"으로 오판해 그 사진만 항상 즉시 실패) */
     const uint8_t *data = NULL;
     size_t len = 0;
-    if (!has_id || !esp_now_photo_cache_get(file_id, &data, &len)) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "photo not cached");
+    if (!ui_main_get_selected_photo_raw(&data, &len)) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no photo selected");
         return ESP_FAIL;
+    }
+    if (has_kind && has_seq && kind_str[0] != '\0') {
+        uint8_t sel_kind = 0; uint32_t sel_seq = 0;
+        uint32_t seq = (uint32_t)strtoul(seq_str, NULL, 10);
+        if (!ui_main_get_selected_photo_id(&sel_kind, &sel_seq) ||
+            sel_kind != (uint8_t)kind_str[0] || sel_seq != seq) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "selection changed");
+            return ESP_FAIL;
+        }
     }
 
     httpd_resp_set_type(req, "image/jpeg");
@@ -281,12 +281,6 @@ static esp_err_t api_disconnect_get_handler(httpd_req_t *req)
 
 static esp_err_t api_photos_get_handler(httpd_req_t *req)
 {
-    char query[32] = { 0 };
-    bool force_refresh = false;
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK && strstr(query, "refresh=1")) {
-        force_refresh = true;
-    }
-
     esp_now_hub_node_t cams[ESP_NOW_HUB_MAX_NODES];
     int n = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, cams, ESP_NOW_HUB_MAX_NODES);
     int cam_idx = -1;
@@ -306,51 +300,29 @@ static esp_err_t api_photos_get_handler(httpd_req_t *req)
         return ret;
     }
 
-    /* 2026-08-30("웹기생" 설계) — 이미 결과가 있으면(다른 리더가 먼저 ack해도 버퍼는
-     * 안 지워짐) 그대로 읽고, 없으면 새로 요청해서 세대번호로 ack와 무관하게 완료를 확인 */
-    esp_now_photo_list_state_t cur_state = esp_now_photo_list_get_state();
-    bool have_result = false;
-    bool result_ok = false;
-    if (!force_refresh && (cur_state == ESP_NOW_PHOTO_LIST_STATE_READY || cur_state == ESP_NOW_PHOTO_LIST_STATE_ERROR)) {
-        have_result = true;
-        result_ok = (cur_state == ESP_NOW_PHOTO_LIST_STATE_READY);
-    } else if (force_refresh || cur_state == ESP_NOW_PHOTO_LIST_STATE_IDLE) {
-        /* 2026-09-04(사용자 설계: "PC 원격제어처럼") — esp_now_photo_list_request()를 직접
-         * 안 부르고 실제 "다시 가져오기" 버튼 탭을 합성(2026-08-30 버그수정 — REQUESTING
-         * 중엔 새로 요청 안 함, 그건 아래 else 분기가 담당 — 중복요청이 나가면 ESP-NOW
-         * 전송 큐가 밀려 WAKE_HELLO_ACK까지 실패해서 캠이 재광고하는 현상으로 실기에서
-         * 확인됨). 합성 자체가 실패하면(카메라 선택 안 됨 등) 대기 없이 바로 실패 */
-        bool inject_ok = false;
-        uint32_t generation = ui_main_inject_list_refresh(&inject_ok);
-        if (inject_ok) {
-            have_result = esp_now_photo_list_wait_result(generation, 25000, &result_ok);
-        } else {
-            have_result = true;
-            result_ok = false;
-        }
-    } else {
-        /* 이미 REQUESTING 중(다른 곳에서 시작된 요청) — 새로 걸지 않고 그 세대를 그대로 기다림 */
-        uint32_t generation = esp_now_photo_list_get_current_generation();
-        have_result = esp_now_photo_list_wait_result(generation, 25000, &result_ok);
-    }
+    /* 2026-09-19(SD 제거 재설계 — "웹은 콘에 기생") — 목록이 이제 콘 SD 로컬 읽기라 CAM
+     * 응답을 기다릴 이유(세대번호/25초 대기 등, 예전 ESP-NOW 왕복 시절 설계)가 없어짐.
+     * 콘 화면의 "목록갱신" 버튼 탭을 그대로 합성하면 반환 시점에 이미 완료돼 있으므로,
+     * 그 결과(콘 화면이 지금 보여주는 바로 그 목록)를 그대로 읽어감 */
+    bool ok = ui_main_inject_list_refresh();
+    const char *state_str = ok ? "ready" : "error";
 
-    const char *state_str = !have_result ? "timeout" : (result_ok ? "ready" : "error");
     int len = snprintf(body, 4096, "{\"cam\":true,\"state\":\"%s\",\"items\":[", state_str);
-    if (have_result && result_ok) {
-        esp_now_photo_list_view_item_t items[ESP_NOW_PHOTO_LIST_MAX];
-        int cnt = esp_now_photo_list_get_items(items, ESP_NOW_PHOTO_LIST_MAX);
+    if (ok) {
+        photo_storage_item_t items[32];
+        int cnt = ui_main_get_photo_list(items, 32);
         for (int i = 0; i < cnt && len < 4096 - 150; i++) {
-            char tag[8];
-            format_file_tag(items[i].kind, items[i].file_id, tag, sizeof(tag));
+            char tag[16];
+            format_file_tag((char)items[i].kind, items[i].seq, tag, sizeof(tag));
             len += snprintf(body + len, 4096 - len,
-                             "%s{\"file_id\":%u,\"tag\":\"%s\",\"capture_time\":%u,\"file_size\":%u}",
+                             "%s{\"kind\":\"%c\",\"seq\":%u,\"tag\":\"%s\",\"capture_time\":%u,\"file_size\":%u}",
                              i == 0 ? "" : ",",
-                             (unsigned)items[i].file_id, tag,
-                             (unsigned)items[i].capture_time, (unsigned)items[i].file_size);
+                             (char)items[i].kind, (unsigned)items[i].seq, tag,
+                             (unsigned)items[i].mtime, (unsigned)items[i].file_size);
         }
     }
     /* 2026-09-04(사용자 설계: "앱의 문구들을 그대로 웹에서 써야한다") */
-    const char *msg = (have_result && result_ok) ? ui_str(STR_LIST_FETCH_SUCCESS) : ui_str(STR_LIST_FETCH_FAILED);
+    const char *msg = ok ? ui_str(STR_LIST_FETCH_SUCCESS) : ui_str(STR_LIST_FETCH_FAILED);
     len += snprintf(body + len, 4096 - len, "],\"msg\":\"%s\"}", msg);
 
     httpd_resp_set_type(req, "application/json; charset=utf-8");
@@ -359,41 +331,26 @@ static esp_err_t api_photos_get_handler(httpd_req_t *req)
     return ret;
 }
 
+/* 2026-09-19(SD 제거 재설계 — "웹은 콘에 기생") — 로컬 SD 읽기라 콘 화면의 실제 사진목록
+ * 행 탭을 합성하면(ui_main_inject_photo_select) 반환 시점에 이미 선택+판넬 표시까지
+ * 동기로 끝나있음. 예전의 "캐시 우선 확인 -> 없으면 요청 후 25초 이벤트 대기"가 통째로
+ * 불필요해짐(그건 CAM 응답을 기다려야 했던 시절 설계) */
 static esp_err_t api_photo_fetch_get_handler(httpd_req_t *req)
 {
     char query[32] = { 0 };
-    char id_str[16] = { 0 };
-    uint32_t file_id = 0;
-    bool has_id = false;
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
-        httpd_query_key_value(query, "id", id_str, sizeof(id_str)) == ESP_OK) {
-        file_id = (uint32_t)strtoul(id_str, NULL, 10);
-        has_id = true;
+    char kind_str[4] = { 0 }, seq_str[16] = { 0 };
+    bool has_kind = false, has_seq = false;
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        has_kind = (httpd_query_key_value(query, "kind", kind_str, sizeof(kind_str)) == ESP_OK);
+        has_seq  = (httpd_query_key_value(query, "seq", seq_str, sizeof(seq_str)) == ESP_OK);
     }
     bool ok = false;
-    if (has_id) {
-        const uint8_t *data = NULL;
-        size_t len0 = 0;
-        if (esp_now_photo_cache_get(file_id, &data, &len0)) {
-            ok = true;
-        } else {
-            esp_now_hub_node_t cams[ESP_NOW_HUB_MAX_NODES];
-            int n = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, cams, ESP_NOW_HUB_MAX_NODES);
-            int cam_idx = -1;
-            for (int i = 0; i < n; i++) {
-                if (cams[i].conn_state == NODE_CONN_PAIRED) { cam_idx = i; break; }
-            }
-            if (cam_idx >= 0) {
-                /* 2026-09-04(사용자 설계: "PC 원격제어처럼") — 모델만 세팅하는 대신 실제
-                 * 사진목록 행 탭을 합성(지금 화면/목록에 그 file_id가 없으면 합성 자체가
-                 * 실패 — 대기 없이 바로 실패). 결과 대기는 이벤트 기반(비파괴적 캐시 확인) */
-                ok = ui_main_inject_photo_select(file_id) &&
-                     esp_now_photo_wait_cached(file_id, 25000, &data, &len0);
-            }
-        }
+    if (has_kind && has_seq && kind_str[0] != '\0') {
+        uint32_t seq = (uint32_t)strtoul(seq_str, NULL, 10);
+        ok = ui_main_inject_photo_select((uint8_t)kind_str[0], seq);
     }
     /* 2026-09-04(사용자 설계: "앱의 문구들을 그대로 웹에서 써야한다") — 사진 성공/실패는
-     * 콘 자신의 진행팝업이 이미 쓰는 STR_FETCH_DONE/STR_FETCH_FAILED를 그대로 재사용 */
+     * 콘 자신이 예전에 쓰던 STR_FETCH_DONE/STR_FETCH_FAILED를 그대로 재사용 */
     char body[96];
     int len = snprintf(body, sizeof(body), "{\"ok\":%s,\"msg\":\"%s\"}",
                         ok ? "true" : "false",

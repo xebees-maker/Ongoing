@@ -1,8 +1,10 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include "power_relay.h"
+#include "photo_storage.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,10 +38,19 @@ bool ui_main_inject_connect_sensor(const uint8_t *mac);
 bool ui_main_inject_set_response_interval(uint32_t sec);
 /* 통계 전체 삭제 버튼+확인팝업 합성(2026-09-07, 어젯밤 쌓인 이산화탄소 0 레코드 정리용) */
 bool ui_main_inject_delete_stats(void);
-/* 성공 시 out_ok=true + 새로 생긴 세대번호 반환(main.c가 esp_now_photo_list_wait_result()에
- * 그대로 넘기면 됨) */
-uint32_t ui_main_inject_list_refresh(bool *out_ok);
-bool ui_main_inject_photo_select(uint32_t file_id);
+/* 2026-09-19(SD 제거 재설계 — 사진목록 UI 로컬화) — 목록갱신/사진선택 모두 이제 콘 SD를
+ * 읽는 동기 로컬 동작이라(더 이상 CAM 응답을 기다리는 ESP-NOW 왕복이 아님) 예전의 세대번호/
+ * 비파괴적 완료-확인 채널이 필요 없어짐. 반환 시점에 이미 결과가 반영돼 있음 */
+bool ui_main_inject_list_refresh(void);
+/* 새로고침된 목록을 그대로 복사(웹이 독자적으로 photo_storage를 다시 읽지 않고, 콘 화면이
+ * 지금 보여주는 바로 그 배열을 읽어감 — "웹기생" 원칙) */
+int ui_main_get_photo_list(photo_storage_item_t *out, int out_cap);
+bool ui_main_inject_photo_select(uint8_t kind, uint32_t seq);
+/* 선택된 사진의 원본(압축 해제 전) JPEG 바이트 — 웹의 "원본 그대로 보기"가 씀 */
+bool ui_main_get_selected_photo_raw(const uint8_t **out_data, size_t *out_len);
+/* 지금 선택된 사진의 (kind,seq) — 웹이 자신의 요청과 "지금 화면이 보여주는 것"이 같은지
+ * 확인하는 용도(/photo 핸들러 참고) */
+bool ui_main_get_selected_photo_id(uint8_t *out_kind, uint32_t *out_seq);
 
 #ifdef __cplusplus
 }

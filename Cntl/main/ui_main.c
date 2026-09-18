@@ -382,25 +382,45 @@ static int find_value_index(const uint32_t *values, int count, uint32_t v)
 static uint8_t          *s_photo_jpeg_buf = NULL;
 static lv_image_dsc_t    s_photo_dsc;
 
+/* 2026-09-19(사진목록 UI 로컬화) — 선택된 사진의 원본(비압축 해제) JPEG 바이트를 담는 버퍼.
+ * 콘 SD에서 통째로 읽어온 그대로 유지(디코드는 s_photo_jpeg_buf 쪽에 별도로 함) — 웹의
+ * "원본 그대로 보기"(/photo, /api/photo_fetch)가 그대로 재사용(ui_main_get_selected_photo_raw
+ * 참고, "웹기생" 설계: 웹은 콘이 이미 선택해서 들고 있는 바이트를 그대로 읽어갈 뿐, 독자적으로
+ * 다시 읽지 않음). 상한은 esp_now_photo.c의 PHOTO_RECV_BUF_CAP(수신 가능한 최대 사진 크기)과
+ * 반드시 같아야 함 — 그보다 큰 사진은 애초에 콘에 도착할 수 없었음 */
+#define PHOTO_RAW_BUF_CAP (1024 * 1024)
+static uint8_t *s_photo_raw_buf = NULL;
+static size_t   s_photo_raw_len = 0;
+
 /* 지금촬영 진행 팝업 — 1.명령전달/2.촬영결과/3.목록갱신 3줄(팝업 뼈대 자체는 아래 공용
  * 진행 팝업 모듈이 담당, 이 라벨 배열만 지금촬영 전용) */
 static lv_obj_t   *s_capture_stage_label[3];
 
-/* CAM SD카드 사진 목록(내용 없이 file_id+크기만) — 탭하면 그 사진을 fetch_by_id로 받아서
- * 플레이스홀더에 표시, 삭제 버튼은 확인 팝업 거쳐서 삭제 */
+/* 2026-09-19(SD 제거 재설계 — 사진목록 UI 로컬화) — 콘 SD의 카메라별 폴더를 페이지 단위로
+ * 읽어온 결과(photo_storage_read_page). 더 이상 CAM에게 목록을 요청하지 않음 */
 /* 2026-08-21 — 내부(비-PSRAM) DRAM이 httpd_start 실패(5005)를 겪을 만큼 빠듯했던 걸 실기로
  * 확인 — 화면 표시용 목록이라 PSRAM으로 옮김(ui_init()에서 할당) */
-static esp_now_photo_list_view_item_t *s_current_list = NULL;
-static int                        s_current_list_count = 0;
+static photo_storage_item_t *s_current_list = NULL;
+static int                    s_current_list_count = 0;
+#define PHOTO_LIST_PAGE_SIZE 20
+static uint32_t s_photo_page_index = 0;  /* 0 = 가장 최근 페이지(stats 탭과 동일 관례) */
+static lv_obj_t *s_photo_page_label     = NULL;
+static lv_obj_t *s_photo_prev_btn       = NULL;
+static lv_obj_t *s_photo_next_btn       = NULL;
+static lv_obj_t *s_photo_jump_prev_btn  = NULL;
+static lv_obj_t *s_photo_jump_next_btn  = NULL;
 
-/* 선택 상태의 진짜 모델은 file_id(s_selected_file_id) — s_selected_row는 그 모델을 지금
- * 그려진 목록 위에 표시하기 위한 뷰 캐시일 뿐(2026-08-02, 사용자 지적: "View는 Model의
- * 그림자일 뿐이야"). 목록이 다시 그려지면(refresh_photo_list_ui) 행 객체는 매번 새로
- * 만들어지므로 s_selected_row 포인터는 그때마다 무효가 되지만, s_selected_file_id는
- * 그대로 유지되고 다시 그릴 때 그 file_id를 찾아 강조표시만 복원함(재요청 없이) */
+/* 선택 상태의 진짜 모델은 (kind,seq)(s_selected_kind/s_selected_seq) — s_selected_row는 그
+ * 모델을 지금 그려진 목록 위에 표시하기 위한 뷰 캐시일 뿐(2026-08-02, 사용자 지적: "View는
+ * Model의 그림자일 뿐이야"). 목록이 다시 그려지면(refresh_photo_list_ui) 행 객체는 매번 새로
+ * 만들어지므로 s_selected_row 포인터는 그때마다 무효가 되지만, 선택 모델은 그대로 유지되고
+ * 다시 그릴 때 그 (kind,seq)를 찾아 강조표시만 복원함.
+ * 2026-09-19 — file_id 대신 photo_storage의 (kind,seq)로 재설계(로컬 SD 파일명 자체가 이미
+ * kind+seq라 더 이상 CAM이 매기는 불투명 ID가 없음) */
 static lv_obj_t  *s_selected_row = NULL;
-static uint32_t   s_selected_file_id = 0;
-static bool       s_has_selected_file_id = false;
+static uint8_t    s_selected_kind = 0;
+static uint32_t   s_selected_seq = 0;
+static bool       s_has_selected_photo = false;
 
 /* 통계 탭 로그박스 — 시리얼 모니터가 리셋을 유발하는 문제 때문에(2026-08-01) ui_log 모듈에
  * 쌓인 로그를 화면에서 직접 보는 용도로 벤더 데모(analytics 위젯) 대신 넣음 */
@@ -2017,58 +2037,31 @@ static lv_obj_t *create_dashboard_panel(lv_obj_t *parent, ui_str_id_t title_id, 
  * 플레이스홀더에 표시
  * ════════════════════════════════════════════════════════════ */
 static void refresh_photo_list_ui(int select_index);  /* capture 팝업이 완료 시점에 씀 */
-static void show_fetch_progress_popup(void);  /* 아래 공용 진행팝업 모듈 정의 뒤에 구현 */
-static void display_photo(uint32_t file_id);  /* 아래 정의 — 캐시 히트 시 여기서 바로 씀 */
-static void consume_ready_photo_if_current(void);  /* 아래 정의 — display_photo() 직후 */
-static void cb_async_sync_selected_photo(void *user_data);  /* 아래 정의 — lv_async_call 트램폴린,
-                                                                 refresh_photo_list_ui()의 자동선택 분기가 씀 */
-static bool sync_photo_list_tick(int select_index);  /* 아래 정의 — on_list_result_event()가 씀 */
-static bool fetch_popup_is_active(void);  /* 아래 정의(fetch_popup_tick_fn 뒤) —
-                                              cb_async_photo_result()가 사진가져오기 진행팝업
-                                              자신의 tick과 상태 소비를 두고 경쟁하지 않으려고 씀 */
-static bool list_popup_is_active(void);   /* 아래 정의(renew_list_tick_fn 뒤) — cb_async_list_result()가
-                                              동일한 이유로 씀 */
+static void display_photo(uint8_t kind, uint32_t seq);  /* 아래 정의 — 탭 시 로컬 SD에서 바로 읽어 씀 */
+static bool capture_popup_is_active(void);  /* 아래 정의(capture_popup_tick_fn 뒤) —
+                                                cb_async_photo_result()가 지금촬영 진행팝업 자신의
+                                                tick과 상태 소비를 두고 경쟁하지 않으려고 씀 */
 
-/* CAM의 실제 파일명 표기(base36 4자리, 0-9A-Z, CAM/main/cam_storage.c의 encode_seq()와
- * 동일 인코딩)를 그대로 미러링 — 예전엔 file_id를 %u로 그냥 10진수로 찍어서 CAM SD카드의
- * 실제 파일명("M0001.jpg")과 목록에 보이는 숫자가 달랐음(2026-08-02, 사용자 지적: CNTL이
- * 임의로 번호를 매기는 것처럼 보였던 원인) */
-static void encode_file_seq_base36(uint32_t seq, char *out /* 5바이트: 4자리+NUL */)
-{
-    static const char digits[37] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    seq %= 1679616u;  /* 36^4 — CAM_STORAGE_SEQ_MOD와 동일 */
-    for (int i = 3; i >= 0; i--) {
-        out[i] = digits[seq % 36];
-        seq /= 36;
-    }
-    out[4] = '\0';
-}
-
-/* Model: 선택 상태 그 자체(s_selected_file_id) 하나만 바꿈 — View/Action은 절대 안 건드림.
- * OnTap(cb_photo_row_select)/목록 재구성(refresh_photo_list_ui) 전부 "선택이 바뀌었다"는
- * 사실만 여기로 알림. 2026-09-04부터 웹도 이 함수를 직접 안 부르고 cb_photo_row_select 자체를
+/* Model: 선택 상태 그 자체(s_selected_kind/s_selected_seq) 하나만 바꿈 — View/Action은 절대
+ * 안 건드림. OnTap(cb_photo_row_select)/목록 재구성(refresh_photo_list_ui) 전부 "선택이
+ * 바뀌었다"는 사실만 여기로 알림. 웹도 이 함수를 직접 안 부르고 cb_photo_row_select 자체를
  * 탭 합성으로 거쳐 감(ui_main_inject_photo_select, "PC 원격제어처럼" 설계).
  * 2026-08-30 버그수정 — esp_now_hub_note_user_action()이 예전엔 start_single_receive()
  * 안에서만(=실제 요청이 lv_async_call을 거쳐 시작될 때) 불려서, 탭/선택 시점과 그 사이에
  * 간극이 있었음. 이 간극에 WAKE_HELLO가 걸리면 적응형 판단(send_cask_sleep_now)이 아직
  * "방금 조작 있었음"을 못 보고 진짜 sleep_sec을 내보내는 레이스가 있었음(사용자 실기 확인:
- * 사진 전송 중에도 캠이 잠듦). 모델이 바뀌는 이 지점에서 바로(동기) 기록해서 간극을 없앰 */
-static void set_selected_file_id(uint32_t file_id)
+ * 사진 전송 중에도 캠이 잠듦). 모델이 바뀌는 이 지점에서 바로(동기) 기록해서 간극을 없앰.
+ * 2026-09-19 — file_id 대신 (kind,seq)로 재설계, 선택 즉시 display_photo()도 여기서 동기로
+ * 호출(로컬 SD 읽기라 더 이상 "선택"과 "가져오기"를 별도 단계로 나눌 이유가 없음 — 예전엔
+ * ESP-NOW 왕복이라 reconcile_selection/sync_selected_photo_if_needed로 분리해야 했었음) */
+static void set_selected_photo(uint8_t kind, uint32_t seq)
 {
-    s_selected_file_id = file_id;
-    s_has_selected_file_id = true;
+    s_selected_kind = kind;
+    s_selected_seq = seq;
+    s_has_selected_photo = true;
     esp_now_hub_note_user_action();
+    display_photo(kind, seq);
 }
-
-/* reconcile_selection — "View/Action은 Model의 그림자일 뿐"(2026-08-02, 사용자 지적)을
- * 실제로 구현: file_id를 인자로 안 받고 s_selected_file_id(모델)를 직접 읽어서 반영함.
- * 호출부(OnTap 등)가 "무엇을 선택했는지"를 여기 전달하는 게 아니라, 여기가 모델을 스스로
- * 관찰해서 반응하는 구조 — 그래야 "탭 이벤트 안에서 가져오기를 처리한다"는 게 안 됨(사용자가
- * 세 번째로 지적한 부분). 강조표시(뷰)는 매번 모델과 동기화하고, 가져오기(액션)는 마지막으로
- * 반영했던 값(s_synced_file_id)과 실제로 달라졌을 때만 함 — 이전 사진을 들고 있다가
- * 재사용하는 캐시 개념 없이, 선택이 바뀔 때마다 무조건 새로 받아옴(2026-08-02, 사용자 지시) */
-static uint32_t s_synced_file_id = 0;
-static bool     s_has_synced_file_id = false;
 
 /* 2026-08-10 — 사진가져오기/목록갱신/지금촬영/전체삭제 4곳이 전부 같은 문제를 겪고 있었음:
  * WAITING(진짜 연결 안 됨)일 때 그냥 요청+진행팝업을 띄우면, esp_now_photo.c 내부의
@@ -2086,67 +2079,25 @@ static bool require_active_or_report(const uint8_t *mac, const char *what)
     return true;
 }
 
-/* 2026-08-21 — reconcile_selection에서 "가져오기"(모델→액션) 부분만 분리 — 강조표시(뷰)와
- * 무관하게 독립 호출 가능하게 함(사용자 설계: "모듈이 분리되게"). 지금촬영/모두지우기 같은
- * 목록가져오기 팝업은 목록 갱신까지만 하고 끝나고, 그 결과로 선택이 바뀐 건 배경 타이머
- * (refresh_dashboard)가 매 틱 이 함수를 불러 스스로 감지해서 별도의 사진가져오기 팝업으로
- * 이어감 — 목록가져오기 팝업이 열려있는 동안은 배경 타이머 자체가 pause_bg_timers()로
- * 멈춰있어서 두 팝업이 겹칠 일이 없음 */
-static void sync_selected_photo_if_needed(bool show_popup)
-{
-    if (s_has_synced_file_id && s_synced_file_id == s_selected_file_id) return;  /* 이미 반영됨 — 끝 */
-    if (!s_has_selected_cam || !s_has_selected_file_id) return;
-
-    ui_log_add("SELECT file_id=%u", (unsigned)s_selected_file_id);
-
-    /* 새 요청을 걸기 전에, 직전 사진이 방금 도착했는데(READY) 아직 판넬에 반영 안 된
-     * 상태면 먼저 처리하고 넘어감 — esp_now_photo_fetch_by_id()가 새 요청 시작하면서
-     * 상태를 무조건 IDLE로 되돌리므로, 그 전에 이걸 안 하면 도착한 사진을 영영 못 봄
-     * (2026-08-01 실기에서 확인). 다만 이 시점엔 s_selected_file_id가 이미 "새" 선택으로
-     * 바뀌어 있어서, 대기 중이던 READY는 대부분 "이전" 선택의 응답 — 그대로 그리면 안
-     * 되고 consume_ready_photo_if_current()가 file_id 일치 여부를 확인해서 처리함
-     * (2026-08-05, 선택-도착 불일치 버그 수정) */
-    consume_ready_photo_if_current();
-
-    if (!require_active_or_report(s_selected_cam_mac, "사진 가져오기")) return;
-
-    /* 2026-08-21 버그수정 — "반영됨" 기록을 예전엔 require_active_or_report() 통과 여부와
-     * 무관하게 무조건 먼저 남겼음(WAITING이면 요청 자체가 안 나갔는데도 반영된 걸로 잘못
-     * 기록) — 그러면 같은 사진을 나중에 다시 선택해도 위 가드에서 "이미 반영됨"으로
-     * 오판해 영영 못 가져옴(지금촬영 직후 목록은 갱신되는데 정작 새 사진은 안 뜨는 버그로
-     * 실사용 중 발견). 요청이 실제로 나갈 때만 기록하도록 순서 이동 */
-    s_synced_file_id = s_selected_file_id;
-    s_has_synced_file_id = true;
-
-    esp_now_photo_fetch_by_id(s_selected_cam_mac, s_selected_file_id);
-    if (show_popup) show_fetch_progress_popup();
-}
-
-/* lv_async_call() 트램폴린 — refresh_photo_list_ui()의 자동선택 분기/웹(ui_main_set_selected_photo)이
- * 씀. lv_async_cb_t 시그니처(void*만 받음)에 맞추기 위함, show_popup은 이 경로에선 항상 true */
-static void cb_async_sync_selected_photo(void *user_data)
-{
-    (void)user_data;
-    sync_selected_photo_if_needed(true);
-}
-
-/* 2026-09-04(사용자 설계: "이벤트로 처리해") — 사진 수신 완료(성공/실패) 이벤트의 앱 쪽
- * 반응. esp_now_photo.c는 LVGL을 몰라서 원시 콜백(esp_now_photo_event_cb_t, 어느 태스크든
- * 될 수 있음)만 주므로, 여기서 바로 lv_async_call()로 LVGL 태스크에 미룸 — 예전에 매틱
- * 폴링하던 refresh_dashboard()의 해당 분기와 정확히 같은 처리를 이벤트 시점에 1회만 함 */
+/* 2026-09-19(SD 제거 재설계 — 사진목록 UI 로컬화) — 사진 수신 완료(성공/실패) 이벤트의 앱 쪽
+ * 반응. 이제 esp_now_photo_state READY는 오직 "CAM이 방금 찍은 사진을 콘에 푸시해왔다"는
+ * 뜻만 남음(지금촬영/주기촬영 둘 다 이 경로 하나로 도착 — CNTL이 먼저 요청해서 받아오는
+ * esp_now_photo_fetch_by_id()는 더 이상 안 씀, CAM에 SD가 없어져 애초에 응답할 수도 없음).
+ * SD 저장은 esp_now_photo.c의 handle_done()이 이미 동기로 끝내놓은 뒤에 이 이벤트가 옴 —
+ * 여기선 상태만 소비(ack)하고, 지금 카메라 판넬이 열려있으면 로컬 목록도 최신화 */
 static void cb_async_photo_result(void *user_data)
 {
     (void)user_data;
-    /* 2026-09-04 리그레션 수정 — 사진가져오기 진행팝업이 떠 있으면 그 팝업 자신의 200ms
-     * tick(fetch_popup_tick_fn)이 READY/ERROR를 보고 소비하는 게 원래 경로. 여기서 먼저
-     * consume_ready_photo_if_current()(내부에서 esp_now_photo_ready_ack()로 상태를 즉시
-     * IDLE로 리셋)를 불러버리면, 팝업의 다음 tick은 READY도 ERROR도 아닌 IDLE만 보게 돼서
-     * 진행정체 타임아웃(STALLED)으로 오판 — 실기에서 확인("사진은 받았는데 팝업이 실패로
-     * 닫힘"). 팝업이 떠 있는 동안은 이 이벤트 소비를 양보함 */
-    if (fetch_popup_is_active()) return;
+    /* 지금촬영 진행팝업이 떠 있으면 그 팝업 자신의 tick(capture_popup_tick_fn)이 이 상태를
+     * 직접 소비하고 목록도 자기 단계에서 새로고침함 — 여기서 먼저 소비해버리면 팝업이
+     * 다음 틱에 상태를 놓쳐 정체 타임아웃으로 오판한다(2026-09-04 fetch_popup 시절과 동일
+     * 이유) */
+    if (capture_popup_is_active()) return;
     esp_now_photo_state_t st = esp_now_photo_get_state();
     if (st == ESP_NOW_PHOTO_STATE_READY) {
-        consume_ready_photo_if_current();
+        esp_now_photo_ready_ack();
+        if (s_has_selected_cam) refresh_photo_list_ui(-1);  /* 주기촬영 등 배경 도착 — 선택은
+                                                                 안 건드리고 목록만 최신화 */
     } else if (st == ESP_NOW_PHOTO_STATE_ERROR) {
         esp_now_photo_clear();
     }
@@ -2155,23 +2106,6 @@ static void cb_async_photo_result(void *user_data)
 static void on_photo_result_event(void)
 {
     lv_async_call(cb_async_photo_result, NULL);
-}
-
-/* 목록판, 위와 동일 패턴 */
-static void cb_async_list_result(void *user_data)
-{
-    (void)user_data;
-    /* fetch_popup_is_active()와 동일 이유(2026-09-04 리그레션 수정) — renew_list_tick_fn은
-     * 이미 READY를 스스로 소비하는(refresh_photo_list_ui+esp_now_photo_list_ack) 자기완결형
-     * 코드라, 여기서 먼저 소비해버리면 팝업이 다음 틱에 상태를 놓쳐 정체 타임아웃
-     * (UI_ERR_LIST_NORESPONSE=3007)으로 오판한다 */
-    if (list_popup_is_active()) return;
-    sync_photo_list_tick(-1);
-}
-
-static void on_list_result_event(void)
-{
-    lv_async_call(cb_async_list_result, NULL);
 }
 
 /* 연결/끊기판 — 카메라 판넬이 다음 1초 대시보드 틱까지 안 기다리고 즉시 갱신되게(사용자
@@ -2189,8 +2123,30 @@ static void on_connect_result_event(void)
     lv_async_call(cb_async_connect_result, NULL);
 }
 
-static void reconcile_selection(lv_obj_t *row, bool show_popup)
+/* 2026-09-19(사진목록 UI 로컬화) — 행의 LVGL user_data(void* 한 칸)에 (kind,seq)를 담아야
+ * 하는데 kind는 항상 'M' 또는 'T' 둘 중 하나뿐이라 1비트로 충분 — 최상위 비트=kind, 나머지
+ * 31비트=seq(최대 8자리 십진수라 27비트면 충분, 31비트는 넉넉한 여유). 이건 순수 위젯
+ * 내부 조회용 스크래치일 뿐 외부로 노출되는 식별자가 아님(파일명 자체가 이미 kind+seq라
+ * ID에 의미를 담는 것과는 다른 상황) */
+static uint32_t pack_photo_id(uint8_t kind, uint32_t seq)
 {
+    return (seq & 0x7FFFFFFFu) | (kind == 'T' ? 0x80000000u : 0);
+}
+static void unpack_photo_id(uint32_t packed, uint8_t *out_kind, uint32_t *out_seq)
+{
+    *out_kind = (packed & 0x80000000u) ? 'T' : 'M';
+    *out_seq  = packed & 0x7FFFFFFFu;
+}
+
+/* OnTap — 로컬 SD 읽기라 더 이상 진행팝업/캐시-도착 대기가 필요 없음(2026-09-19). 강조표시는
+ * 여기서 바로 하고, set_selected_photo()가 판넬 갱신까지 동기로 끝냄 */
+static void cb_photo_row_select(lv_event_t *e)
+{
+    uint32_t packed = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    lv_obj_t *row = lv_event_get_target(e);
+    uint8_t kind; uint32_t seq;
+    unpack_photo_id(packed, &kind, &seq);
+
     if (s_selected_row && s_selected_row != row) {
         lv_obj_set_style_bg_opa(s_selected_row, LV_OPA_TRANSP, 0);
     }
@@ -2198,70 +2154,117 @@ static void reconcile_selection(lv_obj_t *row, bool show_popup)
     lv_obj_set_style_bg_opa(row, LV_OPA_30, 0);
     s_selected_row = row;
 
-    sync_selected_photo_if_needed(show_popup);
+    set_selected_photo(kind, seq);
 }
 
-/* OnTap — Model만 바꾸고(set_selected_file_id) reconcile_selection에 반영을 맡김. 탭
- * 핸들러 자신은 "어떤 행이 눌렸는지" 알아내는 것 이상은 하지 않음 */
-static void cb_photo_row_select(lv_event_t *e)
-{
-    uint32_t file_id = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
-    lv_obj_t *row = lv_event_get_target(e);
-    set_selected_file_id(file_id);
-    reconcile_selection(row, true);
-}
-
+/* 2026-09-19 — 로컬 SD 삭제라 ESP-NOW 왕복/진행팝업 없음(CAM은 이제 삭제할 게 없음 —
+ * SD가 CAM에 없으므로). require_active_or_report도 뺌: CAM 연결 여부와 무관하게 콘 자신의
+ * 저장소를 지우는 것뿐이라 항상 가능해야 함 */
 static void cb_photo_delete_confirm(void *ctx)
 {
-    uint32_t file_id = (uint32_t)(uintptr_t)ctx;
+    uint32_t packed = (uint32_t)(uintptr_t)ctx;
+    uint8_t kind; uint32_t seq;
+    unpack_photo_id(packed, &kind, &seq);
     if (!s_has_selected_cam) return;
-    if (!require_active_or_report(s_selected_cam_mac, "사진 삭제")) return;
 
-    esp_now_photo_delete(s_selected_cam_mac, file_id);
-    esp_now_photo_list_request(s_selected_cam_mac);  /* 삭제 반영된 목록으로 갱신 */
+    photo_storage_delete(s_selected_cam_mac, kind, seq);
+    if (s_has_selected_photo && s_selected_kind == kind && s_selected_seq == seq) {
+        s_has_selected_photo = false;  /* 지금 보던 사진이 삭제됨 */
+    }
+    refresh_photo_list_ui(-1);
 }
 
-static void show_photo_delete_confirm(uint32_t file_id)
+static void show_photo_delete_confirm(uint8_t kind, uint32_t seq)
 {
-    show_confirm_popup(ui_str(STR_MSG_DELETE_PHOTO_CONFIRM), MODAL_KIND_WARNING, cb_photo_delete_confirm, (void *)(uintptr_t)file_id);
+    uint32_t packed = pack_photo_id(kind, seq);
+    show_confirm_popup(ui_str(STR_MSG_DELETE_PHOTO_CONFIRM), MODAL_KIND_WARNING, cb_photo_delete_confirm, (void *)(uintptr_t)packed);
 }
 
 static void cb_photo_delete_btn(lv_event_t *e)
 {
-    uint32_t file_id = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
-    show_photo_delete_confirm(file_id);
+    uint32_t packed = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    uint8_t kind; uint32_t seq;
+    unpack_photo_id(packed, &kind, &seq);
+    show_photo_delete_confirm(kind, seq);
 }
 
 /* 목록 제목 옆 "N개 XX%" / "N Pics XX%" 라벨 — 언어 전환 시(refresh_lang_texts)와
  * 목록 갱신 시(refresh_photo_list_ui) 둘 다에서 다시 그려야 해서 분리(2026-08-04).
  * "개(Pic.)" 표기는 괄호 안이 영문 모드일 때만 쓰는 표기라는 뜻이었음(사용자 정정:
- * 한글모드="N개", 영문모드="N Pic.", 둘 다 같이 보이면 안 됨) */
+ * 한글모드="N개", 영문모드="N Pic.", 둘 다 같이 보이면 안 됨).
+ * 2026-09-19 — CAM이 보고하던 자기 SD 사용량(esp_now_photo_list_get_sd_usage, CAM SD 제거로
+ * 더 이상 의미 없음) 대신 콘 자신의 SD 사용량(refresh_storage_status_label과 동일 소스)으로
+ * 교체, 개수는 이 카메라 폴더의 전체 개수(현재 페이지 개수가 아님) */
 static void update_list_info_label(void)
 {
-    uint32_t sd_total_kb = 0, sd_used_kb = 0;
-    esp_now_photo_list_get_sd_usage(&sd_total_kb, &sd_used_kb);
+    uint32_t total_count = s_has_selected_cam ? photo_storage_get_count(s_selected_cam_mac) : 0;
     bool en = (ui_lang_get() == UI_LANG_EN);
     char info_buf[32];
-    if (sd_total_kb > 0) {
-        unsigned pct = (unsigned)((uint64_t)sd_used_kb * 100 / sd_total_kb);
-        snprintf(info_buf, sizeof(info_buf), en ? "%d Pics  %u%%" : "%d개  %u%%", s_current_list_count, pct);
+    uint64_t sd_total = 0, sd_free = 0;
+    if (sd_storage_is_mounted() && sd_storage_get_capacity(&sd_total, &sd_free) && sd_total > 0) {
+        unsigned pct = (unsigned)((sd_total - sd_free) * 100 / sd_total);
+        snprintf(info_buf, sizeof(info_buf), en ? "%u Pics  %u%%" : "%u개  %u%%", (unsigned)total_count, pct);
     } else {
-        snprintf(info_buf, sizeof(info_buf), en ? "%d Pics" : "%d개", s_current_list_count);
+        snprintf(info_buf, sizeof(info_buf), en ? "%u Pics" : "%u개", (unsigned)total_count);
     }
     lv_label_set_text(s_list_info_label, info_buf);
 }
 
-/* select_index: 이 인덱스의 행을 선택 표시(예: 지금촬영 직후엔 0=최신). -1이면 선택 없음 */
+/* stats 탭의 페이지 이동버튼 갱신과 동일 관례(±1/±10 활성화, "현재/전체" 라벨) */
+static void update_photo_page_nav(uint32_t page_index, uint32_t total_pages)
+{
+    char page_buf[32];
+    snprintf(page_buf, sizeof(page_buf), ui_str(STR_STATS_PAGE_FMT),
+             (unsigned long)(page_index + 1), (unsigned long)total_pages);
+    lv_label_set_text(s_photo_page_label, page_buf);
+
+    bool can_prev = (page_index + 1) < total_pages;  /* 더 오래된 페이지 있음 */
+    bool can_next = (page_index > 0);                /* 더 최신 페이지 있음 */
+    if (can_prev) lv_obj_remove_state(s_photo_prev_btn, LV_STATE_DISABLED);
+    else          lv_obj_add_state(s_photo_prev_btn, LV_STATE_DISABLED);
+    if (can_next) lv_obj_remove_state(s_photo_next_btn, LV_STATE_DISABLED);
+    else          lv_obj_add_state(s_photo_next_btn, LV_STATE_DISABLED);
+    if (can_prev) lv_obj_remove_state(s_photo_jump_prev_btn, LV_STATE_DISABLED);
+    else          lv_obj_add_state(s_photo_jump_prev_btn, LV_STATE_DISABLED);
+    if (can_next) lv_obj_remove_state(s_photo_jump_next_btn, LV_STATE_DISABLED);
+    else          lv_obj_add_state(s_photo_jump_next_btn, LV_STATE_DISABLED);
+}
+
+/* select_index: 페이지 안(0-based)에서 이 인덱스의 행을 선택 표시(지금촬영 직후엔 0=최신 —
+ * 이때 호출부가 s_photo_page_index도 0으로 리셋해둬야 함). -1이면 새 선택 없음(기존 선택
+ * 모델 기준으로 강조표시만 복원).
+ * 2026-09-19(SD 제거 재설계) — CAM에 목록을 요청하던 것을 콘 SD 로컬 읽기로 교체
+ * (photo_storage_read_page), 페이지네이션도 stats 탭과 동일 패턴으로 추가 */
 static void refresh_photo_list_ui(int select_index)
 {
     if (!s_current_list) return;  /* PSRAM 할당 실패 시(극히 드묾) */
-    s_current_list_count = esp_now_photo_list_get_items(s_current_list, ESP_NOW_PHOTO_LIST_MAX);
+    if (!s_has_selected_cam) {
+        s_current_list_count = 0;
+        lv_indev_reset(NULL, s_photo_list);
+        lv_obj_clean(s_photo_list);
+        s_selected_row = NULL;
+        update_list_info_label();
+        update_photo_page_nav(0, 1);
+        return;
+    }
+
+    uint32_t total = photo_storage_get_count(s_selected_cam_mac);
+    uint32_t total_pages = (total + PHOTO_LIST_PAGE_SIZE - 1) / PHOTO_LIST_PAGE_SIZE;
+    if (total_pages == 0) total_pages = 1;
+    if (s_photo_page_index + 1 > total_pages) s_photo_page_index = total_pages - 1;  /* 삭제로
+                                                                                          페이지 수가
+                                                                                          줄었을 때 보정 */
+
+    s_current_list_count = (int)photo_storage_read_page(s_selected_cam_mac, s_photo_page_index,
+                                                          PHOTO_LIST_PAGE_SIZE, s_current_list,
+                                                          PHOTO_LIST_PAGE_SIZE);
     update_list_info_label();
+    update_photo_page_nav(s_photo_page_index, total_pages);
 
     lv_indev_reset(NULL, s_photo_list);
     lv_obj_clean(s_photo_list);
-    /* 뷰 캐시(행 객체 포인터)만 리셋 — 선택 모델(s_selected_file_id)은 목록이 다시
-     * 그려져도 그대로 유지, 아래 루프에서 강조표시만 다시 그림(2026-08-02) */
+    /* 뷰 캐시(행 객체 포인터)만 리셋 — 선택 모델은 목록이 다시 그려져도 그대로 유지,
+     * 아래 루프에서 강조표시만 다시 그림(2026-08-02) */
     s_selected_row = NULL;
 
     if (s_current_list_count == 0) {
@@ -2269,8 +2272,7 @@ static void refresh_photo_list_ui(int select_index)
          * 비워야 하는데 예전엔 여기서 빈 목록 표시만 하고 끝나서, 전체삭제 후에도 미리보기
          * 판넬에 마지막으로 보던 사진이 그대로 남아있는 버그가 있었음(reset_camera_ui_state()
          * 에는 있던 정리 로직이 여기만 빠짐) */
-        s_has_selected_file_id = false;
-        s_has_synced_file_id = false;
+        s_has_selected_photo = false;
         if (s_photo_image) {
             lv_obj_clean(s_photo_box);
             s_photo_image = NULL;
@@ -2280,10 +2282,6 @@ static void refresh_photo_list_ui(int select_index)
             lv_obj_set_style_text_color(s_camera_photo_label, lv_palette_main(LV_PALETTE_GREY), 0);
         }
 
-        /* 목록이 진짜 0장인지, 갱신 요청 자체가 응답을 못 받은 건지 구분이 안 된다는
-         * 사용자 지적(2026-08-02) — 이 함수는 CAM한테서 실제로 목록이 도착했을 때만
-         * 불리므로(무응답이면 아예 호출 안 됨) 여기 도달했다는 건 "진짜 0장"이 확정된
-         * 것. 그걸 회색 문구로 명시 */
         lv_obj_t *empty_lbl = lv_label_create(s_photo_list);
         lv_label_set_text(empty_lbl, ui_str(STR_LIST_EMPTY));
         lv_obj_set_style_text_font(empty_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -2300,30 +2298,26 @@ static void refresh_photo_list_ui(int select_index)
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(row, cb_photo_row_select, LV_EVENT_CLICKED,
-                             (void *)(uintptr_t)s_current_list[i].file_id);
+
+        uint32_t packed = pack_photo_id(s_current_list[i].kind, s_current_list[i].seq);
+        lv_obj_add_event_cb(row, cb_photo_row_select, LV_EVENT_CLICKED, (void *)(uintptr_t)packed);
         /* 2026-09-04(웹 합성용, project_cntl_web_full_ui_injection_design 참고) — 이벤트
          * 콜백의 user_data는 공개 API로 못 읽어서(lv_event_dsc_t가 불투명), 위젯 자체의
-         * 범용 user_data 슬롯에 별도로 file_id를 매담 — 강조표시 로직과는 무관(2026-08-30
-         * MVC 되돌림과 별개) */
-        lv_obj_set_user_data(row, (void *)(uintptr_t)s_current_list[i].file_id);
+         * 범용 user_data 슬롯에 별도로 매담 — 강조표시 로직과는 무관 */
+        lv_obj_set_user_data(row, (void *)(uintptr_t)packed);
 
-        /* 목록 번호는 위치 기반(i+1) 대신 CAM이 실제로 갖고 있는 file_id(+kind)를 그대로
-         * 보여줌(2026-08-01, 사용자 지시 — 중간 삭제 시 번호가 밀리지 않게). file_id는
-         * 더 이상 타임스탬프가 아니라서(CAM 재설계 참고) 촬영시각은 별도 capture_time
-         * 필드(파일의 FAT 수정시각)로 표시 — file_id를 파싱해서 뽑지 않음 */
-        time_t t = (time_t)s_current_list[i].capture_time;
+        /* 목록 번호는 콘 SD의 실제 파일명(kind+seq)을 그대로 보여줌(2026-08-01, 사용자
+         * 지시의 정신을 유지 — 중간 삭제 시 번호가 밀리지 않게). 촬영시각은 파일의 SD 저장
+         * 시각(FAT mtime) */
+        time_t t = (time_t)s_current_list[i].mtime;
         struct tm tm_buf;
-        gmtime_r(&t, &tm_buf);
+        localtime_r(&t, &tm_buf);
         char time_buf[24];
         strftime(time_buf, sizeof(time_buf), "%m-%d %H:%M:%S", &tm_buf);
 
-        char seq_str[5];
-        encode_file_seq_base36(s_current_list[i].file_id, seq_str);
-
         char buf[56];
-        snprintf(buf, sizeof(buf), "%c%s  %s (%uKB)",
-                 (char)s_current_list[i].kind, seq_str, time_buf,
+        snprintf(buf, sizeof(buf), "%c%08u  %s (%uKB)",
+                 (char)s_current_list[i].kind, (unsigned)s_current_list[i].seq, time_buf,
                  (unsigned)(s_current_list[i].file_size / 1024));
 
         lv_obj_t *label = lv_label_create(row);
@@ -2336,27 +2330,20 @@ static void refresh_photo_list_ui(int select_index)
         lv_obj_t *del_btn = lv_button_create(row);
         lv_obj_set_style_pad_hor(del_btn, 8, 0);
         lv_obj_set_style_pad_ver(del_btn, 2, 0);
-        lv_obj_add_event_cb(del_btn, cb_photo_delete_btn, LV_EVENT_CLICKED,
-                             (void *)(uintptr_t)s_current_list[i].file_id);
+        lv_obj_add_event_cb(del_btn, cb_photo_delete_btn, LV_EVENT_CLICKED, (void *)(uintptr_t)packed);
         lv_obj_t *del_lbl = lv_label_create(del_btn);
         lv_label_set_text(del_lbl, LV_SYMBOL_TRASH);
 
         if (i == select_index) {
-            /* 새로운 선택(예: 지금촬영 직후 최신 항목) — Model만 바꾸고 강조표시(뷰)만
-             * 여기서 같이 해줌. "가져오기"(액션)는 여기서 직접 안 부름(2026-08-21, 사용자
-             * 설계) — 이 함수는 목록가져오기 팝업(지금촬영/모두지우기 등) 안에서 호출되는
-             * 중이라 그 팝업이 아직 안 닫힌 시점. 대신 lv_async_call()로 "이번 LVGL 처리
-             * 사이클이 다 끝난 뒤"로 미뤄서 sync_selected_photo_if_needed()를 예약함 — 그
-             * 팝업은 이 함수가 리턴한 직후(같은 사이클 안에서) 닫히므로, 예약된 호출이 실제
-             * 실행될 땐 이미 깨끗하게 닫힌 뒤라 팝업끼리 안 겹침. 폴링(배경 타이머가 매초
-             * 확인하는 방식) 대신 이벤트 기반이라 지연도 없음 —
-             * 모듈 분리(reconcile_selection 참고) */
-            set_selected_file_id(s_current_list[i].file_id);
+            /* 새로운 선택(예: 지금촬영 직후 최신 항목) — set_selected_photo()가 판넬 갱신까지
+             * 동기로 끝냄(로컬 SD 읽기라 더 이상 "선택"과 "가져오기"를 lv_async_call로
+             * 나눌 이유가 없음 — ESP-NOW 왕복이던 시절의 팝업-중첩 회피용 설계였음) */
+            set_selected_photo(s_current_list[i].kind, s_current_list[i].seq);
             lv_obj_set_style_bg_color(row, lv_palette_main(LV_PALETTE_BLUE), 0);
             lv_obj_set_style_bg_opa(row, LV_OPA_30, 0);
             s_selected_row = row;
-            lv_async_call(cb_async_sync_selected_photo, NULL);
-        } else if (s_has_selected_file_id && s_current_list[i].file_id == s_selected_file_id) {
+        } else if (s_has_selected_photo && s_current_list[i].kind == s_selected_kind &&
+                   s_current_list[i].seq == s_selected_seq) {
             /* 이미 선택돼 있던(모델 기준) 항목이 목록 재구성으로 다시 그려진 것뿐 —
              * 강조표시(뷰)만 모델에 맞춰 복원, 재요청은 안 함(2026-08-02) */
             lv_obj_set_style_bg_color(row, lv_palette_main(LV_PALETTE_BLUE), 0);
@@ -2366,22 +2353,40 @@ static void refresh_photo_list_ui(int select_index)
     }
 }
 
-/* CAM 목록 동기화 공용 — "요청 → 도착 대기 → UI 갱신" 트리플이 목록갱신 버튼/지금촬영
- * 팝업/모두지우기 팝업에 각각 필요해서 공통화(2026-08-01). request와 tick을 분리한 이유:
- * 요청은 한 번만 보내면 되고 tick은 매 폴링(200ms/1s)마다 불러 도착 여부만 확인하기 때문. */
-static void request_photo_list_sync(void)
+static void photo_prev_page_cb(lv_event_t *e)
 {
-    esp_now_photo_list_request(s_selected_cam_mac);
+    (void)e;
+    if (!s_has_selected_cam) return;
+    uint32_t total = photo_storage_get_count(s_selected_cam_mac);
+    uint32_t total_pages = (total + PHOTO_LIST_PAGE_SIZE - 1) / PHOTO_LIST_PAGE_SIZE;
+    if (s_photo_page_index + 1 < total_pages) s_photo_page_index++;
+    refresh_photo_list_ui(-1);
 }
 
-/* READY 도착 시 select_index 행을 선택 표시하며 UI 갱신하고 true 반환(호출부가 다음
- * 단계로 넘어가거나 팝업을 닫는 데 씀) — 아직이면 false */
-static bool sync_photo_list_tick(int select_index)
+static void photo_next_page_cb(lv_event_t *e)
 {
-    if (esp_now_photo_list_get_state() != ESP_NOW_PHOTO_LIST_STATE_READY) return false;
-    refresh_photo_list_ui(select_index);
-    esp_now_photo_list_ack();
-    return true;
+    (void)e;
+    if (s_photo_page_index > 0) s_photo_page_index--;
+    refresh_photo_list_ui(-1);
+}
+
+static void photo_jump_prev_page_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!s_has_selected_cam) return;
+    uint32_t total = photo_storage_get_count(s_selected_cam_mac);
+    uint32_t total_pages = (total + PHOTO_LIST_PAGE_SIZE - 1) / PHOTO_LIST_PAGE_SIZE;
+    if (total_pages == 0) total_pages = 1;
+    s_photo_page_index += STATS_JUMP_PAGE_COUNT;  /* stats 탭과 동일 관례(10페이지씩) 재사용 */
+    if (s_photo_page_index + 1 > total_pages) s_photo_page_index = total_pages - 1;
+    refresh_photo_list_ui(-1);
+}
+
+static void photo_jump_next_page_cb(lv_event_t *e)
+{
+    (void)e;
+    s_photo_page_index = (s_photo_page_index > STATS_JUMP_PAGE_COUNT) ? s_photo_page_index - STATS_JUMP_PAGE_COUNT : 0;
+    refresh_photo_list_ui(-1);
 }
 
 /* 압축 JPEG를 target_w x target_h 근사치로 축소 디코드해서 out_buf(호출부가 미리 잡아둔
@@ -2463,37 +2468,36 @@ static void fill_rgb565_dsc(lv_image_dsc_t *dsc, uint8_t *pixel_buf, uint16_t w,
 #define PHOTO_PANEL_DECODE_W 320
 #define PHOTO_PANEL_DECODE_H 240
 
-/* 목록에서 선택된 file_id를 캐시에서 판넬 크기로 디코드해서 대시보드 썸네일(s_photo_box)에
- * 반영 — 캐시에 없으면(아직 안 받아온 사진) 조용히 무시 */
-static void display_photo(uint32_t file_id)
+/* 2026-09-19(사진목록 UI 로컬화) — 선택된 (kind,seq)를 콘 SD에서 통째로 읽어(s_photo_raw_buf,
+ * 웹의 "원본 그대로 보기"가 그대로 재사용 — ui_main_get_selected_photo_raw 참고) 판넬 크기로
+ * 디코드해서 대시보드 썸네일(s_photo_box)에 반영. 파일이 없으면(삭제 직후 등) 조용히 무시 */
+static void display_photo(uint8_t kind, uint32_t seq)
 {
-    if (!s_photo_jpeg_buf) {
-        ESP_LOGE(TAG, "display_photo: 판넬 버퍼 없음(초기 할당 실패?)");
+    if (!s_photo_jpeg_buf || !s_photo_raw_buf) {
+        ESP_LOGE(TAG, "display_photo: 버퍼 없음(초기 할당 실패?)");
         return;
     }
+    if (!s_has_selected_cam) return;
 
-    const uint8_t *jpeg_data = NULL;
     size_t jpeg_len = 0;
-    if (!esp_now_photo_cache_get(file_id, &jpeg_data, &jpeg_len)) {
-        ESP_LOGW(TAG, "display_photo: 캐시에 없음(file_id=%u)", (unsigned)file_id);
-        ui_log_add("DISPLAY cache MISS file_id=%u", (unsigned)file_id);
+    if (!photo_storage_read_file(s_selected_cam_mac, kind, seq, s_photo_raw_buf, PHOTO_RAW_BUF_CAP, &jpeg_len)) {
+        ESP_LOGW(TAG, "display_photo: SD 읽기 실패(kind=%c seq=%u)", (char)kind, (unsigned)seq);
+        ui_log_add("DISPLAY read MISS kind=%c seq=%u", (char)kind, (unsigned)seq);
+        s_photo_raw_len = 0;
         return;
     }
-    ESP_LOGI(TAG, "display_photo: file_id=%u jpeg_len=%u jpeg_data=%p",
-             (unsigned)file_id, (unsigned)jpeg_len, (void *)jpeg_data);
-    ui_log_add("DISPLAY file_id=%u jpeg_len=%u", (unsigned)file_id, (unsigned)jpeg_len);
+    s_photo_raw_len = jpeg_len;
+    ui_log_add("DISPLAY kind=%c seq=%u jpeg_len=%u", (char)kind, (unsigned)seq, (unsigned)jpeg_len);
 
     uint16_t w = 0, h = 0;
     size_t pixel_len = 0;
-    if (!decode_jpeg_scaled(jpeg_data, jpeg_len, PHOTO_PANEL_DECODE_W, PHOTO_PANEL_DECODE_H,
+    if (!decode_jpeg_scaled(s_photo_raw_buf, jpeg_len, PHOTO_PANEL_DECODE_W, PHOTO_PANEL_DECODE_H,
                              s_photo_jpeg_buf, PHOTO_PANEL_BUF_CAP, &w, &h, &pixel_len)) {
-        ESP_LOGE(TAG, "display_photo: decode_jpeg_scaled 실패(file_id=%u)", (unsigned)file_id);
-        ui_log_add_err(UI_ERR_DECODE_FAIL, "Photo display failed (decode) file_id=%u", (unsigned)file_id);
+        ESP_LOGE(TAG, "display_photo: decode_jpeg_scaled 실패(kind=%c seq=%u)", (char)kind, (unsigned)seq);
+        ui_log_add_err(UI_ERR_DECODE_FAIL, "Photo display failed (decode) kind=%c seq=%u", (char)kind, (unsigned)seq);
         return;
     }
-    ESP_LOGI(TAG, "display_photo: decode OK w=%u h=%u pixel_len=%u buf=%p",
-             w, h, (unsigned)pixel_len, (void *)s_photo_jpeg_buf);
-    ui_log_add("DISPLAY decode OK file_id=%u w=%u h=%u", (unsigned)file_id, w, h);
+    ui_log_add("DISPLAY decode OK kind=%c seq=%u w=%u h=%u", (char)kind, (unsigned)seq, w, h);
 
     fill_rgb565_dsc(&s_photo_dsc, s_photo_jpeg_buf, w, h, pixel_len);
     /* 버퍼 내용은 바뀌었지만 &s_photo_dsc 주소는 고정이라, LVGL의 이미지 캐시가 그 주소를
@@ -2509,30 +2513,6 @@ static void display_photo(uint32_t file_id)
         lv_image_set_inner_align(s_photo_image, LV_IMAGE_ALIGN_CONTAIN);
     }
     lv_image_set_src(s_photo_image, &s_photo_dsc);
-    ui_log_add("DISPLAY set_src done file_id=%u", (unsigned)file_id);
-}
-
-/* READY 상태 사진을 "지금 선택된 항목과 일치할 때만" 화면에 반영(2026-08-05) — 취소가
- * 실제 거래를 못 끝내는 문제(위 cb_progress_popup_cancel 참고)를 고쳤어도, 방어적으로
- * 한 번 더 확인함. 안 맞으면(이미 다른 걸 선택해서 이 응답은 낡은 것) 조용히 버리지
- * 않고 에러로 표시(사용자 지시: "2번도 에러니까 안 그리는 것보다 에러를 띄워줘") +
- * 지금 선택된 항목을 다시 요청 — 그 사이 busy로 무시됐을 수 있는 진짜 요청을 벌충함
- * (start_single_receive()의 기존 busy 가드가 중복 무선 전송은 로컬에서 안전하게 막음) */
-static void consume_ready_photo_if_current(void)
-{
-    if (esp_now_photo_get_state() != ESP_NOW_PHOTO_STATE_READY) return;
-    uint32_t ready_id = esp_now_photo_get_ready_file_id();
-    esp_now_photo_ready_ack();
-    if (s_has_selected_file_id && ready_id == s_selected_file_id) {
-        display_photo(ready_id);
-        return;
-    }
-    ui_log_add_err(UI_ERR_PHOTO_SELECTION_STALE,
-                    "Arrived file_id=%u != selected file_id=%u - ignoring, re-requesting",
-                    (unsigned)ready_id, (unsigned)s_selected_file_id);
-    if (s_has_selected_cam && s_has_selected_file_id) {
-        esp_now_photo_fetch_by_id(s_selected_cam_mac, s_selected_file_id);
-    }
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -2668,7 +2648,7 @@ static void set_stage_label(lv_obj_t **labels, int idx, ui_str_id_t str_id, lv_c
  * 아래 참고) */
 typedef enum {
     CAPTURE_POPUP_STAGE_WAIT_RESULT = 0,
-    CAPTURE_POPUP_STAGE_SYNC_LIST = 1,
+    CAPTURE_POPUP_STAGE_WAIT_UPLOAD = 1,
 } capture_popup_stage_t;
 
 static capture_popup_stage_t   s_capture_popup_stage;
@@ -2748,21 +2728,33 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
                          ok ? green : red);
         esp_now_photo_capture_stage_clear();
 
-        /* 2단계가 성공이든 실패든(무응답은 위에서 이미 처리하고 끝났음) 목록은 항상
-         * 다시 확인 — 실패 응답이어도 목록 갱신 자체는 무해(목록이 그대로 옴) */
-        request_photo_list_sync();
-        s_capture_popup_stage = CAPTURE_POPUP_STAGE_SYNC_LIST;
+        /* 2단계가 성공이든 실패든(무응답은 위에서 이미 처리하고 끝났음) 콘에 실제로
+         * 도착하는지는 별도로 기다림 — 촬영 성공과 전송 완료는 다른 단계(2026-09-19: CAM이
+         * 찍은 사진을 콘에 푸시하는 별도 ESP-NOW 전송이 뒤따름, 아래 WAIT_UPLOAD 참고).
+         * 실패 응답이어도 혹시 CAM이 이전 사진을 들고 있을 수 있어 그대로 기다림 */
+        s_capture_popup_stage = CAPTURE_POPUP_STAGE_WAIT_UPLOAD;
         s_capture_popup_stage_start_ms = lv_tick_get();
         set_stage_label(s_capture_stage_label, 2, STR_CAPTURE_STAGE3_PROGRESS, grey);
         return false;
     }
 
-    /* CAPTURE_POPUP_STAGE_SYNC_LIST — 목록갱신만 하고 끝(2026-08-21, 사용자 설계로 원복:
-     * 사진 가져오기는 이 팝업의 일부가 아니라, 아래 refresh_photo_list_ui()가 남기는
-     * "선택됨" 모델을 배경 타이머(refresh_dashboard)가 독립적으로 감지해서 별도 팝업으로
-     * 이어감 — 모듈이 분리되게. 여기선 목록가져오기 결과만 보고 끝 */
-    if (sync_photo_list_tick(0)) {  /* 방금 찍었으면 목록에서 가장 최신 = index 0 */
+    /* CAPTURE_POPUP_STAGE_WAIT_UPLOAD — 2026-09-19(SD 제거 재설계) — 예전엔 여기서 CAM에게
+     * 목록을 다시 물었지만, 이제 CAM은 찍은 사진을 스스로 콘에 푸시하므로(esp_now_photo.c의
+     * handle_done()이 photo_storage_save()까지 동기로 끝냄) 그 도착(READY)만 기다렸다가
+     * 로컬 목록을 새로고침하면 됨 — ESP-NOW 왕복이 하나 통째로 없어짐.
+     * cb_async_photo_result()가 이 팝업이 떠 있는 동안은 이 상태 소비를 양보하므로
+     * (capture_popup_is_active() 참고) 여기서 직접 소비함 */
+    esp_now_photo_state_t pst = esp_now_photo_get_state();
+    if (pst == ESP_NOW_PHOTO_STATE_READY) {
+        esp_now_photo_ready_ack();
+        s_photo_page_index = 0;  /* 방금 찍은 게 최신이니 첫 페이지로 */
+        refresh_photo_list_ui(0);  /* 페이지 안 0번째 = 최신 */
         set_stage_label(s_capture_stage_label, 2, STR_CAPTURE_STAGE3_DONE, green);
+        return true;
+    }
+    if (pst == ESP_NOW_PHOTO_STATE_ERROR) {
+        esp_now_photo_clear();
+        set_stage_label(s_capture_stage_label, 2, STR_CAPTURE_STAGE3_UNKNOWN, red);
         return true;
     }
     if (lv_tick_elaps(s_capture_popup_stage_start_ms) > cam_response_timeout_ms()) {
@@ -2770,6 +2762,11 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
         return true;
     }
     return false;
+}
+
+static bool capture_popup_is_active(void)
+{
+    return s_progress_tick_fn == capture_popup_tick_fn;
 }
 
 static void show_capture_popup(void)
@@ -2800,212 +2797,16 @@ static void cb_capture_now(lv_event_t *e)
     esp_now_photo_capture_now(s_selected_cam_mac);
 }
 
-/* ════════════════════════════════════════════════════════════
- * 목록에서 사진 선택 → 가져오기 진행 팝업 — 모래시계(스피너) + 퍼센트 + 남은시간 추정.
- * 청크가 한동안 안 늘면(무응답/정체) 실패로 간주 — 총 경과시간이 아니라 "마지막 진행
- * 이후 경과시간" 기준(파일이 커서 원래 오래 걸리는 것과 진짜 멈춘 것을 구분하기 위해,
- * 2026-08-01). 완료(READY)/실패(ERROR) 판정만 하고 실제 사진 표시는 팝업이 닫힌 뒤
- * refresh_dashboard()의 일반 수신 처리 경로가 함(지금촬영과 동일 원칙).
- * ════════════════════════════════════════════════════════════ */
-static lv_obj_t *s_fetch_progress_label = NULL;
-static uint32_t  s_fetch_start_ms;
-static uint32_t  s_fetch_last_progress_ms;
-static uint16_t  s_fetch_last_received;
-
-static bool fetch_popup_tick_fn(lv_obj_t *box)
-{
-    (void)box;
-    esp_now_photo_state_t state = esp_now_photo_get_state();
-
-    if (state == ESP_NOW_PHOTO_STATE_READY) {
-        /* 2026-09-04 수정 — renew_list_tick_fn과 같은 패턴으로 통일: 팝업 자신이 READY를
-         * 보면 직접 소비(ack+화면표시)까지 끝낸다. 예전엔 이걸 다른 곳(1초 대시보드 폴링)이
-         * 대신 해준다고 전제했는데, 그 폴링이 이벤트 기반으로 바뀌면서 팝업이 떠 있는 동안은
-         * 그 이벤트 소비가 양보되므로(fetch_popup_is_active() 참고) 이제 여기서 직접 해야
-         * 실제로 소비된다 */
-        consume_ready_photo_if_current();
-        lv_label_set_text(s_fetch_progress_label, ui_str(STR_FETCH_DONE));
-        lv_obj_set_style_text_color(s_fetch_progress_label, lv_palette_main(LV_PALETTE_GREEN), 0);
-        return true;
-    }
-    if (state == ESP_NOW_PHOTO_STATE_ERROR) {
-        lv_label_set_text(s_fetch_progress_label, ui_str(STR_FETCH_FAILED));
-        lv_obj_set_style_text_color(s_fetch_progress_label, lv_palette_main(LV_PALETTE_RED), 0);
-        esp_now_photo_clear();
-        return true;
-    }
-
-    uint16_t received = 0, total = 0;
-    esp_now_photo_get_chunk_progress(&received, &total);
-
-    if (received != s_fetch_last_received) {
-        s_fetch_last_received = received;
-        s_fetch_last_progress_ms = lv_tick_get();
-    } else if (lv_tick_elaps(s_fetch_last_progress_ms) > cam_response_timeout_ms()) {
-        /* 라벨에 STALLED를 써도 true 반환 즉시 팝업이 같은 틱에서 지워져서 실제로는
-         * 한 번도 화면에 안 그려짐(2026-08-02, 사용자 지적 — capture_popup_tick_fn의
-         * NORESPONSE와 동일한 문제) — ui_log_add_err의 토스트가 실제 통보 경로 */
-        lv_label_set_text(s_fetch_progress_label, ui_str(STR_FETCH_STALLED));
-        lv_obj_set_style_text_color(s_fetch_progress_label, lv_palette_main(LV_PALETTE_RED), 0);
-        ui_log_add_err(UI_ERR_FETCH_NORESPONSE, "Photo fetch stalled (%u/%u chunks, timeout)",
-                        (unsigned)received, (unsigned)total);
-        return true;
-    }
-
-    if (total == 0) {
-        lv_label_set_text(s_fetch_progress_label, ui_str(STR_FETCH_CONNECTING));
-        return false;
-    }
-
-    int percent = (int)((uint32_t)received * 100 / total);
-    if (received > 0) {
-        /* 정수 연산만(이 코드베이스는 lv_label_set_text_fmt에 %f를 못 씀) —
-         * 남은 청크 수 * (지금까지 걸린 시간/받은 청크 수) */
-        uint32_t elapsed_ms = lv_tick_elaps(s_fetch_start_ms);
-        uint32_t eta_ms = (uint32_t)(total - received) * elapsed_ms / received;
-        lv_label_set_text_fmt(s_fetch_progress_label, ui_str(STR_FETCH_PROGRESS_ETA_FMT),
-                               percent, (int)(eta_ms / 1000));
-    } else {
-        lv_label_set_text_fmt(s_fetch_progress_label, ui_str(STR_FETCH_PROGRESS_FMT), percent);
-    }
-    lv_obj_set_style_text_color(s_fetch_progress_label, lv_palette_main(LV_PALETTE_GREY), 0);
-    return false;
-}
-
-static bool fetch_popup_is_active(void)
-{
-    return s_progress_tick_fn == fetch_popup_tick_fn;
-}
-
-static void show_fetch_progress_popup(void)
-{
-    s_fetch_start_ms         = lv_tick_get();
-    s_fetch_last_progress_ms = s_fetch_start_ms;
-    s_fetch_last_received    = 0;
-
-    lv_obj_t *box = show_progress_popup(fetch_popup_tick_fn);
-
-    lv_obj_t *spinner = lv_spinner_create(box);
-    lv_obj_set_size(spinner, 40, 40);
-    lv_obj_align(spinner, LV_ALIGN_TOP_MID, 0, 0);
-
-    s_fetch_progress_label = lv_label_create(box);
-    lv_obj_set_style_text_font(s_fetch_progress_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(s_fetch_progress_label, ui_str(STR_FETCH_CONNECTING));
-
-    start_progress_popup(box);
-}
-
-/* 목록갱신 버튼 — 예전엔 요청만 보내고 끝이라 응답이 없어도 사용자가 알 방법이
- * 없었음(2026-08-02, 사용자 지적: "아무 짓도 안하는 건지 목록이 없는 건지 모르겠다") —
- * 지금촬영/모두지우기/사진가져오기와 같은 공용 진행팝업+타임아웃 토스트로 통일.
- * 2026-08-11 재설계(사용자 지시) — 스피너+퍼센트 대신 지금촬영 팝업과 같은 2줄 스택 라벨로
- * "가져오기 명령 전송/목록 수신 중/성공(실패)" 단계를 직접 보여줌 */
-typedef enum {
-    LIST_POPUP_STAGE_SENT = 0,   /* 1단계: 명령 전송, COUNT 응답 대기 */
-    LIST_POPUP_STAGE_RECEIVING,  /* 2단계: 배치 수신 중, READY/ERROR/정체 대기 */
-} list_popup_stage_t;
-
-static list_popup_stage_t s_list_popup_stage;
-static uint32_t           s_list_popup_stage_start_ms;
-static lv_obj_t           *s_list_stage_label[2];
-static uint32_t           s_renew_list_last_progress_ms;
-static uint16_t           s_renew_list_last_received;
-
-/* 2026-08-10 — "시작부터 총 경과시간" 기준에서 fetch_popup_tick_fn()과 동일한 "마지막 진행
- * 이후 경과시간"(정체 감지) 기준으로 변경. 딥슬립 웨이크대기+채널동기화 여러 라운드가
- * 합쳐지면 총 소요시간이 고정예산 하나로는 부족할 수 있는데, 그동안 항목이 계속 들어오고
- * 있다면(=정체 아님) 조급하게 포기할 이유가 없음 — 실사용 중 "데이터는 항상 오는데 팝업만
- * 먼저 3007로 포기" 패턴으로 발견 */
-static bool renew_list_tick_fn(lv_obj_t *box)
-{
-    (void)box;
-    lv_color_t grey  = lv_palette_main(LV_PALETTE_GREY);
-    lv_color_t green = lv_palette_main(LV_PALETTE_GREEN);
-    lv_color_t red   = lv_palette_main(LV_PALETTE_RED);
-
-    if (s_list_popup_stage == LIST_POPUP_STAGE_SENT) {
-        bool acked    = esp_now_photo_list_count_received();
-        bool timedout = lv_tick_elaps(s_list_popup_stage_start_ms) > cam_response_timeout_ms();
-        if (!acked && !timedout) return false;
-
-        if (!acked) {
-            set_stage_label(s_list_stage_label, 0, STR_LIST_STAGE1_NORESPONSE, red);
-            ui_log_add_err(UI_ERR_LIST_NORESPONSE, "List request: no CAM response");
-            return true;
-        }
-
-        set_stage_label(s_list_stage_label, 0, STR_LIST_STAGE1_DONE, green);
-        set_stage_label(s_list_stage_label, 1, STR_LIST_STAGE2_PROGRESS, grey);
-        s_list_popup_stage            = LIST_POPUP_STAGE_RECEIVING;
-        s_list_popup_stage_start_ms   = lv_tick_get();
-        s_renew_list_last_received    = 0;  /* handle_list_count()가 COUNT 도착 시 0으로 리셋함 */
-        s_renew_list_last_progress_ms = lv_tick_get();
-        return false;
-    }
-
-    if (s_list_popup_stage == LIST_POPUP_STAGE_RECEIVING) {
-        esp_now_photo_list_state_t state = esp_now_photo_list_get_state();
-        uint16_t received = 0, total = 0;
-        esp_now_photo_list_get_progress(&received, &total);
-
-        if (received != s_renew_list_last_received) {
-            s_renew_list_last_received    = received;
-            s_renew_list_last_progress_ms = lv_tick_get();
-        }
-        bool resolved = (state == ESP_NOW_PHOTO_LIST_STATE_READY || state == ESP_NOW_PHOTO_LIST_STATE_ERROR);
-        bool stalled  = !resolved && lv_tick_elaps(s_renew_list_last_progress_ms) > cam_response_timeout_ms();
-
-        if (!resolved && !stalled) return false;
-
-        if (stalled) {
-            lv_label_set_text_fmt(s_list_stage_label[1], ui_str(STR_LIST_STAGE2_STALLED_FMT),
-                                   (unsigned)received, (unsigned)total);
-            lv_obj_set_style_text_color(s_list_stage_label[1], red, 0);
-            ui_log_add_err(UI_ERR_LIST_NORESPONSE, "List renew stalled, no CAM response (%u/%u items)",
-                            (unsigned)received, (unsigned)total);
-        } else if (state == ESP_NOW_PHOTO_LIST_STATE_ERROR) {
-            lv_label_set_text_fmt(s_list_stage_label[1], ui_str(STR_LIST_STAGE2_MISMATCH_FMT),
-                                   (unsigned)received, (unsigned)total);
-            lv_obj_set_style_text_color(s_list_stage_label[1], red, 0);
-            esp_now_photo_list_ack();
-        } else {  /* READY */
-            refresh_photo_list_ui(-1);
-            esp_now_photo_list_ack();
-            set_stage_label(s_list_stage_label, 1, STR_LIST_STAGE2_SUCCESS, green);
-        }
-        return true;
-    }
-
-    return false;
-}
-
-static bool list_popup_is_active(void)
-{
-    return s_progress_tick_fn == renew_list_tick_fn;
-}
-
+/* 2026-09-19(SD 제거 재설계 — 사진목록 UI 로컬화) — "목록에서 사진 선택 → 가져오기 진행
+ * 팝업"/"목록갱신 진행 팝업"은 둘 다 ESP-NOW 왕복이 전제였던 설계라 통째로 제거됨. 사진
+ * 선택은 set_selected_photo()가 로컬 SD를 동기로 읽어 바로 화면에 반영하고(cb_photo_row_select
+ * 참고), 목록갱신 버튼도 아래처럼 즉시 반환하는 로컬 읽기 한 줄로 충분 — CAM 연결 여부와도
+ * 무관해짐(콘 자신의 저장소를 다시 읽는 것뿐) */
 static void cb_renew_list(lv_event_t *e)
 {
     (void)e;
     if (!s_has_selected_cam) return;
-    if (!require_active_or_report(s_selected_cam_mac, "목록 갱신")) return;
-
-    esp_now_photo_list_request(s_selected_cam_mac);
-
-    s_list_popup_stage          = LIST_POPUP_STAGE_SENT;
-    s_list_popup_stage_start_ms = lv_tick_get();
-
-    lv_obj_t *box = show_progress_popup(renew_list_tick_fn);
-
-    for (int i = 0; i < 2; i++) {
-        s_list_stage_label[i] = lv_label_create(box);
-        lv_obj_set_style_text_font(s_list_stage_label[i], ui_font_get(UI_FONT_SIZE_18), 0);
-        lv_label_set_text(s_list_stage_label[i], "");
-    }
-    set_stage_label(s_list_stage_label, 0, STR_LIST_STAGE1_PROGRESS, lv_palette_main(LV_PALETTE_GREY));
-
-    start_progress_popup(box);
+    refresh_photo_list_ui(-1);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -3022,114 +2823,16 @@ static void cb_renew_list(lv_event_t *e)
  * 상태를 다시 확인함 — 그것마저 타임아웃되면 "상태 확인 불가"만 보여주고 기존 목록은
  * 그대로 둠(성공한 것처럼 지우지 않음).
  * ════════════════════════════════════════════════════════════ */
-typedef enum {
-    DELETE_ALL_STAGE_WAIT_RECEIVED = 0,  /* CAM 접수+지울 개수 통보 대기 */
-    DELETE_ALL_STAGE_WAIT_DONE     = 1,  /* 접수 확인됨 — 실제 삭제완료(ACK) 대기,
-                                             개수 기준 예산 */
-    DELETE_ALL_STAGE_SYNC_LIST     = 2,
-} delete_all_stage_t;
-
-static lv_obj_t          *s_delete_all_stage_label[2];
-static delete_all_stage_t s_delete_all_stage;
-static uint32_t           s_delete_all_stage_start_ms;
-
-/* 삭제 완료 대기 예산 — 현재 파일별 순차삭제 구현 기준 대략치(실측 309개≈17초 ≈ 55ms/파일)에
- * 안전마진을 둠. cam_storage.c의 삭제 알고리즘이 나중에 빨라지면(DIR-table 최적화 등) 이
- * 값도 같이 줄여야 함(TODO) */
-#define DELETE_ALL_BASE_MARGIN_MS   3000u
-#define DELETE_ALL_PER_FILE_MS      100u
-
-static uint32_t delete_all_done_budget_ms(uint16_t count)
-{
-    return DELETE_ALL_BASE_MARGIN_MS + (uint32_t)count * DELETE_ALL_PER_FILE_MS;
-}
-
-static bool delete_all_tick_fn(lv_obj_t *box)
-{
-    (void)box;
-    lv_color_t grey  = lv_palette_main(LV_PALETTE_GREY);
-    lv_color_t green = lv_palette_main(LV_PALETTE_GREEN);
-    lv_color_t red   = lv_palette_main(LV_PALETTE_RED);
-
-    if (s_delete_all_stage == DELETE_ALL_STAGE_WAIT_RECEIVED) {
-        esp_now_delete_all_state_t st = esp_now_photo_delete_all_get_state();
-        if (st == ESP_NOW_DELETE_ALL_STATE_RECEIVED || st == ESP_NOW_DELETE_ALL_STATE_ACKED) {
-            uint16_t count = esp_now_photo_delete_all_get_received_count();
-            lv_label_set_text_fmt(s_delete_all_stage_label[0], ui_str(STR_DELETEALL_STAGE1_DELETING_FMT),
-                                   (unsigned)count);
-            lv_obj_set_style_text_color(s_delete_all_stage_label[0], grey, 0);
-            s_delete_all_stage = DELETE_ALL_STAGE_WAIT_DONE;
-            s_delete_all_stage_start_ms = lv_tick_get();
-            return false;
-        }
-        if (lv_tick_elaps(s_delete_all_stage_start_ms) > cam_response_timeout_ms()) {
-            set_stage_label(s_delete_all_stage_label, 0, STR_DELETEALL_STAGE1_NORESPONSE, red);
-            ui_log_add_err(UI_ERR_DELETE_ALL_NORESPONSE, "Delete-all request: no CAM receipt ack (link presumed down)");
-            esp_now_photo_delete_all_clear();
-            return true;  /* 접수조차 안 됐으면 목록 재동기화도 의미 없음 */
-        }
-        return false;
-    }
-
-    if (s_delete_all_stage == DELETE_ALL_STAGE_WAIT_DONE) {
-        esp_now_delete_all_state_t st = esp_now_photo_delete_all_get_state();
-        bool acked = (st == ESP_NOW_DELETE_ALL_STATE_ACKED);
-        uint16_t received_count = esp_now_photo_delete_all_get_received_count();
-        bool timedout = !acked &&
-            lv_tick_elaps(s_delete_all_stage_start_ms) > delete_all_done_budget_ms(received_count);
-        if (!acked && !timedout) return false;
-
-        if (acked) {
-            bool ok = esp_now_photo_delete_all_get_success();
-            set_stage_label(s_delete_all_stage_label, 0,
-                             ok ? STR_DELETEALL_STAGE1_DONE : STR_DELETEALL_STAGE1_FAILED, ok ? green : red);
-            esp_now_photo_delete_all_clear();
-        } else {
-            lv_label_set_text_fmt(s_delete_all_stage_label[0], ui_str(STR_DELETEALL_STAGE1_STOPPED_FMT),
-                                   (unsigned)received_count);
-            lv_obj_set_style_text_color(s_delete_all_stage_label[0], red, 0);
-            ui_log_add_err(UI_ERR_DELETE_ALL_STOPPED,
-                            "Delete-all accepted but no completion response (CAM presumed stalled, %u accepted)", (unsigned)received_count);
-            esp_now_photo_delete_all_clear();
-        }
-        /* 결과가 뭐든 실제 상태는 CAM에 다시 물어봐야 앎(부분 삭제 가능성) */
-        request_photo_list_sync();
-        s_delete_all_stage = DELETE_ALL_STAGE_SYNC_LIST;
-        s_delete_all_stage_start_ms = lv_tick_get();
-        set_stage_label(s_delete_all_stage_label, 1, STR_DELETEALL_STAGE2_PROGRESS, grey);
-        return false;
-    }
-
-    /* DELETE_ALL_STAGE_SYNC_LIST */
-    if (sync_photo_list_tick(-1)) {  /* 전체삭제 후라 특정 선택 없음 */
-        set_stage_label(s_delete_all_stage_label, 1, STR_DELETEALL_STAGE2_DONE, green);
-        return true;
-    }
-    if (lv_tick_elaps(s_delete_all_stage_start_ms) > cam_response_timeout_ms()) {
-        set_stage_label(s_delete_all_stage_label, 1, STR_DELETEALL_STAGE2_UNKNOWN, red);
-        return true;  /* 포기하고 닫되, 기존 목록엔 손 안 댐 */
-    }
-    return false;
-}
-
+/* 2026-09-19(SD 제거 재설계) — 전체삭제도 로컬 SD 삭제라 ESP-NOW 왕복/단계별 진행팝업이
+ * 필요 없어짐(CAM은 이제 지울 SD가 없음). 확인팝업만 그대로 유지, 삭제 자체는 즉시 끝남 */
 static void cb_delete_all_confirmed(void *ctx)
 {
     (void)ctx;
-    if (!require_active_or_report(s_selected_cam_mac, "전체삭제")) return;
-
-    esp_now_photo_delete_all(s_selected_cam_mac);
-
-    s_delete_all_stage = DELETE_ALL_STAGE_WAIT_RECEIVED;
-    s_delete_all_stage_start_ms = lv_tick_get();
-
-    lv_obj_t *box = show_progress_popup(delete_all_tick_fn);
-    for (int i = 0; i < 2; i++) {
-        s_delete_all_stage_label[i] = lv_label_create(box);
-        lv_obj_set_style_text_font(s_delete_all_stage_label[i], ui_font_get(UI_FONT_SIZE_18), 0);
-        lv_label_set_text(s_delete_all_stage_label[i], "");
-    }
-    set_stage_label(s_delete_all_stage_label, 0, STR_DELETEALL_STAGE1_PROGRESS, lv_palette_main(LV_PALETTE_GREY));
-    start_progress_popup(box);
+    if (!s_has_selected_cam) return;
+    photo_storage_delete_all(s_selected_cam_mac);
+    s_has_selected_photo = false;
+    s_photo_page_index = 0;
+    refresh_photo_list_ui(-1);
 }
 
 static void cb_delete_all(lv_event_t *e)
@@ -3150,12 +2853,11 @@ static void reset_camera_ui_state(void)
     lv_indev_reset(NULL, s_photo_list);
     lv_obj_clean(s_photo_list);
     s_selected_row = NULL;
-    s_has_selected_file_id = false;  /* 연결이 끊기면 선택 모델도 완전히 비움(재연결 후
-                                       * 예전 목록에 있던 file_id가 새 목록에 우연히 같은
-                                       * 값으로 있어도 잘못 선택된 것처럼 보이지 않게) */
-    s_has_synced_file_id = false;    /* reconcile_selection의 "마지막 반영값" 기록도 같이
-                                       * 비움 — 안 그러면 재연결 후 같은 file_id를 다시
-                                       * 선택했을 때 "이미 반영됨"으로 오판해 새로 안 가져옴 */
+    s_has_selected_photo = false;  /* 연결이 끊기면(또는 다른 카메라로 전환하면) 선택 모델도
+                                       완전히 비움(재연결 후 예전 목록에 있던 (kind,seq)가
+                                       새 목록에 우연히 같은 값으로 있어도 잘못 선택된 것처럼
+                                       보이지 않게) */
+    s_photo_page_index = 0;
     lv_label_set_text(s_list_info_label, "");
 
     if (s_photo_image) {
@@ -3180,7 +2882,7 @@ static void select_camera(const uint8_t *mac)
     memcpy(s_selected_cam_mac, mac, 6);
     s_has_selected_cam = true;
     reset_camera_ui_state();
-    esp_now_photo_list_request(s_selected_cam_mac);
+    refresh_photo_list_ui(-1);  /* 2026-09-19 — 로컬 SD 읽기라 즉시 채워짐, ESP-NOW 요청 불필요 */
 }
 
 static void cb_camera_select_changed(lv_event_t *e)
@@ -5089,10 +4791,11 @@ static void refresh_dashboard(lv_timer_t *t)
             camera_connected ? lv_color_white() : lv_palette_lighten(LV_PALETTE_GREY, 1), 0);
     }
 
-    /* 2026-09-04 — 사진/목록 수신 완료 반응은 매틱 폴링 대신 이벤트(on_photo_result_event/
-     * on_list_result_event, esp_now_photo_set_ready_cb 등록)로 옮김. 지금촬영/모두지우기
-     * 팝업 쪽 목록 완료 처리는 각자의 진행 팝업 tick이 별도로 계속 담당(그동안 이 배경
-     * 타이머 자체가 pause_bg_timers()로 멈춰있어서 이벤트와 안 겹침) */
+    /* 2026-09-04 — 사진 수신 완료 반응은 매틱 폴링 대신 이벤트(on_photo_result_event,
+     * esp_now_photo_set_ready_cb 등록)로 옮김. 지금촬영 팝업 쪽 완료 처리는 자신의 진행
+     * 팝업 tick이 별도로 계속 담당(그동안 이 배경 타이머 자체가 pause_bg_timers()로
+     * 멈춰있어서 이벤트와 안 겹침). 목록/삭제는 2026-09-19부터 로컬 SD 읽기라 비동기 이벤트
+     * 자체가 필요 없어짐 */
 }
 
 /* 통계 탭 로그박스 갱신 — ui_log 모듈에 쌓인 스냅샷을 그대로 라벨에 채우고 항상 맨
@@ -6577,44 +6280,76 @@ bool ui_main_inject_delete_stats(void)
     return run_on_lvgl_task(inject_fn_delete_stats, NULL, 1000);
 }
 
+/* 2026-09-19(SD 제거 재설계 — "웹은 콘에 기생") — 목록갱신이 이제 로컬 SD 읽기라 완전히
+ * 동기(run_on_lvgl_task가 리턴하는 시점엔 이미 s_current_list가 최신 상태) — 예전의
+ * 세대번호/비파괴적 완료-확인 채널이 필요 없어짐(그건 CAM 응답을 "기다려야" 했던 ESP-NOW
+ * 왕복 시절 설계) */
 static bool inject_fn_list_refresh(void *arg)
 {
     (void)arg;
-    if (!s_camera_renew_btn) return false;
-    uint32_t before = esp_now_photo_list_get_current_generation();
-    lv_obj_send_event(s_camera_renew_btn, LV_EVENT_CLICKED, NULL);  /* -> cb_renew_list */
-    uint32_t after = esp_now_photo_list_get_current_generation();
-    return after != before;  /* 눌렸지만 cb_renew_list의 가드(선택된 CAM 없음 등)에 걸리면
-                                 세대가 그대로라 실패로 판정됨 */
+    if (!s_camera_renew_btn || !s_has_selected_cam) return false;
+    lv_obj_send_event(s_camera_renew_btn, LV_EVENT_CLICKED, NULL);  /* -> cb_renew_list, 동기 완료 */
+    return true;
 }
 
-/* 성공 시 실제로 새로 생긴 세대번호(main.c가 esp_now_photo_list_wait_result()에 넘길 것) */
-uint32_t ui_main_inject_list_refresh(bool *out_ok)
+bool ui_main_inject_list_refresh(void)
 {
-    *out_ok = run_on_lvgl_task(inject_fn_list_refresh, NULL, 1000);
-    return esp_now_photo_list_get_current_generation();
+    return run_on_lvgl_task(inject_fn_list_refresh, NULL, 1000);
+}
+
+/* 목록에서 실제로 새로고침된 결과를 그대로 복사해줌 — 웹이 독자적으로 photo_storage를
+ * 다시 읽지 않고, 콘 화면이 지금 보여주고 있는 바로 그 배열을 읽어가게 함("기생" 원칙:
+ * 웹이 보는 것과 콘 화면이 보여주는 것이 항상 같은 소스). out_cap은 PHOTO_LIST_PAGE_SIZE
+ * 이상이면 전부 들어옴 */
+int ui_main_get_photo_list(photo_storage_item_t *out, int out_cap)
+{
+    int n = (s_current_list_count < out_cap) ? s_current_list_count : out_cap;
+    if (s_current_list && n > 0) memcpy(out, s_current_list, sizeof(photo_storage_item_t) * (size_t)n);
+    return n;
 }
 
 static bool inject_fn_photo_select(void *arg)
 {
-    uint32_t file_id = (uint32_t)(uintptr_t)arg;
+    uint32_t packed = *(uint32_t *)arg;
     uint32_t child_cnt = lv_obj_get_child_cnt(s_photo_list);
     for (uint32_t i = 0; i < child_cnt; i++) {
         lv_obj_t *row = lv_obj_get_child(s_photo_list, i);
-        /* 2026-09-04(웹 합성용) — 행 생성 시 lv_obj_set_user_data()로 file_id를 매달아둠
+        /* 2026-09-04(웹 합성용) — 행 생성 시 lv_obj_set_user_data()로 (kind,seq)를 매달아둠
          * (refresh_photo_list_ui() 참고) — 이벤트 콜백 user_data(공개 API로 못 읽음)와는
          * 별개인 위젯 자체의 범용 슬롯 */
-        if ((uint32_t)(uintptr_t)lv_obj_get_user_data(row) == file_id) {
-            lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_photo_row_select */
+        if ((uint32_t)(uintptr_t)lv_obj_get_user_data(row) == packed) {
+            lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_photo_row_select, 동기 완료 */
             return true;
         }
     }
-    return false;  /* 지금 목록에 없는 file_id(웹이 가져간 목록이 낡았을 수 있음) */
+    return false;  /* 지금 목록(=지금 페이지)에 없는 (kind,seq) — 웹이 가져간 목록이 낡았거나
+                       다른 페이지에 있음 */
 }
 
-bool ui_main_inject_photo_select(uint32_t file_id)
+bool ui_main_inject_photo_select(uint8_t kind, uint32_t seq)
 {
-    return run_on_lvgl_task(inject_fn_photo_select, (void *)(uintptr_t)file_id, 1000);
+    static uint32_t packed_copy;
+    packed_copy = pack_photo_id(kind, seq);
+    return run_on_lvgl_task(inject_fn_photo_select, &packed_copy, 1000);
+}
+
+/* 2026-09-19 — 웹의 "원본 그대로 보기"(/photo, /api/photo_fetch)가 씀. 로컬 SD 읽기라
+ * ui_main_inject_photo_select()가 반환한 시점엔 이미 display_photo()까지 동기로 끝나있어서
+ * 그 결과(s_photo_raw_buf)를 그대로 넘겨주면 됨 — 웹이 독자적으로 다시 읽지 않음("기생" 원칙) */
+bool ui_main_get_selected_photo_raw(const uint8_t **out_data, size_t *out_len)
+{
+    if (!s_has_selected_photo || !s_photo_raw_buf || s_photo_raw_len == 0) return false;
+    *out_data = s_photo_raw_buf;
+    *out_len = s_photo_raw_len;
+    return true;
+}
+
+bool ui_main_get_selected_photo_id(uint8_t *out_kind, uint32_t *out_seq)
+{
+    if (!s_has_selected_photo) return false;
+    *out_kind = s_selected_kind;
+    *out_seq = s_selected_seq;
+    return true;
 }
 
 /* 2026-09-07(임시 진단 — 사용자 실측 리포트: "탭 선택 몇 번 하고 나면 3K가 줄어드는데") —
@@ -6662,10 +6397,15 @@ void ui_init(void)
         ESP_LOGE(TAG, "전력로그 버퍼 할당 실패(%u bytes)", (unsigned)POWER_LOG_BUF_CAP);
     }
 
-    s_current_list = heap_caps_malloc(sizeof(esp_now_photo_list_view_item_t) * ESP_NOW_PHOTO_LIST_MAX,
+    s_current_list = heap_caps_malloc(sizeof(photo_storage_item_t) * PHOTO_LIST_PAGE_SIZE,
                                        MALLOC_CAP_SPIRAM);
     if (!s_current_list) {
         ESP_LOGE(TAG, "사진목록 버퍼 할당 실패 — 목록 표시 불가");
+    }
+
+    s_photo_raw_buf = heap_caps_malloc(PHOTO_RAW_BUF_CAP, MALLOC_CAP_SPIRAM);
+    if (!s_photo_raw_buf) {
+        ESP_LOGE(TAG, "원본 JPEG 버퍼 할당 실패(%u bytes)", (unsigned)PHOTO_RAW_BUF_CAP);
     }
 
     s_dash_nodes      = heap_caps_malloc(sizeof(esp_now_hub_node_t) * ESP_NOW_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
@@ -7146,6 +6886,52 @@ void ui_init(void)
     lv_obj_set_style_text_font(s_list_info_label, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_color(s_list_info_label, lv_palette_main(LV_PALETTE_GREY), 0);
 
+    /* 2026-09-19(사진목록 UI 로컬화 — 페이지네이션 추가) — stats 탭의 nav_cluster와 동일
+     * 패턴(±1/±10 버튼 + "현재/전체" 라벨), 목록 폭이 좁아서 제목줄과 합치지 않고 별도 행 */
+    lv_obj_t *photo_nav_row = lv_obj_create(list_panel);
+    lv_obj_set_size(photo_nav_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(photo_nav_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(photo_nav_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(photo_nav_row, 0, 0);
+    lv_obj_set_style_pad_all(photo_nav_row, 0, 0);
+    lv_obj_set_style_pad_column(photo_nav_row, 4, 0);
+
+    s_photo_jump_prev_btn = lv_button_create(photo_nav_row);
+    style_inverted_control(s_photo_jump_prev_btn);
+    lv_obj_set_style_text_color(s_photo_jump_prev_btn, lv_palette_lighten(LV_PALETTE_GREY, 1), LV_STATE_DISABLED);
+    lv_obj_add_event_cb(s_photo_jump_prev_btn, photo_jump_prev_page_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *photo_jump_prev_lbl = lv_label_create(s_photo_jump_prev_btn);
+    lv_label_set_text(photo_jump_prev_lbl, ui_str(STR_BTN_JUMP_PREV10));
+    lv_obj_set_style_text_font(photo_jump_prev_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_photo_prev_btn = lv_button_create(photo_nav_row);
+    style_inverted_control(s_photo_prev_btn);
+    lv_obj_set_style_text_color(s_photo_prev_btn, lv_palette_lighten(LV_PALETTE_GREY, 1), LV_STATE_DISABLED);
+    lv_obj_add_event_cb(s_photo_prev_btn, photo_prev_page_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *photo_prev_lbl = lv_label_create(s_photo_prev_btn);
+    lv_label_set_text(photo_prev_lbl, ui_str(STR_BTN_PREV_PAGE));
+    lv_obj_set_style_text_font(photo_prev_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_photo_page_label = lv_label_create(photo_nav_row);
+    lv_obj_set_style_text_font(s_photo_page_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_photo_page_label, "");
+
+    s_photo_next_btn = lv_button_create(photo_nav_row);
+    style_inverted_control(s_photo_next_btn);
+    lv_obj_set_style_text_color(s_photo_next_btn, lv_palette_lighten(LV_PALETTE_GREY, 1), LV_STATE_DISABLED);
+    lv_obj_add_event_cb(s_photo_next_btn, photo_next_page_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *photo_next_lbl = lv_label_create(s_photo_next_btn);
+    lv_label_set_text(photo_next_lbl, ui_str(STR_BTN_NEXT_PAGE));
+    lv_obj_set_style_text_font(photo_next_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_photo_jump_next_btn = lv_button_create(photo_nav_row);
+    style_inverted_control(s_photo_jump_next_btn);
+    lv_obj_set_style_text_color(s_photo_jump_next_btn, lv_palette_lighten(LV_PALETTE_GREY, 1), LV_STATE_DISABLED);
+    lv_obj_add_event_cb(s_photo_jump_next_btn, photo_jump_next_page_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *photo_jump_next_lbl = lv_label_create(s_photo_jump_next_btn);
+    lv_label_set_text(photo_jump_next_lbl, ui_str(STR_BTN_JUMP_NEXT10));
+    lv_obj_set_style_text_font(photo_jump_next_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
     s_photo_list = lv_list_create(list_panel);
     lv_obj_set_size(s_photo_list, LV_PCT(100), 220);
     lv_obj_set_style_pad_all(s_photo_list, 0, 0);  /* 기본 테마 리스트 안쪽 여백 제거 — 박스 꽉 채움 */
@@ -7215,7 +7001,6 @@ void ui_init(void)
     /* 2026-09-04(사용자 설계: "이벤트로 처리해") — 사진/목록/연결 완료 이벤트에 앱 쪽 반응을
      * 등록. 매틱 폴링하던 refresh_dashboard()의 해당 부분은 제거하고 여기로 옮김 */
     esp_now_photo_set_ready_cb(on_photo_result_event);
-    esp_now_photo_list_set_ready_cb(on_list_result_event);
     esp_now_hub_set_connect_event_cb(on_connect_result_event);
 }
 
