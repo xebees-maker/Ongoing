@@ -9906,6 +9906,28 @@ static void build_option_tab(void)
     lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
     lv_obj_set_style_text_font(s_time_set_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
+    /* 2026-09-18(사용자 지시 — "로그를 시스템 판넬에... Log 공백 View 단추 형식으로") —
+     * 예전엔 페이지 맨 끝에 눈에 덜 띄는 작은 버튼 하나였는데, 다른 시스템 행들과 동일한
+     * [라벨][버튼] 구조로 통일. 진입 동작(팝업 안 콘텐츠 바꿔치기)은 그대로
+     * cb_option_log_btn_tap 재사용 */
+    lv_obj_t *log_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(log_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(log_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(log_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(log_row, 0, 0);
+    lv_obj_set_style_pad_hor(log_row, 12, 0);
+    lv_obj_set_style_pad_ver(log_row, 0, 0);
+
+    lv_obj_t *log_label = lv_label_create(log_row);
+    lv_label_set_text(log_label, ui_str(STR_TAB_LOG));
+    lv_obj_set_style_text_font(log_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    lv_obj_t *log_view_btn = lv_button_create(create_row_right_cluster(log_row));
+    lv_obj_add_event_cb(log_view_btn, cb_option_log_btn_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *log_view_lbl = lv_label_create(log_view_btn);
+    lv_label_set_text(log_view_lbl, ui_str(STR_BTN_VIEW));
+    lv_obj_set_style_text_font(log_view_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
     /* 2026-09-07(탭→팝업 전환) — 설정탭 자신의 버튼들 폭 통일. s_action_btn_width는 이미
      * ui_init()에서 상황판 버튼 기준으로 정해져있음(재계산 없음, 그냥 적용만).
      * 2026-09-09(사용자 지적 — "세팅 단추를 누르면 콘이 죽어") — s_sens_measure_apply_btn은
@@ -9916,7 +9938,7 @@ static void build_option_tab(void)
      * 미미해서 지금은 그대로 둠) */
     lv_obj_t *option_action_buttons[] = {
         restart_btn, s_capture_apply_btn, s_response_apply_btn, s_adaptive_apply_btn,
-        time_set_btn, s_xclk_apply_btn,
+        time_set_btn, s_xclk_apply_btn, log_view_btn,
     };
     lv_obj_update_layout(lv_screen_active());
     for (size_t i = 0; i < sizeof(option_action_buttons) / sizeof(option_action_buttons[0]); i++) {
@@ -9928,22 +9950,6 @@ static void build_option_tab(void)
      * "SSID> 표시가 버튼보다 커서 종속 드랍다운 위치가 이상해져") — 표준폭의 2배로 뒀던 걸
      * 다른 버튼들과 같은 표준폭 하나로 줄임 */
     lv_obj_set_width(s_network_find_btn, s_action_btn_width);
-
-    /* 2026-09-08(사용자 재설계 — "로그는... 설정 팝업 안에 있는 별도 버튼", 일반 사용자는
-     * 안 볼 진단용이라 일부러 눈에 덜 띄는 자리) — 콘텐츠 맨 끝에 작은 버튼 하나. 누르면
-     * 이 팝업 안에서 설정 콘텐츠를 로그 콘텐츠로 바꿔치기(팝업을 새로 안 열음) */
-    lv_obj_t *log_entry_row = lv_obj_create(option_page);
-    lv_obj_set_size(log_entry_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(log_entry_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(log_entry_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(log_entry_row, 0, 0);
-    lv_obj_set_style_pad_hor(log_entry_row, 12, 0);
-    lv_obj_set_style_pad_ver(log_entry_row, 6, 0);
-    lv_obj_t *log_entry_btn = lv_button_create(log_entry_row);
-    lv_obj_add_event_cb(log_entry_btn, cb_option_log_btn_tap, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *log_entry_lbl = lv_label_create(log_entry_btn);
-    lv_label_set_text(log_entry_lbl, ui_str(STR_TAB_LOG));
-    lv_obj_set_style_text_font(log_entry_lbl, ui_font_get(UI_FONT_SIZE_12), 0);
 
     size_t heap_after_option_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGW(TAG, "MEMDIAG 설정탭 위젯 생성 비용(순수): internal %u -> %u (소모 %d bytes)",

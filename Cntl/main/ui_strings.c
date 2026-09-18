@@ -388,6 +388,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_TITLE_SETTING]  = { "설정", "Setting" },
     [STR_TITLE_NOTICE]   = { "알림", "Notice" },
     [STR_TITLE_PROGRESS] = { "진행 중", "In Progress" },
+
+    [STR_BTN_VIEW] = { "보기", "View" },
 };
 
 void ui_lang_load(void)

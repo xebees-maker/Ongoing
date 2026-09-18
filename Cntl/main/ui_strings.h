@@ -388,6 +388,9 @@ typedef enum {
     STR_TITLE_NOTICE,            /* 파랑/흰색(경고색일 수도 있음), 버튼 Close만: "알림" / "Notice" */
     STR_TITLE_PROGRESS,          /* 파랑/흰색, 버튼 Cancel만: "진행 중" / "In Progress" */
 
+    /* 2026-09-18(사용자 지시 — "설정에서 로그를 시스템 판넬에 넣어. Log 공백 View 단추 형식으로") */
+    STR_BTN_VIEW,                /* 시스템 판넬의 로그 행 버튼: "보기" / "View" */
+
     STR_COUNT,
 } ui_str_id_t;
 
