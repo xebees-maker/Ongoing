@@ -10,8 +10,8 @@
 static const char *TAG = "device_config";
 
 #define DEVICE_CONFIG_PATH    FS_MOUNT_POINT "/device_config.bin"
-#define DEVICE_CONFIG_VERSION 8  /* 2026-09-08: aliases[] 슬롯 배열 + auto_connect_known/new
-                                    플래그 추가(연결 기능 주화면 이관, 사용자 설계)로 7->8
+#define DEVICE_CONFIG_VERSION 9  /* 2026-09-18: 촬영주기/AGC/AEC/XCLK를 전역 스칼라 필드에서
+                                    cam_settings[] 슬롯 배열로 재설계(카메라별 설정)로 8->9
                                     (구버전 파일은 버전 불일치로 기본값으로 자연 폴백 —
                                     UI_ERR_CONFIG_FILE_MISMATCH로 화면에도 보임,
                                     device_config_load 참고) */
@@ -49,6 +49,20 @@ typedef struct __attribute__((packed)) {
     char    alias[DEVICE_CONFIG_ALIAS_MAX_LEN];
 } alias_entry_t;
 
+/* 2026-09-18(사용자 지시 — "개별 캠마다 설정", 카메라별 설정 팝업으로 이관) — 촬영주기/
+ * AGC/AEC/XCLK를 전역 값 하나 공유 방식에서 mac 키 슬롯 방식으로 재설계. 넷 다 "영상"
+ * 그룹박스에 같이 있던 카메라별 설정이라 슬롯 하나에 묶음(따로 4개 배열을 안 둠) */
+#define CAM_SETTINGS_SLOTS 8
+
+typedef struct __attribute__((packed)) {
+    uint8_t  mac[6];
+    uint8_t  in_use;
+    uint32_t capture_interval_sec;
+    uint8_t  agc_enable;
+    uint8_t  aec_enable;
+    uint8_t  xclk_mhz;
+} cam_settings_entry_t;
+
 #define CAM_CAPTURE_INTERVAL_SEC_DEFAULT 1800  /* CAM Kconfig 기본(30분)과 동일 */
 /* 2026-09-17(모델-뷰-Dirty 원칙 감사 — "파일/디폴트/Dirty/model/view가 원칙대로") — 예전
  * 값(2)이 실제 드랍다운 프리셋 목록(ui_main.c의 s_response_interval_values = {0,3,10,30,60})에
@@ -72,29 +86,22 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;
-    uint32_t cam_capture_interval_sec;
     uint32_t response_interval_sec;
     uint32_t adaptive_response_sec;
-    uint8_t  agc_enable;
-    uint8_t  aec_enable;
-    uint8_t  xclk_mhz;
     uint8_t  wifi_ap_mode;
     uint8_t  auto_connect_known;
     uint8_t  auto_connect_new;
     sta_credential_t sta_credentials[STA_CREDENTIAL_SLOTS];
     sens_interval_entry_t sens_intervals[SENS_INTERVAL_SLOTS];
     alias_entry_t aliases[ALIAS_SLOTS];
+    cam_settings_entry_t cam_settings[CAM_SETTINGS_SLOTS];
 } device_config_file_t;
 
-static uint32_t s_cam_capture_interval_sec = CAM_CAPTURE_INTERVAL_SEC_DEFAULT;
 static uint32_t s_response_interval_sec    = RESPONSE_INTERVAL_SEC_DEFAULT;
 static uint32_t s_adaptive_response_sec    = ADAPTIVE_RESPONSE_SEC_DEFAULT;
 /* Sens 측정주기 전역 디폴트 — MAC별 슬롯이 없는 센서에 대해 device_config_get_sens_sample_
  * interval_sec()가 반환하는 값. #define을 여기서 딱 한 번만 참조(2026-09-18) */
 static uint32_t s_sens_sample_interval_default_sec = SENS_SAMPLE_INTERVAL_SEC_DEFAULT;
-static bool     s_agc_enable               = AGC_ENABLE_DEFAULT;
-static bool     s_aec_enable               = AEC_ENABLE_DEFAULT;
-static uint8_t  s_xclk_mhz                 = XCLK_MHZ_DEFAULT;
 static bool     s_wifi_ap_mode             = false;
 /* 2026-09-08(사용자 설계) — 기본값 false: 기존처럼 대기중 장치는 수동 확인이 필요한 채로
  * 시작(자동연결은 사용자가 설정탭에서 켜야 함) */
@@ -107,6 +114,7 @@ static bool     s_auto_connect_new         = false;
 static sta_credential_t *s_sta_credentials = NULL;
 static sens_interval_entry_t *s_sens_intervals = NULL;
 static alias_entry_t *s_aliases = NULL;
+static cam_settings_entry_t *s_cam_settings = NULL;
 
 /* 2026-08-30 — device_config.bin 암호화(assets 파일 업로드/다운로드 엔드포인트로 평문 WiFi
  * 비번이 노출되는 문제 대비) 시도했으나, 이 ESP-IDF의 mbedtls가 aes.h를 공개 API에서 제거하고
@@ -122,12 +130,8 @@ static void device_config_save(void)
     }
     device_config_file_t s = {
         .version = DEVICE_CONFIG_VERSION,
-        .cam_capture_interval_sec = s_cam_capture_interval_sec,
         .response_interval_sec   = s_response_interval_sec,
         .adaptive_response_sec   = s_adaptive_response_sec,
-        .agc_enable              = s_agc_enable ? 1 : 0,
-        .aec_enable              = s_aec_enable ? 1 : 0,
-        .xclk_mhz                = s_xclk_mhz,
         .wifi_ap_mode            = s_wifi_ap_mode ? 1 : 0,
         .auto_connect_known      = s_auto_connect_known ? 1 : 0,
         .auto_connect_new        = s_auto_connect_new ? 1 : 0,
@@ -135,6 +139,7 @@ static void device_config_save(void)
     memcpy(s.sta_credentials, s_sta_credentials, sizeof(s.sta_credentials));
     memcpy(s.sens_intervals, s_sens_intervals, sizeof(s.sens_intervals));
     memcpy(s.aliases, s_aliases, sizeof(s.aliases));
+    memcpy(s.cam_settings, s_cam_settings, sizeof(s.cam_settings));
     fwrite(&s, sizeof(s), 1, f);
     fclose(f);
 }
@@ -163,6 +168,13 @@ void device_config_load(void)
             return;
         }
     }
+    if (!s_cam_settings) {
+        s_cam_settings = heap_caps_calloc(CAM_SETTINGS_SLOTS, sizeof(cam_settings_entry_t), MALLOC_CAP_SPIRAM);
+        if (!s_cam_settings) {
+            ESP_LOGE(TAG, "카메라 설정 슬롯 PSRAM 할당 실패");
+            return;
+        }
+    }
 
     FILE *f = fopen(DEVICE_CONFIG_PATH, "rb");
     if (!f) return;
@@ -180,7 +192,6 @@ void device_config_load(void)
                         "Config file format mismatch - fell back to defaults (re-apply in Option tab)");
         return;
     }
-    s_cam_capture_interval_sec = s.cam_capture_interval_sec;
     /* 2026-08-11 버그수정 — 예전엔 response_interval_sec==0을 "저장 안 됨"으로 보고 조용히
      * 기본값(2)으로 되돌렸는데, 이제 0은 "즉시/Live"(딥슬립 자체를 안 함)라는 진짜 의미가
      * 있는 값이라 이 되돌림 때문에 "즉시"를 저장해도 다음 로드 때 다시 2로 바뀌어버림 —
@@ -189,9 +200,6 @@ void device_config_load(void)
      * 값(적응형 반응시간에 0=즉시 개념이 없음)이라 그대로 둠 */
     s_response_interval_sec    = s.response_interval_sec;
     s_adaptive_response_sec    = s.adaptive_response_sec ? s.adaptive_response_sec : ADAPTIVE_RESPONSE_SEC_DEFAULT;
-    s_agc_enable                = s.agc_enable != 0;
-    s_aec_enable                = s.aec_enable != 0;
-    s_xclk_mhz                  = s.xclk_mhz ? s.xclk_mhz : XCLK_MHZ_DEFAULT;
     s_wifi_ap_mode               = s.wifi_ap_mode != 0;
     s_auto_connect_known         = s.auto_connect_known != 0;
     s_auto_connect_new           = s.auto_connect_new != 0;
@@ -205,18 +213,54 @@ void device_config_load(void)
     memcpy(s_sta_credentials, s.sta_credentials, sizeof(s.sta_credentials));
     memcpy(s_sens_intervals, s.sens_intervals, sizeof(s.sens_intervals));
     memcpy(s_aliases, s.aliases, sizeof(s.aliases));
-    ESP_LOGI(TAG, "설정 복원: CAM촬영주기=%us 응답성=%us 적응형반응=%us AGC=%d AEC=%d XCLK=%uMHz "
-             "WiFi=%s SSID=%s",
-             (unsigned)s_cam_capture_interval_sec, (unsigned)s_response_interval_sec,
-             (unsigned)s_adaptive_response_sec, (int)s_agc_enable, (int)s_aec_enable,
-             (unsigned)s_xclk_mhz, s_wifi_ap_mode ? "AP" : "STA", s_sta_credentials[0].ssid);
+    memcpy(s_cam_settings, s.cam_settings, sizeof(s.cam_settings));
+    ESP_LOGI(TAG, "설정 복원: 응답성=%us 적응형반응=%us WiFi=%s SSID=%s (카메라별 설정은 mac별로 별도 복원됨)",
+             (unsigned)s_response_interval_sec, (unsigned)s_adaptive_response_sec,
+             s_wifi_ap_mode ? "AP" : "STA", s_sta_credentials[0].ssid);
 }
 
-uint32_t device_config_get_cam_capture_interval_sec(void) { return s_cam_capture_interval_sec; }
-
-void device_config_set_cam_capture_interval_sec(uint32_t sec)
+/* 2026-09-18(사용자 지시 — "개별 캠마다 설정") — sens_intervals와 동일한 mac 키 슬롯 탐색
+ * 패턴. find_or_create는 없으면 빈 슬롯에 디폴트값으로 새로 만듦(Apply 시점에만 호출) */
+static cam_settings_entry_t *find_cam_settings_slot(const uint8_t *mac)
 {
-    s_cam_capture_interval_sec = sec;
+    if (!s_cam_settings || !mac) return NULL;
+    for (int i = 0; i < CAM_SETTINGS_SLOTS; i++) {
+        if (s_cam_settings[i].in_use && memcmp(s_cam_settings[i].mac, mac, 6) == 0) return &s_cam_settings[i];
+    }
+    return NULL;
+}
+
+static cam_settings_entry_t *find_or_create_cam_settings_slot(const uint8_t *mac)
+{
+    cam_settings_entry_t *slot = find_cam_settings_slot(mac);
+    if (slot) return slot;
+    if (!s_cam_settings || !mac) return NULL;
+    for (int i = 0; i < CAM_SETTINGS_SLOTS; i++) {
+        if (!s_cam_settings[i].in_use) {
+            memcpy(s_cam_settings[i].mac, mac, 6);
+            s_cam_settings[i].in_use = 1;
+            s_cam_settings[i].capture_interval_sec = CAM_CAPTURE_INTERVAL_SEC_DEFAULT;
+            s_cam_settings[i].agc_enable = AGC_ENABLE_DEFAULT ? 1 : 0;
+            s_cam_settings[i].aec_enable = AEC_ENABLE_DEFAULT ? 1 : 0;
+            s_cam_settings[i].xclk_mhz = XCLK_MHZ_DEFAULT;
+            return &s_cam_settings[i];
+        }
+    }
+    ESP_LOGW(TAG, "카메라 설정 슬롯 꽉 참(%d개) — 저장 못 함", CAM_SETTINGS_SLOTS);
+    return NULL;
+}
+
+uint32_t device_config_get_cam_capture_interval_sec(const uint8_t *mac)
+{
+    cam_settings_entry_t *slot = find_cam_settings_slot(mac);
+    return slot ? slot->capture_interval_sec : CAM_CAPTURE_INTERVAL_SEC_DEFAULT;
+}
+
+void device_config_set_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
+{
+    cam_settings_entry_t *slot = find_or_create_cam_settings_slot(mac);
+    if (!slot) return;
+    slot->capture_interval_sec = sec;
     device_config_save();
 }
 
@@ -237,27 +281,45 @@ void device_config_set_adaptive_response_sec(uint32_t sec)
     device_config_save();
 }
 
-bool device_config_get_agc_enable(void) { return s_agc_enable; }
-
-void device_config_set_agc_enable(bool enable)
+bool device_config_get_agc_enable(const uint8_t *mac)
 {
-    s_agc_enable = enable;
+    cam_settings_entry_t *slot = find_cam_settings_slot(mac);
+    return slot ? (slot->agc_enable != 0) : AGC_ENABLE_DEFAULT;
+}
+
+void device_config_set_agc_enable(const uint8_t *mac, bool enable)
+{
+    cam_settings_entry_t *slot = find_or_create_cam_settings_slot(mac);
+    if (!slot) return;
+    slot->agc_enable = enable ? 1 : 0;
     device_config_save();
 }
 
-bool device_config_get_aec_enable(void) { return s_aec_enable; }
-
-void device_config_set_aec_enable(bool enable)
+bool device_config_get_aec_enable(const uint8_t *mac)
 {
-    s_aec_enable = enable;
+    cam_settings_entry_t *slot = find_cam_settings_slot(mac);
+    return slot ? (slot->aec_enable != 0) : AEC_ENABLE_DEFAULT;
+}
+
+void device_config_set_aec_enable(const uint8_t *mac, bool enable)
+{
+    cam_settings_entry_t *slot = find_or_create_cam_settings_slot(mac);
+    if (!slot) return;
+    slot->aec_enable = enable ? 1 : 0;
     device_config_save();
 }
 
-uint8_t device_config_get_xclk_mhz(void) { return s_xclk_mhz; }
-
-void device_config_set_xclk_mhz(uint8_t mhz)
+uint8_t device_config_get_xclk_mhz(const uint8_t *mac)
 {
-    s_xclk_mhz = mhz ? mhz : XCLK_MHZ_DEFAULT;
+    cam_settings_entry_t *slot = find_cam_settings_slot(mac);
+    return slot ? slot->xclk_mhz : XCLK_MHZ_DEFAULT;
+}
+
+void device_config_set_xclk_mhz(const uint8_t *mac, uint8_t mhz)
+{
+    cam_settings_entry_t *slot = find_or_create_cam_settings_slot(mac);
+    if (!slot) return;
+    slot->xclk_mhz = mhz ? mhz : XCLK_MHZ_DEFAULT;
     device_config_save();
 }
 

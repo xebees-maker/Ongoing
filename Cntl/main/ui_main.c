@@ -869,14 +869,8 @@ static void refresh_lang_texts(void)
      * 가있으면 건드리지 않고 건너뜀(다시 그 탭으로 올 때 ui_str()로 새로 지어지므로 언어가
      * 밀릴 일은 없음) */
     if (s_option_tab_built) {
-        lv_label_set_text(s_capture_interval_label, ui_str(STR_LABEL_CAPTURE_INTERVAL));
-        lv_label_set_text(s_capture_apply_lbl, ui_str(STR_BTN_APPLY));
         lv_label_set_text(s_response_interval_label, ui_str(STR_LABEL_RESPONSE_INTERVAL));
         lv_label_set_text(s_response_apply_lbl, ui_str(STR_BTN_APPLY));
-        lv_label_set_text(s_agc_label, ui_str(STR_LABEL_AGC));
-        lv_label_set_text(s_aec_label, ui_str(STR_LABEL_AEC));
-        lv_label_set_text(s_xclk_label, ui_str(STR_LABEL_XCLK));
-        lv_label_set_text(s_xclk_apply_lbl, ui_str(STR_BTN_APPLY));
         lv_label_set_text(s_adaptive_response_label, ui_str(STR_LABEL_ADAPTIVE_RESPONSE));
         lv_label_set_text(s_adaptive_apply_lbl, ui_str(STR_BTN_APPLY));
         lv_label_set_text(s_adaptive_help_label, ui_str(STR_HELP_ADAPTIVE_RESPONSE));
@@ -893,15 +887,9 @@ static void refresh_lang_texts(void)
 
         /* 드롭다운 옵션 문자열 자체도 언어별이라 다시 채워야 함 — lv_dropdown_set_options는
          * 선택 인덱스를 0으로 리셋시키므로, 지금 선택돼있던 인덱스를 기억했다가 그대로
-         * 되돌려줘야 사용자가 고른 값이 언어 전환 때문에 조용히 바뀌지 않음 */
-        uint16_t capture_sel = lv_dropdown_get_selected(s_capture_interval_dd);
-        lv_dropdown_set_options(s_capture_interval_dd, ui_str(STR_OPT_CAPTURE_INTERVAL_LIST));
-        lv_dropdown_set_selected(s_capture_interval_dd, capture_sel);
-
-        uint16_t xclk_sel = lv_dropdown_get_selected(s_xclk_dd);
-        lv_dropdown_set_options(s_xclk_dd, ui_str(STR_OPT_XCLK_LIST));
-        lv_dropdown_set_selected(s_xclk_dd, xclk_sel);
-
+         * 되돌려줘야 사용자가 고른 값이 언어 전환 때문에 조용히 바뀌지 않음.
+         * 2026-09-18 — 촬영주기/XCLK는 이제 장치별 설정 팝업 소속(그 팝업이 열려있을 때만
+         * 존재, sens_measure_dd와 마찬가지로 이 언어전환 목록엔 원래 없었음) */
         uint16_t response_sel = lv_dropdown_get_selected(s_response_interval_dd);
         lv_dropdown_set_options(s_response_interval_dd, ui_str(STR_OPT_RESPONSE_INTERVAL_LIST));
         lv_dropdown_set_selected(s_response_interval_dd, response_sel);
@@ -6219,10 +6207,9 @@ static void show_config_apply_popup(void)
 static void cb_apply_capture_interval(lv_event_t *e)
 {
     (void)e;
-    if (!s_has_selected_cam) {
-        ui_log_add("Capture interval apply: no camera selected");
-        return;
-    }
+    /* 2026-09-18(카메라별 설정 팝업으로 이관) — 이 콜백은 장치별 설정 팝업이 열려있을
+     * 때만 존재하는 위젯에 붙으므로, 대상은 항상 그 팝업의 카메라(s_device_popup_node) —
+     * 예전의 "설정탭에서 고른 카메라(s_selected_cam_mac)" 개념은 더 이상 안 씀 */
     uint16_t idx = lv_dropdown_get_selected(s_capture_interval_dd);
     uint32_t sec = (idx < (sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0])))
                    ? s_capture_interval_values[idx] : 0;
@@ -6234,8 +6221,8 @@ static void cb_apply_capture_interval(lv_event_t *e)
      * "진짜 실패"가 아니라 "다음 접속에 반영될 정상 대기 상태"임 — 2026-08-10, 사용자
      * 지적으로 require_active_or_report()(2007 에러) 대신 응답성 적용과 동일하게 정보
      * 로그만 남기도록 수정(처음엔 실수로 2007과 "저장됨" 안내가 동시에 뜨는 모순이 있었음) */
-    esp_now_hub_apply_cam_capture_interval_sec(s_selected_cam_mac, sec);
-    if (esp_now_hub_get_conn_state(s_selected_cam_mac) == HUB_CONN_STATE_WAITING) {
+    esp_now_hub_apply_cam_capture_interval_sec(s_device_popup_node.mac, sec);
+    if (esp_now_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
         ui_log_add("Capture interval saved - applied automatically on CAM reconnect");
         return;
     }
@@ -6267,18 +6254,14 @@ static void cb_apply_sens_measure_interval(lv_event_t *e)
 static void cb_apply_xclk(lv_event_t *e)
 {
     (void)e;
-    if (!s_has_selected_cam) {
-        ui_log_add("XCLK apply: no camera selected");
-        return;
-    }
     uint16_t idx = lv_dropdown_get_selected(s_xclk_dd);
     uint8_t mhz = (idx < (sizeof(s_xclk_values) / sizeof(s_xclk_values[0])))
                   ? s_xclk_values[idx] : s_xclk_values[0];
     s_config_apply_target = CONFIG_APPLY_TARGET_XCLK;
     s_config_apply_pending_idx = idx;
     s_config_apply_timeout_ms_override = 0;  /* 응답성 전용 보정값 — 이 요청엔 안 씀 */
-    esp_now_hub_apply_cam_xclk_mhz(s_selected_cam_mac, mhz);
-    if (esp_now_hub_get_conn_state(s_selected_cam_mac) == HUB_CONN_STATE_WAITING) {
+    esp_now_hub_apply_cam_xclk_mhz(s_device_popup_node.mac, mhz);
+    if (esp_now_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
         ui_log_add("XCLK saved - applied automatically on CAM reconnect");
         return;
     }
@@ -6327,13 +6310,9 @@ static void cb_apply_response_interval(lv_event_t *e)
 static void cb_agc_switch_changed(lv_event_t *e)
 {
     (void)e;
-    if (!s_has_selected_cam) {
-        ui_log_add("AGC apply: no camera selected");
-        return;
-    }
     bool enable = lv_obj_has_state(s_agc_switch, LV_STATE_CHECKED);
-    esp_now_hub_apply_cam_agc_enable(s_selected_cam_mac, enable);
-    if (esp_now_hub_get_conn_state(s_selected_cam_mac) == HUB_CONN_STATE_WAITING) {
+    esp_now_hub_apply_cam_agc_enable(s_device_popup_node.mac, enable);
+    if (esp_now_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
         ui_log_add("AGC saved - applied automatically on CAM reconnect");
     }
 }
@@ -6341,13 +6320,9 @@ static void cb_agc_switch_changed(lv_event_t *e)
 static void cb_aec_switch_changed(lv_event_t *e)
 {
     (void)e;
-    if (!s_has_selected_cam) {
-        ui_log_add("AEC apply: no camera selected");
-        return;
-    }
     bool enable = lv_obj_has_state(s_aec_switch, LV_STATE_CHECKED);
-    esp_now_hub_apply_cam_aec_enable(s_selected_cam_mac, enable);
-    if (esp_now_hub_get_conn_state(s_selected_cam_mac) == HUB_CONN_STATE_WAITING) {
+    esp_now_hub_apply_cam_aec_enable(s_device_popup_node.mac, enable);
+    if (esp_now_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
         ui_log_add("AEC saved - applied automatically on CAM reconnect");
     }
 }
@@ -8136,6 +8111,21 @@ static void teardown_device_popup(void)
     s_sens_measure_label = NULL;
     s_sens_measure_apply_lbl = NULL;
     s_sens_measure_applied_idx = -1;
+    /* 2026-09-18 — 촬영주기/AGC/AEC/XCLK 위젯도 이 팝업 자식(카메라일 때만 생성됨) */
+    s_capture_interval_dd = NULL;
+    s_capture_apply_btn = NULL;
+    s_capture_interval_label = NULL;
+    s_capture_apply_lbl = NULL;
+    s_capture_interval_applied_idx = -1;
+    s_agc_switch = NULL;
+    s_agc_label = NULL;
+    s_aec_switch = NULL;
+    s_aec_label = NULL;
+    s_xclk_dd = NULL;
+    s_xclk_apply_btn = NULL;
+    s_xclk_label = NULL;
+    s_xclk_apply_lbl = NULL;
+    s_xclk_applied_idx = -1;
     s_device_disconnect_btn = NULL;
     /* 다음에 팝업이 다시 열릴 때(같은 mac이라도) select_sensor()가 무조건 새 위젯을
      * 다시 동기화하도록 강제 — 아래 build_device_popup() 참고 */
@@ -8253,6 +8243,103 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_obj_set_style_text_font(s_sens_measure_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
         select_sensor(mac);  /* s_has_selected_sensor가 teardown에서 false로 리셋돼있어 항상 재동기화 */
+    } else {
+        /* 2026-09-18(사용자 지시 — "카메라 관련 설정들을... 캠마다 다르게 설정할 수 있도록")
+         * — 촬영주기/AGC/AEC/XCLK, 예전 설정탭 "영상" 그룹박스와 동일한 위젯 구성/이벤트,
+         * mac별 device_config getter로 이 카메라만의 값을 읽음 */
+        lv_obj_t *capture_row = lv_obj_create(popup);
+        lv_obj_set_size(capture_row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(capture_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(capture_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(capture_row, 0, 0);
+        lv_obj_set_style_pad_all(capture_row, 0, 0);
+
+        s_capture_interval_label = lv_label_create(capture_row);
+        lv_label_set_text(s_capture_interval_label, ui_str(STR_LABEL_CAPTURE_INTERVAL));
+        lv_obj_set_style_text_font(s_capture_interval_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+        lv_obj_t *capture_right = create_row_right_cluster(capture_row);
+
+        s_capture_interval_dd = lv_dropdown_create(capture_right);
+        lv_obj_set_style_pad_ver(s_capture_interval_dd, 7, 0);
+        lv_dropdown_set_options(s_capture_interval_dd, ui_str(STR_OPT_CAPTURE_INTERVAL_LIST));
+        s_capture_interval_applied_idx = find_value_index(s_capture_interval_values,
+            sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]),
+            device_config_get_cam_capture_interval_sec(mac));
+        lv_dropdown_set_selected(s_capture_interval_dd,
+            (uint16_t)(s_capture_interval_applied_idx >= 0 ? s_capture_interval_applied_idx : 0));
+        lv_obj_set_style_text_font(s_capture_interval_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_set_style_text_font(lv_dropdown_get_list(s_capture_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_add_event_cb(s_capture_interval_dd, cb_capture_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+        s_capture_apply_btn = lv_button_create(capture_right);
+        lv_obj_add_event_cb(s_capture_apply_btn, cb_apply_capture_interval, LV_EVENT_CLICKED, NULL);
+        update_capture_apply_enabled();
+        s_capture_apply_lbl = lv_label_create(s_capture_apply_btn);
+        lv_label_set_text(s_capture_apply_lbl, ui_str(STR_BTN_APPLY));
+        lv_obj_set_style_text_font(s_capture_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+        lv_obj_t *agc_row = lv_obj_create(popup);
+        lv_obj_set_size(agc_row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(agc_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(agc_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(agc_row, 0, 0);
+        lv_obj_set_style_pad_all(agc_row, 0, 0);
+
+        s_agc_label = lv_label_create(agc_row);
+        lv_label_set_text(s_agc_label, ui_str(STR_LABEL_AGC));
+        lv_obj_set_style_text_font(s_agc_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+        s_agc_switch = lv_switch_create(agc_row);
+        if (device_config_get_agc_enable(mac)) lv_obj_add_state(s_agc_switch, LV_STATE_CHECKED);
+        lv_obj_add_event_cb(s_agc_switch, cb_agc_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+        lv_obj_t *aec_row = lv_obj_create(popup);
+        lv_obj_set_size(aec_row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(aec_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(aec_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(aec_row, 0, 0);
+        lv_obj_set_style_pad_all(aec_row, 0, 0);
+
+        s_aec_label = lv_label_create(aec_row);
+        lv_label_set_text(s_aec_label, ui_str(STR_LABEL_AEC));
+        lv_obj_set_style_text_font(s_aec_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+        s_aec_switch = lv_switch_create(aec_row);
+        if (device_config_get_aec_enable(mac)) lv_obj_add_state(s_aec_switch, LV_STATE_CHECKED);
+        lv_obj_add_event_cb(s_aec_switch, cb_aec_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+        lv_obj_t *xclk_row = lv_obj_create(popup);
+        lv_obj_set_size(xclk_row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(xclk_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(xclk_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(xclk_row, 0, 0);
+        lv_obj_set_style_pad_all(xclk_row, 0, 0);
+
+        s_xclk_label = lv_label_create(xclk_row);
+        lv_label_set_text(s_xclk_label, ui_str(STR_LABEL_XCLK));
+        lv_obj_set_style_text_font(s_xclk_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+        lv_obj_t *xclk_right = create_row_right_cluster(xclk_row);
+
+        s_xclk_dd = lv_dropdown_create(xclk_right);
+        lv_obj_set_style_pad_ver(s_xclk_dd, 7, 0);
+        lv_dropdown_set_options(s_xclk_dd, ui_str(STR_OPT_XCLK_LIST));
+        s_xclk_applied_idx = find_value_index(s_xclk_values,
+            sizeof(s_xclk_values) / sizeof(s_xclk_values[0]),
+            device_config_get_xclk_mhz(mac));
+        lv_dropdown_set_selected(s_xclk_dd,
+            (uint16_t)(s_xclk_applied_idx >= 0 ? s_xclk_applied_idx : 0));
+        lv_obj_set_style_text_font(s_xclk_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_set_style_text_font(lv_dropdown_get_list(s_xclk_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_add_event_cb(s_xclk_dd, cb_xclk_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+        s_xclk_apply_btn = lv_button_create(xclk_right);
+        lv_obj_add_event_cb(s_xclk_apply_btn, cb_apply_xclk, LV_EVENT_CLICKED, NULL);
+        update_xclk_apply_enabled();
+        s_xclk_apply_lbl = lv_label_create(s_xclk_apply_btn);
+        lv_label_set_text(s_xclk_apply_lbl, ui_str(STR_BTN_APPLY));
+        lv_obj_set_style_text_font(s_xclk_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
     }
 
     /* 연결끊기 버튼 — 맨 아래, 위험한 조작이라 확인팝업 거침(cb_device_disconnect_clicked) */
@@ -9461,18 +9548,8 @@ static void teardown_option_tab(void)
     s_lang_label = NULL;
     s_btn_ko = NULL;
     s_btn_en = NULL;
-    s_capture_interval_label = NULL;
-    s_capture_interval_dd = NULL;
-    s_capture_apply_btn = NULL;
-    s_capture_apply_lbl = NULL;
-    s_agc_label = NULL;
-    s_agc_switch = NULL;
-    s_aec_label = NULL;
-    s_aec_switch = NULL;
-    s_xclk_label = NULL;
-    s_xclk_dd = NULL;
-    s_xclk_apply_btn = NULL;
-    s_xclk_apply_lbl = NULL;
+    /* 2026-09-18 — 촬영주기/AGC/AEC/XCLK 위젯은 이제 장치별 설정 팝업 소속이라 여기서 안
+     * 만들어짐(cb_close_device_popup()이 정리함) */
     s_response_interval_label = NULL;
     s_response_interval_dd = NULL;
     s_response_apply_btn = NULL;
@@ -9697,124 +9774,10 @@ static void build_option_tab(void)
      * 연결됨 리스트와 측정주기 행 둘 다 주화면(Sensor 판넬)+개별설정 팝업으로 이관돼서 이
      * 그룹박스엔 남는 내용이 없었음 */
 
-    /* 영상(Camera) 그룹박스 — 대기중/연결됨 리스트는 주화면으로 이관, 여기는 공통설정만
-     * 유지(촬영주기도 공통 — 사용자 지시: "카메라는 촬영 주기도 공통이야") */
-    lv_obj_t *camera_group_box = create_group_box(option_page, STR_GROUP_CAMERA);
-
-    /* 촬영주기 행(2026-08-08, 사용자 설계) — [라벨][드롭다운][Apply] 한 줄. 카메라별 설정이라
-     * 이 그룹박스(영상)에 유지, 응답성은 시스템 공통이라 아래 STR_GROUP_SYSTEM으로 이동 */
-    lv_obj_t *capture_row = lv_obj_create(camera_group_box);
-    lv_obj_set_size(capture_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(capture_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(capture_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(capture_row, 0, 0);
-    lv_obj_set_style_pad_hor(capture_row, 12, 0);
-    lv_obj_set_style_pad_ver(capture_row, 0, 0);
-
-    s_capture_interval_label = lv_label_create(capture_row);
-    lv_label_set_text(s_capture_interval_label, ui_str(STR_LABEL_CAPTURE_INTERVAL));
-    lv_obj_set_style_text_font(s_capture_interval_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    lv_obj_t *capture_right = create_row_right_cluster(capture_row);
-
-    s_capture_interval_dd = lv_dropdown_create(capture_right);
-    lv_obj_set_style_pad_ver(s_capture_interval_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
-    lv_dropdown_set_options(s_capture_interval_dd, ui_str(STR_OPT_CAPTURE_INTERVAL_LIST));
-    s_capture_interval_applied_idx = find_value_index(s_capture_interval_values,
-        sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]),
-        device_config_get_cam_capture_interval_sec());
-    /* find_value_index가 -1(못 찾음)을 반환할 수 있음(2026-08-11) — 그대로 두면 applied_idx
-     * 비교 로직(Apply 버튼 활성화 판단)에 -1이 정확히 필요하지만, 드롭다운 표시용 인덱스는
-     * 항상 유효한 범위여야 하므로 여기서만 0으로 방어 */
-    lv_dropdown_set_selected(s_capture_interval_dd,
-        (uint16_t)(s_capture_interval_applied_idx >= 0 ? s_capture_interval_applied_idx : 0));
-    /* 드롭다운 기본폰트는 한글 글리프가 없는 LVGL 내장 폰트 — 닫힌 상태 표시(MAIN)와 펼친
-     * 목록(lv_dropdown_get_list) 둘 다 커스텀 TTF로 따로 지정해야 함(안 하면 깨져 보임,
-     * 2026-08-08 실기에서 확인 — cntl_row의 s_btn_ko 체크박스와 같은 이유) */
-    lv_obj_set_style_text_font(s_capture_interval_dd, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_style_text_font(lv_dropdown_get_list(s_capture_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_add_event_cb(s_capture_interval_dd, cb_capture_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-    s_capture_apply_btn = lv_button_create(capture_right);
-    lv_obj_add_event_cb(s_capture_apply_btn, cb_apply_capture_interval, LV_EVENT_CLICKED, NULL);
-    /* 2026-08-11 버그수정 — "부팅 직후엔 표시값==저장값"이라는 가정이 항상 맞지는 않음(저장된
-     * 값이 지금 프리셋 목록에 없으면 applied_idx=-1이라 드롭다운 표시와 실제 적용값이 다를 수
-     * 있음, device_config 버전불일치 폴백 사고로 실사용 중 발견) — 무조건 비활성화하지 말고
-     * 실제 일치 여부로 판단 */
-    update_capture_apply_enabled();
-    s_capture_apply_lbl = lv_label_create(s_capture_apply_btn);  /* 전역: refresh_lang_texts에서 갱신 */
-    lv_label_set_text(s_capture_apply_lbl, ui_str(STR_BTN_APPLY));
-    lv_obj_set_style_text_font(s_capture_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    /* AGC/AEC 행(2026-08-21, 세로줄 노이즈 진단용) — [라벨][스위치] 한 줄씩, 토글 즉시
-     * 반영(위 cb_agc_switch_changed 주석 참고). 촬영주기와 같은 그룹박스(영상, 카메라별
-     * 설정) */
-    lv_obj_t *agc_row = lv_obj_create(camera_group_box);
-    lv_obj_set_size(agc_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(agc_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(agc_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(agc_row, 0, 0);
-    lv_obj_set_style_pad_hor(agc_row, 12, 0);
-    lv_obj_set_style_pad_ver(agc_row, 0, 0);
-
-    s_agc_label = lv_label_create(agc_row);
-    lv_label_set_text(s_agc_label, ui_str(STR_LABEL_AGC));
-    lv_obj_set_style_text_font(s_agc_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    s_agc_switch = lv_switch_create(agc_row);
-    if (device_config_get_agc_enable()) lv_obj_add_state(s_agc_switch, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(s_agc_switch, cb_agc_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-    lv_obj_t *aec_row = lv_obj_create(camera_group_box);
-    lv_obj_set_size(aec_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(aec_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(aec_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(aec_row, 0, 0);
-    lv_obj_set_style_pad_hor(aec_row, 12, 0);
-    lv_obj_set_style_pad_ver(aec_row, 0, 0);
-
-    s_aec_label = lv_label_create(aec_row);
-    lv_label_set_text(s_aec_label, ui_str(STR_LABEL_AEC));
-    lv_obj_set_style_text_font(s_aec_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    s_aec_switch = lv_switch_create(aec_row);
-    if (device_config_get_aec_enable()) lv_obj_add_state(s_aec_switch, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(s_aec_switch, cb_aec_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-    /* XCLK 행(2026-08-21, 화질/노이즈 진단용) — 촬영주기와 같은 [라벨][드롭다운][Apply]
-     * 구조(즉시적용 스위치가 아니라 확인응답 팝업 있는 Apply 패턴, 사용자 지시) */
-    lv_obj_t *xclk_row = lv_obj_create(camera_group_box);
-    lv_obj_set_size(xclk_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(xclk_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(xclk_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(xclk_row, 0, 0);
-    lv_obj_set_style_pad_hor(xclk_row, 12, 0);
-    lv_obj_set_style_pad_ver(xclk_row, 0, 0);
-
-    s_xclk_label = lv_label_create(xclk_row);
-    lv_label_set_text(s_xclk_label, ui_str(STR_LABEL_XCLK));
-    lv_obj_set_style_text_font(s_xclk_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    lv_obj_t *xclk_right = create_row_right_cluster(xclk_row);
-
-    s_xclk_dd = lv_dropdown_create(xclk_right);
-    lv_obj_set_style_pad_ver(s_xclk_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
-    lv_dropdown_set_options(s_xclk_dd, ui_str(STR_OPT_XCLK_LIST));
-    s_xclk_applied_idx = find_value_index(s_xclk_values,
-        sizeof(s_xclk_values) / sizeof(s_xclk_values[0]),
-        device_config_get_xclk_mhz());
-    lv_dropdown_set_selected(s_xclk_dd,
-        (uint16_t)(s_xclk_applied_idx >= 0 ? s_xclk_applied_idx : 0));
-    lv_obj_set_style_text_font(s_xclk_dd, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_style_text_font(lv_dropdown_get_list(s_xclk_dd), ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_add_event_cb(s_xclk_dd, cb_xclk_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-    s_xclk_apply_btn = lv_button_create(xclk_right);
-    lv_obj_add_event_cb(s_xclk_apply_btn, cb_apply_xclk, LV_EVENT_CLICKED, NULL);
-    update_xclk_apply_enabled();
-    s_xclk_apply_lbl = lv_label_create(s_xclk_apply_btn);
-    lv_label_set_text(s_xclk_apply_lbl, ui_str(STR_BTN_APPLY));
-    lv_obj_set_style_text_font(s_xclk_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    /* 2026-09-18(사용자 지시 — "카메라 관련 설정들을... 캠마다 다르게 설정할 수 있도록",
+     * "설정팝업의 카메라 판넬 내용은 이제 필요 없어져") — 영상(Camera) 그룹박스 자체를
+     * 제거함. 촬영주기/AGC/AEC/XCLK 전부 카메라별(mac) 설정으로 재설계되어 장치별 설정
+     * 팝업(build_device_popup(), 카메라 행 탭 시)으로 이관됨 — 설정 화면에 남는 내용 없음 */
 
     /* 시스템(System) 그룹박스 — 응답성(연결성/절전, 전체 공통 하나) 행. 촬영주기와 같은
      * [라벨][드롭다운][Apply] 인라인 레이아웃 */

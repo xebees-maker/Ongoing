@@ -284,11 +284,11 @@ static void push_cam_config_to(const uint8_t *mac)
         .version                = ESP_NOW_LINK_VERSION,
         .msg_type               = ESP_NOW_MSG_CAM_CONFIG_SET,
         .wb_mode                = CAM_WB_AUTO,
-        .capture_interval_sec   = device_config_get_cam_capture_interval_sec(),
+        .capture_interval_sec   = device_config_get_cam_capture_interval_sec(mac),
         .response_interval_sec  = device_config_get_response_interval_sec(),
-        .agc_enable             = device_config_get_agc_enable() ? 1 : 0,
-        .aec_enable             = device_config_get_aec_enable() ? 1 : 0,
-        .xclk_mhz               = device_config_get_xclk_mhz(),
+        .agc_enable             = device_config_get_agc_enable(mac) ? 1 : 0,
+        .aec_enable             = device_config_get_aec_enable(mac) ? 1 : 0,
+        .xclk_mhz               = device_config_get_xclk_mhz(mac),
         .nack_max_rounds        = device_config_get_nack_max_rounds(),
         /* 2026-08-25(CASK 재설계) — 예전 별도 SET_TIME 메시지를 대체. CONFIG가 이미 매
          * 사이클 무조건 나가니 몇 바이트 더 싣는 게 별도 왕복 하나를 통째로 없애는 것보다
@@ -1373,7 +1373,7 @@ void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode)
 
 void esp_now_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
 {
-    device_config_set_cam_capture_interval_sec(sec);
+    device_config_set_cam_capture_interval_sec(mac, sec);
     push_cam_config_to(mac);
 }
 
@@ -1386,19 +1386,19 @@ void esp_now_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec
 /* 2026-08-21 — AGC/AEC On/Off(세로줄 노이즈 진단용), 촬영주기와 같은 카메라별 설정 패턴 */
 void esp_now_hub_apply_cam_agc_enable(const uint8_t *mac, bool enable)
 {
-    device_config_set_agc_enable(enable);
+    device_config_set_agc_enable(mac, enable);
     push_cam_config_to(mac);
 }
 
 void esp_now_hub_apply_cam_aec_enable(const uint8_t *mac, bool enable)
 {
-    device_config_set_aec_enable(enable);
+    device_config_set_aec_enable(mac, enable);
     push_cam_config_to(mac);
 }
 
 void esp_now_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz)
 {
-    device_config_set_xclk_mhz(mhz);
+    device_config_set_xclk_mhz(mac, mhz);
     push_cam_config_to(mac);
 }
 

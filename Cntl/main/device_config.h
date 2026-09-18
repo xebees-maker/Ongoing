@@ -8,10 +8,10 @@
  *          현재 페어링된 CAM에도 즉시 전송됨(esp_now_hub_apply_cam_capture_interval_sec/
  *          esp_now_hub_apply_response_interval_sec 참고).
  *
- *          촬영주기는 카메라별 설정(배터리/SD 트레이드오프), 응답성은 시스템 전체 공통
- *          설정(연결성/절전 트레이드오프) — 지금은 CAM이 보통 1대라 촬영주기도 전역 값
- *          하나로 둠(esp_now_hub_bench_start()가 이미 "첫 페어링된 CAM" 대상으로 동작하는
- *          것과 같은 단순화). CAM이 여러 대로 늘면 MAC별 저장으로 확장 필요.
+ *          촬영주기/AGC/AEC/XCLK는 카메라별(mac) 설정(배터리/SD/화질 트레이드오프가 카메라
+ *          마다 다를 수 있음), 응답성/적응형 반응시간은 시스템 전체 공통 설정(연결성/절전
+ *          트레이드오프, 캠·센스 공용) — 2026-09-18: 촬영주기/AGC/AEC/XCLK를 전역 값 하나
+ *          공유 방식에서 mac 키 슬롯 방식(Sens 측정주기와 동일 패턴)으로 재설계.
  */
 
 #include <stdint.h>
@@ -24,9 +24,11 @@ extern "C" {
 /* app_main()에서 fs_init() 이후 한 번 호출 — 저장된 값 있으면 복원, 없으면 기본값 유지 */
 void device_config_load(void);
 
-/* CAM 촬영주기(초, 0=자동촬영 끔) — 기본값 1800(30분, CAM Kconfig 기본과 동일) */
-uint32_t device_config_get_cam_capture_interval_sec(void);
-void     device_config_set_cam_capture_interval_sec(uint32_t sec);
+/* CAM 촬영주기(초, 0=자동촬영 끔) — 카메라별(mac) 설정, 기본값 1800(30분).
+ * 2026-09-18(사용자 지시 — "개별 캠마다 설정") — 전역 값 하나에서 Sens 측정주기와 동일한
+ * mac 키 슬롯 방식으로 재설계. getter는 항상 유효한 값을 반환(없는 mac이면 디폴트) */
+uint32_t device_config_get_cam_capture_interval_sec(const uint8_t *mac);
+void     device_config_set_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec);
 
 /* 시스템 공통 응답성(초) — 기본값 2 */
 uint32_t device_config_get_response_interval_sec(void);
@@ -39,17 +41,17 @@ void     device_config_set_response_interval_sec(uint32_t sec);
 uint32_t device_config_get_adaptive_response_sec(void);
 void     device_config_set_adaptive_response_sec(uint32_t sec);
 
-/* AGC(자동게인)/AEC(자동노출) On/Off(2026-08-21, 세로줄 노이즈 진단용) — 카메라별 설정
- * (촬영주기와 같은 그룹), 기본값 true(센서 전원인가 기본값과 일치) */
-bool device_config_get_agc_enable(void);
-void device_config_set_agc_enable(bool enable);
-bool device_config_get_aec_enable(void);
-void device_config_set_aec_enable(bool enable);
+/* AGC(자동게인)/AEC(자동노출) On/Off(2026-08-21, 세로줄 노이즈 진단용) — 카메라별(mac)
+ * 설정, 기본값 true. 2026-09-18: mac 키 슬롯 방식(위 촬영주기와 동일 이유) */
+bool device_config_get_agc_enable(const uint8_t *mac);
+void device_config_set_agc_enable(const uint8_t *mac, bool enable);
+bool device_config_get_aec_enable(const uint8_t *mac);
+void device_config_set_aec_enable(const uint8_t *mac, bool enable);
 
-/* XCLK(MHz) 프리셋(2026-08-21, 화질/노이즈 진단용) — 카메라별 설정, 기본값 24(OV5640 기존
- * 컴파일타임 상수와 일치) */
-uint8_t device_config_get_xclk_mhz(void);
-void    device_config_set_xclk_mhz(uint8_t mhz);
+/* XCLK(MHz) 프리셋(2026-08-21, 화질/노이즈 진단용) — 카메라별(mac) 설정, 기본값 10.
+ * 2026-09-18: mac 키 슬롯 방식(위와 동일 이유) */
+uint8_t device_config_get_xclk_mhz(const uint8_t *mac);
+void    device_config_set_xclk_mhz(const uint8_t *mac, uint8_t mhz);
 
 /* WiFi 모드(2026-08-29) — false=종속(STA, 기존 WIFI_SSID/PASSWORD 또는 아래 sta_ssid로 접속),
  * true=독립(AP, esp_now_hub.c의 CNTL_AP_SSID/PASSWORD/CHANNEL로 자체 AP). 기본값 false(STA) —
