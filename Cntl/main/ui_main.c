@@ -1010,8 +1010,12 @@ static lv_obj_t *create_modal(void)
     lv_obj_set_style_border_width(overlay, 0, 0);
     lv_obj_set_style_radius(overlay, 0, 0);
 
+    /* 2026-09-18(사용자 지시 — "전에 팝업 컨벤션 정할 때... 폭을 화면 2/3으로", 프로젝트
+     * 전역 컨벤션으로 저장: project_cntl_modal_popup_width_convention) — 고정 420px 대신
+     * 화면 폭의 2/3. 높이는 여전히 가변(LV_SIZE_CONTENT) — 고정폭이 의미 없다고 이전에
+     * 정리됐던 부분 그대로 유지 */
     lv_obj_t *box = lv_obj_create(overlay);
-    lv_obj_set_size(box, 420, LV_SIZE_CONTENT);
+    lv_obj_set_size(box, LV_PCT(67), LV_SIZE_CONTENT);
     lv_obj_center(box);
     lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
     s_last_modal = box;
@@ -9240,10 +9244,19 @@ static void show_override_confirm_popup(int idx)
     s_override_popup_idx = idx;
     lv_obj_t *box = create_modal();
 
-    lv_obj_t *title = lv_label_create(box);
+    /* 2026-09-18(사용자 지시 — "타이틀 바는 못 만들어? 글씨는 까망이고") — 단순 색글씨가
+     * 아니라 배경색 있는 실제 타이틀 바(노란 배경 + 검은 글씨) */
+    lv_obj_t *title_bar = lv_obj_create(box);
+    lv_obj_set_size(title_bar, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(title_bar, lv_palette_main(LV_PALETTE_YELLOW), 0);
+    lv_obj_set_style_bg_opa(title_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(title_bar, 0, 0);
+    lv_obj_set_style_pad_hor(title_bar, 12, 0);
+    lv_obj_set_style_pad_ver(title_bar, 6, 0);
+    lv_obj_t *title = lv_label_create(title_bar);
     lv_label_set_text(title, ui_str(STR_TITLE_WARNING));
     lv_obj_set_style_text_font(title, ui_font_get(UI_FONT_SIZE_24), 0);
-    lv_obj_set_style_text_color(title, lv_palette_main(LV_PALETTE_YELLOW), 0);
+    lv_obj_set_style_text_color(title, lv_color_black(), 0);
 
     lv_obj_t *msg_row = lv_obj_create(box);
     lv_obj_set_size(msg_row, LV_PCT(100), LV_SIZE_CONTENT);
@@ -9253,8 +9266,12 @@ static void show_override_confirm_popup(int idx)
     lv_obj_set_style_pad_all(msg_row, 0, 0);
     lv_obj_set_style_pad_column(msg_row, 8, 0);
 
+    /* 2026-09-18(사용자 지적 — "wordwrap 안 되서 스크롤 생겼어") — long_mode/폭을 빠뜨렸던
+     * 실수 수정. flex_grow로 스위치 옆 남는 폭만큼 감싸도록 */
     lv_obj_t *msg = lv_label_create(msg_row);
     lv_label_set_text(msg, ui_str(STR_MSG_OVERRIDE_WARNING));
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_flex_grow(msg, 1);
     lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_override_switch = lv_switch_create(msg_row);
