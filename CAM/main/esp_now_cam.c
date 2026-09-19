@@ -82,6 +82,9 @@ typedef struct {
 } cam_task_request_t;
 
 static QueueHandle_t s_photo_request_queue = NULL;
+/* 2026-08-10 도입 — photo_transfer_task가 뭔가 처리 중인지(2026-09-19: esp_now_cam_enqueue_
+ * auto_capture()도 큐잉 시점에 앞당겨 세팅함 — mark_transfer_idle() 주석 참고) */
+static volatile bool s_transfer_busy = false;
 static volatile bool s_list_request_pending = false;  /* recv_cb 중복 LIST_REQUEST 억제용 */
 static volatile bool s_list_abort_requested = false;  /* 2026-08-11 — Cntl이 PHOTO_LIST_ERROR를
                                                            보내면 세팅, send_photo_list()가
@@ -694,13 +697,24 @@ bool esp_now_cam_push_captured_photo(const uint8_t *buf, size_t len, cam_capture
     return send_photo_from_buffer_sr(buf, len, file_id, kind, s_request_generation);
 }
 
-void esp_now_cam_enqueue_auto_capture(void)
+bool esp_now_cam_enqueue_auto_capture(void)
 {
-    if (!s_photo_request_queue) return;
+    if (!s_photo_request_queue) return false;
     cam_task_request_t item = { .kind = CAM_TASK_REQ_AUTO_CAPTURE };
     if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
         ESP_LOGW(TAG, "AUTO_CAPTURE 큐잉 실패(큐 가득참, 직전 촬영 처리 중) — 이번 주기 건너뜀");
+        return false;
     }
+    /* 2026-09-19(주기촬영 재설계) — photo_transfer_task가 실제로 큐에서 꺼내기 *전*이라도
+     * 여기서 바로 busy로 표시 — 그 틈에 호출부(cam_node.c의 CASK 루프)가 아직 안 바쁨으로
+     * 오판해서 전송이 시작되기도 전에 잠들어버리는 레이스를 막음 */
+    s_transfer_busy = true;
+    return true;
+}
+
+bool esp_now_cam_is_transfer_busy(void)
+{
+    return s_transfer_busy;
 }
 
 /* 목록 요청 — 파일 내용 전송 없이 file_id/크기만 알려줌. 최대 500장 처리라
@@ -924,11 +938,11 @@ static void run_transfer_bench(esp_now_bench_mode_t mode, uint16_t duration_sec)
 
 /* 2026-08-10 도입, 처리 종류가 여럿이라 매 return/continue 지점마다 짝을 맞추는 대신 이번
  * 반복 시작에 세우고 끝에 내림. 2026-08-26 — 이걸 밖으로 노출하던 esp_now_cam_is_busy()는
- * 삭제됨(CNTL이 통신 중엔 SLEEP_NOW를 0으로 보내도록 고쳐서, 캠이 스스로 busy를 확인할
- * 필요 자체가 없어짐 — esp_now_hub.c의 send_cask_sleep_now()/esp_now_photo_is_transacting_with
- * 참고). s_transfer_busy 자체와 아래 mark_transfer_idle()의 재확인 신호는 그대로 유지 —
- * app_main의 이벤트드리븐 대기 루프가 여전히 이 신호로 깨어남 */
-static volatile bool s_transfer_busy = false;
+ * 삭제됐다가, 2026-09-19(주기촬영 재설계)에 esp_now_cam_is_transfer_busy()로 다시 노출됨 —
+ * cam_node.c의 CASK 루프가 "방금 큐잉한 촬영이 다 끝났는지" 확인해야 하기 때문(그 전엔
+ * CNTL이 통신 중엔 SLEEP_NOW를 0으로 보내는 것만으로 충분했지만, 이번 촬영은 CNTL이 그 SLEEP_NOW를
+ * 결정하는 바로 그 사이클에 막 큐잉되는 것이라 그 메커니즘이 아직 못 따라잡음 — s_transfer_busy
+ * 선언은 파일 앞쪽(esp_now_cam_enqueue_auto_capture 등에서도 씀)으로 옮겨짐 */
 
 /* 2026-08-23 — busy 해제 지점마다 cam_node.c의 이벤트드리븐 대기 루프를 깨움(CAML에서
  * 검증 후 이식). 기존에 여러 return/continue 지점마다 s_transfer_busy=false만 하던 걸

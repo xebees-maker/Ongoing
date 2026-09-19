@@ -52,4 +52,12 @@ bool esp_now_cam_push_captured_photo(const uint8_t *buf, size_t len, cam_capture
  *        작은 스택의 esp_timer 태스크 컨텍스트)에서 호출. 무거운 작업(촬영+전송)은 직접 하지
  *        않고 photo_transfer_task(24KB 스택의 전용 태스크)로 큐잉만 함 — 큐가 가득 차 있으면
  *        (직전 촬영 처리 중) 조용히 버림, 다음 주기가 재시도함 */
-void esp_now_cam_enqueue_auto_capture(void);
+/* 2026-09-19(주기촬영 재설계) — 큐잉이 실제로 됐는지(false면 큐가 꽉 차서 이번엔 건너뜀)
+ * 반환. 성공하면 이 시점에 이미 s_transfer_busy=true로 표시돼 있어서(photo_transfer_task가
+ * 큐에서 실제로 꺼내기 전이라도), esp_now_cam_is_transfer_busy()를 곧바로 폴링해도 "아직 안
+ * 바쁨"으로 오판해 잠들어버리는 레이스가 없음 */
+bool esp_now_cam_enqueue_auto_capture(void);
+/* 2026-09-19 — cam_node.c의 CASK 루프가 "방금 큐잉한 촬영이 다 끝났는지" 기다릴 때 씀.
+ * mark_transfer_idle()이 매번 cam_node_signal_recheck()도 같이 불러주므로, 호출부는
+ * s_wake_recheck_sem을 기다리다 깨면 이 값을 다시 확인하는 폴링 루프로 쓰면 됨 */
+bool esp_now_cam_is_transfer_busy(void);

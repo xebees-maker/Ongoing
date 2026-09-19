@@ -1,7 +1,9 @@
 /**
  * @file    stats_store.h
- * @brief   Sens 채널값 시계열을 SD카드(/sdcard/stats/values.bin)에 고정크기 이진 레코드로
- *          영구 저장(2026-09-06, 사용자 설계 — "1년 지나서라도" 조회 가능해야 함).
+ * @brief   Sens 채널값 시계열을 SD카드(/sdcard/stats/values_v2.bin, 2026-09-19 kind 필드
+ *          추가로 포맷 변경 — 옛 values.bin은 고아로 남김, 아래 "계열 자기서술 재설계" 참고)에
+ *          고정크기 이진 레코드로 영구 저장(2026-09-06, 사용자 설계 — "1년 지나서라도" 조회
+ *          가능해야 함).
  *
  *          모든 노드/채널을 하나의 파일에 도착순(=시간순, Cntl 자기 벽시계 기준)으로 이어
  *          씀 — WAKE_HELLO_SENS 처리는 s_nodes_mutex 아래 한 곳에서만 일어나므로 별도
@@ -24,11 +26,18 @@ extern "C" {
 typedef struct __attribute__((packed)) {
     uint32_t unix_time;
     uint8_t  mac[6];
+    uint8_t  kind;        /* 2026-09-19(계열 자기서술 재설계, 사용자 설계) — sensor_kind_t.
+                            * 기록 시점에 이미 콘이 알고 있는 값(라이브 노드의 sensor_kind)을
+                            * 바로 박아넣음 — 읽을 때 mac->kind 역조회(라이브 노드 목록/
+                            * 영구저장소 조회) 없이 레코드 자신이 어떤 계열인지 항상 스스로
+                            * 알고 있게 함. 사용자 원칙: "레코드의 값이 어떤 계열인지만 알면
+                            * 항상 대처 가능한 그림을 그릴 수 있다" */
     uint8_t  chan_type;   /* sensor_channel_type_t */
     uint8_t  chan_index;  /* 그 노드 chan_type[]/chan_val[] 배열에서의 인덱스(0..4) —
                             * 레거시 콤보처럼 같은 chan_type이 한 노드에 2개 이상일 때 구분용 */
     float    value;
-} stats_record_t;  /* 16바이트 고정 — 페이지번호*STATS_STORE_PAGE_SIZE*16 = 파일 오프셋 */
+} stats_record_t;  /* 17바이트 고정(2026-09-19, kind 추가로 16->17) —
+                       페이지번호*STATS_STORE_PAGE_SIZE*sizeof(stats_record_t) = 파일 오프셋 */
 
 /* 2026-09-15(사용자 지시 — "전화면이 되면서... 지금 10개 row로 되어 있는데, 4개는 더
  * 들어갈 듯") — 2열 x 14행 = 28 */
@@ -135,12 +144,16 @@ typedef struct __attribute__((packed)) {
     uint8_t  mac[6];             /* 2026-09-15(사용자 지시 — "kind 추가해야지... Agar는 각
                                      기기마다 하나의 계열") — 장치까지 키에 포함. SCD41/SHT45가
                                      둘 다 온도를 보내도 서로 다른 계열로 분리 저장됨 */
+    uint8_t  kind;                /* 2026-09-19(계열 자기서술 재설계) — stats_record_t.kind와
+                                      동일 이유. 이 필드 덕분에 그래프가 "이 mac이 어떤
+                                      계열이었나"를 라이브 노드 목록/영구저장소에 물어볼 필요
+                                      없이, 저장된 버킷 자신이 스스로 답을 들고 있음 */
     uint8_t  chan_type;
     uint8_t  sample_count;       /* 진단용 — 이 버킷 구간에 실제로 들어온 실측값 개수(평균에
                                      쓰이지 않음, 대표값 선정과 무관) */
     float    avg_value;          /* "평균"이 아니라 버킷 중앙시각에 가장 가까운 실측값 그대로
                                      (필드명은 하위호환을 위해 유지, 의미만 바뀜) */
-} stats_bucket_t;  /* 16바이트 고정(mac 추가로 10->16) */
+} stats_bucket_t;  /* 17바이트 고정(2026-09-19, kind 추가로 16->17) */
 
 /* scale_idx(0..4)의 사전집계 저장에서, [window_start_unix, window_end_unix) 범위 안의
  * mac+chan_type 버킷들을 out에 채움(파일에 쓰인 순서=시간순 그대로). 실제 채운 개수 반환.
@@ -151,6 +164,17 @@ typedef struct __attribute__((packed)) {
 uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type, const uint8_t mac[6],
                                 uint32_t window_start_unix, uint32_t window_end_unix,
                                 stats_bucket_t *out, uint32_t out_cap);
+
+/* 2026-09-19(계열 자기서술 재설계, 사용자 설계 — "레코드의 값이 어떤 계열인지만 알면 항상
+ * 대처 가능한 그림을 그릴 수 있다") — 그래프가 "어떤 mac들이 이 chan_type을 갖고 있나"를
+ * 알아내려고 예전엔 살아있는 노드 목록+영구저장소(sens_kind_store)를 먼저 훑었음(라이브
+ * 연결이 끊기면 조용히 실패하던 근본 원인). 이제 가장 넓은 스케일(1주)의 사전집계 파일
+ * 자체를 훑어서, 그 안에 실제로 존재하는 서로 다른 (mac,kind) 조합을 직접 알아냄 — 별도
+ * 레지스트리 조회가 전혀 없음. 시간창을 안 받는 이유: "이 chan_type을 보고할 수 있는
+ * 후보가 누구인가"라는 존재여부 판정이지, 특정 스케일 화면에 지금 표시될 값 자체가
+ * 아니라서(그건 stats_agg_read_window()가 여전히 담당) 창 제한이 필요 없음 */
+uint32_t stats_agg_collect_macs(uint8_t chan_type, uint8_t out_macs[][6], uint8_t out_kinds[],
+                                 uint32_t out_cap);
 
 #ifdef __cplusplus
 }

@@ -134,7 +134,19 @@ static uint32_t s_capture_interval_sec  = 0;  /* app_main에서 Kconfig 기본�
  * 아직 0)엔 여전히 0(Live, 안전한 기본값)이고, 한 번이라도 CONFIG를 받은 뒤로는 마지막
  * 적용값을 그대로 들고 다음 부팅까지 이어감 */
 static RTC_DATA_ATTR uint32_t s_response_interval_sec = CAM_RESPONSE_INTERVAL_SEC_DEFAULT;
-static esp_timer_handle_t s_capture_timer = NULL;
+
+/* 2026-09-19(주기촬영 재설계 — 사용자 설계) — esp_timer_start_periodic()(RAM 타이머)로
+ * 스스로 주기촬영을 재던 예전 방식은 구조적으로 못 울릴 수 있음이 드러남: CAM_CONFIG_SET이
+ * 매 WAKE_HELLO마다(라이브모드면 초당 한 번꼴로) 다시 오고, cam_node_set_capture_interval_sec()가
+ * 값이 같아도 매번 무조건 타이머를 stop+재시작해서 촬영주기를 다 채우기도 전에 계속
+ * 리셋됐음. 진짜 딥슬립(라이브모드 아닐 때)에서도 RAM 타이머는 당연히 못 버팀.
+ * 대신 "다음 촬영 예정 시각"을 RTC 메모리(딥슬립 경계 넘어 유지)에 벽시계 기준으로 남겨두고,
+ * 캠이 깨어날 때마다(CASK 루프, cam_node.c 아래쪽) 직접 비교해서 판단 — CONFIG는 여전히
+ * capture_interval_sec 값만 캠에게 전달하는 정보일 뿐(콘이 촬영을 대신 트리거하지 않음),
+ * 그 값으로 언제 깨고 언제 찍을지는 캠 스스로 판단(사용자 지시: "콘이 명령 줄 수 있는 기회는
+ * 캠의 웨헬 때뿐이야, ... 콘피그 값에 의해서 캠이 결정하잖아"). 0=아직 계산 안 됨(최초
+ * 부팅/재플래시) — 이 경우 다음 판단 시점에 "이미 지남"으로 취급돼 첫 주기가 즉시 도달함 */
+static RTC_DATA_ATTR time_t s_next_capture_due_unix_time = 0;
 
 /* 2026-08-21 — 세로줄(컬럼 고정패턴노이즈) 진단용. 센서 전원인가 기본값이 곧 "켬"(자동)이라
  * 그대로 초기값도 true — 소프트웨어가 명시적으로 끈 적 없는 지금 상태와 일치시킴 */
@@ -177,18 +189,23 @@ static uint32_t clamp_capture_interval_sec(uint32_t sec)
 void cam_node_set_capture_interval_sec(uint32_t sec)
 {
     sec = clamp_capture_interval_sec(sec);
+    bool changed = (sec != s_capture_interval_sec);
     s_capture_interval_sec = sec;
 
-    if (!s_capture_timer) return;  /* app_main이 아직 타이머를 안 만든 시점(설정 로드 단계) */
-    esp_timer_stop(s_capture_timer);
     if (sec == 0) {
         cam_node_set_auto_capture(false);
-        ESP_LOGI(TAG, "자동촬영 끔(주기=0)");
+        if (changed) ESP_LOGI(TAG, "자동촬영 끔(주기=0)");
         return;
     }
     cam_node_set_auto_capture(true);
-    esp_timer_start_periodic(s_capture_timer, (uint64_t)sec * 1000000ULL);
-    ESP_LOGI(TAG, "자동촬영 주기 변경: %us", (unsigned)sec);
+    if (changed) {
+        /* 2026-09-19(주기촬영 재설계) — 값이 실제로 바뀌었을 때만(꺼졌다 켜진 경우 포함)
+         * 다음 예정시각을 새로 잡음 — CONFIG는 매 WAKE_HELLO마다(라이브모드면 거의 매초)
+         * 같은 값을 반복해서 실어오는데, 그때마다 리셋하면 예전 esp_timer 버그와 똑같이
+         * 촬영주기를 절대 못 채움 */
+        s_next_capture_due_unix_time = time(NULL) + (time_t)sec;
+        ESP_LOGI(TAG, "자동촬영 주기 변경: %us (다음 촬영 목표시각 갱신)", (unsigned)sec);
+    }
 }
 
 uint32_t cam_node_get_capture_interval_sec(void) { return s_capture_interval_sec; }
@@ -609,20 +626,6 @@ void cam_node_set_xclk_target_mhz(uint8_t mhz)
     }
 }
 
-static void capture_timer_cb(void *arg)
-{
-    (void)arg;
-    if (!s_auto_capture_enabled) {
-        return;  /* 콘솔의 auto off 명령으로 꺼둔 상태 */
-    }
-    if (dev_console_auto_capture_paused()) {
-        return;  /* 콘솔 사용 중 — 이번 주기 건너뜀 */
-    }
-    /* 2026-09-18(SD 제거 재설계) — 이 콜백은 esp_timer 태스크(작은 스택)에서 돌아서 촬영+
-     * ESP-NOW 전송(블로킹)을 직접 하면 안 됨 — photo_transfer_task로 큐잉만 함 */
-    esp_now_cam_enqueue_auto_capture();
-}
-
 bool cam_node_capture_now(void)
 {
     return cam_node_capture_now_sized(NULL);
@@ -769,10 +772,12 @@ void app_main(void)
      * 실제값으로 재무장됨) */
     cam_node_set_response_interval_sec(s_response_interval_sec);
 
-    const esp_timer_create_args_t capture_args = { .callback = capture_timer_cb, .name = "cam_capture" };
-    ESP_ERROR_CHECK(esp_timer_create(&capture_args, &s_capture_timer));
+    /* 2026-09-19(주기촬영 재설계) — RAM 타이머(esp_timer_start_periodic) 제거, CASK 루프가
+     * 깰 때마다 s_next_capture_due_unix_time(RTC 메모리, 딥슬립 경계 넘어 유지)과 직접
+     * 비교해서 판단함(cam_node_set_capture_interval_sec()/아래 CASK 루프 참고). 여기선
+     * auto_capture 플래그만 초기값에 맞춰줌 — 다음 예정시각은 RTC에 이미 있던 값(재부팅
+     * 사이) 또는 0(진짜 최초 부팅 — "이미 지남"으로 취급돼 첫 판단 때 바로 도달)을 그대로 씀 */
     if (s_capture_interval_sec > 0) {
-        ESP_ERROR_CHECK(esp_timer_start_periodic(s_capture_timer, (uint64_t)s_capture_interval_sec * 1000000ULL));
         cam_node_set_auto_capture(true);
     }
 
@@ -837,8 +842,35 @@ void app_main(void)
             continue;
         }
 
+        /* 2026-09-19(주기촬영 재설계 — 사용자 설계) — 이번 CASK를 정상적으로 한 번
+         * 완주했으면(=CNTL과 실제로 통신함) 매번 "다음 촬영 예정 시각"에 도달했는지 확인.
+         * 도달했으면 콘이 이번 사이클에 뭘 주든(SLEEP_NOW로 재우려 해도) 상관없이 여기서
+         * 먼저 촬영+전송을 끝냄 — 전송이 끝날 때까지는 진짜로 잠들지 않음(사용자 지시:
+         * "사진 전송이 완료될 때까지 자지 말고 일을 해야지"). esp_now_cam_enqueue_auto_capture()가
+         * 성공하는 순간 이미 busy로 표시되므로(레이스 없음), 그 뒤로 안 바빠질 때까지
+         * 기다리기만 하면 됨 — mark_transfer_idle()이 매번 s_wake_recheck_sem도 깨워줌 */
+        if (cam_node_get_auto_capture() && s_capture_interval_sec > 0 &&
+            !dev_console_auto_capture_paused() &&
+            time(NULL) >= s_next_capture_due_unix_time) {
+            if (esp_now_cam_enqueue_auto_capture()) {
+                while (esp_now_cam_is_transfer_busy()) {
+                    xSemaphoreTake(s_wake_recheck_sem, pdMS_TO_TICKS(1000));
+                }
+                s_next_capture_due_unix_time = time(NULL) + (time_t)s_capture_interval_sec;
+            }
+        }
+
         if (s_sleep_sec_from_cntl != 0) {
             sleep_sec = s_sleep_sec_from_cntl;
+            /* 2026-09-19 — 촬영주기가 응답성보다 짧으면, 다음 체크인까지 기다리지 않고
+             * 촬영 예정시각에 맞춰 더 일찍 깨야 함(사용자 지시: "주기촬영 시간과 슬립나우
+             * 기간이 일치하지 않을 경우 주기촬영 주기에 깨나는 게 우선") */
+            if (cam_node_get_auto_capture() && s_capture_interval_sec > 0) {
+                time_t now = time(NULL);
+                uint32_t until_due = (s_next_capture_due_unix_time > now)
+                    ? (uint32_t)(s_next_capture_due_unix_time - now) : 0;
+                if (until_due < sleep_sec) sleep_sec = until_due;
+            }
             break;
         }
 

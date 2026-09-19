@@ -6,6 +6,7 @@
 #include "stats_store.h"
 #include "sd_storage.h"
 #include "photo_storage.h"
+#include "sens_kind_store.h"
 #include "esp_now_photo.h"
 #include "ui_log.h"
 #include "rtc_sync.h"
@@ -3076,7 +3077,10 @@ static uint8_t find_node_kind_by_mac(const uint8_t mac[6])
     for (int i = 0; i < total; i++) {
         if (memcmp(nodes[i].mac, mac, 6) == 0) return nodes[i].sensor_kind;
     }
-    return SENSOR_KIND_UNKNOWN;
+    /* 2026-09-19(통계 분류 영구저장) — 이번 부팅에서 아직 재접속 안 한(=살아있는 목록에
+     * 없는) 센스는 영구저장된 값으로 폴백 — 없으면 sens_kind_store_get() 자체가 UNKNOWN(0)
+     * 반환 */
+    return sens_kind_store_get(mac);
 }
 
 #if STATS_TEST_AGAR_FAKE_DATA
@@ -3087,7 +3091,10 @@ static bool stats_is_agar_fake_source(uint8_t kind, uint8_t chan_type)
 #endif
 
 /* mac+chan_type -> {그룹, 정밀여부}. 미분류(매핑에 없는 kind, 또는 아예 모르는 mac)면 false.
- * 테스트 오버라이드 없음 — 항상 실제 분류표 그대로(Air는 항상 실측대로 표시됨) */
+ * 테스트 오버라이드 없음 — 항상 실제 분류표 그대로(Air는 항상 실측대로 표시됨).
+ * 라이브 노드(esp_now_hub_get_nodes())에서 직접 얻은 mac을 분류할 때만 씀(예: SR/Power
+ * Control 소스 장치 선택 — 그 드랍다운은 라이브 노드만 나열하므로 여기선 mac 역조회가
+ * 안전함). 그래프/개괄판넬 쪽은 아래 stats_classify_by_kind()로 대체됨(2026-09-19) */
 static bool stats_classify(const uint8_t mac[6], uint8_t chan_type,
                             stats_view_group_t *out_group, bool *out_is_precise)
 {
@@ -3102,31 +3109,53 @@ static bool stats_classify(const uint8_t mac[6], uint8_t chan_type,
     return false;
 }
 
-/* group(+chan_type)에 속하는 mac들을 out_macs에 채움(최대 out_cap개, 페어링된 적 있는 노드
- * 전체를 훑음 — find_node_name_by_mac()과 동일 소스라 잠든 장치도 계속 잡힘). AIR 그룹은
- * want_precise로 정밀/간이 중 하나만 추림(다른 그룹은 무시됨). AGAR 그룹은 실제 분류(PT100
- * 등, 아직 없음)에 더해 테스트용 SCD41/SHT45 온도도 추가로 끼워넣음(위 STATS_TEST_AGAR_
- * FAKE_DATA 주석 참고 — Air 쪽 집계와 별개로 중복 포함되는 게 의도된 동작) */
+/* 2026-09-19(계열 자기서술 재설계, 사용자 설계 — "레코드의 값이 어떤 계열인지만 알면
+ * 항상 대처 가능한 그림을 그릴 수 있다") — kind를 mac으로 역조회하지 않고, 이미 알고
+ * 있는 kind를 바로 분류표에 대입. stats_classify()와 표는 같지만 조회 방향이 다름 */
+static bool stats_classify_by_kind(uint8_t kind, uint8_t chan_type,
+                                    stats_view_group_t *out_group, bool *out_is_precise)
+{
+    for (size_t i = 0; i < sizeof(s_stats_kind_channel_table) / sizeof(s_stats_kind_channel_table[0]); i++) {
+        if (s_stats_kind_channel_table[i].kind == kind && s_stats_kind_channel_table[i].chan_type == chan_type) {
+            if (out_group) *out_group = s_stats_kind_channel_table[i].group;
+            if (out_is_precise) *out_is_precise = s_stats_kind_channel_table[i].is_precise;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* 2026-09-19(계열 자기서술 재설계, 사용자 설계) — group(+chan_type)에 속하는 mac들을
+ * out_macs에 채움(최대 out_cap개). 예전엔 "살아있는 노드 목록 + 영구저장소(sens_kind_store)"
+ * 를 먼저 훑어서 "아는 기기"를 만든 뒤 분류했음 — 이 방식은 라이브 연결이 끊기고 영구저장소도
+ * 비어있으면(재부팅 직후 등) 조용히 실패했음(근본 원인). 이제 stats_agg_collect_macs()로
+ * 사전집계 파일 자체에 이미 실려있는 (mac,kind)를 직접 알아내므로, 별도 레지스트리 조회가
+ * 전혀 없음 — 과거 기록이 있으면 라이브 연결 여부와 완전히 무관하게 항상 후보에 잡힘.
+ * AIR 그룹은 want_precise로 정밀/간이 중 하나만 추림(다른 그룹은 무시됨). AGAR 그룹은 실제
+ * 분류(PT100 등, 아직 없음)에 더해 테스트용 SCD41/SHT45 온도도 추가로 끼워넣음(위
+ * STATS_TEST_AGAR_FAKE_DATA 주석 참고 — Air 쪽 집계와 별개로 중복 포함되는 게 의도된 동작) */
 static int stats_collect_group_macs(stats_view_group_t group, uint8_t chan_type, bool want_precise,
                                      uint8_t out_macs[][6], int out_cap)
 {
-    esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
-    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, ESP_NOW_HUB_MAX_NODES);
+    uint8_t macs[STATS_AGG_MAX_MACS_UI][6];
+    uint8_t kinds[STATS_AGG_MAX_MACS_UI];
+    uint32_t n = stats_agg_collect_macs(chan_type, macs, kinds, STATS_AGG_MAX_MACS_UI);
+
     int count = 0;
-    for (int i = 0; i < total && count < out_cap; i++) {
+    for (uint32_t i = 0; i < n && count < out_cap; i++) {
         stats_view_group_t g;
         bool prec;
         bool matched = false;
-        if (stats_classify(nodes[i].mac, chan_type, &g, &prec)) {
+        if (stats_classify_by_kind(kinds[i], chan_type, &g, &prec)) {
             if (g == group && (group != STATS_VIEW_GROUP_AIR || prec == want_precise)) matched = true;
         }
 #if STATS_TEST_AGAR_FAKE_DATA
         if (!matched && group == STATS_VIEW_GROUP_AGAR &&
-            stats_is_agar_fake_source(nodes[i].sensor_kind, chan_type)) {
+            stats_is_agar_fake_source(kinds[i], chan_type)) {
             matched = true;
         }
 #endif
-        if (matched) memcpy(out_macs[count++], nodes[i].mac, 6);
+        if (matched) memcpy(out_macs[count++], macs[i], 6);
     }
     return count;
 }
@@ -6515,28 +6544,16 @@ void ui_init(void)
     lv_obj_set_style_text_font(s_status_warning, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(s_status_warning, lv_color_hex(0xFFCC00), 0);
 
-    /* 2026-09-09(사용자 지적 — "아이콘이 왜 이리 작아") — 원래 의도("크기는 경고/에러
-     * 아이콘과 동일하게", 위 주석)와 다르게 원(24x24)과 안쪽 X(14pt)가 둘 다 Normal/Warning
-     * 글리프(24pt, 32x32 박스)보다 작았음 — 박스/글리프 크기를 맞춤 */
-    s_status_error = lv_obj_create(status_icon_box);
-    lv_obj_remove_style_all(s_status_error);
-    /* 2026-09-09(사용자 지적 — "에러 상태에서 에러 단추 안눌려") — lv_obj_create()는 기본
-     * CLICKABLE이라 여기서 터치를 가로챈 뒤(LVGL은 기본적으로 이벤트 버블링을 안 함)
-     * status_icon_box에 걸린 cb_logo_warning_tap까지 안 올라갔음. Normal/Warning은
-     * 라벨(기본 비클릭)이라 자연스럽게 부모가 처리했던 것과 대비됨 — 이 원도 비클릭으로
-     * 만들어 나머지 둘과 동일하게 부모가 처리하게 함 */
-    lv_obj_remove_flag(s_status_error, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_size(s_status_error, 32, 32);
+    /* 2026-09-19(사용자 지적 — "에러 아이콘이 X 인데, 이게 창 닫기랑 유사해서") — 빨간
+     * 원+흰색 X(닫기 심볼과 혼동됨)를 Normal/Warning과 같은 구조(라벨 하나, 심볼만 다름)의
+     * 빨간 경고 삼각형으로 교체. 내장 심볼 폰트엔 진입금지(원+사선) 글리프가 없어서
+     * LV_SYMBOL_WARNING을 재사용 — Warning(노랑)과 형태는 같지만 색으로 심각도를 구분 */
+    s_status_error = lv_label_create(status_icon_box);
     lv_obj_center(s_status_error);
     lv_obj_add_flag(s_status_error, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_style_radius(s_status_error, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(s_status_error, lv_palette_main(LV_PALETTE_RED), 0);
-    lv_obj_set_style_bg_opa(s_status_error, LV_OPA_COVER, 0);
-    lv_obj_t *status_error_lbl = lv_label_create(s_status_error);
-    lv_obj_center(status_error_lbl);
-    lv_label_set_text(status_error_lbl, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_font(status_error_lbl, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(status_error_lbl, lv_color_white(), 0);
+    lv_label_set_text(s_status_error, LV_SYMBOL_WARNING);
+    lv_obj_set_style_text_font(s_status_error, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_status_error, lv_palette_main(LV_PALETTE_RED), 0);
 
     s_settings_btn = lv_button_create(top_bar_right);
     lv_obj_add_event_cb(s_settings_btn, cb_settings_btn_tap, LV_EVENT_CLICKED, NULL);

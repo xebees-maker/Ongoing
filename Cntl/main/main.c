@@ -23,6 +23,7 @@
 #include "sd_storage.h"
 #include "stats_store.h"
 #include "power_relay.h"
+#include "sens_kind_store.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -660,6 +661,8 @@ void app_main(void)
     } else {
         ui_log_add("SD card mounted OK");
     }
+    /* 2026-09-19(통계 분류 영구저장) — SD 마운트 이후에만 의미 있음(파일이 SD에 있음) */
+    sens_kind_store_load();
 
     /* 보드 실장 PCF85063A RTC — I2C 버스가 막 만들어진 직후, UI가 뜨기 전에 시각을
      * 읽어와야 로고 부제(시계)가 처음부터 맞는 값으로 뜸 */

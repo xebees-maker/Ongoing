@@ -5,6 +5,7 @@
 #include "rtc_sync.h"
 #include "ui_log.h"
 #include "device_config.h"
+#include "sens_kind_store.h"
 #include "battery.h"
 #include "stats_store.h"
 #include "main.h"
@@ -478,6 +479,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 n->chan_count      = ack->chan_count > ESP_NOW_MAX_CHANNELS ? ESP_NOW_MAX_CHANNELS : ack->chan_count;
                 memcpy(n->chan_type, ack->chan_type, n->chan_count);
                 n->has_sensor_data = true;
+                /* 2026-09-19(통계 분류 영구저장) — 재부팅 후 이 센스가 아직 재접속 전이어도
+                 * stats_store의 과거 기록을 분류할 수 있게 mac별 sensor_kind를 SD에 영구
+                 * 기록. sens_kind_store_set() 자체가 값이 안 바뀌면 파일 재기록을 생략하므로,
+                 * 이 핸들러가 매 keepalive마다 불려도(PAIR_ACK 특성) 불필요한 SD 쓰기는 없음 */
+                sens_kind_store_set(info->src_addr, ack->sensor_kind);
             }
             /* 생존 신호(last_seen_ms)는 항상 갱신 — 페어링 후엔 CAM/SENS가 ADVERTISE를
              * 끊고 이 PAIR_ACK(keepalive)로만 살아있음을 알리는 것으로 보이는데, 이걸
@@ -670,6 +676,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             for (uint8_t ci = 0; ci < n->chan_count; ci++) {
                 if (!n->chan_ok[ci] || n->chan_invalid[ci]) continue;
                 memcpy(recs[rec_count].mac, n->mac, 6);
+                /* 2026-09-19(계열 자기서술 재설계, 사용자 설계) — 지금 이 순간(라이브
+                 * PAIR_ACK로 이미 알고 있음) kind를 레코드에 직접 박아넣음 — 나중에 읽을 때
+                 * mac->kind 역조회가 전혀 필요 없어짐 */
+                recs[rec_count].kind       = n->sensor_kind;
                 recs[rec_count].chan_type  = n->chan_type[ci];
                 recs[rec_count].chan_index = ci;
                 recs[rec_count].unix_time  = n->sensor_last_update_unix_time;

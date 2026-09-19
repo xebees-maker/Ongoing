@@ -409,6 +409,7 @@ static void handle_chunk(const uint8_t *data, int len)
         chunk_bitmap_set(chunk->chunk_idx);
         s_chunks_received++;
     }
+    uint8_t recv_kind = s_recv_kind;
     xSemaphoreGive(s_mutex);
 
     /* 2026-08-10 — 적응형 반응시간의 "마지막 사용자 조작" 시각을 청크마다 갱신. 예전엔
@@ -416,8 +417,14 @@ static void handle_chunk(const uint8_t *data, int len)
      * 고스란히 조용한 시간으로 카운트돼버림 — 전송 도중에 이미 적응형 임계값을 넘겨 SLEEP_NOW가
      * CAM에 큐잉되고, 전송이 끝나 busy가 풀리자마자(사용자가 결과를 볼 틈도 없이) 바로 잠드는
      * 문제로 실사용 중 확인됨(사용자 분석: "통신 완료 후가 아니라 통신을 시작한 입력에 의해
-     * 카운터가 진행됨"). 청크가 계속 들어오는 동안은 "활동 중"이 맞으므로 매 청크 갱신 */
-    esp_now_hub_note_user_action();
+     * 카운터가 진행됨"). 청크가 계속 들어오는 동안은 "활동 중"이 맞으므로 매 청크 갱신 —
+     * 단, 2026-09-19(주기촬영 CAM 자율 푸시 재설계 이후, 사용자 지시로 조사) 'T'(주기촬영)는
+     * 사람이 화면을 보거나 조작한 게 전혀 아닌 CAM 자율 전송이므로 여기서 제외. 안 그러면
+     * 캡처주기<적응형임계값일 때 매 주기촬영 전송이 조용시간을 계속 리셋해서 캠이 영영
+     * 못 자는 버그가 됨(실사용 중 5분간 미절전으로 확인) */
+    if (recv_kind != 'T') {
+        esp_now_hub_note_user_action();
+    }
 }
 
 /* missing_count==0이면 완료를 뜻하는 PHOTO_DONE_ACK를 항상 1번만 보냄(2026-08-05, Layer 1

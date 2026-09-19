@@ -1,6 +1,8 @@
 /**
  * @file    stats_store.c
- * @brief   stats_store.h 구현 — /sdcard/stats/values.bin, 16바이트 고정 레코드.
+ * @brief   stats_store.h 구현 — /sdcard/stats/values_v2.bin, 17바이트 고정 레코드
+ *          (2026-09-19, kind 필드 추가로 옛 values.bin에서 포맷 변경 — 옛 파일은 고아로
+ *          남김, 마이그레이션은 PC ETL로 별도 처리).
  *
  *          레코드는 항상 esp_now_hub.c의 WAKE_HELLO_SENS 처리(s_nodes_mutex 아래, 단일
  *          지점)에서만 추가되므로 파일 내 순서 = 도착순 = Cntl 자기 벽시계 기준 시간순이
@@ -17,7 +19,7 @@
 #include <errno.h>
 
 static const char *TAG = "stats_store";
-#define STATS_FILE_PATH SD_STORAGE_MOUNT_POINT "/stats/values.bin"
+#define STATS_FILE_PATH SD_STORAGE_MOUNT_POINT "/stats/values_v2.bin"
 
 /* 2026-09-10(재설계 — fail/행/죽음 3분류 중 "fail" 처리, [[feedback_design_for_exceptions_not_just_fails]]) —
  * fopen() 실패(SD 자체 문제로 추정)와 "그냥 이 조건에 맞는 레코드가 없음"을 호출부가 구분할
@@ -32,16 +34,16 @@ static bool s_last_io_error = false;
  * ════════════════════════════════════════════════════════════ */
 const uint32_t STATS_SCALE_SECONDS[STATS_SCALE_COUNT] = { 3600, 43200, 86400, 259200, 604800 };
 
-/* 2026-09-15(사용자 지시 — "kind 추가해야지... Agar는 각 기기마다 하나의 계열") — mac을
- * 저장 키에 추가하면서 레코드 크기가 바뀜(10->16바이트) — 예전 포맷 파일을 잘못 읽지
- * 않도록 파일명 자체를 바꿔서 예전 파일은 그냥 고아로 남김(신뢰성 항목들과 동일하게
- * "조용히 잘못 읽는 것"보다 "그냥 새로 시작"이 안전) */
+/* 2026-09-15 — mac을 저장 키에 추가하면서 레코드 크기가 바뀜(10->16바이트, _v2).
+ * 2026-09-19(계열 자기서술 재설계) — kind 필드 추가로 다시 바뀜(16->17바이트, _v3) — 예전
+ * 포맷 파일을 잘못 읽지 않도록 파일명 자체를 바꿔서 예전 파일은 그냥 고아로 남김(신뢰성
+ * 항목들과 동일하게 "조용히 잘못 읽는 것"보다 "그냥 새로 시작"이 안전) */
 static const char *s_agg_file_path[STATS_SCALE_COUNT] = {
-    SD_STORAGE_MOUNT_POINT "/stats/agg_1h_v2.bin",
-    SD_STORAGE_MOUNT_POINT "/stats/agg_12h_v2.bin",
-    SD_STORAGE_MOUNT_POINT "/stats/agg_1d_v2.bin",
-    SD_STORAGE_MOUNT_POINT "/stats/agg_3d_v2.bin",
-    SD_STORAGE_MOUNT_POINT "/stats/agg_1w_v2.bin",
+    SD_STORAGE_MOUNT_POINT "/stats/agg_1h_v3.bin",
+    SD_STORAGE_MOUNT_POINT "/stats/agg_12h_v3.bin",
+    SD_STORAGE_MOUNT_POINT "/stats/agg_1d_v3.bin",
+    SD_STORAGE_MOUNT_POINT "/stats/agg_3d_v3.bin",
+    SD_STORAGE_MOUNT_POINT "/stats/agg_1w_v3.bin",
 };
 
 /* chan_type은 sensor_channel_type_t(esp_now_link.h)인데 이 파일은 저수준이라 그 헤더에
@@ -81,17 +83,19 @@ static agg_accum_t s_agg_accum[STATS_SCALE_COUNT][STATS_AGG_MAX_CHAN_TYPES][STAT
 
 /* 방금 닫힌 버킷 하나를 그 스케일의 파일에 씀 — 실패해도 로그만(치명적 아님, 원본 기록
  * 자체는 이미 성공한 뒤라 데이터 유실은 이 사전집계 한 포인트뿐) */
-static void agg_flush_bucket(uint8_t scale_idx, uint8_t chan_type, const uint8_t mac[6],
+static void agg_flush_bucket(uint8_t scale_idx, uint8_t kind, uint8_t chan_type, const uint8_t mac[6],
                               const agg_accum_t *acc)
 {
     if (!acc->have_value) return;
     stats_bucket_t rec = {
         .bucket_start_unix = acc->bucket_start,
+        .kind               = kind,
         .chan_type          = chan_type,
         .sample_count       = (acc->seen_count > 255) ? 255 : (uint8_t)acc->seen_count,
         .avg_value          = acc->best_value,
     };
     memcpy(rec.mac, mac, 6);
+
     FILE *f = fopen(s_agg_file_path[scale_idx], "ab");
     if (!f) {
         ESP_LOGW(TAG, "사전집계 버킷 열기 실패(scale=%u) — 이 포인트만 유실", (unsigned)scale_idx);
@@ -112,32 +116,39 @@ static void agg_flush_bucket(uint8_t scale_idx, uint8_t chan_type, const uint8_t
  *     우연히 들어온 값이 항상 이겨서 구조적으로 편향됨(사용자 질문 "지난 값을 하는 경우
  *     놓치는 경우가 있을까봐" — 그 우려대로).
  * stats_agg_update()가 raw 기록 성공 직후 레코드마다 호출 */
-static void stats_agg_update(const uint8_t mac[6], uint8_t chan_type, uint32_t unix_time, float value)
+static void stats_agg_update_scale(uint8_t scale, int mac_slot, const uint8_t mac[6], uint8_t kind,
+                                    uint8_t chan_type, uint32_t unix_time, float value)
+{
+    uint32_t bucket_width = STATS_SCALE_SECONDS[scale] / STATS_AGG_POINTS_PER_SCALE;
+    if (bucket_width == 0) bucket_width = 1;
+    uint32_t bucket_start = (unix_time / bucket_width) * bucket_width;  /* 벽시계 정렬 */
+
+    agg_accum_t *acc = &s_agg_accum[scale][chan_type][mac_slot];
+    if (acc->have_value && acc->bucket_start != bucket_start) {
+        agg_flush_bucket(scale, kind, chan_type, mac, acc);
+        acc->have_value  = false;
+        acc->seen_count  = 0;
+    }
+    acc->bucket_start = bucket_start;
+
+    uint32_t center = bucket_start + bucket_width / 2;
+    uint32_t dist = (unix_time > center) ? (unix_time - center) : (center - unix_time);
+    acc->seen_count++;
+    if (!acc->have_value || dist < acc->best_dist_abs) {
+        acc->have_value    = true;
+        acc->best_dist_abs = dist;
+        acc->best_value    = value;
+    }
+}
+
+static void stats_agg_update(const uint8_t mac[6], uint8_t kind, uint8_t chan_type,
+                              uint32_t unix_time, float value)
 {
     if (chan_type >= STATS_AGG_MAX_CHAN_TYPES) return;
     int mac_slot = agg_mac_slot(mac);
     if (mac_slot < 0) return;  /* STATS_AGG_MAX_MACS 초과 — 이 장치는 사전집계만 스킵(원본은 남음) */
     for (int scale = 0; scale < STATS_SCALE_COUNT; scale++) {
-        uint32_t bucket_width = STATS_SCALE_SECONDS[scale] / STATS_AGG_POINTS_PER_SCALE;
-        if (bucket_width == 0) bucket_width = 1;
-        uint32_t bucket_start = (unix_time / bucket_width) * bucket_width;  /* 벽시계 정렬 */
-
-        agg_accum_t *acc = &s_agg_accum[scale][chan_type][mac_slot];
-        if (acc->have_value && acc->bucket_start != bucket_start) {
-            agg_flush_bucket((uint8_t)scale, chan_type, mac, acc);
-            acc->have_value  = false;
-            acc->seen_count  = 0;
-        }
-        acc->bucket_start = bucket_start;
-
-        uint32_t center = bucket_start + bucket_width / 2;
-        uint32_t dist = (unix_time > center) ? (unix_time - center) : (center - unix_time);
-        acc->seen_count++;
-        if (!acc->have_value || dist < acc->best_dist_abs) {
-            acc->have_value    = true;
-            acc->best_dist_abs = dist;
-            acc->best_value    = value;
-        }
+        stats_agg_update_scale((uint8_t)scale, mac_slot, mac, kind, chan_type, unix_time, value);
     }
 }
 
@@ -193,6 +204,40 @@ uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type, const uint8
     return picked;
 }
 
+uint32_t stats_agg_collect_macs(uint8_t chan_type, uint8_t out_macs[][6], uint8_t out_kinds[],
+                                 uint32_t out_cap)
+{
+    if (out_cap == 0) return 0;
+    if (!sd_storage_is_mounted()) return 0;
+
+    /* 가장 넓은 스케일(1주) 파일 전체를 훑음 — 시간창 제한 없이, 이 chan_type을 보고한 적
+     * 있는 서로 다른 (mac,kind)를 전부 찾음(agg_flush_bucket이 모든 스케일에 같은 mac
+     * 집합을 쓰므로 1개 스케일만 봐도 충분) */
+    errno = 0;
+    FILE *f = fopen(s_agg_file_path[STATS_SCALE_COUNT - 1], "rb");
+    if (!f) {
+        if (errno != ENOENT) s_last_io_error = true;
+        return 0;
+    }
+
+    uint32_t count = 0;
+    stats_bucket_t rec;
+    while (fread(&rec, sizeof(rec), 1, f) == 1) {
+        if (rec.chan_type != chan_type) continue;
+        bool dup = false;
+        for (uint32_t i = 0; i < count; i++) {
+            if (memcmp(out_macs[i], rec.mac, 6) == 0) { dup = true; break; }
+        }
+        if (dup) continue;
+        if (count >= out_cap) break;
+        memcpy(out_macs[count], rec.mac, 6);
+        out_kinds[count] = rec.kind;
+        count++;
+    }
+    fclose(f);
+    return count;
+}
+
 bool stats_store_had_io_error(void)
 {
     return s_last_io_error;
@@ -243,7 +288,8 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
      * 갱신(항목12: 이건 각 스케일이 독립 파일이라 "여러 파일에 걸친 모아쓰기"는 의미가 없고
      * — 한 스케일이 한 번에 닫는 버킷은 사실상 항상 최대 1개뿐이라 애초에 모아쓸 게 없음) */
     for (uint32_t i = 0; i < count; i++) {
-        stats_agg_update(records[i].mac, records[i].chan_type, records[i].unix_time, records[i].value);
+        stats_agg_update(records[i].mac, records[i].kind, records[i].chan_type,
+                          records[i].unix_time, records[i].value);
     }
 
     s_stats_append_call_count++;
@@ -261,8 +307,16 @@ uint32_t stats_store_get_count(void)
      * read_since/get_min_max_avg_since/trim_to/get_used_bytes가 전부 내부에서 먼저
      * 부르므로, 여기서 한 번만 막아도 그 아래 함수들의 fopen 시도까지 자연히 다 같이 막힘 */
     if (!sd_storage_is_mounted()) return 0;
+    /* 2026-09-19(실기 확인 — 파일명 바꾼 직후 5009 오탐) — 이 함수만 다른 읽기 함수들
+     * (stats_agg_read_window 등)과 달리 ENOENT(파일이 아직 없음, 예: 방금 포맷을 바꿔서
+     * 아직 한 번도 안 만들어진 경우)를 구분 안 하고 fopen 실패면 무조건 진짜 I/O 오류로
+     * 잡았음 — "아직 데이터 없음"과 "SD 자체 문제"를 혼동해 5009를 오보고 */
+    errno = 0;
     FILE *f = fopen(STATS_FILE_PATH, "rb");
-    if (!f) { s_last_io_error = true; return 0; }
+    if (!f) {
+        if (errno != ENOENT) s_last_io_error = true;
+        return 0;
+    }
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fclose(f);

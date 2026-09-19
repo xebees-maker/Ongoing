@@ -244,6 +244,29 @@ static void trend_push(power_trend_buf_t *buf, uint32_t now_ms, float value)
 static void evaluate_relay(int idx, uint32_t now_ms)
 {
     power_relay_config_t *cfg = &s_relay_cfg[idx];
+
+    /* 2026-09-19(실기 버그 — "오버라이드는 센서 없어도 동작해야 되는 거야") — Override의
+     * 반영 자체는 본설정 여부(configured/chan_type)나 참조 센서의 최신값 유무와 완전히
+     * 무관해야 함. 예전엔 이 체크가 함수 맨 끝(297줄 부근)에만 있어서, configured==false
+     * (본설정을 한 번도 안 거친 릴레이)거나 참조 센서가 아직 값을 안 보낸 상태(재부팅
+     * 직후 흔함 — Sens는 자기 CASK 주기대로 뒤늦게 깨어남)면 오버라이드 여부를 보기도
+     * 전에 함수가 리턴해버려서 Override가 영영 반영 안 되는 버그가 있었음(실기 확인:
+     * "오버라이드 후 재부팅하고 1분 지나도 안 켜짐"). 여기서 독립적으로 먼저 처리 —
+     * 아래(설정완료+센서값 필요) 자동판정 경로는 그대로 둠(센서 데이터가 있으면 추세
+     * 이력을 계속 쌓아서, Override 해제 순간 바로 이어받을 수 있게 하는 기존 설계 유지 —
+     * 아래 300줄 부근 주석 참고. 이 함수 끝에서 같은 조건을 한 번 더 평가하지만
+     * currently_on이 이미 맞춰져 있어 그냥 조용히 no-op됨) */
+    if (cfg->manual_override) {
+        bool currently_on = s_commanded_on[idx];
+        bool want_on = cfg->manual_override_on;
+        bool boot_delay_blocks = want_on && !s_ever_on_since_boot[idx] &&
+                                  (now_ms - s_boot_ms_ref) < POWER_RELAY_BOOT_ON_DELAY_MS;
+        if (want_on != currently_on && !boot_delay_blocks) {
+            power_relay_command(idx, want_on, now_ms);
+            if (want_on) s_ever_on_since_boot[idx] = true;
+        }
+    }
+
     if (!cfg->configured) return;
     /* 방어적 가드(2026-09-16) — Alias만 저장된 채 configured가 잘못 true였던 예전 상태가
      * 저장 파일에 이미 남아있을 수 있음(재부팅해도 그대로 불러와짐). chan_type이 NONE이면
@@ -253,7 +276,10 @@ static void evaluate_relay(int idx, uint32_t now_ms)
     float value;
     bool have = ui_main_query_power_source_value(cfg, &value);
     if (!have) {
-        if (s_last_data_ms[idx] != 0 && (now_ms - s_last_data_ms[idx]) > POWER_RELAY_STALE_TIMEOUT_MS) {
+        /* Override 중엔 이 안전장치(기준 센서 오래 끊김 -> 정지)도 억제 — 수동 명령이
+         * 우선이어야 하는데, 안 그러면 방금 위에서 켠 Override를 이 블록이 바로 꺼버림 */
+        if (!cfg->manual_override && s_last_data_ms[idx] != 0 &&
+            (now_ms - s_last_data_ms[idx]) > POWER_RELAY_STALE_TIMEOUT_MS) {
             /* 2026-09-15(사용자 설계) — 기준 센서가 오래 끊기면 기본은 정지 */
             power_relay_command(idx, false, now_ms);
         }

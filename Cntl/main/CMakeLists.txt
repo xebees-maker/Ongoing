@@ -15,6 +15,8 @@ idf_component_register(
         "stats_store.c"
         "photo_storage.c"
         "power_relay.c"
+        "sens_kind_store.c"
+       
         "../components/waveshare_rgb_lcd_port.c"
         "../components/ch422g.c"
     INCLUDE_DIRS
