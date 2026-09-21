@@ -1,4 +1,4 @@
-# 2026-09-21 — Bridge: CNTL의 ESP-NOW 라디오 스택을 통째로 대신 떠맡는 XIAO Seeed(ESP32-C3)
+# 2026-09-21 — Bridge: CNTL의 ESP-NOW 라디오 스택을 통째로 대신 떠맡는 XIAO Seeed(ESP32-C6)
 # 보드. CNTL<->Bridge는 isolated I2C 4단자(VCC/GND/SDA/SCL)로만 연결됨(project_cntl_i2c_bridge_design_2026_09_21
 # 메모리 참고). Sens/CAM 쪽에서 보면 이 보드가 예전 CNTL과 똑같은 "허브"로 보임 — 프로토콜
 # 변경 없음(esp_now_link.h 그대로 재사용).

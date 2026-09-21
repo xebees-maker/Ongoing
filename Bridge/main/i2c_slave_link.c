@@ -13,11 +13,11 @@
 
 static const char *TAG = "i2c_slave_link";
 
-/* TODO(하드웨어 확인 필요) — Seeed XIAO ESP32-C3 실크스크린 D4/D5(공식 핀아웃 기준
- * GPIO6/GPIO7) 추정. 실제 배선 확인 전까지 플레이스홀더 */
+/* 2026-09-21 — XIAO ESP32-C6 공식 핀아웃(사용자 확인, wiki.seeedstudio.com/xiao_esp32c6_getting_started):
+ * SDA=D4=GPIO22, SCL=D5=GPIO23 */
 #define BRIDGE_I2C_PORT    0
-#define BRIDGE_I2C_SDA_PIN 6
-#define BRIDGE_I2C_SCL_PIN 7
+#define BRIDGE_I2C_SDA_PIN 22
+#define BRIDGE_I2C_SCL_PIN 23
 #define BRIDGE_I2C_ADDR    0x42   /* TODO — 임의값, 충돌 확인 필요(7비트 주소) */
 
 /* 마스터(CNTL)가 쓴 걸 받아서 처리할 큐, 마스터가 읽어갈 걸 올려둘 큐 — 둘 다 ISR에서

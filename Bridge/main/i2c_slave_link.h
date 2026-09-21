@@ -6,8 +6,9 @@
  * 주기적으로 읽어서(마스터 read 트랜잭션) INCOMING_MSG/RELIABLE_RESULT/PONG을 가져감 —
  * bridge_link.h(Common/components/bridge_link)의 고정크기 패킷 하나를 그대로 주고받음.
  *
- * TODO(하드웨어 확인 필요): 아래 SDA/SCL 핀은 Seeed XIAO ESP32-C3 실크스크린 D4/D5(공식
- * 핀아웃 기준 GPIO6/GPIO7) 추정값이다. 실제 보드 배선 확인 전까지는 플레이스홀더로 취급할 것.
+ * 2026-09-21 — 실제 보드는 XIAO ESP32-**C6**(사용자가 처음엔 "C3"로 잘못 말했다가 정정,
+ * 출처: https://wiki.seeedstudio.com/xiao_esp32c6_getting_started). I2C 핀은 사용자가 직접
+ * 확인: SDA=D4=GPIO22, SCL=D5=GPIO23 — 아래 값은 더 이상 플레이스홀더가 아님.
  */
 
 #include "esp_err.h"

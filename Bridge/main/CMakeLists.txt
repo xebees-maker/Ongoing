@@ -11,6 +11,7 @@ idf_component_register(
         esp_netif
         esp_timer
         esp_driver_i2c
+        esp_driver_gpio
         bridge_link
         esp_now_reliable
 )
