@@ -77,19 +77,25 @@ typedef struct {
     bool          in_use;
     uint8_t       mac[6];
     QueueHandle_t queue;
-    /* 2026-09-21(사용자 설계 원칙 — 통신 버퍼는 PSRAM으로) — 큐 저장소(TX_WORKER_QUEUE_LEN*
-     * sizeof(tx_item_t))와 태스크 스택(TX_WORKER_STACK=4096바이트)을 xQueueCreateStatic/
-     * xTaskCreateStatic으로 PSRAM에서 받아옴. 자진종료(vTaskDelete(NULL)) 직전에 자기 자신의
-     * 스택을 heap_caps_free()하는 건 "그 스택 위에서 실행 중인 코드가 자기 발밑 메모리를
-     * 지우는" 것이라 안전하지 않음(free 이후에도 vTaskDelete가 끝날 때까지 그 스택 위에서
-     * 계속 실행됨 — 그 사이 인터럽트 등이 같은 메모리를 재사용하면 손상 위험) — 그래서
-     * 슬롯당 한 번 할당하면 해제하지 않고 재사용함(큐/태스크 오브젝트 자체는 매 사이클
-     * 정상적으로 생성/삭제되지만, 그 밑에 깔린 PSRAM 버퍼는 그대로 둠). Internal RAM
-     * 예산에는 전혀 영향 없음(PSRAM만 소비) */
-    StaticQueue_t queue_cb;
-    uint8_t      *queue_storage;
-    StackType_t  *task_stack;
-    StaticTask_t  task_tcb;
+    /* 2026-09-21(사용자 설계 원칙 — LVGL 제외 모든 버퍼는 PSRAM 우선) — 큐 저장소
+     * (TX_WORKER_QUEUE_LEN*sizeof(tx_item_t))와 태스크 스택(TX_WORKER_STACK=4096바이트)은
+     * PSRAM에서 받아옴. 자진종료(vTaskDelete(NULL)) 직전에 자기 자신의 스택을
+     * heap_caps_free()하는 건 "그 스택 위에서 실행 중인 코드가 자기 발밑 메모리를 지우는"
+     * 것이라 안전하지 않음(free 이후에도 vTaskDelete가 끝날 때까지 그 스택 위에서 계속
+     * 실행됨 — 그 사이 인터럽트 등이 같은 메모리를 재사용하면 손상 위험) — 그래서 넷 다
+     * 슬롯당 한 번만 지연 할당하고 해제하지 않고 재사용함(큐/태스크 오브젝트 자체는 매
+     * 사이클 정상적으로 생성/삭제되지만, 그 밑에 깔린 버퍼는 그대로 둠).
+     * queue_cb(StaticQueue_t)는 ESP-IDF의 xQueueCreateWithCaps()도 캡스 그대로 큐 전체를
+     * 할당하는 걸로 봐서 PSRAM 제약이 없음 — PSRAM으로. task_tcb(StaticTask_t)는
+     * idf_additions.h가 "a TCB must always be in internal RAM"이라고 명시 — Internal
+     * 고정. 다만 8슬롯 전부를 부팅 시점부터 미리 예약하면 실제 안 쓰는 슬롯 몫까지 낭비되므로
+     * (2026-09-21 초판 구현의 잘못 — 임베디드로 넣어서 8슬롯분 Internal이 상시 고정비용이
+     * 됐었음), queue_storage/task_stack과 똑같이 포인터로 두고 슬롯이 처음 쓰일 때만
+     * 할당함 — 실사용 슬롯 수(보통 캠+센스 2개)만큼만 비용을 냄 */
+    StaticQueue_t *queue_cb;
+    uint8_t       *queue_storage;
+    StackType_t   *task_stack;
+    StaticTask_t  *task_tcb;
 } tx_worker_t;
 
 static QueueHandle_t     s_tx_queue = NULL;       /* 입구 — 디스패처만 소비 */
@@ -226,8 +232,8 @@ static void tx_dispatcher_task(void *arg)
                  * ESP_NOW_HUB_MAX_NODES개)에서만 오므로 동시 워커 수도 그 이상 못 감 */
                 ESP_LOGE(TAG, "%s: 워커 슬롯 부족(%d개 초과) — 버림", item.what, TX_MAX_WORKERS);
             } else {
-                /* 2026-09-21 — 큐 저장소/태스크 스택을 PSRAM에서 할당(슬롯당 1회, 이후
-                 * 재사용 — 이유는 tx_worker_t 정의부 주석 참고) */
+                /* 2026-09-21 — 큐 저장소/태스크 스택/큐 제어블록은 PSRAM, TCB만 Internal
+                 * (ESP-IDF 제약) — 넷 다 슬롯당 1회 지연 할당, 이후 재사용(정의부 주석 참고) */
                 if (!w->queue_storage) {
                     w->queue_storage = heap_caps_malloc(TX_WORKER_QUEUE_LEN * sizeof(tx_item_t),
                                                          MALLOC_CAP_SPIRAM);
@@ -235,16 +241,22 @@ static void tx_dispatcher_task(void *arg)
                 if (!w->task_stack) {
                     w->task_stack = heap_caps_malloc(TX_WORKER_STACK, MALLOC_CAP_SPIRAM);
                 }
-                if (!w->queue_storage || !w->task_stack) {
-                    ESP_LOGE(TAG, "%s: 워커 PSRAM 버퍼 할당 실패 — 버림", item.what);
+                if (!w->queue_cb) {
+                    w->queue_cb = heap_caps_malloc(sizeof(StaticQueue_t), MALLOC_CAP_SPIRAM);
+                }
+                if (!w->task_tcb) {
+                    w->task_tcb = heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
+                }
+                if (!w->queue_storage || !w->task_stack || !w->queue_cb || !w->task_tcb) {
+                    ESP_LOGE(TAG, "%s: 워커 버퍼 할당 실패 — 버림", item.what);
                 } else {
                     w->queue = xQueueCreateStatic(TX_WORKER_QUEUE_LEN, sizeof(tx_item_t),
-                                                   w->queue_storage, &w->queue_cb);
+                                                   w->queue_storage, w->queue_cb);
                     memcpy(w->mac, item.mac, sizeof(w->mac));
                     w->in_use = true;
                     xQueueSend(w->queue, &item, 0);  /* 태스크 생성 전에 미리 넣어둠 — 유실 없음 */
                     xTaskCreateStatic(tx_worker_task, "tx_worker", TX_WORKER_STACK / sizeof(StackType_t),
-                                       w, TX_WORKER_PRIORITY, w->task_stack, &w->task_tcb);
+                                       w, TX_WORKER_PRIORITY, w->task_stack, w->task_tcb);
                 }
             }
         }
@@ -254,12 +266,30 @@ static void tx_dispatcher_task(void *arg)
 
 void esp_now_tx_init(void)
 {
-    s_tx_queue = xQueueCreate(TX_QUEUE_LEN, sizeof(tx_item_t));
+    /* 2026-09-21(LVGL 제외 모든 버퍼는 PSRAM 우선) — 디스패처 입구 큐/태스크 스택도 부팅 시
+     * 1회만 생기고 평생 유지되는 단일 인스턴스라 power_relay.c의 패턴을 그대로 씀: TCB만
+     * Internal(고정, 작음), 나머지는 PSRAM. 할당 실패 시 옛 동적 생성으로 폴백 */
+    static StaticQueue_t s_tx_queue_cb;
+    uint8_t *tx_queue_storage = heap_caps_malloc(TX_QUEUE_LEN * sizeof(tx_item_t), MALLOC_CAP_SPIRAM);
+    if (tx_queue_storage) {
+        s_tx_queue = xQueueCreateStatic(TX_QUEUE_LEN, sizeof(tx_item_t), tx_queue_storage, &s_tx_queue_cb);
+    } else {
+        ESP_LOGE(TAG, "TX 큐 PSRAM 할당 실패 — 내부 RAM으로 폴백");
+        s_tx_queue = xQueueCreate(TX_QUEUE_LEN, sizeof(tx_item_t));
+    }
     s_workers_mutex = xSemaphoreCreateMutex();
     /* 2026-09-09(사용자 설계 — "통신 17 SR제어 15 파일처리 10") — 디스패처는 통신 계층이라
      * 예전 tx_task와 동일하게 17. 실제 워커 태스크들도 같은 우선순위(TX_WORKER_PRIORITY)로
      * 생성됨 */
-    xTaskCreate(tx_dispatcher_task, "esp_now_tx_disp", 3072, NULL, 17, NULL);
+    static StaticTask_t s_tx_dispatcher_tcb;
+    StackType_t *tx_dispatcher_stack = heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
+    if (tx_dispatcher_stack) {
+        xTaskCreateStatic(tx_dispatcher_task, "esp_now_tx_disp", 3072, NULL, 17,
+                           tx_dispatcher_stack, &s_tx_dispatcher_tcb);
+    } else {
+        ESP_LOGE(TAG, "디스패처 태스크 스택 PSRAM 할당 실패 — 내부 RAM으로 폴백");
+        xTaskCreate(tx_dispatcher_task, "esp_now_tx_disp", 3072, NULL, 17, NULL);
+    }
 }
 
 void esp_now_tx_enqueue(const uint8_t *mac, const void *req, size_t req_len,
