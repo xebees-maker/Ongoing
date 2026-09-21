@@ -1,0 +1,16 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "i2c_slave_link.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_timer
+        esp_driver_i2c
+        bridge_link
+        esp_now_reliable
+)

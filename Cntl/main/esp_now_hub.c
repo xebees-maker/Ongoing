@@ -1,7 +1,7 @@
 #include "esp_now_hub.h"
 #include "esp_now_photo.h"
-#include "esp_now_reliable.h"
 #include "esp_now_tx.h"
+#include "i2c_bridge.h"
 #include "rtc_sync.h"
 #include "ui_log.h"
 #include "device_config.h"
@@ -45,8 +45,6 @@ static const char *TAG = "esp_now_hub";
  * 부터 막힘). 아래 런타임 변수로 통일해서 모드 전환 시 자동으로 맞게 함 — wifi_bringup()에서
  * 딱 한 번 설정, 그 이후로는 읽기 전용 */
 static wifi_interface_t s_wifi_if = WIFI_IF_STA;
-
-static const uint8_t s_broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 static esp_now_hub_node_t s_nodes[ESP_NOW_HUB_MAX_NODES];
 static int                s_node_count = 0;
@@ -251,23 +249,14 @@ static bool dequeue_pending_action_locked(esp_now_hub_node_t *n, esp_now_hub_pen
     return true;
 }
 
+/* 2026-09-21(I2C 브릿지 마이그레이션) — ESP-NOW 피어 테이블은 이제 브릿지가 소유함(라디오가
+ * 물리적으로 거기 있음). 브릿지의 handle_reliable_send()/handle_fire_and_forget()이 매번
+ * add_peer_if_needed()를 자체적으로 호출하므로(Bridge/main/i2c_slave_link.c 참고, 레이트설정
+ * MCS0/HT20 포함해서 이 함수가 원래 하던 일을 그대로 옮겨감), CNTL 쪽은 더 이상 피어 테이블을
+ * 몰라도 됨 — 호출부를 일일이 지우는 대신(diff 최소화) 이 함수 자체를 no-op으로 둠 */
 static void add_peer_if_needed(const uint8_t *mac)
 {
-    if (esp_now_is_peer_exist(mac)) return;
-    esp_now_peer_info_t peer = { 0 };
-    memcpy(peer.peer_addr, mac, 6);
-    peer.ifidx   = s_wifi_if;
-    peer.channel = 0;
-    peer.encrypt = false;
-    if (esp_now_add_peer(&peer) != ESP_OK) {
-        ESP_LOGW(TAG, "피어 등록 실패");
-        return;
-    }
-    /* 2026-08-08 — CAM 쪽과 짝맞춤(esp_now_cam.c 동일 주석 참고). 이 함수는 CAM/Sens 등
-     * 실제 노드 MAC에만 불림(브로드캐스트 주소는 여기 안 옴) — 안전. */
-    esp_now_rate_config_t rate_cfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };
-    esp_err_t rate_err = esp_now_set_peer_rate_config(mac, &rate_cfg);
-    ESP_LOGI(TAG, "피어 레이트 설정(MCS0/HT20) -> %s", esp_err_to_name(rate_err));
+    (void)mac;
 }
 
 static volatile hub_config_apply_stage_t s_config_apply_stage = HUB_CONFIG_APPLY_IDLE;
@@ -342,10 +331,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     uint8_t msg_type = data[1];
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
 
-    /* Reliable 모드(Layer 1) 요청/응답 매칭 — 지금 esp_now_tx 태스크가 기다리는 요청이 있고
-     * 이 메시지가 그 응답이면 대기 태스크를 깨움. 그 외엔 조용히 무시하고 리턴하므로 아래
-     * 기존 dispatch와 안전하게 병행됨(esp_now_channelsync_on_recv()와 동일 패턴, 2026-08-05) */
-    esp_now_reliable_on_recv(msg_type, info ? info->src_addr : NULL, data, len);
+    /* 2026-09-21(I2C 브릿지 마이그레이션) — reliable 요청/응답 매칭(esp_now_reliable_on_recv)은
+     * 이제 브릿지 쪽에서 일어남(브릿지가 자기 라디오 옆에서 재시도 루프를 돌림 — bridge_link.h/
+     * project_cntl_i2c_bridge_design_2026_09_21 참고). 이 recv_cb는 브릿지가 이미 매칭까지 끝낸
+     * 메시지를 I2C로 전달받는 것뿐이라 여기서 다시 매칭할 게 없음 — 예전 esp_now_reliable_on_recv()
+     * 호출을 제거함(호출해도 s_waiting이 항상 false라 no-op이었을 것 — CNTL은 esp_now_reliable_
+     * request()를 더 이상 직접 안 부름, esp_now_tx.c가 bridge_reliable_request()로 바뀜) */
 
     /* 2026-09-04(사용자 지시 — 요약판넬 우측 신호세기 표시) — 메시지 종류 무관하게 매번
      * 최신 RSSI로 덮어씀. 아직 테이블에 없는 노드(첫 ADVERTISE 전)면 조용히 건너뜀 — 노드가
@@ -453,7 +444,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 .msg_type     = ESP_NOW_MSG_ADVERTISE_ACK,
             };
             esp_wifi_get_mac(s_wifi_if, ack.hub_mac);
-            esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+            bridge_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
         }
 
     } else if (msg_type == ESP_NOW_MSG_PAIR_ACK) {
@@ -602,7 +593,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 폭주로 이어져 결국 NO_MEM+캠 재광고(desync)까지 실기에서 확인. recv_cb 안이라
          * 완전한 reliable 왕복은 못 씌우지만, 실패 시 즉석에서 몇 번 더 시도는 가능 */
         for (int ack_attempt = 0; ack_attempt < 3; ack_attempt++) {
-            if (esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack)) == ESP_OK) break;
+            if (bridge_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack)) == ESP_OK) break;
         }
 
         /* CASK — 항상 고정 3단계(2026-08-26, 사용자 지시로 재설계): CONFIG(항상 먼저, 캠이
@@ -714,7 +705,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         add_peer_if_needed(info->src_addr);
         esp_now_wake_hello_sens_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_WAKE_HELLO_SENS_ACK };
         for (int ack_attempt = 0; ack_attempt < 3; ack_attempt++) {
-            if (esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack)) == ESP_OK) break;
+            if (bridge_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack)) == ESP_OK) break;
         }
 
         if (n->kind == HUB_NODE_KIND_SENS) {
@@ -1175,20 +1166,15 @@ void esp_now_hub_init(void)
 
     wifi_bringup();
 
-    ESP_ERROR_CHECK(esp_now_init());
-    ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
-
-    esp_now_peer_info_t peer = { 0 };
-    memcpy(peer.peer_addr, s_broadcast_addr, sizeof(peer.peer_addr));
-    peer.ifidx   = s_wifi_if;
-    peer.channel = 0;
-    peer.encrypt = false;
-    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
-
-    /* 2026-08-25(CASK 재설계) — 예전엔 여기서 HUB_RESET을 브로드캐스트해서, Cntl이 재부팅해도
-     * "아직 자기가 페어링된 줄 아는" 노드들을 강제로 재광고시켰음. 이제는 모든 재연결이
-     * 노드(캠) 주도라 이게 불필요해짐 — 재부팅한 Cntl은 다음 WAKE_HELLO를 그냥 "이 캠을
-     * 모르는 CNTL"로 조용히 무시하고, 캠은 자기 재시도+폴백으로 알아서 다시 찾아옴 */
+    /* 2026-09-21(I2C 브릿지 마이그레이션, project_cntl_i2c_bridge_design_2026_09_21) — CNTL은
+     * 더 이상 ESP-NOW 라디오를 직접 안 씀. i2c_bridge_init()이 esp_now_init()+
+     * esp_now_register_recv_cb(recv_cb)의 자리를 대신함(시그니처 호환 — recv_cb는 전혀 안
+     * 바뀌고, 브릿지가 I2C로 올려주는 수신을 이 함수가 recv_cb에 그대로 재전달함).
+     * 예전 여기 있던 브로드캐스트 피어 등록은 이미 죽은 코드였음(HUB_RESET 브로드캐스트가
+     * 2026-08-25 CASK 재설계로 제거되면서 s_broadcast_addr을 쓰는 곳 자체가 없어졌었음 —
+     * grep으로 확인, 재구현 안 함) */
+    i2c_bridge_init(recv_cb);
+    i2c_bridge_set_channel(esp_now_hub_get_wifi_channel());
 
     /* 2026-08-25(CASK 재설계) — CNTL의 능동적 생존판단 스윕(send_cask_sleep_now 위쪽 참고).
      * 노드 수와 무관하게 1초 주기 타이머 하나 */
@@ -1398,7 +1384,7 @@ void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode)
         .duration_sec = duration_sec,
         .mode         = mode,
     };
-    esp_err_t err = esp_now_send(target_mac, (const uint8_t *)&msg, sizeof(msg));
+    esp_err_t err = bridge_send(target_mac, (const uint8_t *)&msg, sizeof(msg));
     ESP_LOGI(TAG, "BENCH_START(mode=%u, %u초) -> %s: %s", mode, duration_sec, name_copy, esp_err_to_name(err));
 }
 
