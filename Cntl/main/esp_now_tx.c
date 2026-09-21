@@ -5,6 +5,7 @@
 
 #include <string.h>
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -76,6 +77,19 @@ typedef struct {
     bool          in_use;
     uint8_t       mac[6];
     QueueHandle_t queue;
+    /* 2026-09-21(사용자 설계 원칙 — 통신 버퍼는 PSRAM으로) — 큐 저장소(TX_WORKER_QUEUE_LEN*
+     * sizeof(tx_item_t))와 태스크 스택(TX_WORKER_STACK=4096바이트)을 xQueueCreateStatic/
+     * xTaskCreateStatic으로 PSRAM에서 받아옴. 자진종료(vTaskDelete(NULL)) 직전에 자기 자신의
+     * 스택을 heap_caps_free()하는 건 "그 스택 위에서 실행 중인 코드가 자기 발밑 메모리를
+     * 지우는" 것이라 안전하지 않음(free 이후에도 vTaskDelete가 끝날 때까지 그 스택 위에서
+     * 계속 실행됨 — 그 사이 인터럽트 등이 같은 메모리를 재사용하면 손상 위험) — 그래서
+     * 슬롯당 한 번 할당하면 해제하지 않고 재사용함(큐/태스크 오브젝트 자체는 매 사이클
+     * 정상적으로 생성/삭제되지만, 그 밑에 깔린 PSRAM 버퍼는 그대로 둠). Internal RAM
+     * 예산에는 전혀 영향 없음(PSRAM만 소비) */
+    StaticQueue_t queue_cb;
+    uint8_t      *queue_storage;
+    StackType_t  *task_stack;
+    StaticTask_t  task_tcb;
 } tx_worker_t;
 
 static QueueHandle_t     s_tx_queue = NULL;       /* 입구 — 디스패처만 소비 */
@@ -212,11 +226,26 @@ static void tx_dispatcher_task(void *arg)
                  * ESP_NOW_HUB_MAX_NODES개)에서만 오므로 동시 워커 수도 그 이상 못 감 */
                 ESP_LOGE(TAG, "%s: 워커 슬롯 부족(%d개 초과) — 버림", item.what, TX_MAX_WORKERS);
             } else {
-                w->queue = xQueueCreate(TX_WORKER_QUEUE_LEN, sizeof(tx_item_t));
-                memcpy(w->mac, item.mac, sizeof(w->mac));
-                w->in_use = true;
-                xQueueSend(w->queue, &item, 0);  /* 태스크 생성 전에 미리 넣어둠 — 유실 없음 */
-                xTaskCreate(tx_worker_task, "tx_worker", TX_WORKER_STACK, w, TX_WORKER_PRIORITY, NULL);
+                /* 2026-09-21 — 큐 저장소/태스크 스택을 PSRAM에서 할당(슬롯당 1회, 이후
+                 * 재사용 — 이유는 tx_worker_t 정의부 주석 참고) */
+                if (!w->queue_storage) {
+                    w->queue_storage = heap_caps_malloc(TX_WORKER_QUEUE_LEN * sizeof(tx_item_t),
+                                                         MALLOC_CAP_SPIRAM);
+                }
+                if (!w->task_stack) {
+                    w->task_stack = heap_caps_malloc(TX_WORKER_STACK, MALLOC_CAP_SPIRAM);
+                }
+                if (!w->queue_storage || !w->task_stack) {
+                    ESP_LOGE(TAG, "%s: 워커 PSRAM 버퍼 할당 실패 — 버림", item.what);
+                } else {
+                    w->queue = xQueueCreateStatic(TX_WORKER_QUEUE_LEN, sizeof(tx_item_t),
+                                                   w->queue_storage, &w->queue_cb);
+                    memcpy(w->mac, item.mac, sizeof(w->mac));
+                    w->in_use = true;
+                    xQueueSend(w->queue, &item, 0);  /* 태스크 생성 전에 미리 넣어둠 — 유실 없음 */
+                    xTaskCreateStatic(tx_worker_task, "tx_worker", TX_WORKER_STACK / sizeof(StackType_t),
+                                       w, TX_WORKER_PRIORITY, w->task_stack, &w->task_tcb);
+                }
             }
         }
         xSemaphoreGive(s_workers_mutex);
