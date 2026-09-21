@@ -3166,7 +3166,13 @@ static bool stats_read_mac_window_stat(uint8_t scale_idx, uint8_t chan_type, con
                                         uint32_t window_start, uint32_t window_end,
                                         float *out_min, float *out_max, float *out_avg)
 {
-    static stats_bucket_t buf[STATS_AGG_POINTS_PER_SCALE];
+    /* 2026-09-21(사용자 지시 — 메모리 조사) — 예전엔 static 배열(1020바이트)이라 이 함수를
+     * 한 번도 안 불러도 Internal RAM에 영구 예약돼있었음. 스택엔 여전히 안 두면서(2026-08-03
+     * 스택 오버플로우 사고 이후 원칙) PSRAM에 한 번만 할당해 재사용 — 이 프로젝트의 다른
+     * 대용량 버퍼(s_current_list 등)와 동일 패턴 */
+    static stats_bucket_t *buf = NULL;
+    if (!buf) buf = heap_caps_malloc(sizeof(stats_bucket_t) * STATS_AGG_POINTS_PER_SCALE, MALLOC_CAP_SPIRAM);
+    if (!buf) return false;
     uint32_t got = stats_agg_read_window(scale_idx, chan_type, mac, window_start, window_end,
                                           buf, STATS_AGG_POINTS_PER_SCALE);
     if (got == 0) return false;
@@ -3820,7 +3826,16 @@ static bool refresh_stats_graph(void)
      * 그리기 완료는 함수 끝의 LV_EVENT_REFR_READY 훅에서 별도로 로그)
      * 2026-09-15(그룹 재설계) — chan_type뿐 아니라 mac까지 슬롯별로 다름(s_stats_slot_*) */
     int64_t t_sdread_start_us = esp_timer_get_time();
-    static stats_bucket_t buf[STATS_GRAPH_SERIES_COUNT][STATS_GRAPH_POINT_COUNT];
+    /* 2026-09-21(사용자 지시 — 메모리 조사, 링커 맵으로 실측) — 이 파일 전체 .bss(13.6KB) 중
+     * 가장 큰 단일 항목(4080바이트)이 바로 이 static 배열이었음 — 그래프를 한 번도 안 열어도
+     * Internal RAM에 영구 예약. stats_read_mac_window_stat()과 동일하게 PSRAM 1회 할당으로
+     * 전환(스택엔 안 둠, 2026-08-03 원칙 유지) */
+    static stats_bucket_t (*buf)[STATS_GRAPH_POINT_COUNT] = NULL;
+    if (!buf) {
+        buf = heap_caps_malloc(sizeof(stats_bucket_t) * STATS_GRAPH_SERIES_COUNT * STATS_GRAPH_POINT_COUNT,
+                                MALLOC_CAP_SPIRAM);
+    }
+    if (!buf) return false;
     uint32_t got[STATS_GRAPH_SERIES_COUNT];
     for (int s = 0; s < s_stats_slot_count; s++) {
         got[s] = stats_agg_read_window((uint8_t)idx, s_stats_slot_chan_type[s], s_stats_slot_mac[s],

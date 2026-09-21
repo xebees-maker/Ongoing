@@ -124,7 +124,15 @@ static const char *TAG = "cam_node";
  * 충분히 짧은 1시간으로 설정(사용자 확인) */
 #define RWDT_LIVE_MODE_BUDGET_SEC (60 * 60)
 
-static uint32_t s_capture_interval_sec  = 0;  /* app_main에서 Kconfig 기본값으로 초기화 */
+/* 2026-09-21 수정(실기 확인 — "주기촬영이 라이브모드에선 되는데 진짜 딥슬립 들어가면
+ * 영원히 안 됨") — s_response_interval_sec(바로 아래)와 똑같은 버그였음: 일반 static이라
+ * 매 딥슬립 재부팅마다 Kconfig 기본값(CAM_CAPTURE_INTERVAL_MS, 예: 1800s)으로 리셋됨.
+ * 그 직후 콘의 CONFIG_SET(예: 10s)이 도착하면 cam_node_set_capture_interval_sec()의
+ * changed 판정이 "1800->10, 바뀜"으로 오인해서 s_next_capture_due_unix_time을 매번
+ * "지금+10초"로 강제 리셋함 — 응답성만큼 자고 막 도달했어야 할 목표시각이 재부팅마다
+ * 다시 미래로 밀려나서 영원히 도달 못 함. RTC 메모리로 옮겨서 재부팅 경계 넘어 마지막
+ * 적용값을 유지(아래 app_main 초기화도 "0일 때만 Kconfig 기본값" 적용으로 함께 수정) */
+static RTC_DATA_ATTR uint32_t s_capture_interval_sec  = 0;
 /* 2026-08-26 수정(사용자 실기 관찰: "I는 초기 10초인데, 10초 잠들면서는 0초로 보고하네") —
  * 예전엔 일반 static이라 매 재부팅마다 CAM_RESPONSE_INTERVAL_SEC_DEFAULT(0)로 리셋됐음.
  * WAKE_HELLO는 이번 사이클의 CONFIG를 받기 "전"에 보내지므로(esp_now_cam.c 참고), 재부팅
@@ -734,10 +742,15 @@ void app_main(void)
                                              spk_on_advertise_ack_received, spk_on_scan_sweep_done);
     }
 
-    /* Kconfig 기본값으로 시작 — 로컬 저장 없음(위 설정 관련 주석 참고), 페어링되면 Cntl이
-     * CAM_CONFIG_SET으로 실제 값을 채워줌. clamp_capture_interval_sec는 개발용 Kconfig
-     * 값(CAM_CAPTURE_10S)까지도 안전측으로 걸러줌 — 크래시 안전장치 주석 참고 */
-    s_capture_interval_sec = clamp_capture_interval_sec(CAM_CAPTURE_INTERVAL_MS / 1000);
+    /* 2026-09-21 수정 — 이제 RTC에 마지막 적용값이 남아있으면(재부팅 사이) 그걸 그대로
+     * 쓰고, 진짜 최초 부팅(0)일 때만 Kconfig 기본값 사용. 매번 덮어쓰면 위 RTC_DATA_ATTR로
+     * 옮긴 의미가 없어짐(같은 값이 다시 와도 "바뀜"으로 오인하는 버그 재발). 어차피
+     * 페어링되면 Cntl이 CAM_CONFIG_SET으로 실제 값을 다시 채워줌 — 이건 그 전까지의 초기값.
+     * clamp_capture_interval_sec는 개발용 Kconfig 값(CAM_CAPTURE_10S)까지도 안전측으로
+     * 걸러줌 — 크래시 안전장치 주석 참고 */
+    if (s_capture_interval_sec == 0) {
+        s_capture_interval_sec = clamp_capture_interval_sec(CAM_CAPTURE_INTERVAL_MS / 1000);
+    }
 
     /* 2026-08-10 — 카메라는 여기서 무조건 초기화하지 않음(필요시 초기화로 전환, 사용자 지시).
      * CAM이 깨는 이유는 대부분 "명령을 받기 위해서"이지 촬영이 아님 — 실제로 촬영이 필요한
