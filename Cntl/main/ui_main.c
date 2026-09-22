@@ -4471,10 +4471,15 @@ static void refresh_dashboard(lv_timer_t *t)
      * 붙여줘") — 콜론 앞 공백 제거, 다른 라벨들("%s: ...")과 통일 */
     lv_label_set_text_fmt(s_mem_status_label, "%s: I = %s / P = %s", ui_str(STR_LABEL_MEMORY), mem_i, mem_p);
 
-    /* 2026-09-22 — 콘-콘 CAN 테스트 Tx/Rx 누적 카운트, 매 틱 그대로 갱신(가벼운 정수 읽기라
-     * 비용 무시 가능, Memory 줄과 동일 빈도). I2C 브릿지 코드 제거로 원래 표시 용도는 없어짐 */
-    lv_label_set_text_fmt(s_bridge_status_label, "CAN test: Tx %lu / Rx %lu",
-                           (unsigned long)can_test_get_tx_count(), (unsigned long)can_test_get_rx_count());
+    /* 2026-09-22 — 콘-콘 CAN 테스트 카운트, 매 틱 그대로 갱신(가벼운 정수 읽기라 비용 무시
+     * 가능, Memory 줄과 동일 빈도). I2C 브릿지 코드 제거로 원래 표시 용도는 없어짐.
+     * 2026-09-22(사용자 지적) — Tx는 큐잉 성공(실제 전송 성공 아님)이라 오해 소지 있어서
+     * 실제 성공/실패(on_tx_done 기반) OK/Fail도 같이 표시 */
+    lv_label_set_text_fmt(s_bridge_status_label, "CAN: Tx %lu Rx %lu OK %lu Fail %lu | Q C=%lu/%lu D=%lu/%lu",
+                           (unsigned long)can_test_get_tx_count(), (unsigned long)can_test_get_rx_count(),
+                           (unsigned long)can_test_get_tx_done_ok(), (unsigned long)can_test_get_tx_done_fail(),
+                           (unsigned long)can_test_get_ctrl_queue_depth(), (unsigned long)can_test_get_ctrl_queue_hwm(),
+                           (unsigned long)can_test_get_data_queue_depth(), (unsigned long)can_test_get_data_queue_hwm());
 
     /* 2026-09-10(사용자 설계 — "CNTL 메모리 밑에 SD 용량도 표시... 9:1 비율... 90%가 될 때
      * 10%만큼 오래된 걸 지운다") — SD 원격 조회는 매 틱(1초)마다 하기엔 낭비라 5초마다만.
@@ -4718,12 +4723,26 @@ static void refresh_dashboard(lv_timer_t *t)
     }
     /* 2026-09-22(사용자 지시 — "캠 연결 없어도 예전에 연결된 적 있는 캠의 Alias/사진을
      * 볼 수 있어야 함", 이어서 "두 대 중 하나만 라이브인 혼재 상황도 드롭다운에서 둘 다
-     * 골라져야" 지적) — SD 사진 폴더 기준 "아는 카메라" 전부를 항상 훑되, 이미 라이브
-     * 목록(cam_macs)에 있는 MAC은 중복으로 안 넣음(known_only만 남김). 드롭다운은
-     * 라이브 + known-only를 합친 목록(dd_macs) — 라이브 유무와 무관하게 둘 다 항상
-     * 선택 가능해야 함 */
+     * 골라져야" 지적) — SD 사진 폴더 기준 "아는 카메라" 전부를 훑되, 이미 라이브 목록
+     * (cam_macs)에 있는 MAC은 중복으로 안 넣음(known_only만 남김). 드롭다운은 라이브 +
+     * known-only를 합친 목록(dd_macs).
+     * 2026-09-22(사용자 지적 — 폴링 재사용 금지, "팝업 열렸을 때만 확인하면 되잖아") —
+     * 이 목록은 카메라 팝업이 실제로 열려있을 때만 쓰이므로, 팝업이 닫혀있으면 SD를 아예
+     * 안 건드림(5초 캐싱도 여전히 폴링이라 부적절 — 팝업 닫혀있는 동안은 호출 자체가 0) */
     uint8_t known_cam_macs[ESP_NOW_HUB_MAX_NODES][6];
-    int known_cam_count_raw = (int)photo_storage_list_camera_macs(known_cam_macs, ESP_NOW_HUB_MAX_NODES);
+    int known_cam_count_raw = 0;
+    if (s_camera_popup) {
+        /* 2026-09-22(사용자 지시 — "팝업 열 때마다 말하지 않아도 측정해야되") — 팝업이
+         * 열려있는 동안 이 블록은 계속 매 틱 실행됨(폴링 자체를 없앤 게 아니라 "언제"만
+         * 옮긴 것 — 사용자 지적). 열려있는 매 틱마다 실제로 메모리가 또 줄어드는지 직접
+         * 추적 — 계속 줄면 진짜 누수, 한 번 줄고 멈추면 일회성 비용 */
+        size_t heap_before_scan = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        known_cam_count_raw = (int)photo_storage_list_camera_macs(known_cam_macs, ESP_NOW_HUB_MAX_NODES);
+        size_t heap_after_scan = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        ESP_LOGW(TAG, "MEMDIAG 카메라팝업 열려있음(틱): internal %u -> %u (변화 %d bytes)",
+                 (unsigned)heap_before_scan, (unsigned)heap_after_scan,
+                 (int)heap_after_scan - (int)heap_before_scan);
+    }
     uint8_t dd_macs[ESP_NOW_HUB_MAX_NODES][6];
     int dd_count = 0;
     for (int i = 0; i < cam_count && dd_count < ESP_NOW_HUB_MAX_NODES; i++) {
@@ -7861,6 +7880,13 @@ static void cb_close_camera_popup(lv_event_t *e)
 static void build_camera_tab(void)
 {
     if (s_camera_popup) return;  /* 이미 열려있음 */
+
+    /* 2026-09-22(사용자 지시 — "팝업 열 때마다 말하지 않아도 측정해야되") — 팝업 열기
+     * 시작 시점의 internal free. 실제 known-camera 스캔/드롭다운/사진목록 채움은 이
+     * 함수가 아니라 다음 refresh_dashboard() 틱에서 일어나므로(아래 known_cam_macs 관련
+     * 주석 참고), 여기서는 시작점만 찍고 실제 변화는 refresh_dashboard() 쪽 로그로 추적 */
+    size_t heap_before_open = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGW(TAG, "MEMDIAG 카메라팝업 열기: internal=%u (시작점)", (unsigned)heap_before_open);
 
     lv_obj_t *popup = create_page_popup();
     s_camera_popup = popup;

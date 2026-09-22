@@ -1,0 +1,263 @@
+#include "can_bridge_link.h"
+#include "esp_twai.h"
+#include "esp_twai_onchip.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include <string.h>
+#include <stdlib.h>
+
+static const char *TAG = "can_bridge_link";
+
+/* PSRAM 우선, 없으면 내부 RAM 폴백(사용자 지시 — feedback_prefer_psram_for_buffers 정책을
+ * 브릿지에도 동일 적용, PSRAM 없는 후보 보드 대비 폴백 필수) */
+static void *psram_or_internal_alloc(size_t len)
+{
+    void *p = heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) {
+        p = heap_caps_malloc(len, MALLOC_CAP_8BIT);
+    }
+    return p;
+}
+
+/* ============================== FIFO 큐 — 드롭 금지 ============================== */
+
+void can_bridge_queue_init(can_bridge_queue_t *q)
+{
+    memset(q, 0, sizeof(*q));
+}
+
+void can_bridge_queue_push(can_bridge_queue_t *q, const uint8_t *data, size_t len)
+{
+    can_bridge_queue_entry_t *e = (can_bridge_queue_entry_t *)psram_or_internal_alloc(sizeof(can_bridge_queue_entry_t) + len);
+    if (!e) {
+        /* 사용자 지시: 이 링크에서 메시지 유실은 절대 허용 안 함 — 드롭 대신 즉시 드러나게 abort.
+         * (PSRAM+내부RAM 둘 다 실패할 정도면 이미 메모리 설계 자체가 잘못된 상태) */
+        ESP_LOGE(TAG, "큐 항목 할당 실패(len=%u) — 메시지 드롭 금지 정책상 중단", (unsigned)len);
+        abort();
+    }
+    e->next = NULL;
+    e->len = len;
+    memcpy(e->data, data, len);
+
+    if (q->tail) {
+        q->tail->next = e;
+    } else {
+        q->head = e;
+    }
+    q->tail = e;
+    q->count++;
+    if (q->count > q->high_water_mark) {
+        q->high_water_mark = q->count;
+    }
+}
+
+int can_bridge_queue_pop(can_bridge_queue_t *q, uint8_t **out_data, size_t *out_len)
+{
+    if (!q->head) return 0;
+    can_bridge_queue_entry_t *e = q->head;
+    q->head = e->next;
+    if (!q->head) q->tail = NULL;
+    q->count--;
+
+    /* entry 헤더(next/len)는 반환하는 data 포인터보다 앞에 있으니, data 시작주소를 돌려주고
+     * free는 pop_free에서 그 앞의 entry 헤더까지 포함해 처리 */
+    *out_data = e->data;
+    *out_len = e->len;
+    return 1;
+}
+
+void can_bridge_queue_pop_free(uint8_t *popped_data)
+{
+    /* data[]는 flexible array member라 entry 시작주소 = data - offsetof(...,data) */
+    can_bridge_queue_entry_t *e = (can_bridge_queue_entry_t *)(popped_data - offsetof(can_bridge_queue_entry_t, data));
+    free(e);
+}
+
+/* ============================== ISO-TP 재조립(수신) ============================== */
+
+void can_bridge_reassembly_init(can_bridge_reassembly_t *r, uint8_t *psram_buf, size_t buf_cap)
+{
+    memset(r, 0, sizeof(*r));
+    r->buf = psram_buf;
+    r->buf_cap = buf_cap;
+}
+
+int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_data, uint8_t frame_len,
+                                uint8_t fc_frame_out[8], can_bridge_queue_t *complete_queue)
+{
+    if (frame_len < 1) return 0;
+    uint8_t pci = (frame_data[0] >> 4) & 0x0F;
+
+    if (pci == ISO_TP_PCI_SF) {
+        uint8_t len = frame_data[0] & 0x0F;
+        if (len == 0 || len > ISO_TP_SF_MAX_LEN || (size_t)len > r->buf_cap) {
+            ESP_LOGW(TAG, "SF 길이 이상(%u) — 폐기", len);
+            return 0;
+        }
+        memcpy(r->buf, &frame_data[1], len);
+        can_bridge_queue_push(complete_queue, r->buf, len);
+        r->in_progress = 0;
+        return 0; /* SF는 FC 불필요 */
+    }
+
+    if (pci == ISO_TP_PCI_FF) {
+        if (frame_len < 2) return 0;
+        size_t total_len = (((size_t)(frame_data[0] & 0x0F)) << 8) | frame_data[1];
+        if (total_len > r->buf_cap) {
+            ESP_LOGE(TAG, "FF total_len(%u) > 버퍼(%u) — 폐기(발신측 재시도 기대)",
+                     (unsigned)total_len, (unsigned)r->buf_cap);
+            r->in_progress = 0;
+            return 0;
+        }
+        size_t first_chunk = total_len < ISO_TP_FF_FIRST_LEN ? total_len : ISO_TP_FF_FIRST_LEN;
+        memcpy(r->buf, &frame_data[2], first_chunk);
+        r->total_len = total_len;
+        r->received_len = first_chunk;
+        r->next_seq = 1;
+        r->in_progress = 1;
+
+        /* BS=0("남은 거 다 보내"), STmin=0 — 사용자 지시 없는 세부는 최소구현(단순 P2P 링크라
+         * 별도 페이싱 협상 불필요) */
+        fc_frame_out[0] = (uint8_t)((ISO_TP_PCI_FC << 4) | ISO_TP_FC_STATUS_CTS);
+        fc_frame_out[1] = 0x00; /* BlockSize=0 */
+        fc_frame_out[2] = 0x00; /* STmin=0 */
+        memset(&fc_frame_out[3], 0, 5);
+        return 1;
+    }
+
+    if (pci == ISO_TP_PCI_CF) {
+        if (!r->in_progress) {
+            ESP_LOGW(TAG, "진행 중인 FF 없이 CF 도착 — 폐기");
+            return 0;
+        }
+        uint8_t seq = frame_data[0] & 0x0F;
+        if (seq != r->next_seq) {
+            ESP_LOGW(TAG, "CF 순번 어긋남(기대=%u 수신=%u) — 이 메시지 폐기(발신측 재시도 기대)",
+                     r->next_seq, seq);
+            r->in_progress = 0;
+            return 0;
+        }
+        size_t remain = r->total_len - r->received_len;
+        size_t chunk = (size_t)(frame_len - 1);
+        if (chunk > remain) chunk = remain;
+        if (r->received_len + chunk > r->buf_cap) {
+            ESP_LOGE(TAG, "CF로 버퍼 한도 초과 — 폐기");
+            r->in_progress = 0;
+            return 0;
+        }
+        memcpy(r->buf + r->received_len, &frame_data[1], chunk);
+        r->received_len += chunk;
+        r->next_seq = (uint8_t)((r->next_seq + 1) & 0x0F);
+
+        if (r->received_len >= r->total_len) {
+            can_bridge_queue_push(complete_queue, r->buf, r->total_len);
+            r->in_progress = 0;
+        }
+        return 0;
+    }
+
+    /* FC는 재조립 상태머신이 아니라 송신측(can_bridge_send)이 직접 처리 — 여기로 오면 무시 */
+    return 0;
+}
+
+/* ============================== 송신(ISO-TP 분할) ============================== */
+
+struct can_bridge_ctx {
+    twai_node_handle_t node;
+    uint32_t tx_id;
+    SemaphoreHandle_t fc_sem;
+    volatile uint8_t fc_status;
+    volatile uint8_t fc_pending;
+};
+
+can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id)
+{
+    can_bridge_ctx_t *ctx = (can_bridge_ctx_t *)psram_or_internal_alloc(sizeof(can_bridge_ctx_t));
+    if (!ctx) {
+        ESP_LOGE(TAG, "ctx 할당 실패");
+        abort();
+    }
+    ctx->node = node;
+    ctx->tx_id = tx_id;
+    ctx->fc_sem = xSemaphoreCreateBinary();
+    ctx->fc_status = ISO_TP_FC_STATUS_CTS;
+    ctx->fc_pending = 0;
+    return ctx;
+}
+
+/* CAN RX 콜백 쪽에서, 이 ctx가 기다리는 FC 프레임을 받았을 때 호출 — can_test.c의
+ * on_rx_done에서 PCI==FC이고 기대하던 방향이면 이걸 불러줘야 함 */
+void can_bridge_ctx_notify_fc(can_bridge_ctx_t *ctx, const uint8_t *frame_data)
+{
+    if (!ctx->fc_pending) return;
+    ctx->fc_status = frame_data[0] & 0x0F;
+    ctx->fc_pending = 0;
+    xSemaphoreGive(ctx->fc_sem);
+}
+
+static esp_err_t send_one_frame(can_bridge_ctx_t *ctx, const uint8_t data[8], uint8_t len)
+{
+    twai_frame_t f = {
+        .header.id = ctx->tx_id,
+        .buffer = (uint8_t *)data,
+        .buffer_len = len,
+    };
+    return twai_node_transmit(ctx->node, &f, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
+}
+
+/* msg(app_header+payload, len바이트)를 통째로 ISO-TP로 쪼개 보냄. 성공 시 ESP_OK.
+ * len<=7이면 SF 하나로 끝(FC 불필요). 그보다 크면 FF -> FC 대기 -> CF들 순서(BS=0/STmin=0
+ * 고정이라 FC는 딱 한 번만 기다리면 나머지 CF는 곧바로 연속 전송) */
+esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
+{
+    if (len == 0 || len > ISO_TP_MAX_MSG_LEN) return ESP_ERR_INVALID_ARG;
+
+    if (len <= ISO_TP_SF_MAX_LEN) {
+        uint8_t frame[8] = {0};
+        frame[0] = (uint8_t)((ISO_TP_PCI_SF << 4) | len);
+        memcpy(&frame[1], msg, len);
+        return send_one_frame(ctx, frame, (uint8_t)(1 + len));
+    }
+
+    /* First Frame */
+    uint8_t frame[8] = {0};
+    frame[0] = (uint8_t)((ISO_TP_PCI_FF << 4) | ((len >> 8) & 0x0F));
+    frame[1] = (uint8_t)(len & 0xFF);
+    memcpy(&frame[2], msg, ISO_TP_FF_FIRST_LEN);
+    ctx->fc_pending = 1;
+    esp_err_t err = send_one_frame(ctx, frame, 8);
+    if (err != ESP_OK) { ctx->fc_pending = 0; return err; }
+
+    if (xSemaphoreTake(ctx->fc_sem, pdMS_TO_TICKS(CAN_BRIDGE_DEFAULT_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "FC 타임아웃 — 전송 중단");
+        ctx->fc_pending = 0;
+        return ESP_ERR_TIMEOUT;
+    }
+    if (ctx->fc_status != ISO_TP_FC_STATUS_CTS) {
+        ESP_LOGW(TAG, "FC status=%u(CTS 아님) — 전송 중단", ctx->fc_status);
+        return ESP_FAIL;
+    }
+
+    size_t sent = ISO_TP_FF_FIRST_LEN;
+    uint8_t seq = 1;
+    while (sent < len) {
+        size_t chunk = (len - sent) < ISO_TP_CF_MAX_LEN ? (len - sent) : ISO_TP_CF_MAX_LEN;
+        uint8_t cf[8] = {0};
+        cf[0] = (uint8_t)((ISO_TP_PCI_CF << 4) | (seq & 0x0F));
+        memcpy(&cf[1], msg + sent, chunk);
+        err = send_one_frame(ctx, cf, (uint8_t)(1 + chunk));
+        if (err != ESP_OK) return err;
+        sent += chunk;
+        seq = (uint8_t)((seq + 1) & 0x0F);
+        /* 2026-09-22(실기 디버깅 — CF를 간격 없이 연속 전송하니 양쪽 보드가 동시에 여러 프레임을
+         * 터뜨릴 때 TEC/REC가 튀면서 버스 에러(폼/스터프)로 CF 일부가 유실, 재조립이 영영 안
+         * 끝나는 문제 실측 확인. STmin=0으로 FC에는 통보했지만 실제로 그 속도로 쏘면 문제가
+         * 있어서, 송신 쪽에서만 최소 간격을 둠(수신측 FC 프로토콜은 안 바꿈 — BS=0/STmin=0 통보는
+         * 유지, 그냥 우리 쪽 구현이 좀 더 보수적으로 감) */
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    return ESP_OK;
+}
