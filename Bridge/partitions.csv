@@ -1,0 +1,5 @@
+# 브릿지(브) 파티션 테이블 — 콘과 같은 물리 보드(16MB flash)를 빌려 쓰는 벤치테스트 단계.
+# 콘과 달리 폰트/자산 LittleFS가 필요 없어서(로그창은 내장 폰트만 씀) app 파티션 하나로 단순화.
+nvs,        data, nvs,      0x9000,     0x6000,
+phy_init,   data, phy,      0xF000,     0x1000,
+app,        app,  factory,  0x10000,    0x300000,

@@ -1,0 +1,243 @@
+/*
+ * SPDX-FileCopyrightText: 2022 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: CC0-1.0
+ */
+
+#include "waveshare_rgb_lcd_port.h"
+#include "ch422g.h"
+
+static const char *TAG = "example";
+
+/* IDF 6.0.2 removed the legacy driver/i2c.h master API (i2c_param_config/
+ * i2c_driver_install/i2c_master_write_to_device) that this example originally used
+ * (it's written against an older IDF, per README "ESP-IDF >= 5.5"); ported to the
+ * new i2c_master bus/device API here. Byte values, addresses, order and delays vs
+ * the upstream vendor demo are otherwise unchanged. */
+static i2c_master_bus_handle_t s_i2c_bus = NULL;
+
+/* 2026-09-06 — CH422G 접근을 ch422g.c(공용 드라이버, 섀도우 상태 하나로 통합 관리)로
+ * 옮김. 예전엔 이 파일이 s_ch422g_mode_dev/s_ch422g_data_dev를 직접 들고 통짜
+ * 매직넘버(0x2C/0x2E/0x1E)만 썼는데, SD카드 CS(EXIO4)도 같은 레지스터의 다른 비트라
+ * 별도로 관리하면 섀도우가 두 군데로 나뉘어 서로 덮어쓸 위험이 있었음 — 이제 이
+ * 파일도 ch422g_set_io_raw()로 "정확히 같은 바이트"를 그대로 재현만 하고(동작 변화
+ * 없음), 이후 SD카드 쪽 코드는 ch422g_set_io(CH422G_IO_SD_CS, ...)로 안전하게
+ * 비트 단위 제어함 */
+static esp_err_t i2c_master_init(void)
+{
+    if (s_i2c_bus != NULL) {
+        return ESP_OK;
+    }
+
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = I2C_MASTER_NUM,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    esp_err_t ret = i2c_new_master_bus(&bus_cfg, &s_i2c_bus);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ESP_LOGI(TAG, "i2c_master_bus_handle_t 생성됨: %p", (void *)s_i2c_bus);
+
+    return ch422g_init(s_i2c_bus);
+}
+
+#if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_GT911
+
+// GPIO initialization
+void gpio_init(void)
+{
+    // Zero-initialize the config structure
+    gpio_config_t io_conf = {};
+    // Disable interrupt
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    // Bit mask of the pins, use GPIO4 here
+    io_conf.pin_bit_mask = GPIO_INPUT_PIN_SEL;
+    // Set as input mode
+    io_conf.mode = GPIO_MODE_OUTPUT;
+
+    gpio_config(&io_conf);
+}
+
+// Reset the touch screen
+static void waveshare_esp32_s3_touch_reset(void)
+{
+    // Reset the touch screen. It is recommended to reset the touch screen before using it.
+    ch422g_set_io_raw(CH422G_MODE_IO_OE, 0x2C);
+    esp_rom_delay_us(100 * 1000);
+    gpio_set_level(GPIO_INPUT_IO_4, 0);
+    esp_rom_delay_us(100 * 1000);
+    ch422g_set_io_raw(CH422G_MODE_IO_OE, 0x2E);
+    esp_rom_delay_us(200 * 1000);
+}
+
+#endif
+
+// Initialize RGB LCD
+esp_err_t waveshare_esp32_s3_rgb_lcd_init(uint8_t frame_buffer_count,
+                                          esp_lcd_panel_handle_t *panel_handle,
+                                          esp_lcd_touch_handle_t *touch_handle)
+{
+    if (panel_handle == NULL || touch_handle == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *panel_handle = NULL;
+    *touch_handle = NULL;
+
+    ESP_LOGI(TAG, "Install RGB LCD panel driver"); // Log the start of the RGB LCD panel driver installation
+    esp_lcd_rgb_panel_config_t panel_config = {
+        .clk_src = LCD_CLK_SRC_DEFAULT, // Set the clock source for the panel
+        .timings = {
+            .pclk_hz = EXAMPLE_LCD_PIXEL_CLOCK_HZ, // Pixel clock frequency
+            .h_res = EXAMPLE_LCD_H_RES,            // Horizontal resolution
+            .v_res = EXAMPLE_LCD_V_RES,            // Vertical resolution
+#if ESP_PANEL_USE_1024_600_LCD
+            .hsync_back_porch = 145, // Horizontal sync pulse width
+            .hsync_front_porch = 170, // Horizontal back porch
+            .hsync_pulse_width = 30, // Horizontal front porch
+            .vsync_back_porch = 23,  // Vertical sync pulse width
+            .vsync_front_porch = 12,  // Vertical back porch
+            .vsync_pulse_width = 2,  // Vertical front porch
+#else
+            .hsync_pulse_width = 4, // Horizontal sync pulse width
+            .hsync_back_porch = 8,  // Horizontal back porch
+            .hsync_front_porch = 8, // Horizontal front porch
+            .vsync_pulse_width = 4, // Vertical sync pulse width
+            .vsync_back_porch = 8,  // Vertical back porch
+            .vsync_front_porch = 8, // Vertical front porch
+#endif
+            .flags = {
+                .pclk_active_neg = 1, // Active low pixel clock
+            },
+        },
+        .data_width = EXAMPLE_RGB_DATA_WIDTH,                    // Data width for RGB
+        /* bits_per_pixel/sram_trans_align/psram_trans_align (upstream vendor demo, older IDF)
+         * were replaced by in/out_color_format in the RGB panel driver on this IDF version. */
+        .in_color_format = LCD_COLOR_FMT_RGB565,
+        .out_color_format = LCD_COLOR_FMT_RGB565,
+        .num_fbs = frame_buffer_count,                           // Number of frame buffers
+        .bounce_buffer_size_px = EXAMPLE_RGB_BOUNCE_BUFFER_SIZE, // Bounce buffer size in pixels
+        .hsync_gpio_num = EXAMPLE_LCD_IO_RGB_HSYNC,              // GPIO number for horizontal sync
+        .vsync_gpio_num = EXAMPLE_LCD_IO_RGB_VSYNC,              // GPIO number for vertical sync
+        .de_gpio_num = EXAMPLE_LCD_IO_RGB_DE,                    // GPIO number for data enable
+        .pclk_gpio_num = EXAMPLE_LCD_IO_RGB_PCLK,                // GPIO number for pixel clock
+        .disp_gpio_num = EXAMPLE_LCD_IO_RGB_DISP,                // GPIO number for display
+        .data_gpio_nums = {
+            EXAMPLE_LCD_IO_RGB_DATA0,
+            EXAMPLE_LCD_IO_RGB_DATA1,
+            EXAMPLE_LCD_IO_RGB_DATA2,
+            EXAMPLE_LCD_IO_RGB_DATA3,
+            EXAMPLE_LCD_IO_RGB_DATA4,
+            EXAMPLE_LCD_IO_RGB_DATA5,
+            EXAMPLE_LCD_IO_RGB_DATA6,
+            EXAMPLE_LCD_IO_RGB_DATA7,
+            EXAMPLE_LCD_IO_RGB_DATA8,
+            EXAMPLE_LCD_IO_RGB_DATA9,
+            EXAMPLE_LCD_IO_RGB_DATA10,
+            EXAMPLE_LCD_IO_RGB_DATA11,
+            EXAMPLE_LCD_IO_RGB_DATA12,
+            EXAMPLE_LCD_IO_RGB_DATA13,
+            EXAMPLE_LCD_IO_RGB_DATA14,
+            EXAMPLE_LCD_IO_RGB_DATA15,
+        },
+        .flags = {
+            .fb_in_psram = 1, // Use PSRAM for framebuffer
+        },
+    };
+
+    // Create a new RGB panel with the specified configuration
+    ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, panel_handle));
+
+    ESP_LOGI(TAG, "Initialize RGB LCD panel");         // Log the initialization of the RGB LCD panel
+    ESP_ERROR_CHECK(esp_lcd_panel_init(*panel_handle)); // Initialize the LCD panel
+
+#if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_GT911
+    /* 2026-09-22(실기 크래시로 발견 — GT911 초기화 실패가 ESP_ERROR_CHECK로 abort되어 재부팅
+     * 루프에 빠짐, 브릿지가 같은 공유버스(GPIO8/9)에 물리면서 처음 관측됨) — 이 구간(터치/공유
+     * I2C 버스) 안의 실패는 더 이상 abort하지 않음. panel_handle은 이미 위에서 초기화 완료된
+     * 상태라 패널 자체는 그대로 쓰고, 터치만 비활성(touch_handle=NULL)인 채로 부팅을 계속함 */
+    ESP_LOGI(TAG, "Initialize I2C bus");   // Log the initialization of the I2C bus
+    esp_err_t i2c_err = i2c_master_init(); // Initialize the I2C master
+    if (i2c_err != ESP_OK) {
+        ESP_LOGW(TAG, "I2C 버스 초기화 실패: %s", esp_err_to_name(i2c_err));
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "Initialize GPIO");      // Log GPIO initialization
+    gpio_init();                           // Initialize GPIO pins
+    ESP_LOGI(TAG, "Initialize Touch LCD"); // Log touch LCD initialization
+    waveshare_esp32_s3_touch_reset();      // Reset the touch panel
+
+    esp_lcd_panel_io_handle_t tp_io_handle = NULL;                                          // Declare a handle for touch panel I/O
+    esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG(); // Configure I2C for GT911 touch controller
+    /* Upstream vendor demo sets 0 here (meant "use bus default" on the older IDF this
+     * example targets) — the new i2c_master driver on this IDF version rejects 0 as an
+     * invalid SCL frequency at i2c_master_bus_add_device() and aborts, so use the bus rate. */
+    tp_io_config.scl_speed_hz = I2C_MASTER_FREQ_HZ;
+
+    ESP_LOGI(TAG, "Initialize I2C panel IO");                                          // Log I2C panel I/O initialization
+    esp_err_t io_err = esp_lcd_new_panel_io_i2c(s_i2c_bus, &tp_io_config, &tp_io_handle); // Create new I2C panel I/O
+    if (io_err != ESP_OK) {
+        ESP_LOGW(TAG, "터치 패널 IO 초기화 실패: %s", esp_err_to_name(io_err));
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Initialize touch controller GT911"); // Log touch controller initialization
+    const esp_lcd_touch_config_t tp_cfg = {
+        .x_max = EXAMPLE_LCD_H_RES,                // Set maximum X coordinate
+        .y_max = EXAMPLE_LCD_V_RES,                // Set maximum Y coordinate
+        .rst_gpio_num = EXAMPLE_PIN_NUM_TOUCH_RST, // GPIO number for reset
+        .int_gpio_num = EXAMPLE_PIN_NUM_TOUCH_INT, // GPIO number for interrupt
+        .levels = {
+            .reset = 0,     // Reset level
+            .interrupt = 0, // Interrupt level
+        },
+        .flags = {
+            .swap_xy = 0,  // No swap of X and Y
+            .mirror_x = 0, // No mirroring of X
+            .mirror_y = 0, // No mirroring of Y
+        },
+    };
+    esp_err_t gt_err = esp_lcd_touch_new_i2c_gt911(tp_io_handle, &tp_cfg, touch_handle); // Create new I2C GT911 touch controller
+    if (gt_err != ESP_OK) {
+        ESP_LOGW(TAG, "GT911 초기화 실패: %s", esp_err_to_name(gt_err));
+        *touch_handle = NULL;
+        return ESP_OK;
+    }
+#endif                                                                                 // CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_GT911
+
+    return ESP_OK; // Return success
+}
+
+/******************************* Turn on the screen backlight **************************************/
+/* 2026-09-22(실기 크래시로 발견 — 여기 두 ESP_ERROR_CHECK가 GT911과 같은 공유버스 타임아웃으로
+ * abort돼 재부팅 루프의 다음 단계였음) — 더 이상 abort하지 않음. 백라이트는 화면이 아예 안
+ * 보이게 되는 만큜 짧게 재시도(3회, 트랜잭션 타임아웃 스케일에 맞춘 50ms 간격) 후에도 실패하면
+ * 로그만 남기고 계속 진행(패널 자체는 이미 초기화돼 있어 백라이트만 꺼진 채로라도 부팅은 됨) */
+esp_err_t waveshare_rgb_lcd_backlight_on(void)
+{
+    esp_err_t err = i2c_master_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "백라이트: I2C 버스 초기화 실패: %s", esp_err_to_name(err));
+        return ESP_OK;
+    }
+
+    // Pull the backlight pin high to light the screen backlight
+    // (0x1E also happens to leave SD_CS=1/deselected — same as before this migration)
+    for (int attempt = 0; attempt < 3; attempt++) {
+        err = ch422g_set_io_raw(CH422G_MODE_IO_OE, 0x1E);
+        if (err == ESP_OK) return ESP_OK;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGW(TAG, "백라이트 켜기 실패(3회 재시도): %s", esp_err_to_name(err));
+    return ESP_OK;
+}
+
+i2c_master_bus_handle_t waveshare_rgb_lcd_get_i2c_bus(void)
+{
+    return s_i2c_bus;
+}
