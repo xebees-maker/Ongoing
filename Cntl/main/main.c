@@ -24,7 +24,6 @@
 #include "stats_store.h"
 #include "power_relay.h"
 #include "sens_kind_store.h"
-#include "can_test.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -668,9 +667,6 @@ void app_main(void)
     /* 2026-09-19(통계 분류 영구저장) — SD 마운트 이후에만 의미 있음(파일이 SD에 있음) */
     sens_kind_store_load();
 
-    /* 2026-09-22(임시 진단 — 사용자 지시) — 콘-콘 CAN 배선 테스트, 확인 끝나면 제거할 것 */
-    can_test_init();
-
     /* 보드 실장 PCF85063A RTC — I2C 버스가 막 만들어진 직후, UI가 뜨기 전에 시각을
      * 읽어와야 로고 부제(시계)가 처음부터 맞는 값으로 뜸 */
     esp_err_t rtc_ret = rtc_sync_init();
@@ -733,7 +729,12 @@ void app_main(void)
     }
 
     /* Cntl 통합 테스트 4단계 → CAM 연결 기능: WiFi+ESP-NOW 허브(페어링/노드테이블 포함) —
-     * Cntl main.c와 동일하게 UI 뜬 뒤 마지막에 켬 */
+     * Cntl main.c와 동일하게 UI 뜬 뒤 마지막에 켬.
+     * 2026-09-22(브릿지 역할 벤치테스트 시도 1 — 실패) — 이 초기화 전체를 건너뛰려 했더니
+     * UI의 주기 갱신(refresh_dashboard 등)이 esp_now_hub/tx가 만드는 세마포어/큐를 그대로
+     * 가정하고 있어서 NULL 핸들로 assert 크래시(xQueueSemaphoreTake)남. UI는 그대로 두면서
+     * 초기화만 건너뛰는 건 이 코드베이스 구조상 안전하지 않음 — 그래서 초기화는 항상 정상
+     * 진행하고, 대신 아래에서 recv_cb만 브릿지용으로 바꿔치기하는 방식으로 변경 */
     esp_now_photo_init();
     esp_now_hub_init();  /* 내부에서 esp_netif_init()+esp_event_loop_create_default() 호출 —
                              아래 이벤트 등록은 반드시 그 다음이어야 함 */

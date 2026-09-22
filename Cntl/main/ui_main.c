@@ -2,7 +2,6 @@
 #include "ui_strings.h"
 #include "ui_font.h"
 #include "esp_now_hub.h"
-#include "can_test.h"
 #include "device_config.h"
 #include "stats_store.h"
 #include "sd_storage.h"
@@ -96,7 +95,6 @@ static lv_obj_t          *s_web_row             = NULL;  /* 2026-09-09 — "Web 
 static lv_obj_t          *s_web_prefix_label    = NULL;
 static lv_obj_t          *s_mem_status_label    = NULL;  /* 2026-08-21 — 요약 둘째줄, 여유 메모리 상시 표시(사용자 지시) */
 static lv_obj_t          *s_storage_status_label = NULL;  /* 2026-09-10 — 메모리 줄 바로 아래, SD Storage(Picture/Measure/Total) 상시 표시(사용자 설계) */
-static lv_obj_t          *s_bridge_status_label  = NULL;  /* 2026-09-22 — 요약판넬 맨 아래, 콘-콘 CAN 테스트 Tx/Rx 카운트 임시 표시(can_test.c) */
 /* 2026-09-15(사용자 지시로 제거) — Summary 실시간 순시치 4라벨(s_summary_live_*)은
  * Sensor 판넬 행별 T/H/C/A 표시로 대체됨 */
 static lv_obj_t          *s_sensor_empty        = NULL;
@@ -4471,16 +4469,6 @@ static void refresh_dashboard(lv_timer_t *t)
      * 붙여줘") — 콜론 앞 공백 제거, 다른 라벨들("%s: ...")과 통일 */
     lv_label_set_text_fmt(s_mem_status_label, "%s: I = %s / P = %s", ui_str(STR_LABEL_MEMORY), mem_i, mem_p);
 
-    /* 2026-09-22 — 콘-콘 CAN 테스트 카운트, 매 틱 그대로 갱신(가벼운 정수 읽기라 비용 무시
-     * 가능, Memory 줄과 동일 빈도). I2C 브릿지 코드 제거로 원래 표시 용도는 없어짐.
-     * 2026-09-22(사용자 지적) — Tx는 큐잉 성공(실제 전송 성공 아님)이라 오해 소지 있어서
-     * 실제 성공/실패(on_tx_done 기반) OK/Fail도 같이 표시 */
-    lv_label_set_text_fmt(s_bridge_status_label, "CAN: Tx %lu Rx %lu OK %lu Fail %lu | Q C=%lu/%lu D=%lu/%lu",
-                           (unsigned long)can_test_get_tx_count(), (unsigned long)can_test_get_rx_count(),
-                           (unsigned long)can_test_get_tx_done_ok(), (unsigned long)can_test_get_tx_done_fail(),
-                           (unsigned long)can_test_get_ctrl_queue_depth(), (unsigned long)can_test_get_ctrl_queue_hwm(),
-                           (unsigned long)can_test_get_data_queue_depth(), (unsigned long)can_test_get_data_queue_hwm());
-
     /* 2026-09-10(사용자 설계 — "CNTL 메모리 밑에 SD 용량도 표시... 9:1 비율... 90%가 될 때
      * 10%만큼 오래된 걸 지운다") — SD 원격 조회는 매 틱(1초)마다 하기엔 낭비라 5초마다만.
      * Picture는 캠 사진저장 자체가 아직 미구현(미정)이라 항상 0 사용(예산은 그대로 계산돼
@@ -6762,13 +6750,6 @@ void ui_init(void)
      * 문법을 쓰려면 반드시 이걸 켜야 함(전에 이걸 빠뜨려서 "#ff0000 ..." 이 그대로
      * 문자로 찍혔던 버그가 있었음, 이번엔 잊지 않음) */
     lv_label_set_recolor(s_storage_status_label, true);
-
-    /* 2026-09-22 — 요약판넬 맨 아래, Storage 줄 바로 아래(summary_top_box 셋째 줄).
-     * 콘-콘 CAN 테스트용 임시 카운터 표시(can_test.c) — I2C 브릿지 관련 코드 제거로
-     * 원래 용도는 없어짐, 지금은 CAN 테스트 진단용으로만 씀 */
-    s_bridge_status_label = lv_label_create(summary_top_box);
-    lv_obj_set_style_text_font(s_bridge_status_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(s_bridge_status_label, "CAN test: Tx 0 / Rx 0");
 
     /* 2026-09-16(SR/Power Control, 순수 대화로 설계) — Summary와 Sensor 사이. Sens/CAM과
      * 달리 페어링 목록이 아니라 콘 고정 GPIO 2개라 항상 2행 — Sensor 판넬처럼 매 틱 재구성할
