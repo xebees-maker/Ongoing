@@ -1,5 +1,5 @@
 #include "esp_now_tx.h"
-#include "esp_now_reliable.h"
+#include "can_bridge.h"
 #include "esp_now_hub.h"
 #include "ui_log.h"
 
@@ -156,10 +156,10 @@ static void tx_worker_task(void *arg)
             vTaskDelete(NULL);
         }
 
-        esp_err_t err = esp_now_reliable_request(item.mac, item.req, item.req_len,
-                                                  item.accept_reply_types, item.accept_reply_types_count,
-                                                  item.timeout_ms, item.max_attempts,
-                                                  NULL, 0, NULL);
+        esp_err_t err = can_bridge_reliable_request(item.mac, item.req, item.req_len,
+                                                     item.accept_reply_types, item.accept_reply_types_count,
+                                                     item.timeout_ms, item.max_attempts,
+                                                     NULL, 0, NULL);
         if (err != ESP_OK) {
             /* 2026-08-10 — 예전엔 여기서 무조건 UI_ERR_NOT_PAIRED(2007, "페어링 끊김")를
              * 찍었는데, 이 모듈은 어떤 요청이든 다 거쳐가는 범용 전송 스케줄러라 "페어링

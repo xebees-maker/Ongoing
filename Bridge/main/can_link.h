@@ -13,4 +13,3 @@ void can_link_init(void);
 
 /* bridge_esp_now.c가 캠에서 받은 프레임을 콘에 릴레이할 때 씀 */
 can_bridge_ctx_t *can_link_get_data_ctx(void);
-can_bridge_ctx_t *can_link_get_ctrl_ctx(void);

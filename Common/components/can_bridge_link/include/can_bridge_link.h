@@ -93,10 +93,41 @@ typedef enum {
 } can_bridge_ctrl_type_t;
 
 /* DATA 카테고리 — 브릿지는 이 안의 CASK(esp_now_link.h) 내용을 해석하지 않는 투명 릴레이.
- * mac=상대 CAM/Sens MAC, payload=CASK 프레임 원본 바이트 그대로 */
+ * mac=상대 CAM/Sens MAC, payload=CASK 프레임 원본 바이트 그대로.
+ *
+ * 2026-09-23(1단계 — 광고~연결) — 콘은 ESP-NOW를 전혀 모름(esp_now_init조차 없음, 사용자
+ * 지시). 콘의 esp_now_reliable_request() 같은 "요청 1개 -> 응답 1개, 안 오면 재시도"
+ * 호출은, 콘 프로세스 안에서 직접 재시도하던 걸 CAN을 통해 브에 그대로 넘기는 IPC 호출로
+ * 바뀜 — 재시도 자체는 브가 기존 esp_now_reliable 컴포넌트를 그대로 써서 수행(새로 안
+ * 만듦, 사용자 지시: "콘의 소스를 가져다 써야지"). RELIABLE_SEND/RESULT가 그 IPC 왕복. */
 typedef enum {
-    CAN_DATA_RELAY = 1,   /* 양방향: mac 기준 CASK 프레임 원본을 그대로 실어나름 */
+    CAN_DATA_RELAY = 1,            /* 양방향: mac 기준 CASK 프레임 원본을 그대로 실어나름
+                                       (단순 fire-and-forget, esp_now_send 자리) */
+    CAN_DATA_RELIABLE_SEND = 2,    /* 콘->브: mac에게 이 요청을 reliable로 보내고 결과를 달라
+                                       (esp_now_reliable_request 자리) — can_bridge_reliable_send_hdr_t
+                                       + 원본 요청 페이로드가 이어붙음 */
+    CAN_DATA_RELIABLE_RESULT = 3,  /* 브->콘: 위 요청의 최종 결과 — can_bridge_reliable_result_hdr_t
+                                       + (성공 시)응답 페이로드가 이어붙음. mac으로 상관관계 매칭
+                                       (한 MAC당 미결 요청 1개 원칙, 예전 I2C 설계와 동일 근거 —
+                                       seq 필드 불필요) */
 } can_bridge_data_type_t;
+
+#define CAN_BRIDGE_RELIABLE_MAX_ACCEPT_TYPES 4
+
+/* CAN_DATA_RELIABLE_SEND 페이로드의 헤더 — esp_now_reliable_request()의 파라미터 그대로 실음.
+ * app_header 바로 뒤, 원본 요청 페이로드(req) 바로 앞에 옴 */
+typedef struct __attribute__((packed)) {
+    uint32_t timeout_ms;
+    uint8_t  max_attempts;
+    uint8_t  accept_reply_types[CAN_BRIDGE_RELIABLE_MAX_ACCEPT_TYPES];
+    uint8_t  accept_reply_types_count;
+} can_bridge_reliable_send_hdr_t;
+
+/* CAN_DATA_RELIABLE_RESULT 페이로드의 헤더 — app_header 바로 뒤, (ok=1이면)응답 페이로드
+ * 바로 앞에 옴 */
+typedef struct __attribute__((packed)) {
+    uint8_t ok;  /* 1=성공(응답 페이로드 있음), 0=타임아웃/실패(페이로드 없음) */
+} can_bridge_reliable_result_hdr_t;
 
 /* ---- 재조립 버퍼 — DATA/CONTROL 각각 독립(동시에 진행 중인 세션이 섞이지 않게) ----
  * PSRAM에 할당(caller가 malloc, 이 구조체는 포인터만 들고 있음 — feedback_prefer_psram_for_buffers) */

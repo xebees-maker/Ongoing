@@ -4,6 +4,7 @@
 #include "ui_screen.h"
 
 #include "esp_now.h"
+#include "esp_now_reliable.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -32,6 +33,14 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 {
     if (!info || len <= 0 || len > BRIDGE_ESPNOW_MAX_FRAME) return;
 
+    /* 2026-09-23(1단계) — 콘의 esp_now_reliable_request()를 브가 대행(can_link.c의
+     * CAN_DATA_RELIABLE_SEND 처리 참고)하므로, 이 recv_cb가 그 대기 매칭도 콘 대신 해줘야 함
+     * (예전 I2C Bridge/main.c의 recv_cb와 동일 패턴 — msg_type은 data[1], esp_now_link.h의
+     * "version, msg_type" 공통 앞부분 구조). 대기 중인 요청이 없으면 조용히 무시하고 리턴 */
+    if (len >= 2) {
+        esp_now_reliable_on_recv(data[1], info->src_addr, data, len);
+    }
+
     /* recv_cb는 ESP-NOW 내부 태스크 컨텍스트 — can_bridge_send()처럼 블로킹 가능한 호출을
      * 여기서 직접 하면 안 됨. 큐에 복사만 하고 즉시 반환 */
     incoming_t item;
@@ -50,7 +59,6 @@ static void relay_task(void *arg)
 {
     (void)arg;
     incoming_t item;
-    can_bridge_ctx_t *data_ctx = can_link_get_data_ctx();
 
     uint8_t *msg = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + BRIDGE_ESPNOW_MAX_FRAME, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!msg) msg = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + BRIDGE_ESPNOW_MAX_FRAME, MALLOC_CAP_8BIT);
@@ -67,9 +75,16 @@ static void relay_task(void *arg)
         memcpy(msg, &hdr, CAN_BRIDGE_APP_HEADER_LEN);
         memcpy(msg + CAN_BRIDGE_APP_HEADER_LEN, item.data, item.len);
 
+        /* 매번 다시 가져옴(태스크 시작 시점에 캡처해서 NULL로 굳어버리는 순서 버그를 실기에서
+         * 겪음 — can_link_init()이 나중에 불려도 이러면 안전) */
+        can_bridge_ctx_t *data_ctx = can_link_get_data_ctx();
+        if (!data_ctx) {
+            ui_screen_log_can("Relay dropped: not ready");
+            continue;
+        }
         esp_err_t err = can_bridge_send(data_ctx, msg, CAN_BRIDGE_APP_HEADER_LEN + item.len);
         if (err != ESP_OK) {
-            ui_screen_log_wireless("CAN 중계 실패: %s", esp_err_to_name(err));
+            ui_screen_log_can("Relay failed: %s", esp_err_to_name(err));
         }
     }
 }
@@ -86,7 +101,19 @@ static void add_peer_if_needed(const uint8_t mac[6])
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "add_peer 실패(mac=%02X%02X%02X%02X%02X%02X): %s",
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], esp_err_to_name(err));
+        return;
     }
+    /* 2026-09-23(1단계) — 콘의 esp_now_hub.c에 있던 것 그대로 이식(사용자 지시: 콘엔
+     * ESP-NOW 관련 기능이 전혀 없어야 함 — 피어관리/레이트설정도 브 몫). CAM 쪽과 짝맞춤
+     * (esp_now_cam.c 동일 설정) */
+    esp_now_rate_config_t rate_cfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };
+    esp_err_t rate_err = esp_now_set_peer_rate_config(mac, &rate_cfg);
+    ESP_LOGI(TAG, "피어 레이트 설정(MCS0/HT20) -> %s", esp_err_to_name(rate_err));
+}
+
+void bridge_esp_now_ensure_peer(const uint8_t mac[6])
+{
+    add_peer_if_needed(mac);
 }
 
 void bridge_esp_now_send_raw(const uint8_t mac[6], const uint8_t *data, uint16_t len)
@@ -95,7 +122,7 @@ void bridge_esp_now_send_raw(const uint8_t mac[6], const uint8_t *data, uint16_t
     esp_err_t err = esp_now_send(mac, data, len);
     ui_screen_log_wireless("TX mac=%02X%02X%02X%02X%02X%02X len=%u %s",
                             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], len,
-                            err == ESP_OK ? "큐잉OK" : esp_err_to_name(err));
+                            err == ESP_OK ? "queued" : esp_err_to_name(err));
 }
 
 static void wifi_bringup(void)
@@ -123,9 +150,16 @@ void bridge_esp_now_init(void)
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
 
-    s_incoming_q = xQueueCreate(8, sizeof(incoming_t));
+    /* 2026-09-22(사용자 지적 — "버퍼 또 인터널로 잡았냐?") — incoming_t가 1479B씩(ESP-NOW
+     * 최대 프레임 포함) 8개라 ~11.8KB나 내부RAM에 잡고 있었음. PSRAM으로 옮김. 태스크 스택도
+     * 동일 원칙 적용(esp_now_tx.c의 tx_worker 패턴) */
+    static StaticQueue_t s_incoming_q_struct;
+    uint8_t *incoming_q_storage = (uint8_t *)heap_caps_malloc(8 * sizeof(incoming_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_incoming_q = xQueueCreateStatic(8, sizeof(incoming_t), incoming_q_storage, &s_incoming_q_struct);
 
-    xTaskCreate(relay_task, "esp_now_relay", 4096, NULL, 10, NULL);
+    static StaticTask_t s_relay_tcb;
+    StackType_t *relay_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    xTaskCreateStatic(relay_task, "esp_now_relay", 4096 / sizeof(StackType_t), NULL, 10, relay_stack, &s_relay_tcb);
 
     ESP_LOGI(TAG, "브 ESP-NOW 라디오 소유 시작됨");
 }

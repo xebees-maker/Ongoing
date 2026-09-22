@@ -60,8 +60,12 @@ void app_main(void)
         esp_lv_adapter_unlock();
     }
 
-    bridge_esp_now_init();
+    /* 2026-09-22(실기 크래시로 발견 — StoreProhibited, can_bridge_send() 안에서 NULL ctx
+     * 역참조) — bridge_esp_now_init()이 만드는 relay_task가 can_link_get_data_ctx()를
+     * 태스크 시작 시점에 한 번 캡처하는데, 그때 can_link_init()이 아직 안 불려서 ctx가
+     * NULL이었음. CAN 링크를 먼저 세운 뒤 ESP-NOW를 켜야 함 */
     can_link_init();
+    bridge_esp_now_init();
 
     ESP_LOGI(TAG, "브 시작됨 (콘 소스 미사용, 자체 초기화)");
 }
