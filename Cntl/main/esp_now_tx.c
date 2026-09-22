@@ -1,5 +1,5 @@
 #include "esp_now_tx.h"
-#include "i2c_bridge.h"
+#include "esp_now_reliable.h"
 #include "esp_now_hub.h"
 #include "ui_log.h"
 
@@ -156,13 +156,10 @@ static void tx_worker_task(void *arg)
             vTaskDelete(NULL);
         }
 
-        /* 2026-09-21(I2C 브릿지 마이그레이션) — 실제 재시도 루프는 이제 브릿지에서 돎(브릿지가
-         * 자기 라디오 옆에서 Common/esp_now_reliable.c를 그대로 씀). 이 호출은 I2C로 그 요청을
-         * 위임하고 결과만 기다리는 것 — 시그니처는 그대로라 이 위/아래 로직은 안 바뀜 */
-        esp_err_t err = bridge_reliable_request(item.mac, item.req, item.req_len,
-                                                 item.accept_reply_types, item.accept_reply_types_count,
-                                                 item.timeout_ms, item.max_attempts,
-                                                 NULL, 0, NULL);
+        esp_err_t err = esp_now_reliable_request(item.mac, item.req, item.req_len,
+                                                  item.accept_reply_types, item.accept_reply_types_count,
+                                                  item.timeout_ms, item.max_attempts,
+                                                  NULL, 0, NULL);
         if (err != ESP_OK) {
             /* 2026-08-10 — 예전엔 여기서 무조건 UI_ERR_NOT_PAIRED(2007, "페어링 끊김")를
              * 찍었는데, 이 모듈은 어떤 요청이든 다 거쳐가는 범용 전송 스케줄러라 "페어링

@@ -9,7 +9,6 @@ idf_component_register(
         "esp_now_hub.c"
         "esp_now_photo.c"
         "esp_now_tx.c"
-        "i2c_bridge.c"
         "rtc_sync.c"
         "device_config.c"
         "sd_storage.c"
@@ -17,7 +16,8 @@ idf_component_register(
         "photo_storage.c"
         "power_relay.c"
         "sens_kind_store.c"
-       
+        "can_test.c"
+
         "../components/waveshare_rgb_lcd_port.c"
         "../components/ch422g.c"
     INCLUDE_DIRS
@@ -30,7 +30,7 @@ idf_component_register(
         esp_netif
         esp_http_server
         esp_now_link
-        bridge_link
+        esp_now_reliable
         esp_timer
         waveshare__pcf85063a
         battery_monitor
@@ -40,6 +40,7 @@ idf_component_register(
         esp_driver_spi
         esp_driver_gpio
         esp_driver_i2c
+        esp_driver_twai
     PRIV_REQUIRES
         esp_new_jpeg)
 

@@ -99,6 +99,14 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
                                              해소 가능 — 성공 검증 시 s_sd_io_fail_active를
                                              꺼서 상태아이콘도 정상으로 되돌림(ui_main.c 참고,
                                              이 코드 자체는 이력에 계속 남음) */
+#define UI_ERR_TOUCH_INIT_FAIL      5010  /* 2026-09-22(실기 크래시로 발견) — waveshare_rgb_lcd_port.c의
+                                             터치(GT911)/공유 I2C 버스 초기화 단계(i2c_master_init/
+                                             esp_lcd_new_panel_io_i2c/esp_lcd_touch_new_i2c_gt911)
+                                             중 아무거나 실패. 예전엔 ESP_ERROR_CHECK로 그 자리에서
+                                             abort()되어 재부팅 루프에 빠졌음 — 이제 패널 자체(이미
+                                             초기화됨)는 그대로 쓰고 터치만 비활성화한 채 부팅 계속.
+                                             브릿지가 같은 공유버스(GPIO8/9)에 물리면서 처음 관측됨
+                                             (project_cntl_i2c_bridge_design_2026_09_21) */
 
 void ui_log_add_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 

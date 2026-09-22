@@ -14,4 +14,5 @@ idf_component_register(
         esp_driver_gpio
         bridge_link
         esp_now_reliable
+        status_led
 )

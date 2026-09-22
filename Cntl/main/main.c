@@ -24,6 +24,7 @@
 #include "stats_store.h"
 #include "power_relay.h"
 #include "sens_kind_store.h"
+#include "can_test.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -640,7 +641,10 @@ void app_main(void)
         frame_buffer_count,
         &panel_handle,
         &touch_handle));
-    ESP_ERROR_CHECK(waveshare_rgb_lcd_backlight_on());
+    /* 2026-09-22 — waveshare_rgb_lcd_backlight_on() 내부가 이제 I2C 실패 시 abort하지 않고
+     * 항상 ESP_OK를 반환하도록 바뀜(실기 크래시로 발견된 abort 지점) — 여기서도
+     * ESP_ERROR_CHECK로 다시 감싸면 안 됨(그러면 이 바깥 지점에서 또 abort하게 됨) */
+    waveshare_rgb_lcd_backlight_on();
 
     /* 2026-09-06(사용자 지시) — SD카드 마운트, 통계탭 시계열 저장용. LCD/CH422G가 이미
      * 초기화된 뒤에 불러야 함(CH422G 공유 I2C 버스/섀도우 상태 의존, sd_storage.h 참고).
@@ -663,6 +667,9 @@ void app_main(void)
     }
     /* 2026-09-19(통계 분류 영구저장) — SD 마운트 이후에만 의미 있음(파일이 SD에 있음) */
     sens_kind_store_load();
+
+    /* 2026-09-22(임시 진단 — 사용자 지시) — 콘-콘 CAN 배선 테스트, 확인 끝나면 제거할 것 */
+    can_test_init();
 
     /* 보드 실장 PCF85063A RTC — I2C 버스가 막 만들어진 직후, UI가 뜨기 전에 시각을
      * 읽어와야 로고 부제(시계)가 처음부터 맞는 값으로 뜸 */

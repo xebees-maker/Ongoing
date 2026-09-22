@@ -19,3 +19,7 @@ void i2c_slave_link_init(void);
 /* ESP-NOW recv_cb에서 호출 — 수신한 원본 프레임(mac/rssi/payload)을 CNTL에게 넘길 INCOMING_MSG로
  * 큐잉함(비ISR 컨텍스트에서 부르는 걸 전제 — esp_now recv_cb는 ESP-NOW 태스크 컨텍스트라 안전) */
 void i2c_slave_link_queue_incoming(const uint8_t *mac, int8_t rssi, const uint8_t *data, size_t len);
+
+/* 2026-09-22(임시 진단) — on_request ISR이 실제로 tx 태스크를 깨우는지 확인용 카운터.
+ * 확인 끝나면 diag_task와 함께 제거할 것 */
+void i2c_slave_link_get_diag_counters(uint32_t *on_request, uint32_t *on_request_woken, uint32_t *tx_notified);

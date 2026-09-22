@@ -2,7 +2,6 @@
 #include "esp_now_link.h"
 #include "esp_now_hub.h"
 #include "esp_now_tx.h"
-#include "i2c_bridge.h"
 #include "ui_log.h"
 #include "device_config.h"
 #include "photo_storage.h"
@@ -370,7 +369,7 @@ static void handle_meta(const uint8_t *src_mac, const uint8_t *data, int len)
      * Selective Repeat 벤치마크로 발견) — 원래는 start_single_receive()가 Cntl이 먼저
      * PHOTO_REQUEST를 보낼 때 미리 채워뒀는데, XFER_BENCH 모드는 CAM이 요청 없이 먼저
      * 밀어서(META부터 시작) s_photo_cam_mac이 한 번도 안 채워진 채로 남아있었음(초기값
-     * 전부 0) — bridge_send(0-MAC, ...)이 ESP_ERR_ESPNOW_NOT_FOUND로 항상 실패해서 응답이
+     * 전부 0) — esp_now_send(0-MAC, ...)이 ESP_ERR_ESPNOW_NOT_FOUND로 항상 실패해서 응답이
      * CAM에 전혀 안 갔던 게 원인. META를 실제로 누가 보냈는지가 항상 진짜 정답이므로
      * 여기서 갱신하는 게 요청 경로 여부와 무관하게 맞음 */
     if (src_mac) memcpy(s_photo_cam_mac, src_mac, sizeof(s_photo_cam_mac));
@@ -382,7 +381,7 @@ static void handle_meta(const uint8_t *src_mac, const uint8_t *data, int len)
      * 안 함 — 어차피 못 받을 전송이라 CAM이 재시도 끝에 스스로 포기하게 두는 게 대역폭
      * 낭비가 적음) */
     esp_now_photo_done_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_META_ACK };
-    bridge_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
+    esp_now_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
 }
 
 static void handle_chunk(const uint8_t *data, int len)
@@ -442,7 +441,7 @@ static void send_done_ack(uint16_t missing_count, const uint16_t *missing_idx)
     ack.file_id       = s_file_id;
     ack.missing_count = missing_count;
     if (missing_count > 0) memcpy(ack.missing_idx, missing_idx, missing_count * sizeof(uint16_t));
-    esp_err_t err = bridge_send(s_photo_cam_mac, (const uint8_t *)&ack, sizeof(ack));
+    esp_err_t err = esp_now_send(s_photo_cam_mac, (const uint8_t *)&ack, sizeof(ack));
     ESP_LOGI(TAG, "PHOTO_DONE_ACK 전송(누락 %u개) file_id=%u: %s", missing_count, (unsigned)s_file_id, esp_err_to_name(err));
 }
 
@@ -580,7 +579,7 @@ static void handle_window_status_request(const uint8_t *data, int len)
     ack.msg_type      = ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK;
     ack.file_id       = req->file_id;
     ack.missing_count = n;
-    esp_err_t err = bridge_send(s_photo_cam_mac, (const uint8_t *)&ack, sizeof(ack));
+    esp_err_t err = esp_now_send(s_photo_cam_mac, (const uint8_t *)&ack, sizeof(ack));
     ESP_LOGI(TAG, "WINDOW_STATUS_ACK [%u,%u) 누락 %u개: %s",
              req->range_start, end, n, esp_err_to_name(err));
 }
@@ -689,7 +688,7 @@ static void handle_capture_status(const uint8_t *src_mac, const uint8_t *data, i
             .version  = ESP_NOW_LINK_VERSION,
             .msg_type = ESP_NOW_MSG_CAPTURE_STATUS_ACK,
         };
-        bridge_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
+        esp_now_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
     }
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -821,7 +820,7 @@ bool esp_now_photo_list_count_received(void)
 
 /* CAM -> Cntl 1단계: 스트리밍 시작 전에 총 개수를 먼저 알림. src_mac으로 바로 ACK — 요청측
  * (send_list_request_raw)이 기다리는 응답이 아니라 CAM이 자기 esp_now_reliable_request()로
- * 따로 기다리는 응답이라 여기서 즉시 bridge_send()로 답함(handle_capture_status()와 동일
+ * 따로 기다리는 응답이라 여기서 즉시 esp_now_send()로 답함(handle_capture_status()와 동일
  * 패턴, Layer 1 재시도는 CAM 쪽이 알아서 함) */
 static void handle_list_count(const uint8_t *src_mac, const uint8_t *data, int len)
 {
@@ -854,7 +853,7 @@ static void handle_list_count(const uint8_t *src_mac, const uint8_t *data, int l
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_PHOTO_LIST_COUNT_ACK,
     };
-    esp_err_t err = bridge_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
+    esp_err_t err = esp_now_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
     ESP_LOGI(TAG, "PHOTO_LIST_COUNT_ACK 전송: %s", esp_err_to_name(err));
 }
 
@@ -896,7 +895,7 @@ static void handle_list_batch(const uint8_t *src_mac, const uint8_t *data, int l
         .msg_type    = ESP_NOW_MSG_PHOTO_LIST_BATCH_ACK,
         .entry_count = 0,
     };
-    esp_err_t err = bridge_send(src_mac, (const uint8_t *)&ack, 3);  /* entries는 안 봄 — 헤더만 */
+    esp_err_t err = esp_now_send(src_mac, (const uint8_t *)&ack, 3);  /* entries는 안 봄 — 헤더만 */
     ESP_LOGI(TAG, "PHOTO_LIST_BATCH_ACK 전송(%d개 처리): %s", entry_count, esp_err_to_name(err));
 }
 
@@ -960,7 +959,7 @@ static void handle_list_done(const uint8_t *src_mac, const uint8_t *data, int le
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_PHOTO_LIST_DONE_ACK,
     };
-    esp_err_t err = bridge_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
+    esp_err_t err = esp_now_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
     ESP_LOGI(TAG, "PHOTO_LIST_DONE_ACK 전송: %s", esp_err_to_name(err));
 }
 

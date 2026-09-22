@@ -25,6 +25,18 @@ static void mac_to_hex(const uint8_t mac[6], char out[13])
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
+/* mac_to_hex()의 역변환 — 폴더명(12자리 소문자 hex)이 아니면 false */
+static bool hex_to_mac(const char *hex, uint8_t out[6])
+{
+    if (strlen(hex) != 12) return false;
+    for (int i = 0; i < 6; i++) {
+        unsigned byte;
+        if (sscanf(hex + i * 2, "%2x", &byte) != 1) return false;
+        out[i] = (uint8_t)byte;
+    }
+    return true;
+}
+
 static void camera_dir_path(const uint8_t mac[6], char *out, size_t out_len)
 {
     char mac_hex[13];
@@ -372,4 +384,23 @@ uint32_t photo_storage_delete_all(const uint8_t mac[6])
     closedir(dir);
     ESP_LOGI(TAG, "delete_all: %u개 삭제 (%s)", (unsigned)deleted, dir_path);
     return deleted;
+}
+
+uint32_t photo_storage_list_camera_macs(uint8_t out_macs[][6], uint32_t out_cap)
+{
+    if (!sd_storage_is_mounted()) return 0;
+
+    char photos_root[32];
+    snprintf(photos_root, sizeof(photos_root), "%s/photos", SD_STORAGE_MOUNT_POINT);
+    DIR *root = opendir(photos_root);
+    if (!root) return 0;
+
+    uint32_t count = 0;
+    struct dirent *ent;
+    while (count < out_cap && (ent = readdir(root)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        if (hex_to_mac(ent->d_name, out_macs[count])) count++;
+    }
+    closedir(root);
+    return count;
 }

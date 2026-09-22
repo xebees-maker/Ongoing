@@ -6,6 +6,7 @@
 
 #include "waveshare_rgb_lcd_port.h"
 #include "ch422g.h"
+#include "ui_log.h"
 
 static const char *TAG = "example";
 
@@ -41,6 +42,7 @@ static esp_err_t i2c_master_init(void)
     if (ret != ESP_OK) {
         return ret;
     }
+    ESP_LOGI(TAG, "i2c_master_bus_handle_t 생성됨: %p", (void *)s_i2c_bus);
 
     return ch422g_init(s_i2c_bus);
 }
@@ -156,8 +158,16 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(uint8_t frame_buffer_count,
     ESP_ERROR_CHECK(esp_lcd_panel_init(*panel_handle)); // Initialize the LCD panel
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_GT911
+    /* 2026-09-22(실기 크래시로 발견 — GT911 초기화 실패가 ESP_ERROR_CHECK로 abort되어 재부팅
+     * 루프에 빠짐, 브릿지가 같은 공유버스(GPIO8/9)에 물리면서 처음 관측됨) — 이 구간(터치/공유
+     * I2C 버스) 안의 실패는 더 이상 abort하지 않음. panel_handle은 이미 위에서 초기화 완료된
+     * 상태라 패널 자체는 그대로 쓰고, 터치만 비활성(touch_handle=NULL)인 채로 부팅을 계속함 */
     ESP_LOGI(TAG, "Initialize I2C bus");   // Log the initialization of the I2C bus
-    ESP_ERROR_CHECK(i2c_master_init());    // Initialize the I2C master
+    esp_err_t i2c_err = i2c_master_init(); // Initialize the I2C master
+    if (i2c_err != ESP_OK) {
+        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "I2C 버스 초기화 실패: %s", esp_err_to_name(i2c_err));
+        return ESP_OK;
+    }
     ESP_LOGI(TAG, "Initialize GPIO");      // Log GPIO initialization
     gpio_init();                           // Initialize GPIO pins
     ESP_LOGI(TAG, "Initialize Touch LCD"); // Log touch LCD initialization
@@ -171,7 +181,11 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(uint8_t frame_buffer_count,
     tp_io_config.scl_speed_hz = I2C_MASTER_FREQ_HZ;
 
     ESP_LOGI(TAG, "Initialize I2C panel IO");                                          // Log I2C panel I/O initialization
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(s_i2c_bus, &tp_io_config, &tp_io_handle)); // Create new I2C panel I/O
+    esp_err_t io_err = esp_lcd_new_panel_io_i2c(s_i2c_bus, &tp_io_config, &tp_io_handle); // Create new I2C panel I/O
+    if (io_err != ESP_OK) {
+        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "터치 패널 IO 초기화 실패: %s", esp_err_to_name(io_err));
+        return ESP_OK;
+    }
 
     ESP_LOGI(TAG, "Initialize touch controller GT911"); // Log touch controller initialization
     const esp_lcd_touch_config_t tp_cfg = {
@@ -189,20 +203,38 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(uint8_t frame_buffer_count,
             .mirror_y = 0, // No mirroring of Y
         },
     };
-    ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_gt911(tp_io_handle, &tp_cfg, touch_handle)); // Create new I2C GT911 touch controller
+    esp_err_t gt_err = esp_lcd_touch_new_i2c_gt911(tp_io_handle, &tp_cfg, touch_handle); // Create new I2C GT911 touch controller
+    if (gt_err != ESP_OK) {
+        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "GT911 초기화 실패: %s", esp_err_to_name(gt_err));
+        *touch_handle = NULL;
+        return ESP_OK;
+    }
 #endif                                                                                 // CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_GT911
 
     return ESP_OK; // Return success
 }
 
 /******************************* Turn on the screen backlight **************************************/
+/* 2026-09-22(실기 크래시로 발견 — 여기 두 ESP_ERROR_CHECK가 GT911과 같은 공유버스 타임아웃으로
+ * abort돼 재부팅 루프의 다음 단계였음) — 더 이상 abort하지 않음. 백라이트는 화면이 아예 안
+ * 보이게 되는 만큜 짧게 재시도(3회, 트랜잭션 타임아웃 스케일에 맞춘 50ms 간격) 후에도 실패하면
+ * 로그만 남기고 계속 진행(패널 자체는 이미 초기화돼 있어 백라이트만 꺼진 채로라도 부팅은 됨) */
 esp_err_t waveshare_rgb_lcd_backlight_on(void)
 {
-    ESP_ERROR_CHECK(i2c_master_init());
+    esp_err_t err = i2c_master_init();
+    if (err != ESP_OK) {
+        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "백라이트: I2C 버스 초기화 실패: %s", esp_err_to_name(err));
+        return ESP_OK;
+    }
 
     // Pull the backlight pin high to light the screen backlight
     // (0x1E also happens to leave SD_CS=1/deselected — same as before this migration)
-    ESP_ERROR_CHECK(ch422g_set_io_raw(CH422G_MODE_IO_OE, 0x1E));
+    for (int attempt = 0; attempt < 3; attempt++) {
+        err = ch422g_set_io_raw(CH422G_MODE_IO_OE, 0x1E);
+        if (err == ESP_OK) return ESP_OK;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "백라이트 켜기 실패(3회 재시도): %s", esp_err_to_name(err));
     return ESP_OK;
 }
 

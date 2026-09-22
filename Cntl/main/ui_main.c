@@ -2,6 +2,7 @@
 #include "ui_strings.h"
 #include "ui_font.h"
 #include "esp_now_hub.h"
+#include "can_test.h"
 #include "device_config.h"
 #include "stats_store.h"
 #include "sd_storage.h"
@@ -86,12 +87,16 @@ static lv_obj_t *s_group_title[STR_GROUP_SYSTEM - STR_GROUP_CNTL + 1];
 /* 상황판 판넬 3개(요약/측정기/카메라) — refresh_lang_texts()가 참조하므로 그 정의보다
  * 먼저 선언돼야 함(파일 스코프 static은 선언 지점 이후부터만 참조 가능) */
 static lv_obj_t          *s_dash_title[4];  /* 0=요약, 1=측정기, 2=카메라, 3=전원제어(2026-09-16) */
-static bool               s_camera_title_enabled_prev = false;  /* 2026-09-08 — Camera 역상 회색/흰색 전환용 */
+static bool               s_camera_selectable_prev = false;  /* 2026-09-22 — refresh_dashboard()가 매 틱 갱신.
+                                                                  build_camera_tab()이 팝업 여는 순간 toolbar/
+                                                                  split_row를 바로 보일지 판단하는 용도(라이브
+                                                                  연결 or SD 이력 카메라 중 하나라도 있으면 true) */
 static lv_obj_t          *s_web_url_label       = NULL;  /* 2026-08-21 — 요약 맨 윗줄, 웹 대시보드 접속 URL(사용자 지시) */
 static lv_obj_t          *s_web_row             = NULL;  /* 2026-09-09 — "Web " 접두문구+URL 둘로 분리(접두문구는 밑줄 없음) 위 행 래퍼 */
 static lv_obj_t          *s_web_prefix_label    = NULL;
 static lv_obj_t          *s_mem_status_label    = NULL;  /* 2026-08-21 — 요약 둘째줄, 여유 메모리 상시 표시(사용자 지시) */
 static lv_obj_t          *s_storage_status_label = NULL;  /* 2026-09-10 — 메모리 줄 바로 아래, SD Storage(Picture/Measure/Total) 상시 표시(사용자 설계) */
+static lv_obj_t          *s_bridge_status_label  = NULL;  /* 2026-09-22 — 요약판넬 맨 아래, 콘-콘 CAN 테스트 Tx/Rx 카운트 임시 표시(can_test.c) */
 /* 2026-09-15(사용자 지시로 제거) — Summary 실시간 순시치 4라벨(s_summary_live_*)은
  * Sensor 판넬 행별 T/H/C/A 표시로 대체됨 */
 static lv_obj_t          *s_sensor_empty        = NULL;
@@ -106,6 +111,7 @@ static lv_obj_t          *s_camera_box          = NULL;
 static lv_obj_t          *s_camera_dash_list    = NULL;
 static lv_obj_t          *s_camera_photo_label  = NULL;
 static lv_obj_t          *s_camera_capture_lbl  = NULL;
+static lv_obj_t          *s_camera_capture_btn  = NULL;  /* 2026-09-22 — 라이브 연결 없을 때 비활성화(사용자 지시) */
 static lv_obj_t          *s_camera_renew_lbl    = NULL;
 static lv_obj_t          *s_camera_renew_btn    = NULL;  /* 2026-09-04 — 웹 합성용(버튼 자체를
                                                               찾아 탭 이벤트를 보내야 해서 저장) */
@@ -2792,7 +2798,11 @@ static void cb_capture_now(lv_event_t *e)
 {
     (void)e;
     if (!s_has_selected_cam) return;
-    if (!require_active_or_report(s_selected_cam_mac, "지금촬영")) return;
+    /* 2026-09-22(사용자 지적 — 토스트 글리프 깨짐) — what은 로그 문자열에 그대로 섞여 들어감
+     * (ui_log_add_err), 로그는 프로젝트 관례상 영문만(project_cntl_stats_tab_log_perf 참고,
+     * 폭 트림 로직이 바이트 단위라 멀티바이트 한글이 섞이면 글자가 잘려 깨짐) — 한글 "지금촬영"
+     * 대신 영문으로 */
+    if (!require_active_or_report(s_selected_cam_mac, "Capture now")) return;
 
     show_capture_popup();
     esp_now_photo_capture_now(s_selected_cam_mac);
@@ -2895,8 +2905,13 @@ static void cb_camera_select_changed(lv_event_t *e)
 
 /* 페어링된 CAM 이름 목록이 실제로 바뀌었을 때만 드롭다운 옵션을 다시 그림 — 매초 무조건
  * 다시 그리면 사용자가 마침 드롭다운을 열어보고 있을 때 깜빡이거나 닫혀버림. 옵션 문자열과
- * 동시에 s_cam_dd_macs(인덱스->mac 매핑)도 같이 갱신 */
-static void rebuild_camera_dropdown_if_changed(const esp_now_hub_node_t *nodes, const uint8_t macs[][6], int count)
+ * 동시에 s_cam_dd_macs(인덱스->mac 매핑)도 같이 갱신.
+ * 2026-09-22(사용자 지시 — 미연결 상태에서도 과거 촬영 이력 조회 가능해야 함, 라이브+known
+ * 혼재 시나리오까지 지원) — macs[0..live_count)는 라이브(nodes[i] 유효), macs[live_count..count)는
+ * SD 이력만 있는 known-only(살아있는 노드 정보가 없어 nodes 배열 범위 밖 — MAC 기반 이름으로
+ * 폴백) */
+static void rebuild_camera_dropdown_if_changed(const esp_now_hub_node_t *nodes, int live_count,
+                                                const uint8_t macs[][6], int count)
 {
     /* 2026-09-10(사용자 지시 — "카메라 팝업에서 카메라 목록 선택을 alias로 바꿈") — 대시보드
      * 행(3351/3469줄)과 동일한 alias-or-name 패턴. 버퍼는 alias가 name보다 길 수 있어서
@@ -2906,7 +2921,16 @@ static void rebuild_camera_dropdown_if_changed(const esp_now_hub_node_t *nodes, 
     size_t off = 0;
     for (int i = 0; i < count; i++) {
         const char *alias = device_config_get_alias(macs[i]);
-        const char *display_name = (alias[0] != '\0') ? alias : nodes[i].name;
+        char fallback_name[24];
+        if (alias[0] == '\0') {
+            if (i < live_count) {
+                snprintf(fallback_name, sizeof(fallback_name), "%s", nodes[i].name);
+            } else {
+                snprintf(fallback_name, sizeof(fallback_name), "CAM %02X%02X%02X",
+                          macs[i][3], macs[i][4], macs[i][5]);
+            }
+        }
+        const char *display_name = (alias[0] != '\0') ? alias : fallback_name;
         int n = snprintf(options + off, sizeof(options) - off, "%s%s",
                           i > 0 ? "\n" : "", display_name);
         if (n < 0 || (size_t)n >= sizeof(options) - off) break;
@@ -4447,6 +4471,11 @@ static void refresh_dashboard(lv_timer_t *t)
      * 붙여줘") — 콜론 앞 공백 제거, 다른 라벨들("%s: ...")과 통일 */
     lv_label_set_text_fmt(s_mem_status_label, "%s: I = %s / P = %s", ui_str(STR_LABEL_MEMORY), mem_i, mem_p);
 
+    /* 2026-09-22 — 콘-콘 CAN 테스트 Tx/Rx 누적 카운트, 매 틱 그대로 갱신(가벼운 정수 읽기라
+     * 비용 무시 가능, Memory 줄과 동일 빈도). I2C 브릿지 코드 제거로 원래 표시 용도는 없어짐 */
+    lv_label_set_text_fmt(s_bridge_status_label, "CAN test: Tx %lu / Rx %lu",
+                           (unsigned long)can_test_get_tx_count(), (unsigned long)can_test_get_rx_count());
+
     /* 2026-09-10(사용자 설계 — "CNTL 메모리 밑에 SD 용량도 표시... 9:1 비율... 90%가 될 때
      * 10%만큼 오래된 걸 지운다") — SD 원격 조회는 매 틱(1초)마다 하기엔 낭비라 5초마다만.
      * Picture는 캠 사진저장 자체가 아직 미구현(미정)이라 항상 0 사용(예산은 그대로 계산돼
@@ -4687,7 +4716,30 @@ static void refresh_dashboard(lv_timer_t *t)
         memcpy(cam_macs[cam_count], s_dash_nodes[i].mac, 6);
         cam_count++;
     }
-    rebuild_camera_dropdown_if_changed(cam_nodes, cam_macs, cam_count);
+    /* 2026-09-22(사용자 지시 — "캠 연결 없어도 예전에 연결된 적 있는 캠의 Alias/사진을
+     * 볼 수 있어야 함", 이어서 "두 대 중 하나만 라이브인 혼재 상황도 드롭다운에서 둘 다
+     * 골라져야" 지적) — SD 사진 폴더 기준 "아는 카메라" 전부를 항상 훑되, 이미 라이브
+     * 목록(cam_macs)에 있는 MAC은 중복으로 안 넣음(known_only만 남김). 드롭다운은
+     * 라이브 + known-only를 합친 목록(dd_macs) — 라이브 유무와 무관하게 둘 다 항상
+     * 선택 가능해야 함 */
+    uint8_t known_cam_macs[ESP_NOW_HUB_MAX_NODES][6];
+    int known_cam_count_raw = (int)photo_storage_list_camera_macs(known_cam_macs, ESP_NOW_HUB_MAX_NODES);
+    uint8_t dd_macs[ESP_NOW_HUB_MAX_NODES][6];
+    int dd_count = 0;
+    for (int i = 0; i < cam_count && dd_count < ESP_NOW_HUB_MAX_NODES; i++) {
+        memcpy(dd_macs[dd_count], cam_macs[i], 6);
+        dd_count++;
+    }
+    for (int i = 0; i < known_cam_count_raw && dd_count < ESP_NOW_HUB_MAX_NODES; i++) {
+        bool already_live = false;
+        for (int j = 0; j < cam_count; j++) {
+            if (memcmp(known_cam_macs[i], cam_macs[j], 6) == 0) { already_live = true; break; }
+        }
+        if (already_live) continue;
+        memcpy(dd_macs[dd_count], known_cam_macs[i], 6);
+        dd_count++;
+    }
+    rebuild_camera_dropdown_if_changed(cam_nodes, cam_count, dd_macs, dd_count);
 
     /* 2026-09-08(카메라 팝업 추출) — 주화면에 남는 "연결된 카메라" 목록, 요약판넬(s_summary_list)과
      * 완전히 같은 2단계 패턴: 구조 재생성은 dash_changed일 때만(위 요약판넬과 같은 조건 재사용),
@@ -4790,50 +4842,69 @@ static void refresh_dashboard(lv_timer_t *t)
         }
     }
 
-    bool camera_connected = (cam_count > 0);
-    if (camera_connected) {
+    bool camera_connected  = (cam_count > 0);  /* 메인화면 "연결된 카메라" 목록 전용 — 라이브만 */
+    /* 2026-09-22 — 팝업(toolbar/split_row) 표시 여부는 "지금 뭐라도 보여줄 게 있는가"
+     * 기준 — 라이브 연결이든 SD 이력뿐인 known이든 상관없음. 반면 메인화면의 "연결된
+     * 카메라" 목록(s_camera_dash_list)은 계속 camera_connected(라이브)만 기준으로 함.
+     * 2026-09-22(사용자 지적 — "두 대 중 하나만 라이브인 상황에서 드롭다운 바뀔 때마다
+     * 버튼 상태도 바뀌어야") — 선택은 이제 합쳐진 dd_macs/dd_count 기준 하나로 통일(라이브
+     * 우선순위 없음, 그냥 합쳐진 목록 안에서 이전 선택 유지 시도) */
+    bool camera_selectable = (dd_count > 0);
+    s_camera_selectable_prev = camera_selectable;
+    if (dd_count > 0) {
         int  selected_idx = 0;
         bool still_valid  = false;
-        for (int i = 0; i < cam_count; i++) {
-            if (s_has_selected_cam && memcmp(cam_macs[i], s_selected_cam_mac, 6) == 0) {
+        for (int i = 0; i < dd_count; i++) {
+            if (s_has_selected_cam && memcmp(dd_macs[i], s_selected_cam_mac, 6) == 0) {
                 still_valid  = true;
                 selected_idx = i;
                 break;
             }
         }
-        select_camera(still_valid ? cam_macs[selected_idx] : cam_macs[0]);
+        select_camera(still_valid ? dd_macs[selected_idx] : dd_macs[0]);
         lv_dropdown_set_selected(s_camera_select_dd, (uint16_t)(still_valid ? selected_idx : 0));
     } else if (s_has_selected_cam) {
         s_has_selected_cam = false;
         reset_camera_ui_state();
     }
+    /* 2026-09-22(사용자 지시 — "수동촬영이 안눌리거나, 현재 카메라 없다고 알려야 하는데
+     * 에러 2007이 뜨고", 이어서 "드롭다운에서 캠 바꿀 때마다 버튼 상태도 바뀌어야" 지적) —
+     * camera_connected(그룹 전체 라이브 여부) 대신 "지금 선택된 그 MAC이 라이브인가"를
+     * 개별 확인 — 혼재(라이브 1대+known 1대) 상황에서 드롭다운으로 known 쪽을 고르면
+     * 다른 카메라가 라이브여도 버튼은 비활성화돼야 함. esp_now_hub_get_conn_state()는
+     * hub가 아예 모르는 MAC(순수 SD 이력뿐)에도 안전하게 WAITING을 반환함(find_node
+     * 실패 시 ever_paired=false로 처리) — require_active_or_report()와 동일 판정 기준 */
+    if (s_camera_capture_btn) {
+        bool selected_is_live = s_has_selected_cam &&
+            (esp_now_hub_get_conn_state(s_selected_cam_mac) != HUB_CONN_STATE_WAITING);
+        if (selected_is_live) lv_obj_remove_state(s_camera_capture_btn, LV_STATE_DISABLED);
+        else                  lv_obj_add_state(s_camera_capture_btn, LV_STATE_DISABLED);
+    }
     if (camera_connected) {
         lv_obj_add_flag(s_camera_empty, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_camera_dash_list, LV_OBJ_FLAG_HIDDEN);
-        /* 2026-09-08(카메라 팝업 추출) — toolbar/split_row는 팝업이 열려있을 때만 보여야 함
-         * (지금 부모가 주화면 camera_box인지 s_camera_popup인지로 판단) — 팝업이 열려있으면
-         * build_camera_tab()이 이미 hidden을 풀어뒀고, 닫혀있으면 팝업 쪽 표시는 의미가
-         * 없으므로 여기서는 부모가 팝업일 때만 hidden을 갱신(주화면에 있을 땐 무조건 숨김) */
-        if (s_camera_popup) {
-            lv_obj_remove_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
-        }
     } else {
         /* 2026-09-09(사용자 지적) — 센서 판넬과 동일 원칙: 대기중(s_camera_row_count)까지
          * 없을 때만 "없음" 표시 */
         if (s_camera_row_count == 0) lv_obj_remove_flag(s_camera_empty, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(s_camera_empty, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_camera_dash_list, LV_OBJ_FLAG_HIDDEN);
+    }
+    /* 2026-09-08(카메라 팝업 추출), 2026-09-22(camera_selectable로 기준 확장) —
+     * toolbar/split_row는 팝업이 열려있을 때만 보여야 함(지금 부모가 주화면 camera_box인지
+     * s_camera_popup인지로 판단) — 팝업이 열려있으면 build_camera_tab()이 이미 hidden을
+     * 풀어뒀고, 닫혀있으면 팝업 쪽 표시는 의미가 없으므로 여기서는 부모가 팝업일 때만
+     * hidden을 갱신(주화면에 있을 땐 무조건 숨김) */
+    if (camera_selectable && s_camera_popup) {
+        lv_obj_remove_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
+    } else if (!camera_selectable) {
         lv_obj_add_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
     }
-    /* 2026-09-08(사용자 지시 — "한 개도 없으면 역상 속 글씨가 밝은 회색으로 안눌린다는
-     * 표현") — 상태 바뀔 때만 갱신(매틱 재적용 방지) */
-    if (camera_connected != s_camera_title_enabled_prev) {
-        s_camera_title_enabled_prev = camera_connected;
-        lv_obj_set_style_text_color(s_dash_title[2],
-            camera_connected ? lv_color_white() : lv_palette_lighten(LV_PALETTE_GREY, 1), 0);
-    }
+    /* 2026-09-22(사용자 지시로 제거) — 0대일 때 제목을 회색으로 "탭 불가" 표시하던 로직.
+     * 이제 카메라 판넬도 센서 판넬처럼 연결 대수와 무관하게 항상 탭 가능해서 더 이상 필요
+     * 없음(cb_camera_btn_tap 참고) */
 
     /* 2026-09-04 — 사진 수신 완료 반응은 매틱 폴링 대신 이벤트(on_photo_result_event,
      * esp_now_photo_set_ready_cb 등록)로 옮김. 지금촬영 팝업 쪽 완료 처리는 자신의 진행
@@ -6673,6 +6744,13 @@ void ui_init(void)
      * 문자로 찍혔던 버그가 있었음, 이번엔 잊지 않음) */
     lv_label_set_recolor(s_storage_status_label, true);
 
+    /* 2026-09-22 — 요약판넬 맨 아래, Storage 줄 바로 아래(summary_top_box 셋째 줄).
+     * 콘-콘 CAN 테스트용 임시 카운터 표시(can_test.c) — I2C 브릿지 관련 코드 제거로
+     * 원래 용도는 없어짐, 지금은 CAN 테스트 진단용으로만 씀 */
+    s_bridge_status_label = lv_label_create(summary_top_box);
+    lv_obj_set_style_text_font(s_bridge_status_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_bridge_status_label, "CAN test: Tx 0 / Rx 0");
+
     /* 2026-09-16(SR/Power Control, 순수 대화로 설계) — Summary와 Sensor 사이. Sens/CAM과
      * 달리 페어링 목록이 아니라 콘 고정 GPIO 2개라 항상 2행 — Sensor 판넬처럼 매 틱 재구성할
      * 필요 없이 여기서 딱 한 번 만들고, refresh_power_control_panel()이 텍스트/색만 갱신 */
@@ -6782,13 +6860,9 @@ void ui_init(void)
 
     lv_obj_t *camera_box = create_dashboard_panel(dashboard_page, STR_GROUP_CAMERA, 2);
     s_camera_box = camera_box;
-    /* 2026-09-08(사용자 지시 — "카메라 판넬 제목 Camera도" 역상, "한 개도 없으면 역상 속
-     * 글씨가 밝은 회색으로 안눌린다는 표현") — 초기값은 0대 상태(회색, 클릭 비활성) —
-     * refresh_dashboard()가 cam_count 바뀔 때마다 다시 계산(아래 참고). 2026-09-08(카메라
-     * 팝업 추출) — 센서판넬 제목과 동일 원칙으로 클릭 가능하게 만들되, cb_camera_btn_tap이
-     * s_camera_title_enabled_prev(회색/흰색 상태)를 직접 봐서 0대일 때는 탭이 안 먹게 막음 */
+    /* 2026-09-08(카메라 팝업 추출), 2026-09-22(사용자 지시로 회색/탭불가 로직 제거) —
+     * 센서판넬 제목(s_dash_title[1])과 동일 원칙: 연결 대수와 무관하게 항상 클릭 가능 */
     style_inverted_control(s_dash_title[2]);
-    lv_obj_set_style_text_color(s_dash_title[2], lv_palette_lighten(LV_PALETTE_GREY, 1), 0);
     lv_obj_add_flag(s_dash_title[2], LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_dash_title[2], cb_camera_btn_tap, LV_EVENT_CLICKED, NULL);
     s_camera_empty = lv_label_create(camera_box);
@@ -6856,6 +6930,7 @@ void ui_init(void)
     lv_obj_set_style_pad_all(camera_btn_group, 0, 0);
 
     lv_obj_t *btn_capture = lv_button_create(camera_btn_group);
+    s_camera_capture_btn = btn_capture;
     lv_obj_add_event_cb(btn_capture, cb_capture_now, LV_EVENT_CLICKED, NULL);
     s_camera_capture_lbl = lv_label_create(btn_capture);
     lv_label_set_text(s_camera_capture_lbl, ui_str(STR_BTN_CAPTURE_NOW));
@@ -7763,14 +7838,12 @@ static void cb_stats_btn_tap(lv_event_t *e)
     build_stats_tab();
 }
 
-/* 2026-09-08(카메라 팝업 추출) — 카메라판넬 제목 탭. s_camera_title_enabled_prev가 false면
- * (연결된 CAM 0대 — 회색 상태) 아무 것도 안 함, 센서와 달리 카메라는 "탭 불가" 표현이
- * 이미 회색으로 나가 있으므로 그 약속을 실제 동작에서도 지킴(사용자 설계: "제목
- * (탭가능/불가능)") */
+/* 2026-09-08(카메라 팝업 추출), 2026-09-22(사용자 지시 — "캠 연결 없어도 센스처럼 팝업이
+ * 열려야되") — 카메라판넬 제목 탭. 연결된 CAM 0대여도 센서 판넬(cb_stats_btn_tap)과 동일하게
+ * 항상 팝업을 엶 — 예전엔 0대일 때 회색으로 탭 불가 처리했었는데 그 설계를 뒤집음 */
 static void cb_camera_btn_tap(lv_event_t *e)
 {
     (void)e;
-    if (!s_camera_title_enabled_prev) return;
     build_camera_tab();
 }
 
@@ -7796,10 +7869,26 @@ static void build_camera_tab(void)
 
     lv_obj_set_parent(s_camera_content, popup);
     lv_obj_set_parent(s_camera_split_row, popup);
-    /* 팝업은 카메라판넬 제목이 클릭 가능(=연결된 CAM 1대 이상)할 때만 열리므로 항상
-     * "연결됨" 상태 — 다음 refresh_dashboard() 틱까지 기다리지 않고 즉시 보이게 함 */
-    lv_obj_remove_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
+    /* 2026-09-22(사용자 지시로 0대 연결에서도 팝업이 열리게 되면서 수정) — 더 이상 "항상
+     * 연결됨"을 가정할 수 없음. s_camera_selectable_prev(라이브 연결 or SD 이력 카메라 중
+     * 하나라도 있으면 true, refresh_dashboard()가 매 틱 갱신)로 지금 실제 상태를 즉시 판단
+     * (다음 틱까지 기다리지 않음) — 아무것도 없으면 toolbar/split_row는 계속 숨겨두고,
+     * 다음 refresh_dashboard() 틱이 카메라(라이브든 SD 이력이든)를 감지하면 그때 자연히
+     * 보여줌(기존 로직, 위 camera_selectable 분기 참고) */
+    if (s_camera_selectable_prev) {
+        lv_obj_remove_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        /* 2026-09-22(사용자 지적 — "연결된 적 없는 보드는 아무 것도 안 나오네") —
+         * s_camera_empty는 메인화면 camera_box 소속이라 팝업 안에서는 안 보임. 팝업이
+         * 완전히 비어보이지 않게 여기 전용 안내 라벨을 하나 만듦(팝업은 열 때마다 새로
+         * 지어지므로 static 보관 불필요 — teardown_camera_tab()의 lv_obj_delete(popup)가
+         * 자식까지 같이 지움) */
+        lv_obj_t *empty_lbl = lv_label_create(popup);
+        lv_label_set_text(empty_lbl, ui_str(STR_PANEL_NO_CAMERA));
+        lv_obj_set_style_text_font(empty_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_center(empty_lbl);
+    }
 }
 
 static void teardown_camera_tab(void)

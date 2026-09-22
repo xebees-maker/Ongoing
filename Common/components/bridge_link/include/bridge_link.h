@@ -1,33 +1,33 @@
 #pragma once
 
 /**
- * 2026-09-21(설계 — CNTL<->브릿지(XIAO Seeed) I2C 프로토콜, 사용자와의 대화 기반 설계)
+ * 2026-09-21(설계 — CNTL<->브릿지(XIAO Seeed, ESP32-C6) I2C 프로토콜, 사용자와의 대화 기반 설계)
  *
- * CNTL은 더 이상 ESP-NOW 라디오를 직접 쓰지 않음 — 별도 브릿지 보드(XIAO Seeed, ESP32-C3)가
- * ESP-NOW 드라이버 전체(초기화/피어관리/채널/송수신/reliable 재시도 루프)를 대신 갖고,
- * CNTL과는 isolated I2C 4단자(VCC/GND/SDA/SCL, 여분 핀 없음)로만 연결됨. CNTL이 I2C 마스터
- * (지능을 가진 쪽이 버스도 주도 — 사용자 설계), 브릿지가 슬레이브.
+ * CNTL은 더 이상 ESP-NOW 라디오를 직접 쓰지 않음 — 별도 브릿지 보드가 ESP-NOW 드라이버 전체
+ * (초기화/피어관리/채널/송수신/reliable 재시도 루프)를 대신 갖고, CNTL과는 콘 보드의 외부 I2C
+ * 커넥터(GPIO8/9 공유버스를 레벨시프터로 뽑아낸 것)로 연결됨. CNTL이 I2C 마스터, 브릿지가 슬레이브.
  *
- * 브릿지는 Sens/CAM 쪽 esp_now_link.h 프로토콜을 전혀 해석하지 않는 투명 중계임 — 여기 정의된
- * bridge_link_packet_t의 payload는 그 프로토콜의 원본 바이트를 그대로 담아 나른다. CNTL의
- * CASK 상태머신(esp_now_hub.c)은 이 대화에서 전혀 안 바뀜 — 실제 esp_now_send()/reliable
- * 호출부만 이 패킷을 통해 브릿지로 위임하는 얇은 계층(Cntl/main/i2c_bridge.c)으로 바뀜.
+ * 브릿지는 Sens/CAM 쪽 esp_now_link.h 프로토콜을 전혀 해석하지 않는 투명 중계임 — payload는 그
+ * 프로토콜의 원본 바이트를 그대로 담아 나른다.
  *
- * 고정 크기 구조체 하나로 설계(가변 길이 프레이밍 대신) — I2C 트랜잭션 구현을 단순하게 유지하기
- * 위한 1차 구현 선택. 사진 전송(PHOTO_CHUNK, 최대 ~1MB)도 이 경로를 그대로 타므로(브릿지는
- * 무조건 투명 중계 — 다른 물리 경로가 없음, 2026-09-21 사용자 확인) I2C 처리량이 문제가 되면
- * 그때 가변 길이/스트리밍 방식으로 재설계할 것 — 이번 1차 구현의 의도적 단순화.
+ * 2026-09-21 밤 재설계(사용자 지시, v1의 고정 1493바이트 통짜 구조체가 실기에서 I2C 타임아웃을
+ * 유발한 걸 발견한 뒤) — "패킷" 개념 자체가 이 링크엔 원래 안 맞을 수 있다는 대화 끝에(멀티플렉싱/
+ * 라우팅도, 회선 불안정 대비도 이 10cm 1:1 동기링크엔 불필요) 최소한으로 남김:
+ *   - 가변 크기: 헤더(고정, 작음) + payload(실제 길이만큼만) 2단계 트랜잭션.
+ *   - SEQ_NUMBER 없음 — dest_mac이 이미 상관키 역할(한 MAC당 동시 요청 1개), 순서뒤바뀜/중복 같은
+ *     것 자체가 이 동기식 P2P 링크에서 구조적으로 안 생김(사용자 지시).
+ *   - CRC는 최소한으로 유지 — 실패 감지 후 "재시도"가 가장 간단한 복구 전략이라는 전제(사용자
+ *     지시: "값이 이상하면 트랜잭션 자체를 다시 해도 되잖아") — 정교한 오류정정이 아니라 딱
+ *     재시도 트리거용.
  */
 
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
 
-/* ESP-NOW v2 한도(1470B) 기준 — Common/esp_now_reliable.c의 REPLY_BUF_CAP과 동일 전례를 따름
- * (어떤 응답 타입이 오든 이 안에 들어옴이 이미 그 컴포넌트에서 검증됨) */
+/* ESP-NOW v2 한도(1470B) 기준 — 헤더/버퍼 크기의 상한일 뿐, 매 전송마다 이만큼 나가는 게
+ * 아니라 실제 payload_len만큼만 두 번째 단계에서 전송됨(v1과의 핵심 차이) */
 #define BRIDGE_LINK_MAX_PAYLOAD 1470
-
-/* accept_reply_types 배열 — 실사용 호출부는 전부 1개짜리라(esp_now_tx.c 등) 여유있게 4로 잡음 */
 #define BRIDGE_LINK_MAX_ACCEPT_TYPES 4
 
 typedef enum {
@@ -46,6 +46,8 @@ typedef enum {
     BRIDGE_MSG_RESET,           /* CNTL->브릿지: 브릿지 자체 esp_restart() 요청 */
 } bridge_msg_type_t;
 
+/* 1단계 트랜잭션 — 항상 고정 크기(sizeof(bridge_link_header_t)), payload_len으로 2단계가
+ * 필요한지(그리고 몇 바이트인지) 알려줌. header_crc가 틀리면 2단계 없이 바로 재시도 */
 typedef struct __attribute__((packed)) {
     uint8_t  msg_type;      /* bridge_msg_type_t */
     uint8_t  mac[6];        /* RELIABLE_SEND/RESULT/FIRE_AND_FORGET: 상대 MAC. INCOMING: 발신 MAC */
@@ -55,15 +57,12 @@ typedef struct __attribute__((packed)) {
     uint8_t  max_attempts;  /* RELIABLE_SEND 전용 — 위와 동일 */
     uint8_t  accept_reply_types[BRIDGE_LINK_MAX_ACCEPT_TYPES]; /* RELIABLE_SEND 전용 */
     uint8_t  accept_reply_types_count;                          /* RELIABLE_SEND 전용 */
-    uint16_t payload_len;
-    uint8_t  payload[BRIDGE_LINK_MAX_PAYLOAD];
-    uint16_t crc;           /* 아래 bridge_link_crc16()으로 msg_type..payload[payload_len-1]까지 계산 */
-} bridge_link_packet_t;
+    uint16_t payload_len;   /* 0이면 2단계 트랜잭션 자체가 없음(PING/PONG/SET_CHANNEL 등 대부분) */
+    uint16_t header_crc;    /* 아래 필드들(header_crc 자신 제외) CRC16 */
+} bridge_link_header_t;
 
-/* CRC-16/CCITT(포함 다항식 0x1021, 초기값 0xFFFF) — 테이블 없이 비트루프로 계산, 매 트랜잭션마다
- * 한 번씩만 부르므로 양쪽 다 성능 문제 없음. len==0이면 msg_type+mac+ok+rssi+timeout_ms+
- * max_attempts+accept_reply_types+accept_reply_types_count+payload_len 고정 헤더만 계산됨 —
- * 호출부는 항상 offsetof(payload)+payload_len을 넘겨야 함(bridge_link_crc_len() 참고) */
+/* CRC-16/CCITT(다항식 0x1021, 초기값 0xFFFF) — 테이블 없이 비트루프, 트랜잭션당 1~2회뿐이라
+ * 양쪽 다 성능 문제 없음. 정교한 오류정정 목적이 아니라 "깨졌으면 재시도" 트리거용(사용자 설계) */
 static inline uint16_t bridge_link_crc16(const uint8_t *data, size_t len)
 {
     uint16_t crc = 0xFFFF;
@@ -76,20 +75,55 @@ static inline uint16_t bridge_link_crc16(const uint8_t *data, size_t len)
     return crc;
 }
 
-/* CRC 계산 대상 길이 — 고정 헤더 전체(offsetof(payload)) + 실제 payload_len만큼만(패딩 바이트는
- * 안 봄, 매번 다른 쓰레기값이라 포함하면 CRC가 무의미해짐) */
-static inline size_t bridge_link_crc_len(const bridge_link_packet_t *pkt)
+static inline void bridge_link_header_seal(bridge_link_header_t *hdr)
 {
-    return offsetof(bridge_link_packet_t, payload) + pkt->payload_len;
+    hdr->header_crc = bridge_link_crc16((const uint8_t *)hdr, offsetof(bridge_link_header_t, header_crc));
 }
 
-static inline void bridge_link_seal(bridge_link_packet_t *pkt)
+static inline int bridge_link_header_verify(const bridge_link_header_t *hdr)
 {
-    pkt->crc = bridge_link_crc16((const uint8_t *)pkt, bridge_link_crc_len(pkt));
+    if (hdr->payload_len > BRIDGE_LINK_MAX_PAYLOAD) return 0;
+    return bridge_link_crc16((const uint8_t *)hdr, offsetof(bridge_link_header_t, header_crc)) == hdr->header_crc;
 }
 
-static inline int bridge_link_verify(const bridge_link_packet_t *pkt)
+/* 2단계 트랜잭션(header->payload_len > 0일 때만) — payload_len바이트 + 뒤에 CRC16(2바이트).
+ * 호출부는 payload_len+2바이트짜리 버퍼를 주고받은 뒤 이 두 함수로 검증/실링 */
+static inline void bridge_link_payload_seal(uint8_t *payload_buf_with_crc, uint16_t payload_len)
 {
-    if (pkt->payload_len > BRIDGE_LINK_MAX_PAYLOAD) return 0;
-    return bridge_link_crc16((const uint8_t *)pkt, bridge_link_crc_len(pkt)) == pkt->crc;
+    uint16_t crc = bridge_link_crc16(payload_buf_with_crc, payload_len);
+    payload_buf_with_crc[payload_len]     = (uint8_t)(crc & 0xFF);
+    payload_buf_with_crc[payload_len + 1] = (uint8_t)(crc >> 8);
+}
+
+static inline int bridge_link_payload_verify(const uint8_t *payload_buf_with_crc, uint16_t payload_len)
+{
+    uint16_t crc = bridge_link_crc16(payload_buf_with_crc, payload_len);
+    uint16_t got = (uint16_t)payload_buf_with_crc[payload_len] | ((uint16_t)payload_buf_with_crc[payload_len + 1] << 8);
+    return crc == got;
+}
+
+/* 코드에서 다루기 편하게 헤더+페이로드를 묶은 메모리상의 논리 메시지 — 와이어 포맷 그 자체는
+ * 아님(실제 전송은 항상 헤더 먼저, payload_len>0일 때만 그 뒤에 payload_len+2바이트가 별도
+ * I2C 트랜잭션으로 이어짐 — Cntl/main/i2c_bridge.c, Bridge/main/i2c_slave_link.c 참고).
+ * packed로 선언해 header 뒤에 payload가 패딩 없이 바로 붙게 해서, 실제 전송 시
+ * "&msg 시작부터 sizeof(header)+payload_len+2바이트"를 그대로 한 번에 슬라이스해 쓸 수 있게 함.
+ * payload_len==0이면 payload[] 내용/CRC는 의미 없음(전송도 안 됨) */
+typedef struct __attribute__((packed)) {
+    bridge_link_header_t header;
+    uint8_t payload[BRIDGE_LINK_MAX_PAYLOAD + 2];  /* +2: payload_len>0일 때 끝에 붙는 CRC16 */
+} bridge_link_msg_t;
+
+static inline void bridge_link_msg_seal(bridge_link_msg_t *msg)
+{
+    bridge_link_header_seal(&msg->header);
+    if (msg->header.payload_len > 0) {
+        bridge_link_payload_seal(msg->payload, msg->header.payload_len);
+    }
+}
+
+/* 이 메시지를 실제로 전송할 때 필요한 총 바이트수(헤더 단계 + payload_len>0이면 페이로드
+ * 단계) — i2c_master_transmit()/i2c_slave_write() 호출 시 그대로 씀 */
+static inline size_t bridge_link_msg_wire_len(const bridge_link_msg_t *msg)
+{
+    return sizeof(msg->header) + (msg->header.payload_len > 0 ? (size_t)msg->header.payload_len + 2 : 0);
 }

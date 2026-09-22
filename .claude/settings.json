@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash",
+      "Bash(*)",
       "PowerShell",
+      "PowerShell(*)",
       "Read",
       "Edit(Docs/handoff_*.md)",
       "Edit(Docs/한일_*.txt)",
