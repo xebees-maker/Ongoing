@@ -343,15 +343,16 @@ void esp_now_channelsync_on_recv(const esp_now_recv_info_t *info, uint8_t msg_ty
             ESP_LOGW(TAG, "ADVERTISE_ACK 길이 부족(len=%d) — 무시", len);
             goto done;
         }
-        const esp_now_advertise_ack_t *ack = (const esp_now_advertise_ack_t *)data;
-
         /* s_scan_channel을 그대로 믿으면 안 됨 — scan_timer_cb(별도 타이머 콜백)가 이 콜백과
          * 다른 시점에 채널을 바꿀 수 있어서, 실제로 이 응답을 수신한 채널은
          * info->rx_ctrl->channel로 확인하는 게 정확함(2026-08-02, 실기에서 발견된 레이스 —
          * 이제 뮤텍스로 근본 원인도 막혔지만, "어느 채널에서 받았는지"는 여전히 이렇게 확인) */
         uint8_t actual_channel = (info && info->rx_ctrl) ? info->rx_ctrl->channel : s_scan_channel;
 
-        memcpy(s_hub_mac, ack->hub_mac, sizeof(s_hub_mac));
+        /* 2026-09-23(사용자 지시 — 콘의 MAC은 내부망 프로토콜 어디에도 들어가면 안 됨,
+         * feedback_cntl_mac_never_in_internal_protocol 메모리 참고) — hub_mac을 페이로드에서
+         * 읽지 않고 프레임의 실제 발신지(info->src_addr, 드라이버가 채워주는 값)를 씀 */
+        memcpy(s_hub_mac, info->src_addr, sizeof(s_hub_mac));
         add_peer_if_needed(s_hub_mac);
 
         s_scan_channel = actual_channel;

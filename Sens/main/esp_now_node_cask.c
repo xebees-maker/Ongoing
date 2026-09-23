@@ -283,9 +283,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * 아직 없거나(최초 페어링 전) 실패한 경우, 예전과 동일하게 광고->PAIR_REQUEST로 붙음 */
     if (s_conn_state == SENS_CONN_PAIRED || msg_type != ESP_NOW_MSG_PAIR_REQUEST) return;
     if (len < (int)sizeof(esp_now_pair_request_t)) return;
-    const esp_now_pair_request_t *req = (const esp_now_pair_request_t *)data;
 
-    memcpy(s_hub_mac, req->hub_mac, sizeof(s_hub_mac));
+    /* 2026-09-23(사용자 지시 — 콘의 MAC은 내부망 프로토콜 어디에도 들어가면 안 됨,
+     * feedback_cntl_mac_never_in_internal_protocol 메모리 참고) — hub_mac을 페이로드에서 읽지
+     * 않고, 프레임의 실제 발신지(info->src_addr)를 씀(esp_now_cam.c와 동일 조치) */
+    memcpy(s_hub_mac, info->src_addr, sizeof(s_hub_mac));
 
     s_conn_state = SENS_CONN_PAIRED;
     ESP_LOGI(TAG, "[STATE] -> %s (pair_request)", conn_state_name(s_conn_state));

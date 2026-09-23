@@ -235,8 +235,12 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
-    uint8_t hub_mac[6];
-    /* hub_boot_id(2026-08-22, CNTL 재부팅 감지용) — 2026-08-25 CASK 재설계로 제거. 이 값을
+    /* hub_mac 필드는 2026-09-23에 제거됨(사용자 지시 — 내부망 프로토콜에 콘의 MAC이 들어가면
+     * 안 됨, feedback_cntl_mac_never_in_internal_protocol 메모리 참고). 원래 여기 담던 "허브가
+     * 응답을 보낼 주소"는 수신측이 프레임의 실제 발신지(info->src_addr)로 대신 판단함 —
+     * 하드웨어가 채워주는 값이라 항상 정확함(브가 실제로 쏜 MAC), 애플리케이션이 값을 채워
+     * 넣을 필요가 없음.
+     * hub_boot_id(2026-08-22, CNTL 재부팅 감지용) — 2026-08-25 CASK 재설계로 제거. 이 값을
      * 실어보내던 CHANNEL_PONG이 없어졌고, 재부팅한 CNTL은 그냥 "이 캠을 모르는 CNTL"로 자연히
      * 처리되어 결과적으로 같은 폴백 경로를 타므로 별도 감지가 불필요해짐 */
 } esp_now_advertise_ack_t;
@@ -244,7 +248,6 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
-    uint8_t hub_mac[6];
 } esp_now_pair_request_t;
 
 /* 2026-09-05(사용자 지시) — 노드가 뭘 재는지(센서 종류/채널구성)는 자주 안 바뀌는 값이라

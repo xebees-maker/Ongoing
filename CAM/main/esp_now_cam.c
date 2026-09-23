@@ -1346,9 +1346,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     if (s_conn_state == CAM_CONN_PAIRED || msg_type != ESP_NOW_MSG_PAIR_REQUEST) return;
     if (len < (int)sizeof(esp_now_pair_request_t)) return;
-    const esp_now_pair_request_t *req = (const esp_now_pair_request_t *)data;
 
-    memcpy(s_hub_mac, req->hub_mac, sizeof(s_hub_mac));
+    /* 2026-09-23(사용자 지시 — 콘의 MAC은 내부망 프로토콜 어디에도 들어가면 안 됨,
+     * feedback_cntl_mac_never_in_internal_protocol 메모리 참고) — hub_mac을 페이로드에서 읽지
+     * 않고, 프레임의 실제 발신지(info->src_addr)를 씀. 이건 ESP-NOW 드라이버가 채워주는
+     * 값이라 브가 실제로 쏜 MAC이 항상 정확히 들어있음 */
+    memcpy(s_hub_mac, info->src_addr, sizeof(s_hub_mac));
 
     /* 2026-08-23(사용자 지시, 레이스 케이스3) — s_conn_state=PAIRED + notify_paired()(스캔
      * 정지, 뮤텍스로 보호됨)를 최대한 앞으로 당겨서, scan_timer_cb가 끼어들어 광고 한 통을

@@ -1,4 +1,6 @@
 #include "ui_screen.h"
+#include "esp_now_link.h"
+#include "esp_now.h"
 
 #include "lvgl.h"
 #include "esp_lv_adapter.h"
@@ -11,6 +13,62 @@
 #include <string.h>
 
 static const char *TAG = "ui_screen";
+
+void ui_screen_mac6(const uint8_t mac[6], char out[7])
+{
+    snprintf(out, 7, "%02X%02X%02X", mac[3], mac[4], mac[5]);
+}
+
+const char *ui_screen_err_short(esp_err_t err)
+{
+    static char buf[24];
+    if (err == ESP_OK) return "OK";
+    const char *name = esp_err_to_name(err);
+    if (strncmp(name, "ESP_ERR_", 8) == 0) {
+        snprintf(buf, sizeof(buf), "ERR-%s", name + 8);
+        return buf;
+    }
+    if (strcmp(name, "ESP_FAIL") == 0) return "ERR-FAIL";
+    return name;  /* 매칭 안 되는 드문 케이스는 원본 그대로(길어도 정보는 유지) */
+}
+
+const char *ui_screen_msg_type_name(uint8_t msg_type)
+{
+    /* 지금 페어링 흐름(광고->ACK->연결)에서 실제로 보이는 것부터 — 나머지(캐스크/사진전송
+     * 등)는 필요해지면 추가 */
+    switch (msg_type) {
+        case ESP_NOW_MSG_ADVERTISE:        return "ADVERTISE";
+        case ESP_NOW_MSG_PAIR_REQUEST:     return "PAIR_REQ";
+        case ESP_NOW_MSG_PAIR_ACK:         return "PAIR_ACK";
+        case ESP_NOW_MSG_ADVERTISE_ACK:    return "ADV_ACK";
+        case ESP_NOW_MSG_WAKE_HELLO:       return "WAKE_HELLO";
+        case ESP_NOW_MSG_WAKE_HELLO_ACK:   return "WAKE_ACK";
+        case ESP_NOW_MSG_UNPAIR:           return "UNPAIR";
+        case ESP_NOW_MSG_UNPAIR_ACK:       return "UNPAIR_ACK";
+        default: {
+            static char buf[12];
+            snprintf(buf, sizeof(buf), "#%u", msg_type);
+            return buf;
+        }
+    }
+}
+
+const char *ui_screen_result_code(esp_err_t err)
+{
+    static char buf[12];
+    switch (err) {
+        case ESP_OK:                    return "OK";
+        case ESP_ERR_TIMEOUT:           return "TO";
+        case ESP_ERR_ESPNOW_NOT_FOUND:  return "NP";
+        case ESP_FAIL:                  return "FL";
+        case ESP_ERR_NO_MEM:            return "NM";
+        case ESP_ERR_INVALID_ARG:       return "BA";
+        case ESP_ERR_INVALID_STATE:     return "BS";
+        default:
+            snprintf(buf, sizeof(buf), "E%d", (int)err);
+            return buf;
+    }
+}
 
 static lv_obj_t *s_mem_label;
 static lv_obj_t *s_wireless_log;
@@ -60,8 +118,14 @@ void ui_screen_init(void)
 
 static void log_append(lv_obj_t *box, const char *fmt, va_list args)
 {
+    /* 2026-09-23(사용자 지시 — 양쪽 창 로그를 순서대로 대조하기 위한 공통 순번) — 두 창
+     * 공통 카운터, 00~99 순환. 순수 표시용 디버그 보조라 동시성 보호는 안 둠(드물게 겹쳐도
+     * 화면 번호 하나 스킵/중복되는 정도, 기능엔 영향 없음) */
+    static uint32_t s_seq = 0;
     char line[192];
-    int n = vsnprintf(line, sizeof(line), fmt, args);
+    int prefix_n = snprintf(line, sizeof(line), "[%02u] ", (unsigned)(s_seq++ % 100));
+    if (prefix_n < 0 || (size_t)prefix_n >= sizeof(line)) return;
+    int n = vsnprintf(line + prefix_n, sizeof(line) - (size_t)prefix_n, fmt, args);
     if (n < 0) return;
     /* 2026-09-23(디버깅용) — 화면에만 찍히고 시리얼엔 전혀 안 남아서 원격으로 확인이
      * 불가능했음(사용자는 화면으로 보지만 Claude는 시리얼로만 봄) — 둘 다 남김 */

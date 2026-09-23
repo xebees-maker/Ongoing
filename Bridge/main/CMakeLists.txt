@@ -21,6 +21,7 @@ idf_component_register(
         esp_driver_twai
         can_bridge_link
         esp_now_reliable
+        esp_now_link
 )
 
 idf_build_get_property(build_components BUILD_COMPONENTS)

@@ -123,9 +123,12 @@ static void handle_reliable_send(const can_bridge_app_header_t *hdr, const uint8
                                               send_hdr.timeout_ms, send_hdr.max_attempts,
                                               s_reply_buf, 1470, &reply_len);
 
-    ui_screen_log_can("RELIABLE mac=%02X%02X%02X%02X%02X%02X req_len=%u -> %s",
-                       hdr->mac[0], hdr->mac[1], hdr->mac[2], hdr->mac[3], hdr->mac[4], hdr->mac[5],
-                       (unsigned)req_len, err == ESP_OK ? "OK" : esp_err_to_name(err));
+    /* 2026-09-23(사용자 지적) — RL(구 RLBL)은 CAN에서 받은 명령을 "처리하는 코드 위치" 기준이
+     * 아니라 실제로 무선(ESP-NOW)으로 캠과 주고받은 결과를 설명하는 내용이라 무선 창이 맞음 */
+    char m6[7]; ui_screen_mac6(hdr->mac, m6);
+    const char *type_name = req_len >= 2 ? ui_screen_msg_type_name(req[1]) : "?";
+    ui_screen_log_wireless("RL(%c/%s/%u/%s) %s", (err == ESP_OK) ? 'S' : 'F', m6,
+                            (unsigned)req_len, ui_screen_result_code(err), type_name);
 
     /* 결과를 콘에 CAN으로 돌려줌 — app_header + result_hdr + (성공시)응답 페이로드 */
     uint8_t *result_msg = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + sizeof(can_bridge_reliable_result_hdr_t) + 1470,
@@ -161,8 +164,14 @@ static void can_consume_task(void *arg)
                 size_t body_len = len - CAN_BRIDGE_APP_HEADER_LEN;
 
                 if (hdr.msg_type == CAN_DATA_RELAY) {
-                    ui_screen_log_can("DATA rx mac=%02X%02X%02X%02X%02X%02X len=%u -> ESP-NOW out",
-                                       hdr.mac[0], hdr.mac[1], hdr.mac[2], hdr.mac[3], hdr.mac[4], hdr.mac[5], (unsigned)body_len);
+                    /* 2026-09-23(사용자 확인 — "DATA rx가 무선에 찍혔다") — 다시 보니 이 줄
+                     * 자체는 코드상 CAN 창에 정상적으로 찍히는 게 맞고, 실제로는 그 직후
+                     * bridge_esp_now_send_raw()가 무선 창에 "TX(...)"를 바로 이어서 찍어서
+                     * 같은 이벤트가 두 창에 연달아 나오다 보니 헷갈린 것으로 보임(버그 아님) —
+                     * 어차피 TX(...) 줄이 결과를 알려주므로 여기선 mac+len만 짧게 */
+                    char m6[7]; ui_screen_mac6(hdr.mac, m6);
+                    const char *type_name = body_len >= 2 ? ui_screen_msg_type_name(body[1]) : "?";
+                    ui_screen_log_can("DATA rx(%s/%u) %s", m6, (unsigned)body_len, type_name);
                     /* 콘이 CAM에 보내라고 준 원본 프레임 — 그대로 ESP-NOW로 내보냄(투명 릴레이) */
                     bridge_esp_now_send_raw(hdr.mac, body, (uint16_t)body_len);
                 } else if (hdr.msg_type == CAN_DATA_RELIABLE_SEND) {

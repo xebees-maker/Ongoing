@@ -440,13 +440,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 .version      = ESP_NOW_LINK_VERSION,
                 .msg_type     = ESP_NOW_MSG_ADVERTISE_ACK,
             };
-            /* 2026-09-23(1단계, 알려진 한계 — 다음 작업으로 남김) — hub_mac은 원래 "캠이
-             * 다음부터 곧장 유니캐스트할 대상"인데, 지금은 콘 자신의 WiFi MAC(인터넷용, ESP-NOW
-             * 무관)이 들어감. 실제로는 브의 ESP-NOW MAC이 들어가야 캠의 fast-path 재연결이
-             * 맞는 대상을 향함 — 브가 자기 MAC을 콘에 알려주는 절차가 아직 없어서 이번 패스
-             * 에서는 그대로 둠(지금 당장의 광고->ACK->PAIR 흐름 자체는 info->src_addr 기반이라
-             * 영향 없음, 다음 웨이크의 fast-path 재연결에만 영향) */
-            esp_wifi_get_mac(s_wifi_if, ack.hub_mac);
             can_bridge_relay_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
         }
 
@@ -1309,17 +1302,10 @@ static void esp_now_hub_pair(const uint8_t *mac)
 
     add_peer_if_needed(mac);
 
-    /* 2026-09-23(1단계, 알려진 한계 — ADVERTISE_ACK 쪽과 동일, 위 주석 참고) — 여기도
-     * 콘 자신의 WiFi MAC이 아니라 브의 ESP-NOW MAC이 들어가야 캠의 fast-path 재연결이 맞는
-     * 대상을 향함. 다음 작업으로 남김(브가 자기 MAC을 콘에 알려주는 절차 필요) */
-    uint8_t hub_mac[6];
-    esp_wifi_get_mac(s_wifi_if, hub_mac);
-
     esp_now_pair_request_t req = {
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_PAIR_REQUEST,
     };
-    memcpy(req.hub_mac, hub_mac, sizeof(req.hub_mac));
     /* 2026-08-05 Layer 1 — esp_now_tx 태스크로 큐잉(reliable_request로 PAIR_ACK을 기다리며
      * 재시도). 이 함수 자체는 그대로 즉시 리턴(UI 안 얼어붙음, 기존과 동일한 UX) — 실제
      * 페어링 상태 반영은 지금처럼 recv_cb의 PAIR_ACK 핸들러가 그대로 담당함(esp_now_tx는

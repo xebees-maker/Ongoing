@@ -66,9 +66,9 @@ static void relay_task(void *arg)
     for (;;) {
         if (xQueueReceive(s_incoming_q, &item, portMAX_DELAY) != pdTRUE) continue;
 
-        ui_screen_log_wireless("RX mac=%02X%02X%02X%02X%02X%02X rssi=%d len=%u",
-                                item.mac[0], item.mac[1], item.mac[2], item.mac[3], item.mac[4], item.mac[5],
-                                item.rssi, item.len);
+        char m6[7]; ui_screen_mac6(item.mac, m6);
+        const char *type_name = item.len >= 2 ? ui_screen_msg_type_name(item.data[1]) : "?";
+        ui_screen_log_wireless("RX(%d/%s/%u) %s", item.rssi, m6, item.len, type_name);
 
         can_bridge_app_header_t hdr = { .msg_type = CAN_DATA_RELAY, .flags = (uint8_t)item.rssi };
         memcpy(hdr.mac, item.mac, 6);
@@ -84,7 +84,7 @@ static void relay_task(void *arg)
         }
         esp_err_t err = can_bridge_send(data_ctx, msg, CAN_BRIDGE_APP_HEADER_LEN + item.len);
         if (err != ESP_OK) {
-            ui_screen_log_can("Relay failed: %s", esp_err_to_name(err));
+            ui_screen_log_can("Relay fail: %s", ui_screen_err_short(err));
         }
     }
 }
@@ -119,10 +119,10 @@ void bridge_esp_now_ensure_peer(const uint8_t mac[6])
 void bridge_esp_now_send_raw(const uint8_t mac[6], const uint8_t *data, uint16_t len)
 {
     add_peer_if_needed(mac);
-    esp_err_t err = esp_now_send(mac, data, len);
-    ui_screen_log_wireless("TX mac=%02X%02X%02X%02X%02X%02X len=%u %s",
-                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], len,
-                            err == ESP_OK ? "queued" : esp_err_to_name(err));
+    esp_now_send(mac, data, len);
+    char m6[7]; ui_screen_mac6(mac, m6);
+    const char *type_name = len >= 2 ? ui_screen_msg_type_name(data[1]) : "?";
+    ui_screen_log_wireless("TX(%s/%u) %s", m6, len, type_name);
 }
 
 static void wifi_bringup(void)
