@@ -343,9 +343,12 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     StackType_t *can_rx_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *can_consume_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *can_status_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
-    xTaskCreateStatic(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 10, can_rx_stack, &s_can_rx_tcb);
-    xTaskCreateStatic(can_consume_task, "can_consume", 4096 / sizeof(StackType_t), NULL, 10, can_consume_stack, &s_can_consume_tcb);
-    xTaskCreateStatic(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb);
+    /* 2026-09-25(사용자 설계 — 통신/UI 코어 분리) — LVGL은 코어 0, CAN 통신은 코어 1에 고정.
+     * 코어 1 안에서는 CAN(수신/소비)이 가장 높아야 함 — 통신 등급 17(project_cntl_task_priority_scheme),
+     * power_relay(15)보다 위. can_status는 5초 주기 상태 로그뿐이라 낮은 5 유지 */
+    xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
+    xTaskCreateStaticPinnedToCore(can_consume_task, "can_consume", 4096 / sizeof(StackType_t), NULL, 17, can_consume_stack, &s_can_consume_tcb, 1);
+    xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
 
     ESP_LOGI(TAG, "콘 CAN 링크 시작됨(TX=%d RX=%d %dbps)", CAN_BRIDGE_TX_GPIO, CAN_BRIDGE_RX_GPIO, CAN_BRIDGE_BITRATE);
 }

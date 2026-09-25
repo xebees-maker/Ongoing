@@ -385,14 +385,16 @@ void power_relay_start(void)
      * 스택을 내부RAM에서 할당함(esp_lv_adapter의 stack_in_psram=true와 같은 이유로 위험).
      * 이 프로젝트는 SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY+FREERTOS_TASK_CREATE_ALLOW_EXT_MEM이
      * 이미 켜져있어(sdkconfig 확인) xTaskCreateStatic()에 PSRAM 버퍼를 직접 주면 스택
-     * 자체를 PSRAM에 둘 수 있음 — TCB(제어블록)만 내부RAM(작고 고정폭이라 무시 가능) */
+     * 자체를 PSRAM에 둘 수 있음 — TCB(제어블록)만 내부RAM(작고 고정폭이라 무시 가능)
+     * 2026-09-25(사용자 설계 — 통신/UI 코어 분리) — UI와 무관하므로 CAN과 같은 코어 1에 고정.
+     * 코어 1 안에서 CAN(17)보다 낮은 15 유지 */
     static StaticTask_t s_power_relay_tcb;
     StackType_t *stack_buf = heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
     if (stack_buf) {
-        xTaskCreateStatic(power_relay_task, "power_relay", 8192, NULL, 15, stack_buf, &s_power_relay_tcb);
+        xTaskCreateStaticPinnedToCore(power_relay_task, "power_relay", 8192, NULL, 15, stack_buf, &s_power_relay_tcb, 1);
     } else {
         ESP_LOGE(TAG, "SR 태스크 스택 PSRAM 할당 실패 — 내부 RAM으로 폴백");
-        xTaskCreate(power_relay_task, "power_relay", 8192, NULL, 15, NULL);
+        xTaskCreatePinnedToCore(power_relay_task, "power_relay", 8192, NULL, 15, NULL, 1);
     }
     size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGW(TAG, "MEMDIAG power_relay_start 비용: internal %u -> %u (소모 %d bytes)",

@@ -675,6 +675,9 @@ void app_main(void)
     esp_lv_adapter_config_t adapter_config = ESP_LV_ADAPTER_DEFAULT_CONFIG();
     adapter_config.task_stack_size = 12 * 1024;
     adapter_config.stack_in_psram = true;
+    /* 2026-09-25(사용자 설계 — 통신/UI 코어 분리) — LVGL은 코어 0, CAN 통신은 코어 1.
+     * Wi-Fi(웹 전용)도 코어 0이지만 웹 접속 중엔 앱 UI를 직접 조작할 일이 없어 충돌 없음 */
+    adapter_config.task_core_id = 0;
     ESP_ERROR_CHECK(esp_lv_adapter_init(&adapter_config));
 
     esp_lv_adapter_display_config_t disp_config = ESP_LV_ADAPTER_DISPLAY_RGB_DEFAULT_CONFIG(
