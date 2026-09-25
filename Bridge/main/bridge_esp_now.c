@@ -102,6 +102,16 @@ static void relay_task(void *arg)
     }
 }
 
+/* 2026-09-25 — 송신 1건 완료 = 드라이버 송신 큐에 자리 생김. NO_MEM으로 대기 중인
+ * esp_now_reliable_request()(can_link.c의 RELIABLE_SEND 대행)를 깨움 — 브는 그 외 send_cb
+ * 용도가 없음 */
+static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t status)
+{
+    (void)info;
+    (void)status;
+    esp_now_reliable_on_send_done();
+}
+
 static void add_peer_if_needed(const uint8_t mac[6])
 {
     if (esp_now_is_peer_exist(mac)) return;
@@ -170,6 +180,7 @@ void bridge_esp_now_init(void)
 
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
+    ESP_ERROR_CHECK(esp_now_register_send_cb(send_cb));
 
     /* 2026-09-22(사용자 지적 — "버퍼 또 인터널로 잡았냐?") — incoming_t가 1479B씩(ESP-NOW
      * 최대 프레임 포함) 8개라 ~11.8KB나 내부RAM에 잡고 있었음. PSRAM으로 옮김. 태스크 스택도

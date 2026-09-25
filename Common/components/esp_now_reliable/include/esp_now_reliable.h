@@ -49,6 +49,13 @@ esp_err_t esp_now_reliable_request(const uint8_t *peer_mac,
 void esp_now_reliable_on_recv(uint8_t msg_type, const uint8_t *src_mac,
                                const uint8_t *data, int len);
 
+/* 2026-09-25(사용자 지시 — 통신은 이벤트 방식) — 앱의 send_cb(ESP-NOW 송신 완료 콜백)에서
+ * 매번 호출. 송신 1건이 끝나면 드라이버 송신 큐에 자리가 하나 생긴 것이므로, NO_MEM(큐 포화)으로
+ * 멈춰 있던 esp_now_reliable_request()를 깨움. send_cb는 기기당 하나만 등록 가능해서
+ * (esp_now_register_send_cb) 이 컴포넌트가 직접 등록하지 않고 on_recv와 같은 방식으로
+ * 앱이 한 줄 불러주는 구조. 대기 중인 요청이 없으면 아무 일도 안 함 */
+void esp_now_reliable_on_send_done(void);
+
 #ifdef __cplusplus
 }
 #endif

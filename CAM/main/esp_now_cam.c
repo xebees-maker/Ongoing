@@ -181,6 +181,9 @@ static const uint8_t s_broadcast_mac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }
 
 static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t status)
 {
+    /* 2026-09-25 — 송신 1건 완료 = 드라이버 송신 큐에 자리 생김. NO_MEM으로 대기 중인
+     * esp_now_reliable_request()를 깨움(이벤트 방식, 대기 중인 게 없으면 아무 일도 안 함) */
+    esp_now_reliable_on_send_done();
     if (info && info->des_addr && memcmp(info->des_addr, s_broadcast_mac, sizeof(s_broadcast_mac)) == 0) {
         if (status == ESP_NOW_SEND_SUCCESS) {
             esp_now_channelsync_notify_advertise_send_done();

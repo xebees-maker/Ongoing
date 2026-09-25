@@ -19,6 +19,14 @@ static const char *TAG = "esp_now_reliable";
  * 경합이 거의 없을 것으로 예상되지만, 안전을 위해 둠 */
 static SemaphoreHandle_t s_api_mutex = NULL;
 static SemaphoreHandle_t s_done_sem  = NULL;
+/* 송신 완료(=드라이버 송신 큐에 자리 생김) 신호 — esp_now_reliable_on_send_done()이 줌 */
+static SemaphoreHandle_t s_tx_done_sem = NULL;
+static volatile bool s_waiting_tx_slot = false;
+
+/* NO_MEM 뒤 송신 완료 이벤트를 기다리는 최대 시간. 정상이면 다른 프레임이 끝나는 즉시(수 ms)
+ * 깨어남 — 이 값은 앱이 on_send_done을 안 불러주거나 이벤트가 끝내 안 오는 경우의 상한일 뿐 */
+#define TX_SLOT_WAIT_MAX_MS 100
+#define TX_SLOT_MAX_TRIES   6
 
 static volatile bool s_waiting = false;
 static uint8_t        s_wait_peer_mac[6];
@@ -34,6 +42,7 @@ static void ensure_init(void)
     if (s_api_mutex) return;
     s_api_mutex = xSemaphoreCreateMutex();
     s_done_sem  = xSemaphoreCreateBinary();
+    s_tx_done_sem = xSemaphoreCreateBinary();
 }
 
 static void add_peer_if_needed(const uint8_t *mac)
@@ -71,12 +80,22 @@ esp_err_t esp_now_reliable_request(const uint8_t *peer_mac,
          * 상대의 응답을 기다릴 이유가 없음. 짧게 재시도해서 실제로 내보낸 뒤에만
          * timeout_ms를 씀(2026-08-05, 실기에서 발견: 사진 청크 버스트로 큐가 찬 동안
          * DONE reliable_request가 매번 NO_MEM으로 못 나가면서도 매번 800ms씩 허비 —
-         * 다른 곳(esp_now_cam.c 청크 전송 루프)과 같은 재시도 관례를 그대로 따름) */
-        esp_err_t send_err;
-        for (int local_retry = 0; local_retry < 6; local_retry++) {
+         * 다른 곳(esp_now_cam.c 청크 전송 루프)과 같은 재시도 관례를 그대로 따름).
+         * 2026-09-25(사용자 지시 — 이벤트 방식) — 예전엔 NO_MEM이면 20ms 쉬고 다시 보내는
+         * 폴링이었음. 이제 송신 완료 이벤트(esp_now_reliable_on_send_done — 큐에 자리가 생김)를
+         * 기다렸다가 다시 보냄. 보내기 직전에 신호를 비워 두므로, send가 NO_MEM을 돌려주기 전에
+         * 끝난 송신이 있었다면 그 신호가 남아 있어 바로 재시도함(깨우기 유실 없음) */
+        esp_err_t send_err = ESP_FAIL;
+        for (int local_retry = 0; local_retry < TX_SLOT_MAX_TRIES; local_retry++) {
+            xSemaphoreTake(s_tx_done_sem, 0);  /* 이전에 남아있을 수 있는 신호 비움 */
+            s_waiting_tx_slot = true;
             send_err = esp_now_send(peer_mac, (const uint8_t *)req, req_len);
-            if (send_err != ESP_ERR_ESPNOW_NO_MEM) break;
-            vTaskDelay(pdMS_TO_TICKS(20));
+            if (send_err != ESP_ERR_ESPNOW_NO_MEM) {
+                s_waiting_tx_slot = false;
+                break;
+            }
+            xSemaphoreTake(s_tx_done_sem, pdMS_TO_TICKS(TX_SLOT_WAIT_MAX_MS));
+            s_waiting_tx_slot = false;
         }
         if (send_err != ESP_OK) {
             ESP_LOGW(TAG, "esp_now_send 실패(시도 %d/%d): %s", attempt + 1, max_attempts, esp_err_to_name(send_err));
@@ -122,4 +141,12 @@ void esp_now_reliable_on_recv(uint8_t msg_type, const uint8_t *src_mac,
     s_reply_len = copy_len;
     s_matched   = true;
     xSemaphoreGive(s_done_sem);
+}
+
+void esp_now_reliable_on_send_done(void)
+{
+    /* send_cb는 Wi-Fi 태스크 컨텍스트(ISR 아님) — 일반 Give 사용. 초기화 전이거나 NO_MEM으로
+     * 기다리는 요청이 없으면 아무 것도 안 함 */
+    if (!s_tx_done_sem || !s_waiting_tx_slot) return;
+    xSemaphoreGive(s_tx_done_sem);
 }
