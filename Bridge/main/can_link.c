@@ -256,10 +256,12 @@ void can_link_init(void)
     StackType_t *can_status_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
     /* 소비 태스크를 먼저 만들고 알림 대상으로 등록한 뒤에 수신 태스크를 띄움 — 첫 push부터
      * 알림이 가도록(등록 전에 들어온 게 있어도 소비 태스크의 첫 비우기에서 처리됨) */
-    TaskHandle_t consume_task = xTaskCreateStatic(can_consume_task, "can_consume", 4096 / sizeof(StackType_t), NULL, 10, can_consume_stack, &s_can_consume_tcb);
+    /* 2026-09-25(사용자 설계 — 코어 분리) — CAN은 코어 1(ESP-NOW/Wi-Fi/LVGL은 코어 0).
+     * can_rx/can_consume는 통신 등급 17(콘과 동일), can_status는 상태 로그뿐이라 5 */
+    TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "can_consume", 4096 / sizeof(StackType_t), NULL, 17, can_consume_stack, &s_can_consume_tcb, 1);
     can_bridge_queue_set_notify_task(&s_data_complete_q, consume_task);
-    xTaskCreateStatic(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 10, can_rx_stack, &s_can_rx_tcb);
-    xTaskCreateStatic(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb);
+    xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
+    xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
 
     ESP_LOGI(TAG, "브 CAN 링크 시작됨(TX=%d RX=%d %dbps, DATA 전용)", CAN_LINK_TX_GPIO, CAN_LINK_RX_GPIO, CAN_LINK_BITRATE);
 }

@@ -8,6 +8,8 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -78,7 +80,24 @@ static lv_obj_t *s_can_log;
  * "절대 드롭 안 함" 정책과는 별개 개념) */
 #define UI_SCREEN_LOG_MAX_CHARS 4000
 
+/* 2026-09-25(실기 — 통신 태스크마다 "Failed to acquire LVGL lock" 반복) — 예전엔 로그를 부른
+ * 통신 태스크(esp_now_relay/can_consume)가 직접 LVGL 락을 최대 200ms 기다렸다가 textarea에
+ * 썼음 — 통신이 UI 렌더링에 묶임. 이제 통신 태스크는 줄을 이 큐에 넣고 즉시 반환(대기 0),
+ * 코어 0의 ui_log 태스크가 큐를 기다렸다가(이벤트) 락을 잡고 화면에 씀. 시리얼 로그는 예전처럼
+ * 호출한 자리에서 바로 찍음. 큐가 가득 차면 화면 표시만 한 줄 빠짐(시리얼엔 남음, 표시용일 뿐) */
+#define UI_SCREEN_LOG_LINE_LEN 194
+#define UI_SCREEN_LOG_Q_DEPTH  32
+typedef struct {
+    uint8_t is_wireless;                 /* 1=무선 창, 0=CAN 창 */
+    char    text[UI_SCREEN_LOG_LINE_LEN];
+} ui_log_line_t;
+static QueueHandle_t s_log_q;
+static ui_log_line_t *s_log_task_line;  /* ui_log 태스크 전용 수신 버퍼(PSRAM) */
+static ui_log_line_t *s_fmt_line;       /* log_append 공용 포맷 버퍼(PSRAM, s_fmt_mutex로 보호) */
+static SemaphoreHandle_t s_fmt_mutex;
+
 static void mem_update_task(void *arg);
+static void log_ui_task(void *arg);
 
 static lv_obj_t *make_log_box(lv_obj_t *parent, lv_align_t align, lv_coord_t w, lv_coord_t h)
 {
@@ -111,45 +130,95 @@ void ui_screen_init(void)
 
     ESP_LOGI(TAG, "브 화면 구성됨(메모리 표시 + 무선/CAN 로그창 2개)");
 
+    s_fmt_mutex = xSemaphoreCreateMutex();
+    s_fmt_line = (ui_log_line_t *)heap_caps_malloc(sizeof(ui_log_line_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_fmt_mutex || !s_fmt_line) {
+        ESP_LOGE(TAG, "로그 포맷 버퍼/뮤텍스 할당 실패 — 로그 출력 안 함");
+    }
+
+    /* 로그 표시 큐 + ui_log 태스크 — 큐 저장소/태스크 스택 모두 PSRAM(feedback_prefer_psram_for_buffers) */
+    static StaticQueue_t s_log_q_struct;
+    uint8_t *log_q_storage = (uint8_t *)heap_caps_malloc(UI_SCREEN_LOG_Q_DEPTH * sizeof(ui_log_line_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_log_task_line = (ui_log_line_t *)heap_caps_malloc(sizeof(ui_log_line_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (log_q_storage && s_log_task_line) {
+        s_log_q = xQueueCreateStatic(UI_SCREEN_LOG_Q_DEPTH, sizeof(ui_log_line_t), log_q_storage, &s_log_q_struct);
+        static StaticTask_t s_log_tcb;
+        StackType_t *log_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+        if (log_stack) {
+            xTaskCreateStaticPinnedToCore(log_ui_task, "ui_log", 4096 / sizeof(StackType_t), NULL, 5, log_stack, &s_log_tcb, 0);
+        } else {
+            ESP_LOGE(TAG, "ui_log 스택 할당 실패 — 화면 로그 표시 안 함(시리얼 로그는 유지)");
+            s_log_q = NULL;
+        }
+    } else {
+        ESP_LOGE(TAG, "로그 큐 할당 실패 — 화면 로그 표시 안 함(시리얼 로그는 유지)");
+    }
+
+    /* 2026-09-25(사용자 설계 — 코어 분리) — UI 쪽 태스크는 LVGL과 같은 코어 0 */
     static StaticTask_t s_mem_tcb;
     StackType_t *mem_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
-    xTaskCreateStatic(mem_update_task, "ui_mem", 3072 / sizeof(StackType_t), NULL, 5, mem_stack, &s_mem_tcb);
+    xTaskCreateStaticPinnedToCore(mem_update_task, "ui_mem", 3072 / sizeof(StackType_t), NULL, 5, mem_stack, &s_mem_tcb, 0);
 }
 
-static void log_append(lv_obj_t *box, const char *fmt, va_list args)
+static void log_ui_task(void *arg)
+{
+    (void)arg;
+    ui_log_line_t *l = s_log_task_line;
+    for (;;) {
+        if (xQueueReceive(s_log_q, l, portMAX_DELAY) != pdTRUE) continue;
+        lv_obj_t *box = l->is_wireless ? s_wireless_log : s_can_log;
+        if (!box) continue;
+        if (esp_lv_adapter_lock(-1) == ESP_OK) {
+            /* 상한을 넘기면 오래된 것부터 잘라냄(화면 표시 목적일 뿐, CAN 큐와 무관) */
+            const char *cur = lv_textarea_get_text(box);
+            if (cur && strlen(cur) + strlen(l->text) > UI_SCREEN_LOG_MAX_CHARS) {
+                lv_textarea_set_text(box, "");
+            }
+            lv_textarea_add_text(box, l->text);
+            esp_lv_adapter_unlock();
+        }
+    }
+}
+
+static void log_append(bool is_wireless, const char *fmt, va_list args)
 {
     /* 2026-09-23(사용자 지시 — 양쪽 창 로그를 순서대로 대조하기 위한 공통 순번) — 두 창
-     * 공통 카운터, 00~99 순환. 순수 표시용 디버그 보조라 동시성 보호는 안 둠(드물게 겹쳐도
-     * 화면 번호 하나 스킵/중복되는 정도, 기능엔 영향 없음) */
+     * 공통 카운터, 00~99 순환(2026-09-25부터 아래 s_fmt_mutex 안에서 증가) */
     static uint32_t s_seq = 0;
-    char line[192];
-    int prefix_n = snprintf(line, sizeof(line), "[%02u] ", (unsigned)(s_seq++ % 100));
-    if (prefix_n < 0 || (size_t)prefix_n >= sizeof(line)) return;
-    int n = vsnprintf(line + prefix_n, sizeof(line) - (size_t)prefix_n, fmt, args);
-    if (n < 0) return;
-    /* 2026-09-23(디버깅용) — 화면에만 찍히고 시리얼엔 전혀 안 남아서 원격으로 확인이
-     * 불가능했음(사용자는 화면으로 보지만 Claude는 시리얼로만 봄) — 둘 다 남김 */
-    ESP_LOGI(box == s_wireless_log ? "wireless" : "can_ui", "%s", line);
-    size_t len = strnlen(line, sizeof(line));
-    if (len == 0 || line[len - 1] != '\n') {
-        if (len < sizeof(line) - 1) { line[len] = '\n'; line[len + 1] = '\0'; }
-    }
-
-    if (esp_lv_adapter_lock(pdMS_TO_TICKS(200)) == ESP_OK) {
-        /* 상한을 넘기면 오래된 것부터 잘라냄(화면 표시 목적일 뿐, CAN 큐와 무관) */
-        if (lv_textarea_get_text(box) && strlen(lv_textarea_get_text(box)) + strlen(line) > UI_SCREEN_LOG_MAX_CHARS) {
-            lv_textarea_set_text(box, "");
+    /* 줄 버퍼(약 195B)를 호출한 통신 태스크 스택에 두지 않음(feedback_never_put_large_data_on_stack)
+     * — PSRAM 버퍼 1개를 뮤텍스로 보호해서 공용. 뮤텍스가 잡는 구간은 포맷+시리얼 출력+큐 넣기(대기
+     * 0)뿐이라 UI 렌더링과는 무관 */
+    if (!s_fmt_mutex || !s_fmt_line) return;
+    xSemaphoreTake(s_fmt_mutex, portMAX_DELAY);
+    ui_log_line_t *l = s_fmt_line;
+    char *line = l->text;
+    const size_t cap = sizeof(l->text) - 2;  /* 끝에 '\n' + '\0' 자리(2바이트)를 남겨 둠 */
+    int prefix_n = snprintf(line, cap, "[%02u] ", (unsigned)(s_seq++ % 100));
+    int n = (prefix_n >= 0 && (size_t)prefix_n < cap)
+            ? vsnprintf(line + prefix_n, cap - (size_t)prefix_n, fmt, args) : -1;
+    if (n >= 0) {
+        /* 2026-09-23(디버깅용) — 화면에만 찍히고 시리얼엔 전혀 안 남아서 원격으로 확인이
+         * 불가능했음(사용자는 화면으로 보지만 Claude는 시리얼로만 봄) — 둘 다 남김 */
+        ESP_LOGI(is_wireless ? "wireless" : "can_ui", "%s", line);
+        if (s_log_q) {
+            size_t len = strnlen(line, cap);
+            if (len == 0 || line[len - 1] != '\n') {
+                line[len] = '\n';
+                line[len + 1] = '\0';
+            }
+            l->is_wireless = is_wireless ? 1 : 0;
+            /* 통신 태스크를 UI에 묶지 않음 — 대기 0으로 넣고 바로 반환 */
+            xQueueSend(s_log_q, l, 0);
         }
-        lv_textarea_add_text(box, line);
-        esp_lv_adapter_unlock();
     }
+    xSemaphoreGive(s_fmt_mutex);
 }
 
 void ui_screen_log_wireless(const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    log_append(s_wireless_log, fmt, args);
+    log_append(true, fmt, args);
     va_end(args);
 }
 
@@ -157,7 +226,7 @@ void ui_screen_log_can(const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    log_append(s_can_log, fmt, args);
+    log_append(false, fmt, args);
     va_end(args);
 }
 

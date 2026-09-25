@@ -29,9 +29,17 @@ typedef struct {
 
 static QueueHandle_t s_incoming_q;
 
+/* 2026-09-25(실기 — "stack overflow in task esp_now_relay") — incoming_t(약 1480B)를
+ * recv_cb/relay_task 양쪽에서 스택 지역변수로 잡고 있었음(feedback_never_put_large_data_on_stack
+ * 위반). 초기화 때 PSRAM에 한 번씩만 잡아 두고 포인터로만 씀. recv_cb는 Wi-Fi 태스크에서만
+ * 순차 호출되고 relay_task는 자기 것만 쓰므로 각각 버퍼 1개면 충분(xQueueSend/Receive가 복사) */
+static incoming_t *s_rx_item;     /* recv_cb 전용 */
+static incoming_t *s_relay_item;  /* relay_task 전용 */
+
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
     if (!info || len <= 0 || len > BRIDGE_ESPNOW_MAX_FRAME) return;
+    if (!s_rx_item || !s_incoming_q) return;
 
     /* 2026-09-23(1단계) — 콘의 esp_now_reliable_request()를 브가 대행(can_link.c의
      * CAN_DATA_RELIABLE_SEND 처리 참고)하므로, 이 recv_cb가 그 대기 매칭도 콘 대신 해줘야 함
@@ -43,37 +51,42 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     /* recv_cb는 ESP-NOW 내부 태스크 컨텍스트 — can_bridge_send()처럼 블로킹 가능한 호출을
      * 여기서 직접 하면 안 됨. 큐에 복사만 하고 즉시 반환 */
-    incoming_t item;
-    memcpy(item.mac, info->src_addr, 6);
-    item.rssi = info->rx_ctrl ? (int8_t)info->rx_ctrl->rssi : 0;
-    item.len = (uint16_t)len;
-    memcpy(item.data, data, len);
+    incoming_t *item = s_rx_item;
+    memcpy(item->mac, info->src_addr, 6);
+    item->rssi = info->rx_ctrl ? (int8_t)info->rx_ctrl->rssi : 0;
+    item->len = (uint16_t)len;
+    memcpy(item->data, data, len);
 
-    if (xQueueSend(s_incoming_q, &item, 0) != pdTRUE) {
+    if (xQueueSend(s_incoming_q, item, 0) != pdTRUE) {
         ESP_LOGW(TAG, "수신 큐 가득참 — 드롭(mac=%02X%02X%02X%02X%02X%02X)",
-                 item.mac[0], item.mac[1], item.mac[2], item.mac[3], item.mac[4], item.mac[5]);
+                 item->mac[0], item->mac[1], item->mac[2], item->mac[3], item->mac[4], item->mac[5]);
     }
 }
 
 static void relay_task(void *arg)
 {
     (void)arg;
-    incoming_t item;
+    incoming_t *item = s_relay_item;
 
     uint8_t *msg = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + BRIDGE_ESPNOW_MAX_FRAME, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!msg) msg = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + BRIDGE_ESPNOW_MAX_FRAME, MALLOC_CAP_8BIT);
+    if (!msg || !item) {
+        ESP_LOGE(TAG, "relay_task 버퍼 할당 실패(msg=%p item=%p) — 릴레이 중단", (void *)msg, (void *)item);
+        vTaskDelete(NULL);
+        return;
+    }
 
     for (;;) {
-        if (xQueueReceive(s_incoming_q, &item, portMAX_DELAY) != pdTRUE) continue;
+        if (xQueueReceive(s_incoming_q, item, portMAX_DELAY) != pdTRUE) continue;
 
-        char m6[7]; ui_screen_mac6(item.mac, m6);
-        const char *type_name = item.len >= 2 ? ui_screen_msg_type_name(item.data[1]) : "?";
-        ui_screen_log_wireless("RX(%d/%s/%u) %s", item.rssi, m6, item.len, type_name);
+        char m6[7]; ui_screen_mac6(item->mac, m6);
+        const char *type_name = item->len >= 2 ? ui_screen_msg_type_name(item->data[1]) : "?";
+        ui_screen_log_wireless("RX(%d/%s/%u) %s", item->rssi, m6, item->len, type_name);
 
-        can_bridge_app_header_t hdr = { .msg_type = CAN_DATA_RELAY, .flags = (uint8_t)item.rssi };
-        memcpy(hdr.mac, item.mac, 6);
+        can_bridge_app_header_t hdr = { .msg_type = CAN_DATA_RELAY, .flags = (uint8_t)item->rssi };
+        memcpy(hdr.mac, item->mac, 6);
         memcpy(msg, &hdr, CAN_BRIDGE_APP_HEADER_LEN);
-        memcpy(msg + CAN_BRIDGE_APP_HEADER_LEN, item.data, item.len);
+        memcpy(msg + CAN_BRIDGE_APP_HEADER_LEN, item->data, item->len);
 
         /* 매번 다시 가져옴(태스크 시작 시점에 캡처해서 NULL로 굳어버리는 순서 버그를 실기에서
          * 겪음 — can_link_init()이 나중에 불려도 이러면 안전) */
@@ -82,7 +95,7 @@ static void relay_task(void *arg)
             ui_screen_log_can("Relay dropped: not ready");
             continue;
         }
-        esp_err_t err = can_bridge_send(data_ctx, msg, CAN_BRIDGE_APP_HEADER_LEN + item.len);
+        esp_err_t err = can_bridge_send(data_ctx, msg, CAN_BRIDGE_APP_HEADER_LEN + item->len);
         if (err != ESP_OK) {
             ui_screen_log_can("Relay fail: %s", ui_screen_err_short(err));
         }
@@ -147,6 +160,14 @@ void bridge_esp_now_init(void)
 {
     wifi_bringup();
 
+    s_rx_item = (incoming_t *)heap_caps_malloc(sizeof(incoming_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_rx_item) s_rx_item = (incoming_t *)heap_caps_malloc(sizeof(incoming_t), MALLOC_CAP_8BIT);
+    s_relay_item = (incoming_t *)heap_caps_malloc(sizeof(incoming_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_relay_item) s_relay_item = (incoming_t *)heap_caps_malloc(sizeof(incoming_t), MALLOC_CAP_8BIT);
+    if (!s_rx_item || !s_relay_item) {
+        ESP_LOGE(TAG, "incoming 버퍼 할당 실패(rx=%p relay=%p)", (void *)s_rx_item, (void *)s_relay_item);
+    }
+
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
 
@@ -159,7 +180,9 @@ void bridge_esp_now_init(void)
 
     static StaticTask_t s_relay_tcb;
     StackType_t *relay_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
-    xTaskCreateStatic(relay_task, "esp_now_relay", 4096 / sizeof(StackType_t), NULL, 10, relay_stack, &s_relay_tcb);
+    /* 2026-09-25(사용자 설계 — 코어 분리) — ESP-NOW는 코어 0(Wi-Fi 태스크와 같은 쪽), CAN은
+     * 코어 1. 통신 등급 17(project_cntl_task_priority_scheme, 콘과 동일) */
+    xTaskCreateStaticPinnedToCore(relay_task, "esp_now_relay", 4096 / sizeof(StackType_t), NULL, 17, relay_stack, &s_relay_tcb, 0);
 
     ESP_LOGI(TAG, "브 ESP-NOW 라디오 소유 시작됨");
 }

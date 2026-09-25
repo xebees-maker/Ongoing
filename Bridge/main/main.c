@@ -43,6 +43,9 @@ void app_main(void)
     esp_lv_adapter_config_t adapter_config = ESP_LV_ADAPTER_DEFAULT_CONFIG();
     adapter_config.task_stack_size = 12 * 1024;
     adapter_config.stack_in_psram = true;
+    /* 2026-09-25(사용자 설계 — 코어 분리) — LVGL은 코어 0, CAN은 코어 1. 실제 브엔 UI가 없고
+     * 지금 화면은 벤치테스트용 임시 장치라서 있는 것 */
+    adapter_config.task_core_id = 0;
     ESP_ERROR_CHECK(esp_lv_adapter_init(&adapter_config));
 
     esp_lv_adapter_display_config_t disp_config = ESP_LV_ADAPTER_DISPLAY_RGB_DEFAULT_CONFIG(
