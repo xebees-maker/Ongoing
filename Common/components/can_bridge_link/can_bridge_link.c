@@ -423,12 +423,10 @@ static esp_err_t can_bridge_send_locked(can_bridge_ctx_t *ctx, const uint8_t *ms
         if (err != ESP_OK) return err;
         sent += chunk;
         seq = (uint8_t)((seq + 1) & 0x0F);
-        /* 2026-09-22(실기 디버깅 — CF를 간격 없이 연속 전송하니 양쪽 보드가 동시에 여러 프레임을
-         * 터뜨릴 때 TEC/REC가 튀면서 버스 에러(폼/스터프)로 CF 일부가 유실, 재조립이 영영 안
-         * 끝나는 문제 실측 확인. STmin=0으로 FC에는 통보했지만 실제로 그 속도로 쏘면 문제가
-         * 있어서, 송신 쪽에서만 최소 간격을 둠(수신측 FC 프로토콜은 안 바꿈 — BS=0/STmin=0 통보는
-         * 유지, 그냥 우리 쪽 구현이 좀 더 보수적으로 감) */
-        vTaskDelay(pdMS_TO_TICKS(2));
+        /* 2026-09-22에 CF마다 2ms 대기를 넣었음(연속 전송 시 버스 에러로 CF 유실 관측).
+         * 2026-09-26(사진 전송 CAN 개선 1단계, 사용자 지시) — 제거하고 측정. 당시엔 지역변수
+         * 프레임 포인터를 송신 큐에 넣던 버그(e3b8caf에서 수정)가 있어서, 그 증상이 이 버그
+         * 때문이었을 수 있음. 청크 하나(CF 약 174개)에 이 대기만 약 350ms였음 */
     }
     return ESP_OK;
 }
