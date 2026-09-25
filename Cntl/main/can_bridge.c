@@ -149,6 +149,9 @@ static void deliver_reliable_result(const can_bridge_app_header_t *hdr, const ui
     xSemaphoreGive(s_pending_mutex);
 }
 
+/* 2026-09-25(사용자 지시 — 이벤트 방식) — 예전엔 큐가 비면 vTaskDelay(20ms) 후 다시 확인하는
+ * 폴링이었음(지시는 이벤트였는데 잘못 구현). 이제 큐를 비운 뒤 태스크 알림을 기다림 — 알림은
+ * can_bridge_queue_push()가 완성된 메시지를 넣을 때만 보냄(can_bridge_queue_set_notify_task) */
 static void can_consume_task(void *arg)
 {
     (void)arg;
@@ -169,7 +172,7 @@ static void can_consume_task(void *arg)
             }
             can_bridge_queue_pop_free(data);
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
 }
 
@@ -180,9 +183,11 @@ static void can_status_task(void *arg)
         twai_node_status_t status;
         if (twai_node_get_info(s_node, &status, NULL) == ESP_OK) {
             static const char *names[] = {"error_active", "error_warning", "error_passive", "bus_off"};
+            uint32_t q_count, q_hwm;
+            can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
             ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u DATA큐=%u(최대%u)",
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
-                     (unsigned)s_data_complete_q.count, (unsigned)s_data_complete_q.high_water_mark);
+                     (unsigned)q_count, (unsigned)q_hwm);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -346,8 +351,11 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     /* 2026-09-25(사용자 설계 — 통신/UI 코어 분리) — LVGL은 코어 0, CAN 통신은 코어 1에 고정.
      * 코어 1 안에서는 CAN(수신/소비)이 가장 높아야 함 — 통신 등급 17(project_cntl_task_priority_scheme),
      * power_relay(15)보다 위. can_status는 5초 주기 상태 로그뿐이라 낮은 5 유지 */
+    /* 소비 태스크를 먼저 만들고 알림 대상으로 등록한 뒤에 수신 태스크를 띄움 — 첫 push부터
+     * 알림이 가도록(등록 전에 들어온 게 있어도 소비 태스크의 첫 비우기에서 처리됨) */
+    TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "can_consume", 4096 / sizeof(StackType_t), NULL, 17, can_consume_stack, &s_can_consume_tcb, 1);
+    can_bridge_queue_set_notify_task(&s_data_complete_q, consume_task);
     xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
-    xTaskCreateStaticPinnedToCore(can_consume_task, "can_consume", 4096 / sizeof(StackType_t), NULL, 17, can_consume_stack, &s_can_consume_tcb, 1);
     xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
 
     ESP_LOGI(TAG, "콘 CAN 링크 시작됨(TX=%d RX=%d %dbps)", CAN_BRIDGE_TX_GPIO, CAN_BRIDGE_RX_GPIO, CAN_BRIDGE_BITRATE);

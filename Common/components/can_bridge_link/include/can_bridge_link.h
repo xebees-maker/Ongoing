@@ -32,6 +32,8 @@
 #include <stddef.h>
 #include "esp_err.h"
 #include "esp_twai.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 /* ---- CAN ID 배정: CONTROL < DATA (낮은 ID = 높은 버스 우선순위, 사용자 지시) ---- */
 #define CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL   0x100
@@ -148,14 +150,25 @@ typedef struct can_bridge_queue_entry {
     uint8_t data[];           /* PSRAM 할당, 가변 길이 */
 } can_bridge_queue_entry_t;
 
+/* 2026-09-25(사용자 지시 — 통신은 전부 이벤트 방식, 큐는 락/방어코드 보강) — push(CAN 수신
+ * 태스크)와 pop(소비 태스크)이 서로 다른 태스크(듀얼코어면 서로 다른 코어일 수도)에서 불리므로
+ * 목록 조작은 스핀락 크리티컬 섹션으로 보호. 할당/해제/로그/알림은 크리티컬 섹션 밖에서만 함.
+ * notify_task가 등록돼 있으면 push(=완성된 메시지 1개 도착) 때만 그 태스크에 태스크 알림을
+ * 보냄 — 소비 태스크는 폴링 없이 ulTaskNotifyTake()로 대기 */
 typedef struct {
     can_bridge_queue_entry_t *head;
     can_bridge_queue_entry_t *tail;
     uint32_t count;           /* 현재 큐에 들어있는 메시지 수 — 콘 요약/설정 화면 노출용 */
     uint32_t high_water_mark; /* 역대 최대 큐 길이 — 비정상 적체 진단용 */
+    portMUX_TYPE lock;        /* head/tail/count/high_water_mark/notify_task 보호 */
+    TaskHandle_t notify_task; /* push 시 깨울 소비 태스크(NULL이면 알림 없음) */
+    uint8_t inited;           /* can_bridge_queue_init() 호출 여부 — 미초기화 사용 방어 */
 } can_bridge_queue_t;
 
 void can_bridge_queue_init(can_bridge_queue_t *q);
+/* push 때 태스크 알림을 받을 소비 태스크 등록. 소비 태스크는 "큐 비우기 -> ulTaskNotifyTake()"
+ * 순서로 돌아야 함(등록 전에 들어온 메시지도 첫 비우기에서 처리됨) */
+void can_bridge_queue_set_notify_task(can_bridge_queue_t *q, TaskHandle_t task);
 /* data/len을 PSRAM에 복사해 큐 끝에 추가 — 절대 실패/드롭하지 않음(할당 실패 시 abort,
  * 이 링크에서 메시지 유실은 절대 허용 안 한다는 사용자 지시) */
 void can_bridge_queue_push(can_bridge_queue_t *q, const uint8_t *data, size_t len);
@@ -163,6 +176,8 @@ void can_bridge_queue_push(can_bridge_queue_t *q, const uint8_t *data, size_t le
  * can_bridge_queue_pop_free로 해제) — peek 후 pop 분리하지 않고 바로 소유권 이전 */
 int can_bridge_queue_pop(can_bridge_queue_t *q, uint8_t **out_data, size_t *out_len);
 void can_bridge_queue_pop_free(uint8_t *popped_data);
+/* 상태 로그용 — count/high_water_mark를 락 안에서 한 번에 읽음(둘 중 NULL은 건너뜀) */
+void can_bridge_queue_get_stats(can_bridge_queue_t *q, uint32_t *out_count, uint32_t *out_high_water_mark);
 
 /* ---- 재조립 상태머신 — CAN RX ISR/태스크에서 프레임 1개씩 넣어주면, 완성된 메시지가
  * 나올 때 완성된 바이트열(app_header+payload)을 큐에 push. fc_frame_out에 FC를 보내야

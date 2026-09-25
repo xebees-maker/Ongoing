@@ -151,6 +151,9 @@ static void handle_reliable_send(const can_bridge_app_header_t *hdr, const uint8
     free(result_msg);
 }
 
+/* 2026-09-25(사용자 지시 — 이벤트 방식) — 예전엔 큐가 비면 vTaskDelay(50ms) 후 다시 확인하는
+ * 폴링이었음. 이제 큐를 비운 뒤 태스크 알림을 기다림 — 알림은 can_bridge_queue_push()가 완성된
+ * 메시지를 넣을 때만 보냄(can_bridge_queue_set_notify_task) */
 static void can_consume_task(void *arg)
 {
     (void)arg;
@@ -180,7 +183,7 @@ static void can_consume_task(void *arg)
             }
             can_bridge_queue_pop_free(data);
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
 }
 
@@ -191,9 +194,11 @@ static void can_status_task(void *arg)
         twai_node_status_t status;
         if (twai_node_get_info(s_node, &status, NULL) == ESP_OK) {
             static const char *names[] = {"error_active", "error_warning", "error_passive", "bus_off"};
+            uint32_t q_count, q_hwm;
+            can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
             ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u DATA큐=%u(최대%u)",
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
-                     (unsigned)s_data_complete_q.count, (unsigned)s_data_complete_q.high_water_mark);
+                     (unsigned)q_count, (unsigned)q_hwm);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -249,8 +254,11 @@ void can_link_init(void)
     StackType_t *can_rx_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *can_consume_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *can_status_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
+    /* 소비 태스크를 먼저 만들고 알림 대상으로 등록한 뒤에 수신 태스크를 띄움 — 첫 push부터
+     * 알림이 가도록(등록 전에 들어온 게 있어도 소비 태스크의 첫 비우기에서 처리됨) */
+    TaskHandle_t consume_task = xTaskCreateStatic(can_consume_task, "can_consume", 4096 / sizeof(StackType_t), NULL, 10, can_consume_stack, &s_can_consume_tcb);
+    can_bridge_queue_set_notify_task(&s_data_complete_q, consume_task);
     xTaskCreateStatic(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 10, can_rx_stack, &s_can_rx_tcb);
-    xTaskCreateStatic(can_consume_task, "can_consume", 4096 / sizeof(StackType_t), NULL, 10, can_consume_stack, &s_can_consume_tcb);
     xTaskCreateStatic(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb);
 
     ESP_LOGI(TAG, "브 CAN 링크 시작됨(TX=%d RX=%d %dbps, DATA 전용)", CAN_LINK_TX_GPIO, CAN_LINK_RX_GPIO, CAN_LINK_BITRATE);

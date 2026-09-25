@@ -26,11 +26,40 @@ static void *psram_or_internal_alloc(size_t len)
 
 void can_bridge_queue_init(can_bridge_queue_t *q)
 {
+    if (!q) {
+        ESP_LOGE(TAG, "queue_init: q=NULL");
+        return;
+    }
     memset(q, 0, sizeof(*q));
+    portMUX_INITIALIZE(&q->lock);
+    q->inited = 1;
+}
+
+void can_bridge_queue_set_notify_task(can_bridge_queue_t *q, TaskHandle_t task)
+{
+    if (!q || !q->inited) {
+        ESP_LOGE(TAG, "queue_set_notify_task: 미초기화 큐(q=%p)", (void *)q);
+        return;
+    }
+    taskENTER_CRITICAL(&q->lock);
+    q->notify_task = task;
+    taskEXIT_CRITICAL(&q->lock);
 }
 
 void can_bridge_queue_push(can_bridge_queue_t *q, const uint8_t *data, size_t len)
 {
+    if (!q || !q->inited) {
+        /* 코드 버그(미초기화 큐에 push) — 드롭 금지 정책상 조용히 버리지 않고 즉시 드러나게 중단 */
+        ESP_LOGE(TAG, "queue_push: 미초기화 큐(q=%p) — 메시지 드롭 금지 정책상 중단", (void *)q);
+        abort();
+    }
+    if (len == 0 || !data) {
+        /* 길이 0짜리는 메시지가 아님(재조립기는 len>=1만 넘김) — 넣을 게 없으니 무시 */
+        ESP_LOGE(TAG, "queue_push: 잘못된 인자(data=%p len=%u) — 무시", (const void *)data, (unsigned)len);
+        return;
+    }
+
+    /* 할당/복사는 락 밖에서(크리티컬 섹션 안에서 malloc 금지) */
     can_bridge_queue_entry_t *e = (can_bridge_queue_entry_t *)psram_or_internal_alloc(sizeof(can_bridge_queue_entry_t) + len);
     if (!e) {
         /* 사용자 지시: 이 링크에서 메시지 유실은 절대 허용 안 함 — 드롭 대신 즉시 드러나게 abort.
@@ -42,6 +71,7 @@ void can_bridge_queue_push(can_bridge_queue_t *q, const uint8_t *data, size_t le
     e->len = len;
     memcpy(e->data, data, len);
 
+    taskENTER_CRITICAL(&q->lock);
     if (q->tail) {
         q->tail->next = e;
     } else {
@@ -52,18 +82,37 @@ void can_bridge_queue_push(can_bridge_queue_t *q, const uint8_t *data, size_t le
     if (q->count > q->high_water_mark) {
         q->high_water_mark = q->count;
     }
+    TaskHandle_t notify_task = q->notify_task;
+    taskEXIT_CRITICAL(&q->lock);
+
+    /* 완성된 메시지 1개 도착 = 소비 태스크가 처리할 일이 생긴 때 — 이때만 깨움 */
+    if (notify_task) {
+        xTaskNotifyGive(notify_task);
+    }
 }
 
 int can_bridge_queue_pop(can_bridge_queue_t *q, uint8_t **out_data, size_t *out_len)
 {
-    if (!q->head) return 0;
+    if (!q || !q->inited || !out_data || !out_len) {
+        ESP_LOGE(TAG, "queue_pop: 잘못된 인자(q=%p inited=%u out_data=%p out_len=%p)",
+                 (void *)q, q ? (unsigned)q->inited : 0u, (void *)out_data, (void *)out_len);
+        return 0;
+    }
+
+    taskENTER_CRITICAL(&q->lock);
     can_bridge_queue_entry_t *e = q->head;
-    q->head = e->next;
-    if (!q->head) q->tail = NULL;
-    q->count--;
+    if (e) {
+        q->head = e->next;
+        if (!q->head) q->tail = NULL;
+        if (q->count > 0) q->count--;
+    }
+    taskEXIT_CRITICAL(&q->lock);
+
+    if (!e) return 0;
 
     /* entry 헤더(next/len)는 반환하는 data 포인터보다 앞에 있으니, data 시작주소를 돌려주고
      * free는 pop_free에서 그 앞의 entry 헤더까지 포함해 처리 */
+    e->next = NULL;
     *out_data = e->data;
     *out_len = e->len;
     return 1;
@@ -71,9 +120,23 @@ int can_bridge_queue_pop(can_bridge_queue_t *q, uint8_t **out_data, size_t *out_
 
 void can_bridge_queue_pop_free(uint8_t *popped_data)
 {
+    if (!popped_data) return;
     /* data[]는 flexible array member라 entry 시작주소 = data - offsetof(...,data) */
     can_bridge_queue_entry_t *e = (can_bridge_queue_entry_t *)(popped_data - offsetof(can_bridge_queue_entry_t, data));
     free(e);
+}
+
+void can_bridge_queue_get_stats(can_bridge_queue_t *q, uint32_t *out_count, uint32_t *out_high_water_mark)
+{
+    uint32_t count = 0, hwm = 0;
+    if (q && q->inited) {
+        taskENTER_CRITICAL(&q->lock);
+        count = q->count;
+        hwm = q->high_water_mark;
+        taskEXIT_CRITICAL(&q->lock);
+    }
+    if (out_count) *out_count = count;
+    if (out_high_water_mark) *out_high_water_mark = hwm;
 }
 
 /* ============================== ISO-TP 재조립(수신) ============================== */
