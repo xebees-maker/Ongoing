@@ -337,6 +337,10 @@ struct can_bridge_ctx {
     SemaphoreHandle_t fc_sem;
     volatile uint8_t fc_status;
     volatile uint8_t fc_pending;
+    /* 2026-09-25(실기 — 브에서 RL 결과 전송(can_consume)과 캠 프레임 릴레이(esp_now_relay)가
+     * 같은 ctx로 동시에 can_bridge_send를 불러 두 메시지의 FF/CF가 섞임 -> 콘 "CF 순번 어긋남",
+     * 브 "FC 타임아웃") — "ctx당 세션 1개" 규칙을 호출자에게 맡기지 않고 여기서 보장 */
+    SemaphoreHandle_t send_mutex;
 };
 
 can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id)
@@ -349,6 +353,11 @@ can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id)
     ctx->node = node;
     ctx->tx_id = tx_id;
     ctx->fc_sem = xSemaphoreCreateBinary();
+    ctx->send_mutex = xSemaphoreCreateMutex();
+    if (!ctx->fc_sem || !ctx->send_mutex) {
+        ESP_LOGE(TAG, "ctx 세마포어/뮤텍스 생성 실패");
+        abort();
+    }
     ctx->fc_status = ISO_TP_FC_STATUS_CTS;
     ctx->fc_pending = 0;
     return ctx;
@@ -374,10 +383,8 @@ static esp_err_t send_one_frame(can_bridge_ctx_t *ctx, const uint8_t data[8], ui
 /* msg(app_header+payload, len바이트)를 통째로 ISO-TP로 쪼개 보냄. 성공 시 ESP_OK.
  * len<=7이면 SF 하나로 끝(FC 불필요). 그보다 크면 FF -> FC 대기 -> CF들 순서(BS=0/STmin=0
  * 고정이라 FC는 딱 한 번만 기다리면 나머지 CF는 곧바로 연속 전송) */
-esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
+static esp_err_t can_bridge_send_locked(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
 {
-    if (len == 0 || len > ISO_TP_MAX_MSG_LEN) return ESP_ERR_INVALID_ARG;
-
     if (len <= ISO_TP_SF_MAX_LEN) {
         uint8_t frame[8] = {0};
         frame[0] = (uint8_t)((ISO_TP_PCI_SF << 4) | len);
@@ -390,6 +397,7 @@ esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
     frame[0] = (uint8_t)((ISO_TP_PCI_FF << 4) | ((len >> 8) & 0x0F));
     frame[1] = (uint8_t)(len & 0xFF);
     memcpy(&frame[2], msg, ISO_TP_FF_FIRST_LEN);
+    xSemaphoreTake(ctx->fc_sem, 0);  /* 이전 세션에서 남았을 수 있는 FC 신호 비움 */
     ctx->fc_pending = 1;
     esp_err_t err = send_one_frame(ctx, frame, 8);
     if (err != ESP_OK) { ctx->fc_pending = 0; return err; }
@@ -423,4 +431,17 @@ esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
         vTaskDelay(pdMS_TO_TICKS(2));
     }
     return ESP_OK;
+}
+
+esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
+{
+    if (!ctx || !msg) return ESP_ERR_INVALID_ARG;
+    if (len == 0 || len > ISO_TP_MAX_MSG_LEN) return ESP_ERR_INVALID_ARG;
+
+    /* ctx당 세션 1개 — 다른 태스크가 같은 ctx로 보내는 중이면 끝날 때까지 대기(메시지 드롭 금지
+     * 정책이라 타임아웃 없이 기다림, 한 세션은 FC 타임아웃 500ms + CF 전송으로 유한시간 안에 끝남) */
+    xSemaphoreTake(ctx->send_mutex, portMAX_DELAY);
+    esp_err_t err = can_bridge_send_locked(ctx, msg, len);
+    xSemaphoreGive(ctx->send_mutex);
+    return err;
 }

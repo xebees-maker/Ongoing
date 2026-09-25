@@ -219,5 +219,6 @@ can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id)
  * 호출 — can_bridge_send()가 이걸로 깨어나서 CF 전송을 계속함 */
 void can_bridge_ctx_notify_fc(can_bridge_ctx_t *ctx, const uint8_t *frame_data);
 /* msg(app_header+payload, len바이트)를 ISO-TP로 분할해 ctx->tx_id로 순차 전송(동기 호출,
- * FC 대기 포함) — 반드시 호출자가 세션 1개 원칙(FIFO)을 지켜 직렬로만 불러야 함 */
+ * FC 대기 포함). 2026-09-25부터 ctx당 세션 1개 원칙을 함수 안의 뮤텍스가 보장 — 여러 태스크가
+ * 같은 ctx로 동시에 불러도 한 메시지씩 차례로 나감(호출자가 따로 직렬화할 필요 없음) */
 esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len);
