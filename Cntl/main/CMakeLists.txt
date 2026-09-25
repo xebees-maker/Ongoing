@@ -14,6 +14,7 @@ idf_component_register(
         "sd_storage.c"
         "stats_store.c"
         "photo_storage.c"
+        "storage_mgr.c"
         "power_relay.c"
         "sens_kind_store.c"
         "can_bridge.c"

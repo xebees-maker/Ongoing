@@ -21,6 +21,7 @@
 #include "rtc_sync.h"
 #include "device_config.h"
 #include "sd_storage.h"
+#include "storage_mgr.h"
 #include "stats_store.h"
 #include "power_relay.h"
 #include "sens_kind_store.h"
@@ -664,6 +665,9 @@ void app_main(void)
     } else {
         ui_log_add("SD card mounted OK");
     }
+    /* 2026-09-26 — SD 사용량 관리/정리 전담 파일처리 태스크(storage_mgr.h). 시작하자마자 한 번
+     * 재스캔(사진 폴더/측정값 주 파일) — 미마운트여도 띄워 둠(재연결 성공 시 재스캔 요청이 옴) */
+    storage_mgr_start();
     /* 2026-09-19(통계 분류 영구저장) — SD 마운트 이후에만 의미 있음(파일이 SD에 있음) */
     sens_kind_store_load();
 

@@ -1,9 +1,13 @@
 /**
  * @file    stats_store.h
- * @brief   Sens 채널값 시계열을 SD카드(/sdcard/stats/values_v2.bin, 2026-09-19 kind 필드
- *          추가로 포맷 변경 — 옛 values.bin은 고아로 남김, 아래 "계열 자기서술 재설계" 참고)에
- *          고정크기 이진 레코드로 영구 저장(2026-09-06, 사용자 설계 — "1년 지나서라도" 조회
- *          가능해야 함).
+ * @brief   Sens 채널값 시계열을 SD카드에 고정크기 이진 레코드로 영구 저장(2026-09-06, 사용자
+ *          설계 — "1년 지나서라도" 조회 가능해야 함).
+ *
+ *          2026-09-26(사용자 설계) — 파일 하나에 계속 붙이던 방식에서 1주 단위 파일로 바뀜:
+ *          원시 /sdcard/stats/rWWWWWWWW.bin, 집계 /sdcard/stats/aS_WWWWWWWW.bin
+ *          (WWWWWWWW = unix_time/604800). 정리는 가장 오래된 주의 파일들을 지우는 것뿐.
+ *          아래 설명 중 "파일 하나"라고 된 부분은 이제 "주 파일들을 시간순으로 이어 붙인 것"으로
+ *          읽으면 됨 — 함수들의 동작(페이지/기간 조회 결과)은 그대로.
  *
  *          모든 노드/채널을 하나의 파일에 도착순(=시간순, Cntl 자기 벽시계 기준)으로 이어
  *          씀 — WAKE_HELLO_SENS 처리는 s_nodes_mutex 아래 한 곳에서만 일어나므로 별도
@@ -59,7 +63,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count);
  * lv_label_set_text() 등은 항상 LVGL 태스크 쪽에서 실행됨 */
 bool stats_store_take_write_io_error(void);
 
-/* 전체 레코드 수(파일 없으면 0) */
+/* 전체 레코드 수(파일 없으면 0) — 2026-09-26부터 RAM 색인 값(SD I/O 없음) */
 uint32_t stats_store_get_count(void);
 
 /* page_index=0이 가장 최근 페이지. out에 최대 out_cap개, 파일에 쓰인 순서(=오래된 것부터)
@@ -88,17 +92,26 @@ void stats_store_delete_all(void);
 uint32_t stats_store_read_since(uint32_t cutoff_unix_time, uint8_t chan_type,
                                  stats_record_t *out, uint32_t out_cap);
 
-/* 2026-09-10(사용자 설계 — "Storage[%(Remain MB)]... Measure zz(kk)") — 현재 파일 크기
- * (바이트). stats_store_get_count() * sizeof(stats_record_t)와 동일하지만 호출부가
- * 매번 곱하지 않아도 되게 별도 제공. 파일 없으면 0 */
+/* 2026-09-10(사용자 설계 — "Storage[%(Remain MB)]... Measure zz(kk)") — 측정값이 쓰는 바이트.
+ * 2026-09-26부터 원시+집계 파일 합(RAM 색인 값, SD I/O 없음) */
 uint64_t stats_store_get_used_bytes(void);
 
 /* 2026-09-10(사용자 설계 — "할당된 용량의 90%가 될 때 10%만큼 오래된 걸 지운다") —
- * 파일을 앞부분(오래된 레코드)부터 지워서 최종 크기가 target_bytes 이하가 되게 함.
- * 이미 target_bytes 이하면 아무 것도 안 하고 0 반환. 실제로 지운 레코드 수를 반환.
- * 임시파일에 남길 부분만 다시 써서 교체하는 방식(레코드가 고정크기라 오프셋 계산이
- * 정확함) — SD 미마운트/파일 없음 등으로 실패해도 0 반환(치명적 아님) */
+ * 2026-09-26부터 가장 오래된 주의 원시+집계 파일을 통째로 지워서 사용량(원시+집계)이
+ * target_bytes 이하가 되게 함(다시 쓰기 없음, 지금 기록 중인 가장 최근 주는 남김).
+ * 실제로 지운 원시 레코드 수를 반환 */
 uint32_t stats_store_trim_to(uint64_t target_bytes);
+
+/* 2026-09-26(주 단위 파일 재설계) — /sdcard/stats를 한 번 훑어 주별 색인(레코드 수/집계 바이트)을
+ * 새로 만듦. 끝이 반쯤 쓰인 파일은 레코드 경계로 자르고, 이름/크기가 비정상인 항목은 개수만
+ * out_bad_entries에 돌려줌. storage_mgr(파일처리 태스크)가 마운트/재연결/포맷 직후에만 부름.
+ * 이후 get_count/get_used_bytes는 이 색인만 봄(SD I/O 없음) */
+void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries);
+
+/* 2026-09-26 — 재연결/포맷 직후 "카드가 진짜 읽히는지" 검증용 가벼운 실제 I/O(stats 폴더
+ * opendir). 예전엔 stats_store_get_count()가 fopen을 해서 이 용도로 썼는데, 이제 get_count는
+ * RAM 색인만 봐서 I/O를 안 함. 실패하면 stats_store_had_io_error()가 true */
+void stats_store_probe_io(void);
 
 /* 2026-09-10(재설계 — SD fail 회로차단기, 사용자 지시: "SD 조회 fail이면, 다른 값도 믿을
  * 수 없어. 즉시 중단이지") — 위 읽기 함수들 중 하나가 방금 "데이터 없음"이 아니라 진짜

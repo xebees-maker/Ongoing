@@ -33,20 +33,25 @@ typedef struct {
  * esp_now_photo_meta_t.kind와 동일) — 헤더 의존을 피하려고 여기선 uint8_t로 받음.
  * 파일명은 그 카메라 폴더 안에서만 유일하면 되는 순번(이 함수가 스캔해서 자동 부여,
  * out_seq에 기록) — CAM은 더 이상 영구 파일명을 갖지 않으므로(SD 제거) file_id를 그대로
- * 쓰지 않고 콘이 처음부터 다시 부여함. SD 미마운트 등으로 실패하면 false */
+ * 쓰지 않고 콘이 처음부터 다시 부여함. SD 미마운트 등으로 실패하면 false.
+ * 2026-09-26 — .tmp에 쓰고 fsync 후 최종 이름으로 rename(쓰다 리셋돼도 반쪽 사진이 안 보이게) */
 bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg, size_t len,
                          uint32_t *out_seq);
 
-/* 모든 카메라 폴더를 합산한 총 사용 바이트 — 주화면 Storage 표시의 Picture 항목
- * (ui_main.c refresh_storage_status_label)용. SD 미마운트/폴더 없음 등이면 0 */
+/* 모든 카메라 폴더를 합산한 총 사용 바이트 — 2026-09-26부터 폴더 스캔 없이 RAM 합계를 돌려줌
+ * (저장/삭제/정리 때 더하고 뺌, photo_storage_rescan() 때 새로 계산). SD I/O 없음 */
 uint64_t photo_storage_get_used_bytes(void);
 
+/* 2026-09-26 — 사진 폴더를 한 번 훑어 RAM 합계와 카메라별 다음 순번을 새로 만듦. 저장 도중
+ * 리셋으로 남은 .tmp 파일은 지우고, 이름이 형식에 안 맞거나 크기가 비정상인 항목(FAT 손상
+ * 의심)은 합계/정리 대상에서 빼고 개수만 out_bad_entries에 돌려줌. storage_mgr(파일처리
+ * 태스크)가 마운트/재연결/포맷 직후에만 부름 */
+void photo_storage_rescan(uint64_t sd_total, uint32_t *out_bad_entries);
+
 /* 카메라 구분 없이 전체에서 가장 오래된(mtime 기준) 파일부터 지워서 총 사용량이
- * target_bytes 이하가 되게 함 — stats_store_trim_to()와 동일한 호출 패턴(90% 도달 시 80%
- * 목표로 호출). 카메라마다 독립된 순번(seq)이라 순번으로는 기기 간 시간 순서를 알 수
- * 없어서 mtime을 씀(같은 카메라 내 연속촬영처럼 짧은 간격이 아니라 서로 다른 기기의
- * 전송이라 FAT mtime 해상도 문제가 실질적으로 없음 — cam_storage.c가 seq를 쓰는 이유와는
- * 다른 상황). 실제로 지운 파일 수 반환 */
+ * target_bytes 이하가 되게 함(90% 도달 시 80% 목표로 storage_mgr가 호출). 한 번 훑을 때
+ * 오래된 후보를 여러 장 모아서 지움. 카메라마다 독립된 순번(seq)이라 순번으로는 기기 간
+ * 시간 순서를 알 수 없어서 mtime을 씀. 손상 의심 항목은 지우지 않음. 실제로 지운 파일 수 반환 */
 uint32_t photo_storage_trim_to(uint64_t target_bytes);
 
 /* 2026-09-19(사진목록 UI 로컬화) — 이 카메라 폴더의 전체 사진 수(페이지 계산용).

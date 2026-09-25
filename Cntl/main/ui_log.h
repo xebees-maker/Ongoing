@@ -133,6 +133,11 @@ void ui_log_clear_one_error(int code);
  * 등록된 코드가 없음 — 체계 자체는 다음에 쓸 일이 생기면 그대로 재사용.
  * 2026-09-11 — 에러와 마찬가지로 개별 지우기로 통일(위 ui_log_clear_one_error 참고) */
 
+#define UI_WARN_SD_BAD_ENTRY        6002  /* 2026-09-26 — SD 재스캔 중 크기/이름이 말이 안 되는
+                                             항목(FAT 손상 의심)을 사용량 합계와 정리 대상에서
+                                             뺐음(storage_mgr.c). 예전엔 이런 항목 하나가 사진
+                                             사용량을 약 16EB로 부풀려 정리가 5초마다 계속 돌았음 */
+
 void ui_log_add_warn(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 bool ui_log_get_pending_warn(char *out, size_t out_cap);
 #define UI_WARN_HISTORY_CAP 16

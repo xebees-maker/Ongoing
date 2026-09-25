@@ -1,5 +1,6 @@
 #include "photo_storage.h"
 #include "sd_storage.h"
+#include "storage_mgr.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -10,6 +11,8 @@
 #include <errno.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "photo_storage";
 
@@ -18,6 +21,53 @@ static const char *TAG = "photo_storage";
  * 십진수라 별도 인코더 없이 snprintf/strtoul로 충분) */
 #define PHOTO_SEQ_DIGITS  8
 #define PHOTO_FNAME_LEN   (1 + PHOTO_SEQ_DIGITS + 4)  /* kind + 8자리 + ".jpg" */
+
+/* 2026-09-26(SD 안전정책 — 쓰다가 리셋돼도 반쯤 쓴 파일이 사진으로 안 보이게) — 먼저 이 확장자로
+ * 다 쓰고 fsync+close한 뒤 최종 이름(.jpg)으로 rename. 재스캔 때 남아있는 .tmp는 지움 */
+#define PHOTO_TMP_SUFFIX  ".tmp"
+
+/* 2026-09-26(재스캔 방어) — 사진 한 장이 이보다 크면 손상 의심(OV5640 최대 약 1MB — 여유 있게) */
+#define PHOTO_MAX_SANE_BYTES (16u * 1024u * 1024u)
+
+/* ---- RAM 상태(2026-09-26, storage_mgr.h 참고) — 사용량 합계와 카메라별 다음 순번.
+ * 예전엔 사용량을 매번 폴더 전체 스캔으로 구했고(LVGL 태스크에서 약 765ms), 저장할 때마다
+ * next_seq_in_dir()로 카메라 폴더를 스캔했음. 이제 재스캔 때 한 번만 훑고 이후엔 여기서 관리 */
+#define PHOTO_SEQ_CACHE_CAP 8  /* ESP_NOW_HUB_MAX_NODES와 같은 값(이 파일은 저수준이라 헤더 의존 안 함) */
+typedef struct {
+    uint8_t  mac[6];
+    uint32_t next_seq;
+    bool     used;
+} seq_cache_t;
+
+static SemaphoreHandle_t s_mutex = NULL;
+static portMUX_TYPE s_mutex_init_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint64_t s_used_bytes = 0;
+static seq_cache_t s_seq_cache[PHOTO_SEQ_CACHE_CAP];
+
+static void lock(void)
+{
+    if (!s_mutex) {
+        SemaphoreHandle_t m = xSemaphoreCreateMutex();
+        taskENTER_CRITICAL(&s_mutex_init_lock);
+        if (!s_mutex) { s_mutex = m; m = NULL; }
+        taskEXIT_CRITICAL(&s_mutex_init_lock);
+        if (m) vSemaphoreDelete(m);
+    }
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+}
+
+static void unlock(void)
+{
+    xSemaphoreGive(s_mutex);
+}
+
+static void used_add(int64_t delta)
+{
+    lock();
+    if (delta < 0 && (uint64_t)(-delta) > s_used_bytes) s_used_bytes = 0;
+    else s_used_bytes = (uint64_t)((int64_t)s_used_bytes + delta);
+    unlock();
+}
 
 static void mac_to_hex(const uint8_t mac[6], char out[13])
 {
@@ -104,6 +154,27 @@ static uint32_t next_seq_in_dir(const char *dir_path)
     return max_seq_plus_one;
 }
 
+/* 호출부가 lock() 잡은 상태 — 이 카메라의 다음 순번을 캐시에서 꺼내고 1 올림. 캐시에 없으면
+ * (재스캔 이후 처음 보는 카메라) 그 폴더를 한 번만 스캔해서 채움 */
+static uint32_t take_next_seq_locked(const uint8_t mac[6], const char *dir_path)
+{
+    int free_slot = -1;
+    for (int i = 0; i < PHOTO_SEQ_CACHE_CAP; i++) {
+        if (s_seq_cache[i].used && memcmp(s_seq_cache[i].mac, mac, 6) == 0) {
+            return s_seq_cache[i].next_seq++;
+        }
+        if (!s_seq_cache[i].used && free_slot < 0) free_slot = i;
+    }
+    uint32_t seq = next_seq_in_dir(dir_path);
+    if (free_slot >= 0) {
+        memcpy(s_seq_cache[free_slot].mac, mac, 6);
+        s_seq_cache[free_slot].next_seq = seq + 1;
+        s_seq_cache[free_slot].used = true;
+    }
+    /* 캐시가 꽉 찼으면(카메라 9대 이상 — 실제로는 안 옴) 캐시 없이 매번 스캔으로 동작 */
+    return seq;
+}
+
 bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg, size_t len,
                          uint32_t *out_seq)
 {
@@ -115,6 +186,10 @@ bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg,
         ESP_LOGW(TAG, "저장 실패 — 잘못된 kind=%c", (char)kind);
         return false;
     }
+    if (!jpeg || len == 0) {
+        ESP_LOGW(TAG, "저장 실패 — 빈 데이터(len=%u)", (unsigned)len);
+        return false;
+    }
 
     char dir_path[64];
     camera_dir_path(mac, dir_path, sizeof(dir_path));
@@ -123,23 +198,39 @@ bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg,
         return false;
     }
 
-    uint32_t seq = next_seq_in_dir(dir_path);
+    lock();
+    uint32_t seq = take_next_seq_locked(mac, dir_path);
+    unlock();
 
     char file_path[96];
     snprintf(file_path, sizeof(file_path), "%s/%c%0*u.jpg", dir_path, (char)kind, PHOTO_SEQ_DIGITS, (unsigned)seq);
+    char tmp_path[104];
+    snprintf(tmp_path, sizeof(tmp_path), "%s" PHOTO_TMP_SUFFIX, file_path);
 
-    FILE *fp = fopen(file_path, "wb");
+    /* 2026-09-26(SD 안전정책) — .tmp에 전부 쓰고 fsync로 카드에 반영한 뒤 닫고, 그다음에야 최종
+     * 이름으로 바꿈. 이 사이 어디서 리셋되든 반쯤 쓴 내용이 .jpg로 보이는 일은 없음 */
+    FILE *fp = fopen(tmp_path, "wb");
     if (!fp) {
-        ESP_LOGW(TAG, "파일 열기 실패: %s", file_path);
+        ESP_LOGW(TAG, "파일 열기 실패: %s (errno=%d)", tmp_path, errno);
         return false;
     }
     size_t written = fwrite(jpeg, 1, len, fp);
+    bool synced = (fflush(fp) == 0) && (fsync(fileno(fp)) == 0);
     fclose(fp);
-    if (written != len) {
-        ESP_LOGW(TAG, "쓰기 불완전(%u/%u bytes) — 파일 삭제: %s", (unsigned)written, (unsigned)len, file_path);
-        unlink(file_path);
+    if (written != len || !synced) {
+        ESP_LOGW(TAG, "쓰기 불완전(%u/%u bytes, sync=%d) — 임시파일 삭제: %s",
+                 (unsigned)written, (unsigned)len, synced ? 1 : 0, tmp_path);
+        unlink(tmp_path);
         return false;
     }
+    if (rename(tmp_path, file_path) != 0) {
+        ESP_LOGW(TAG, "임시파일 이름 바꾸기 실패(errno=%d): %s", errno, tmp_path);
+        unlink(tmp_path);
+        return false;
+    }
+
+    used_add((int64_t)len);
+    storage_mgr_notify_changed();
 
     if (out_seq) *out_seq = seq;
     ESP_LOGI(TAG, "사진 저장 완료: %s (%u bytes)", file_path, (unsigned)len);
@@ -148,87 +239,182 @@ bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg,
 
 uint64_t photo_storage_get_used_bytes(void)
 {
-    if (!sd_storage_is_mounted()) return 0;
+    lock();
+    uint64_t v = s_used_bytes;
+    unlock();
+    return v;
+}
 
+static bool ends_with(const char *s, const char *suffix)
+{
+    size_t ls = strlen(s), lx = strlen(suffix);
+    return ls >= lx && strcmp(s + ls - lx, suffix) == 0;
+}
+
+void photo_storage_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
+{
+    uint32_t bad = 0;
+    uint64_t total = 0;
+    uint64_t sane_limit = PHOTO_MAX_SANE_BYTES;
+    if (sd_total > 0 && sd_total < sane_limit) sane_limit = sd_total;
+
+    /* 스캔 동안 저장(카메라 사진 도착)이 끼어들어 이중으로 세지 않게 전체를 잠금 —
+     * 마운트/재연결/포맷 직후에만 도는 일이라 저장이 잠깐 기다리는 건 허용 */
+    lock();
+    memset(s_seq_cache, 0, sizeof(s_seq_cache));
+
+    char photos_root[32];
+    snprintf(photos_root, sizeof(photos_root), "%s/photos", SD_STORAGE_MOUNT_POINT);
+    DIR *root = opendir(photos_root);
+    if (root) {
+        struct dirent *cam_ent;
+        while ((cam_ent = readdir(root)) != NULL) {
+            if (cam_ent->d_name[0] == '.') continue;  /* "."/".." 건너뜀 */
+            uint8_t cam_mac[6];
+            if (!hex_to_mac(cam_ent->d_name, cam_mac)) {
+                ESP_LOGW(TAG, "재스캔: 알 수 없는 항목(카메라 폴더 아님) 제외: %.40s", cam_ent->d_name);
+                bad++;
+                continue;
+            }
+            char cam_dir[64];
+            camera_dir_path(cam_mac, cam_dir, sizeof(cam_dir));
+            DIR *dir = opendir(cam_dir);
+            if (!dir) continue;
+
+            uint32_t max_seq_plus_one = 0;
+            struct dirent *ent;
+            while ((ent = readdir(dir)) != NULL) {
+                if (ent->d_name[0] == '.') continue;
+                char path[96 + 16];
+                if (ends_with(ent->d_name, PHOTO_TMP_SUFFIX) && strlen(ent->d_name) < 32) {
+                    /* 저장 도중 리셋으로 남은 반쯤 쓴 임시파일 — 지움 */
+                    snprintf(path, sizeof(path), "%s/%.31s", cam_dir, ent->d_name);
+                    if (unlink(path) == 0) ESP_LOGW(TAG, "재스캔: 남은 임시파일 삭제: %s", path);
+                    continue;
+                }
+                uint8_t kind; uint32_t seq;
+                if (!parse_fname(ent->d_name, &kind, &seq)) {
+                    ESP_LOGW(TAG, "재스캔: 이름이 형식에 안 맞는 항목 제외(손상 의심): %.40s", ent->d_name);
+                    bad++;
+                    continue;
+                }
+                file_path_for(cam_mac, kind, seq, path, sizeof(path));  /* parse_fname 통과 = 고정 길이 이름 */
+                struct stat st;
+                if (stat(path, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size > sane_limit) {
+                    ESP_LOGW(TAG, "재스캔: 크기가 비정상인 항목 제외(손상 의심): %s", path);
+                    bad++;
+                    continue;
+                }
+                total += (uint64_t)st.st_size;
+                if (seq + 1 > max_seq_plus_one) max_seq_plus_one = seq + 1;
+            }
+            closedir(dir);
+
+            for (int i = 0; i < PHOTO_SEQ_CACHE_CAP; i++) {
+                if (!s_seq_cache[i].used) {
+                    memcpy(s_seq_cache[i].mac, cam_mac, 6);
+                    s_seq_cache[i].next_seq = max_seq_plus_one;
+                    s_seq_cache[i].used = true;
+                    break;
+                }
+            }
+        }
+        closedir(root);
+    }
+    s_used_bytes = total;
+    unlock();
+
+    if (out_bad_entries) *out_bad_entries = bad;
+}
+
+/* ---- 정리 — 가장 오래된 것부터. 한 번 훑을 때 오래된 후보를 TRIM_BATCH개씩 모아서 지움
+ * (예전엔 한 장 지울 때마다 전체를 두 번 훑었음 — get_used_bytes()+find_oldest_file()) ---- */
+#define TRIM_BATCH 64
+typedef struct {
+    time_t   mtime;
+    uint32_t size;
+    uint32_t seq;
+    uint8_t  kind;
+    uint8_t  mac[6];
+} trim_cand_t;
+
+/* cands(오름차순, mtime 오래된 것부터)에 후보 하나를 끼워 넣음 — 꽉 찼으면 가장 새로운 걸 밀어냄 */
+static void cand_insert(trim_cand_t *cands, int *count, const trim_cand_t *c)
+{
+    int n = *count;
+    if (n == TRIM_BATCH && c->mtime >= cands[n - 1].mtime) return;
+    int pos = (n < TRIM_BATCH) ? n : TRIM_BATCH - 1;
+    while (pos > 0 && cands[pos - 1].mtime > c->mtime) {
+        cands[pos] = cands[pos - 1];
+        pos--;
+    }
+    cands[pos] = *c;
+    if (n < TRIM_BATCH) *count = n + 1;
+}
+
+static int collect_oldest(trim_cand_t *cands, uint64_t sane_limit)
+{
+    int count = 0;
     char photos_root[32];
     snprintf(photos_root, sizeof(photos_root), "%s/photos", SD_STORAGE_MOUNT_POINT);
     DIR *root = opendir(photos_root);
     if (!root) return 0;
-
-    uint64_t total = 0;
     struct dirent *cam_ent;
     while ((cam_ent = readdir(root)) != NULL) {
-        if (cam_ent->d_name[0] == '.') continue;  /* "."/".." 건너뜀 */
-        char cam_dir[320];
-        snprintf(cam_dir, sizeof(cam_dir), "%s/%s", photos_root, cam_ent->d_name);
+        uint8_t cam_mac[6];
+        if (cam_ent->d_name[0] == '.' || !hex_to_mac(cam_ent->d_name, cam_mac)) continue;
+        char cam_dir[64];
+        camera_dir_path(cam_mac, cam_dir, sizeof(cam_dir));
         DIR *dir = opendir(cam_dir);
         if (!dir) continue;
         struct dirent *ent;
         while ((ent = readdir(dir)) != NULL) {
-            if (ent->d_name[0] == '.') continue;
-            char path[640];
-            snprintf(path, sizeof(path), "%s/%s", cam_dir, ent->d_name);
+            trim_cand_t c;
+            if (!parse_fname(ent->d_name, &c.kind, &c.seq)) continue;  /* 손상 의심 항목은 정리 대상 아님 */
+            char path[96];
+            file_path_for(cam_mac, c.kind, c.seq, path, sizeof(path));
             struct stat st;
-            if (stat(path, &st) == 0) total += (uint64_t)st.st_size;
+            if (stat(path, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size > sane_limit) continue;
+            c.mtime = st.st_mtime;
+            c.size = (uint32_t)st.st_size;
+            memcpy(c.mac, cam_mac, 6);
+            cand_insert(cands, &count, &c);
         }
         closedir(dir);
     }
     closedir(root);
-    return total;
-}
-
-/* 전체 카메라 폴더를 훑어 mtime이 가장 오래된 파일 하나의 경로를 찾음 — 못 찾으면 false */
-static bool find_oldest_file(char *out_path, size_t out_path_len)
-{
-    char photos_root[32];
-    snprintf(photos_root, sizeof(photos_root), "%s/photos", SD_STORAGE_MOUNT_POINT);
-    DIR *root = opendir(photos_root);
-    if (!root) return false;
-
-    bool found = false;
-    time_t oldest_mtime = 0;
-    struct dirent *cam_ent;
-    while ((cam_ent = readdir(root)) != NULL) {
-        if (cam_ent->d_name[0] == '.') continue;
-        char cam_dir[320];
-        snprintf(cam_dir, sizeof(cam_dir), "%s/%s", photos_root, cam_ent->d_name);
-        DIR *dir = opendir(cam_dir);
-        if (!dir) continue;
-        struct dirent *ent;
-        while ((ent = readdir(dir)) != NULL) {
-            if (ent->d_name[0] == '.') continue;
-            char path[640];
-            snprintf(path, sizeof(path), "%s/%s", cam_dir, ent->d_name);
-            struct stat st;
-            if (stat(path, &st) != 0) continue;
-            if (!found || st.st_mtime < oldest_mtime) {
-                oldest_mtime = st.st_mtime;
-                strncpy(out_path, path, out_path_len - 1);
-                out_path[out_path_len - 1] = '\0';
-                found = true;
-            }
-        }
-        closedir(dir);
-    }
-    closedir(root);
-    return found;
+    return count;
 }
 
 uint32_t photo_storage_trim_to(uint64_t target_bytes)
 {
     if (!sd_storage_is_mounted()) return 0;
 
+    static trim_cand_t *s_cands = NULL;  /* 파일처리 태스크 전용, PSRAM 한 번만 */
+    if (!s_cands) {
+        s_cands = heap_caps_malloc(sizeof(trim_cand_t) * TRIM_BATCH, MALLOC_CAP_SPIRAM);
+        if (!s_cands) { ESP_LOGE(TAG, "정리 후보 버퍼 할당 실패 — 정리 안 함"); return 0; }
+    }
+
     uint32_t deleted = 0;
     while (photo_storage_get_used_bytes() > target_bytes) {
-        char oldest[96];
-        if (!find_oldest_file(oldest, sizeof(oldest))) break;  /* 더 지울 게 없음 */
-        if (unlink(oldest) != 0) {
-            ESP_LOGW(TAG, "정리 중 삭제 실패: %s", oldest);
-            break;  /* 무한루프 방지 — 못 지우는 파일이면 중단 */
+        int n = collect_oldest(s_cands, PHOTO_MAX_SANE_BYTES);
+        if (n == 0) break;  /* 더 지울 게 없음 */
+        bool progress = false;
+        for (int i = 0; i < n && photo_storage_get_used_bytes() > target_bytes; i++) {
+            char path[96];
+            file_path_for(s_cands[i].mac, s_cands[i].kind, s_cands[i].seq, path, sizeof(path));
+            if (unlink(path) != 0) {
+                ESP_LOGW(TAG, "정리 중 삭제 실패(errno=%d): %s", errno, path);
+                continue;
+            }
+            used_add(-(int64_t)s_cands[i].size);
+            deleted++;
+            progress = true;
         }
-        ESP_LOGI(TAG, "정리로 삭제: %s", oldest);
-        deleted++;
+        if (!progress) break;  /* 이번 묶음을 하나도 못 지움 — 무한루프 방지 */
     }
+    if (deleted > 0) ESP_LOGI(TAG, "정리: %u장 삭제(오래된 것부터)", (unsigned)deleted);
     return deleted;
 }
 
@@ -352,10 +538,14 @@ bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq)
 {
     char file_path[96];
     file_path_for(mac, kind, seq, file_path, sizeof(file_path));
+    struct stat st;
+    int64_t size = (stat(file_path, &st) == 0 && st.st_size > 0) ? (int64_t)st.st_size : 0;
     if (unlink(file_path) != 0) {
         ESP_LOGW(TAG, "delete: 실패(errno=%d): %s", errno, file_path);
         return false;
     }
+    used_add(-size);  /* 삭제가 성공했을 때만 뺌 */
+    storage_mgr_notify_changed();
     ESP_LOGI(TAG, "delete: %s", file_path);
     return true;
 }
@@ -368,20 +558,23 @@ uint32_t photo_storage_delete_all(const uint8_t mac[6])
     if (!dir) return 0;
 
     uint32_t deleted = 0;
+    int64_t freed = 0;
     struct dirent *ent;
     uint8_t kind; uint32_t seq;
     while ((ent = readdir(dir)) != NULL) {
         if (!parse_fname(ent->d_name, &kind, &seq)) continue;
-        /* 320 — get_used_bytes()/find_oldest_file()의 cam_dir[320]과 동일 여유(d_name은
-         * NAME_MAX=255까지 이론상 가능, GCC의 -Wformat-truncation을 만족시키려면 96으로는
-         * 정적으로 증명 불가 — 실제로는 parse_fname()이 이미 PHOTO_FNAME_LEN 고정 길이만
-         * 통과시킴) */
-        char file_path[320];
-        snprintf(file_path, sizeof(file_path), "%s/%s", dir_path, ent->d_name);
-        if (unlink(file_path) == 0) deleted++;
+        /* parse_fname()이 PHOTO_FNAME_LEN 고정 길이만 통과시키므로 file_path_for()로 다시 만듦
+         * (큰 스택 버퍼 없이) */
+        char file_path[96];
+        file_path_for(mac, kind, seq, file_path, sizeof(file_path));
+        struct stat st;
+        int64_t size = (stat(file_path, &st) == 0 && st.st_size > 0) ? (int64_t)st.st_size : 0;
+        if (unlink(file_path) == 0) { deleted++; freed += size; }
         else ESP_LOGW(TAG, "delete_all: 실패(errno=%d): %s", errno, file_path);
     }
     closedir(dir);
+    used_add(-freed);
+    storage_mgr_notify_changed();
     ESP_LOGI(TAG, "delete_all: %u개 삭제 (%s)", (unsigned)deleted, dir_path);
     return deleted;
 }

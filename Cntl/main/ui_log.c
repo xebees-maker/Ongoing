@@ -309,8 +309,11 @@ int ui_log_get_warn_history(int *out_codes, int max)
 
 const char *ui_log_warn_desc(int code)
 {
-    (void)code;  /* 2026-08-25 — 위 s_warn_table 삭제 주석 참고, 지금은 조회할 표가 없음 */
-    return "알 수 없는 워닝";
+    /* 2026-08-25에 표를 비웠다가 2026-09-26 SD 손상 항목 경고로 다시 하나 생김 */
+    switch (code) {
+        case UI_WARN_SD_BAD_ENTRY: return "SD 손상 의심 항목 제외됨";
+        default:                   return "알 수 없는 워닝";
+    }
 }
 
 /* 2026-09-11 — 위 ui_log_clear_one_error()와 동일 패턴(워닝용) */

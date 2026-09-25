@@ -6,6 +6,7 @@
 #include "stats_store.h"
 #include "sd_storage.h"
 #include "photo_storage.h"
+#include "storage_mgr.h"
 #include "sens_kind_store.h"
 #include "esp_now_photo.h"
 #include "ui_log.h"
@@ -1469,7 +1470,9 @@ static void mark_sd_io_fail(const char *context)
  * 용도에 적합 — 실패하면 stats_store_had_io_error()가 true로 남음 */
 static bool sd_verify_healthy(void)
 {
-    stats_store_get_count();
+    /* 2026-09-26 — stats_store_get_count()는 이제 RAM 색인만 봐서(I/O 없음) 검증이 안 됨 —
+     * 실제 I/O를 하는 전용 probe로 교체 */
+    stats_store_probe_io();
     return !stats_store_had_io_error();
 }
 
@@ -1529,26 +1532,21 @@ static void refresh_storage_status_label(void)
         return;
     }
 
-    uint64_t sd_total = 0, sd_free = 0;
-    if (!sd_storage_get_capacity(&sd_total, &sd_free) || sd_total == 0) {
-        lv_label_set_text(s_storage_status_label, "");
+    /* 2026-09-26(재설계 — 실측: 예전엔 여기서 사진 폴더 스캔 약 765ms + 정리 약 2055ms가 LVGL
+     * 태스크를 5초마다 약 3초씩 멈춤) — 이제 사용량/빈 공간은 파일처리 태스크(storage_mgr)가
+     * RAM에 들고 있는 값을 복사만 함(SD I/O 없음). 정리도 여기서 안 함 — 저장/삭제 직후
+     * storage_mgr가 판단하고, 안내 팝업만 refresh_dashboard()가 띄움 */
+    storage_mgr_snapshot_t snap;
+    storage_mgr_get_snapshot(&snap);
+    if (!snap.valid || snap.sd_total == 0) {
+        lv_label_set_text(s_storage_status_label, "");  /* 재스캔 중(부팅/재연결 직후 잠깐) */
         return;
     }
-
+    uint64_t sd_total = snap.sd_total, sd_free = snap.sd_free;
     uint64_t picture_budget = sd_total * 9 / 10;
     uint64_t measure_budget = sd_total / 10;
-    /* 2026-09-18(SD 제거 재설계 — 캠 사진 콘 SD 저장 구현) — 폴더 크기 합산으로 교체 */
-    uint64_t picture_used = photo_storage_get_used_bytes();
-    uint64_t measure_used = stats_store_get_used_bytes();
-    /* 2026-09-10(SD fail 회로차단기) — 이 조회 자체가 fopen 등에서 진짜 I/O 실패였다면
-     * (단순 "기록 0개"가 아니라) 나머지 계산/표시를 이어가지 말고 즉시 에러 상태로 전환.
-     * stats_store_get_used_bytes()는 내부에서 stats_store_get_count()를 부르므로 그
-     * 함수의 리셋/세팅이 그대로 반영됨 */
-    if (stats_store_had_io_error()) {
-        mark_sd_io_fail("main screen SD capacity display");
-        set_storage_label_text(ui_str(STR_STATUS_SD_IO_ERROR_MSG), true);
-        return;
-    }
+    uint64_t picture_used = snap.pic_used;
+    uint64_t measure_used = snap.stats_used;
     /* 2026-09-10(임시 진단 — "지금 1주일치가 아니지, 몇시간 정도일 뿐이야" 정확한
      * 수치 확인용, 확인 후 제거) */
     {
@@ -1577,21 +1575,6 @@ static void refresh_storage_status_label(void)
         ui_str(STR_LABEL_MEASURE_SHORT), (unsigned)measure_pct, (unsigned)measure_remain_mb,
         ui_str(STR_LABEL_TOTAL), (unsigned)total_pct, (unsigned)total_remain_mb);
     set_storage_label_text(detail, false);
-
-    /* 정리 트리거 — Measure/Picture 둘 다 자기 예산의 90% 이상이면 80%까지 삭제
-     * (2026-09-18, Picture도 동일 패턴으로 확장 — photo_storage_trim_to()) */
-    if (measure_used * 100 / measure_budget >= 90) {
-        uint32_t deleted = stats_store_trim_to(measure_budget * 80 / 100);
-        if (deleted > 0) {
-            show_storage_cleanup_popup(ui_str(STR_LABEL_MEASURE_SHORT), deleted);
-        }
-    }
-    if (picture_used * 100 / picture_budget >= 90) {
-        uint32_t deleted = photo_storage_trim_to(picture_budget * 80 / 100);
-        if (deleted > 0) {
-            show_storage_cleanup_popup(ui_str(STR_LABEL_PICTURE), deleted);
-        }
-    }
 }
 
 /* stats_store 읽기 함수가 stats_store_had_io_error()로 진짜 I/O 실패(단순 "데이터 없음"이
@@ -2205,9 +2188,10 @@ static void update_list_info_label(void)
     uint32_t total_count = s_has_selected_cam ? photo_storage_get_count(s_selected_cam_mac) : 0;
     bool en = (ui_lang_get() == UI_LANG_EN);
     char info_buf[32];
-    uint64_t sd_total = 0, sd_free = 0;
-    if (sd_storage_is_mounted() && sd_storage_get_capacity(&sd_total, &sd_free) && sd_total > 0) {
-        unsigned pct = (unsigned)((sd_total - sd_free) * 100 / sd_total);
+    storage_mgr_snapshot_t snap;
+    storage_mgr_get_snapshot(&snap);  /* 2026-09-26 — SD 직접 조회 대신 RAM 값 */
+    if (sd_storage_is_mounted() && snap.valid && snap.sd_total > 0) {
+        unsigned pct = (unsigned)((snap.sd_total - snap.sd_free) * 100 / snap.sd_total);
         snprintf(info_buf, sizeof(info_buf), en ? "%u Pics  %u%%" : "%u개  %u%%", (unsigned)total_count, pct);
     } else {
         snprintf(info_buf, sizeof(info_buf), en ? "%u Pics" : "%u개", (unsigned)total_count);
@@ -4478,7 +4462,17 @@ static void refresh_dashboard(lv_timer_t *t)
         s_storage_check_tick = 0;
         refresh_storage_status_label();  /* 2026-09-10 재설계 — 실제 계산/표시 로직은
             SD 상태/복구 섹션의 refresh_storage_status_label()로 이동(탭 팝업에서 재연결/
-            포맷 직후에도 즉시 재사용해야 해서 공용 함수로 뺌, [[project_cntl_sd_reliability_redesign_2026_09_10]]) */
+            포맷 직후에도 즉시 재사용해야 해서 공용 함수로 뺌, [[project_cntl_sd_reliability_redesign_2026_09_10]]).
+            2026-09-26부터 RAM 값만 읽음(SD I/O 없음) */
+    }
+    /* 2026-09-26 — 정리는 파일처리 태스크(storage_mgr)에서 일어나고, 안내 팝업만 여기(LVGL
+     * 태스크)서 띄움(test-and-clear) */
+    {
+        uint32_t pic_deleted = 0, stats_deleted = 0;
+        if (storage_mgr_take_cleanup(&pic_deleted, &stats_deleted)) {
+            if (stats_deleted > 0) show_storage_cleanup_popup(ui_str(STR_LABEL_MEASURE_SHORT), stats_deleted);
+            if (pic_deleted > 0) show_storage_cleanup_popup(ui_str(STR_LABEL_PICTURE), pic_deleted);
+        }
     }
     /* 2026-09-07(임시 진단 — 내부RAM 서서히 감소 원인 추적) — 10초마다(이 틱이 1초 주기라
      * 10번째마다) 전체 추이를 로그로 남김. stats_store_append() 안쪽 진단과 대조용 */

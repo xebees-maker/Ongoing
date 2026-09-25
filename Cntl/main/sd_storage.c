@@ -3,6 +3,7 @@
  * @brief   SD카드(SPI모드, CS는 CH422G EXIO4) 마운트 구현
  */
 #include "sd_storage.h"
+#include "storage_mgr.h"
 #include "ch422g.h"
 #include "waveshare_rgb_lcd_port.h"
 
@@ -108,6 +109,9 @@ esp_err_t sd_storage_init(void)
     }
 
     ESP_LOGI(TAG, "SD카드 마운트 완료: %s", SD_STORAGE_MOUNT_POINT);
+    /* 2026-09-26 — 재연결로 다시 마운트된 경우 사용량 합계를 새로 만들게 함(부팅 때는 파일처리
+     * 태스크가 아직 없어서 무시되고, 태스크가 시작하면서 어차피 재스캔함) */
+    storage_mgr_request_rescan();
     return ESP_OK;
 }
 
@@ -178,6 +182,7 @@ esp_err_t sd_storage_format(void)
         ESP_LOGW(TAG, "photos 폴더 생성 실패(errno=%d)", errno);
     }
     ESP_LOGI(TAG, "SD 포맷 완료");
+    storage_mgr_request_rescan();  /* 포맷으로 전부 비었음 — 합계 새로 */
     return ESP_OK;
 }
 
