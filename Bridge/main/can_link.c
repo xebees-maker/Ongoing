@@ -27,7 +27,7 @@ static const char *TAG = "can_link";
 
 #define CAN_LINK_TX_GPIO GPIO_NUM_15
 #define CAN_LINK_RX_GPIO GPIO_NUM_16
-#define CAN_LINK_BITRATE 500000
+#define CAN_LINK_BITRATE 1000000  /* 2026-09-26(사진 전송 CAN 개선 2단계) — 500k -> 1M, 콘과 반드시 같은 값 */
 
 static twai_node_handle_t s_node = NULL;
 

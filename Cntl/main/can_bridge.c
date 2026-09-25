@@ -22,7 +22,7 @@ static const char *TAG = "can_bridge";
 
 #define CAN_BRIDGE_TX_GPIO GPIO_NUM_15
 #define CAN_BRIDGE_RX_GPIO GPIO_NUM_16
-#define CAN_BRIDGE_BITRATE 500000
+#define CAN_BRIDGE_BITRATE 1000000  /* 2026-09-26(사진 전송 CAN 개선 2단계) — 500k -> 1M, 브와 반드시 같은 값 */
 
 static twai_node_handle_t s_node = NULL;
 static can_bridge_ctx_t *s_data_ctx;
