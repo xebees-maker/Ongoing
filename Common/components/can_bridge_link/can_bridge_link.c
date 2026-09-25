@@ -226,6 +226,109 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
     return 0;
 }
 
+/* ============================== 송신 프레임 풀 ============================== */
+
+typedef struct {
+    twai_frame_t frame;
+    uint8_t data[8];
+    volatile uint8_t in_use;
+} tx_slot_t;
+
+static tx_slot_t *s_tx_slots;            /* PSRAM, CAN_BRIDGE_TX_POOL_SIZE개 */
+static SemaphoreHandle_t s_tx_free_sem;  /* 빈 슬롯 개수(카운팅) */
+static portMUX_TYPE s_tx_lock = portMUX_INITIALIZER_UNLOCKED;
+
+void can_bridge_tx_pool_init(void)
+{
+    if (s_tx_slots) return;
+    s_tx_slots = (tx_slot_t *)psram_or_internal_alloc(sizeof(tx_slot_t) * CAN_BRIDGE_TX_POOL_SIZE);
+    s_tx_free_sem = xSemaphoreCreateCounting(CAN_BRIDGE_TX_POOL_SIZE, CAN_BRIDGE_TX_POOL_SIZE);
+    if (!s_tx_slots || !s_tx_free_sem) {
+        /* 송신 불가 상태로 조용히 두지 않음(드롭 금지 정책과 같은 취지) */
+        ESP_LOGE(TAG, "송신 프레임 풀 할당 실패(slots=%p sem=%p) — 중단", (void *)s_tx_slots, (void *)s_tx_free_sem);
+        abort();
+    }
+    memset(s_tx_slots, 0, sizeof(tx_slot_t) * CAN_BRIDGE_TX_POOL_SIZE);
+}
+
+static void tx_slot_release(tx_slot_t *slot)
+{
+    taskENTER_CRITICAL(&s_tx_lock);
+    slot->in_use = 0;
+    taskEXIT_CRITICAL(&s_tx_lock);
+    xSemaphoreGive(s_tx_free_sem);
+}
+
+esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_t *data, uint8_t len, int timeout_ms)
+{
+    if (!s_tx_slots || !s_tx_free_sem) {
+        ESP_LOGE(TAG, "tx_frame: 풀 미초기화(can_bridge_tx_pool_init 누락)");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!node || len > 8 || (len > 0 && !data)) return ESP_ERR_INVALID_ARG;
+
+    TickType_t start = xTaskGetTickCount();
+    TickType_t total = (timeout_ms < 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    if (xSemaphoreTake(s_tx_free_sem, total) != pdTRUE) {
+        ESP_LOGW(TAG, "송신 프레임 풀 빈 슬롯 없음(%dms) — 송신 실패", timeout_ms);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    tx_slot_t *slot = NULL;
+    taskENTER_CRITICAL(&s_tx_lock);
+    for (int i = 0; i < CAN_BRIDGE_TX_POOL_SIZE; i++) {
+        if (!s_tx_slots[i].in_use) {
+            s_tx_slots[i].in_use = 1;
+            slot = &s_tx_slots[i];
+            break;
+        }
+    }
+    taskEXIT_CRITICAL(&s_tx_lock);
+    if (!slot) {
+        /* 세마포어 개수와 in_use가 어긋난 경우(논리 버그) — 개수는 되돌려 둠 */
+        ESP_LOGE(TAG, "tx_frame: 세마포어는 얻었는데 빈 슬롯 없음(논리 버그)");
+        xSemaphoreGive(s_tx_free_sem);
+        return ESP_FAIL;
+    }
+
+    memset(&slot->frame, 0, sizeof(slot->frame));
+    if (len > 0) memcpy(slot->data, data, len);
+    slot->frame.header.id = id;
+    slot->frame.buffer = slot->data;
+    slot->frame.buffer_len = len;
+
+    int remain_ms = -1;
+    if (timeout_ms >= 0) {
+        TickType_t elapsed = xTaskGetTickCount() - start;
+        TickType_t left = (elapsed < total) ? (total - elapsed) : 0;
+        remain_ms = (int)pdTICKS_TO_MS(left);
+    }
+    esp_err_t err = twai_node_transmit(node, &slot->frame, remain_ms);
+    if (err != ESP_OK) {
+        /* 드라이버 큐에 못 들어감 — ISR이 이 슬롯을 볼 일이 없으니 바로 반납 */
+        tx_slot_release(slot);
+    }
+    return err;
+}
+
+bool can_bridge_tx_pool_on_done_isr(const twai_tx_done_event_data_t *edata)
+{
+    if (!edata || !edata->done_tx_frame || !s_tx_slots || !s_tx_free_sem) return false;
+    const twai_frame_t *f = edata->done_tx_frame;
+    tx_slot_t *slot = NULL;
+    for (int i = 0; i < CAN_BRIDGE_TX_POOL_SIZE; i++) {
+        if (&s_tx_slots[i].frame == f) { slot = &s_tx_slots[i]; break; }
+    }
+    if (!slot) return false;  /* 이 풀에서 나간 프레임이 아님 */
+
+    portENTER_CRITICAL_ISR(&s_tx_lock);
+    slot->in_use = 0;
+    portEXIT_CRITICAL_ISR(&s_tx_lock);
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_tx_free_sem, &woken);
+    return woken == pdTRUE;
+}
+
 /* ============================== 송신(ISO-TP 분할) ============================== */
 
 struct can_bridge_ctx {
@@ -263,12 +366,9 @@ void can_bridge_ctx_notify_fc(can_bridge_ctx_t *ctx, const uint8_t *frame_data)
 
 static esp_err_t send_one_frame(can_bridge_ctx_t *ctx, const uint8_t data[8], uint8_t len)
 {
-    twai_frame_t f = {
-        .header.id = ctx->tx_id,
-        .buffer = (uint8_t *)data,
-        .buffer_len = len,
-    };
-    return twai_node_transmit(ctx->node, &f, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
+    /* 2026-09-25 — 지역 프레임 포인터를 드라이버에 넘기지 않고 PSRAM 풀 슬롯에 복사해서 보냄
+     * (can_bridge_tx_frame 주석 참고) */
+    return can_bridge_tx_frame(ctx->node, ctx->tx_id, data, len, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
 }
 
 /* msg(app_header+payload, len바이트)를 통째로 ISO-TP로 쪼개 보냄. 성공 시 ESP_OK.

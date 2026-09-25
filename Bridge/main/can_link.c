@@ -61,6 +61,14 @@ static IRAM_ATTR bool on_rx_done(twai_node_handle_t handle, const twai_rx_done_e
     return woken == pdTRUE;
 }
 
+/* 송신 완료(성공/실패 무관) — 송신 풀 슬롯 반납 */
+static bool on_tx_done(twai_node_handle_t handle, const twai_tx_done_event_data_t *edata, void *ctx)
+{
+    (void)handle;
+    (void)ctx;
+    return can_bridge_tx_pool_on_done_isr(edata);
+}
+
 static IRAM_ATTR bool on_error(twai_node_handle_t handle, const twai_error_event_data_t *edata, void *ctx)
 {
     ESP_EARLY_LOGW(TAG, "버스 에러: 0x%x", (unsigned)edata->err_flags.val);
@@ -87,8 +95,12 @@ static void can_rx_task(void *arg)
 
         uint8_t fc[8];
         if (can_bridge_reassembly_feed(&s_data_reasm, rf.data, rf.len, fc, &s_data_complete_q)) {
-            twai_frame_t f = { .header.id = CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA, .buffer = fc, .buffer_len = 8 };
-            twai_node_transmit(s_node, &f, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
+            /* 2026-09-25 — 지역 프레임을 드라이버에 넘기면 반환 뒤 ISR이 덮인 스택을 읽음(콘 실기
+             * 크래시로 확인). PSRAM 송신 풀 슬롯에 복사해서 보냄 */
+            esp_err_t fc_err = can_bridge_tx_frame(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA, fc, 8, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
+            if (fc_err != ESP_OK) {
+                ESP_LOGW(TAG, "FC 송신 실패: %s", esp_err_to_name(fc_err));
+            }
         }
     }
 }
@@ -240,7 +252,9 @@ void can_link_init(void)
         return;
     }
 
+    can_bridge_tx_pool_init();
     twai_event_callbacks_t cbs = {
+        .on_tx_done = on_tx_done,
         .on_rx_done = on_rx_done,
         .on_error = on_error,
         .on_state_change = on_state_change,

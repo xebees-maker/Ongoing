@@ -196,6 +196,24 @@ typedef struct can_bridge_ctx can_bridge_ctx_t;
 
 #define CAN_BRIDGE_DEFAULT_TIMEOUT_MS 500
 
+/* ---- 송신 프레임 풀(PSRAM) ----
+ * 2026-09-25(실기 크래시 — 콘 Core0 LoadProhibited, twai_hal_format_frame 안) — ESP-IDF v6
+ * twai_node_transmit()은 프레임을 복사하지 않고 포인터만 송신 큐에 넣음(하드웨어가 바쁘면 즉시
+ * 반환, 나중에 ISR이 그 포인터를 따라가 전송). 예전엔 스택 지역변수 프레임/데이터를 넘겨서, 반환
+ * 뒤 덮인 스택을 ISR이 읽고 죽거나 엉뚱한 바이트를 보냄. 이제 모든 CAN 송신은 이 풀의 슬롯(프레임
+ * +데이터 8B)에 복사해서 보내고, on_tx_done(송신 완료, 성공/실패 무관)에서 슬롯을 반납함 —
+ * 빈 슬롯은 카운팅 세마포어로 기다림(이벤트 방식). 크기: 드라이버 송신 큐 깊이(8)+전송 중 1개 여유 */
+#define CAN_BRIDGE_TX_POOL_SIZE 16
+
+/* twai_node_enable() 전에 1회 호출 */
+void can_bridge_tx_pool_init(void);
+/* data(len<=8)를 풀 슬롯에 복사해 id로 송신 큐에 넣음. timeout_ms는 빈 슬롯 대기+드라이버 큐 대기
+ * 전체 상한(-1이면 무한). 실패 시 슬롯은 즉시 반납됨 */
+esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_t *data, uint8_t len, int timeout_ms);
+/* 앱의 twai on_tx_done 콜백(ISR)에서 호출 — 끝난 프레임의 슬롯을 반납. 반환값은 더 높은 우선순위
+ * 태스크를 깨웠는지(콜백의 반환값으로 그대로 넘기면 됨) */
+bool can_bridge_tx_pool_on_done_isr(const twai_tx_done_event_data_t *edata);
+
 can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id);
 /* CAN RX 콜백에서 PCI==FC인 프레임을 받으면, 그 프레임을 기다리고 있는 송신측 ctx에 대해
  * 호출 — can_bridge_send()가 이걸로 깨어나서 CF 전송을 계속함 */
