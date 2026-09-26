@@ -2699,6 +2699,15 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
         bool timedout  = !resolved && lv_tick_elaps(s_capture_popup_stage_start_ms) > capture_stage_timeout_ms(stage);
         if (!resolved && !timedout) return false;
 
+        if (!resolved && stage == PHOTO_RX_CAPTURE_STAGE_SENT) {
+            /* 2026-09-26(사용자 설계 — 자고 있는 캠에 명령을 줄 수 없으니 기다리지 않음) — 아직 캠이 접수도
+             * 안 한 상태면 요청은 CASK 큐에서 다음 접속을 기다리는 중(없어지지 않음, 캠이 깨면 촬영하고 사진은
+             * cb_async_photo_result로 들어옴) — 에러가 아니라 안내만 하고 닫음. 카메라 목록 행의 "대기 N"으로도 보임 */
+            show_toast(ui_str(STR_CAPTURE_QUEUED_TOAST), lv_palette_main(LV_PALETTE_ORANGE));
+            ui_log_add("Capture now queued - CAM will shoot on next wake");
+            photo_rx_capture_stage_clear();
+            return true;
+        }
         if (!resolved) {
             /* 진짜 무응답 — CAM과 통신 자체가 안 되는 상태라 이어서 목록을 확인해봤자
              * 똑같이 타임아웃될 뿐이라 의미 없음(2026-08-02, 사용자 지적: "응답이 없는데
@@ -4826,6 +4835,11 @@ static void refresh_dashboard(lv_timer_t *t)
             }
             if (device_config_get_aec_enable(s_camera_dash_row_macs[i]) && n > 0 && (size_t)n < sizeof(buf)) {
                 n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", ui_str(STR_LABEL_AEC_TINY));
+            }
+            /* 2026-09-26(사용자 설계) — CASK 큐에서 다음 접속을 기다리는 명령 수(지금 촬영 등) */
+            if (cam_nodes[j].action_queue_count > 0 && n > 0 && (size_t)n < sizeof(buf)) {
+                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %d",
+                              ui_str(STR_LABEL_PENDING_TINY), cam_nodes[j].action_queue_count);
             }
             /* 2026-09-18(사용자 지적 — is_active를 true로 하드코딩해서 실제 상태와 무관하게
              * 표시되던 버그) — 센스의 near_orphan 계산과 동일 패턴으로 실제 상태 반영 */
