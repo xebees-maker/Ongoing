@@ -5900,23 +5900,6 @@ static void refresh_network_right_zone(void)
     }
 }
 
-/* 설정탭 Apply 5단계 플로우(2026-08-08, 사용자 설계) — 공용 진행팝업(show_progress_popup)
- * 재사용, capture/response 둘 다 이 하나의 tick 함수로 처리(어느 쪽인지는
- * s_config_apply_target로 구분). 촬영주기/응답성 각각 독립된 Apply 버튼이라 동시에 둘 다
- * 누르는 경우는 없다고 가정(2단계 팝업이 모달이라 물리적으로도 막힘) */
-typedef enum { CONFIG_APPLY_TARGET_CAPTURE, CONFIG_APPLY_TARGET_RESPONSE, CONFIG_APPLY_TARGET_XCLK } config_apply_target_t;
-static config_apply_target_t s_config_apply_target;
-static int                   s_config_apply_pending_idx;
-static uint32_t              s_config_apply_start_ms;
-static lv_obj_t              *s_config_apply_label;
-
-/* 2026-08-23(사용자 지적) — 응답성을 "30초 -> Live(0초)"처럼 짧은 쪽으로 바꿀 때, CAM은
- * 아직 옛 값(30초)대로 자고 있는데 cam_response_timeout_ms()는 새로 저장된 값(0초, 3초
- * 예산)으로 계산돼서 CAM이 실제로 깨기도 전에 4005(무응답)로 오탐됨 — 결국 30초 근방에
- * 정상 적용되긴 하지만 그 사이 가짜 에러가 뜸. 0이면 기존 cam_response_timeout_ms() 그대로
- * 사용, 응답성 변경 시에만 old/new 중 큰 쪽으로 계산해서 여기 채움(cb_apply_response_interval) */
-static uint32_t s_config_apply_timeout_ms_override = 0;
-
 static void update_capture_apply_enabled(void)
 {
     bool changed = (lv_dropdown_get_selected(s_capture_interval_dd) != (uint16_t)s_capture_interval_applied_idx);
@@ -5996,78 +5979,61 @@ static void cb_apply_adaptive_response(lv_event_t *e)
     update_adaptive_apply_enabled();
 }
 
-static bool config_apply_tick_fn(lv_obj_t *box)
+/* 2026-09-26(사용자 설계) — CAM 설정은 적용 버튼에서 저장만 하고(자고 있는 캠에 명령을 줄 수 없으니 기다리지
+ * 않음), 캠이 깨어나 CASK CONFIG를 받고 ACK하면 그 값이 적용된 값. 라벨 뒤에 "적용 대기/적용됨"을 붙여 보여줌
+ * — 저장값(device_config)과 캠이 마지막으로 ACK한 CONFIG(node_hub_get_cam_applied_config) 비교, 1초 주기 */
+static void set_cfg_state_label(lv_obj_t *label, ui_str_id_t base_id, int state /* -1: 표시 없음, 0: 대기, 1: 적용됨 */)
 {
-    (void)box;
-    hub_config_apply_stage_t stage = node_hub_get_config_apply_stage();
-    if (stage == HUB_CONFIG_APPLY_ACKED) {
-        lv_label_set_text(s_config_apply_label, ui_str(STR_STATUS_OK));
-        lv_obj_set_style_text_color(s_config_apply_label, lv_palette_main(LV_PALETTE_GREEN), 0);
-        if (s_config_apply_target == CONFIG_APPLY_TARGET_CAPTURE) {
-            s_capture_interval_applied_idx = s_config_apply_pending_idx;
-            update_capture_apply_enabled();
-        } else if (s_config_apply_target == CONFIG_APPLY_TARGET_RESPONSE) {
-            s_response_interval_applied_idx = s_config_apply_pending_idx;
-            update_response_apply_enabled();
-        } else {
-            s_xclk_applied_idx = s_config_apply_pending_idx;
-            update_xclk_apply_enabled();
-        }
-        node_hub_config_apply_stage_clear();
-        return true;
+    if (!label) return;
+    if (state < 0) {
+        lv_label_set_text(label, ui_str(base_id));
+        lv_obj_remove_local_style_prop(label, LV_STYLE_TEXT_COLOR, 0);
+        return;
     }
-    uint32_t timeout_ms = s_config_apply_timeout_ms_override ? s_config_apply_timeout_ms_override
-                                                              : cam_response_timeout_ms();
-    if (lv_tick_elaps(s_config_apply_start_ms) > timeout_ms) {
-        lv_label_set_text(s_config_apply_label, ui_str(STR_CONFIG_APPLY_STALLED));
-        lv_obj_set_style_text_color(s_config_apply_label, lv_palette_main(LV_PALETTE_RED), 0);
-        ui_log_add_err(UI_ERR_CONFIG_NORESPONSE, "Config apply request: no CAM response (timeout)");
-        node_hub_config_apply_stage_clear();
-        return true;
-    }
-    return false;
+    lv_label_set_text_fmt(label, "%s%s", ui_str(base_id), ui_str(state ? STR_CFG_APPLIED_SUFFIX : STR_CFG_PENDING_SUFFIX));
+    if (state) lv_obj_remove_local_style_prop(label, LV_STYLE_TEXT_COLOR, 0);
+    else       lv_obj_set_style_text_color(label, lv_palette_main(LV_PALETTE_ORANGE), 0);
 }
 
-static void show_config_apply_popup(void)
+static void refresh_cam_config_state(lv_timer_t *t)
 {
-    s_config_apply_start_ms = lv_tick_get();
-    lv_obj_t *box = show_progress_popup(config_apply_tick_fn);
-
-    lv_obj_t *spinner = lv_spinner_create(box);
-    lv_obj_set_size(spinner, 40, 40);
-    lv_obj_align(spinner, LV_ALIGN_TOP_MID, 0, 0);
-
-    s_config_apply_label = lv_label_create(box);
-    lv_obj_set_style_text_font(s_config_apply_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(s_config_apply_label, ui_str(STR_CONFIG_APPLY_PROGRESS));
-    lv_obj_set_style_text_color(s_config_apply_label, lv_palette_main(LV_PALETTE_GREY), 0);
-
-    start_progress_popup(box);
+    (void)t;
+    if (s_capture_interval_label || s_xclk_label) {
+        esp_now_cam_config_t applied;
+        bool have = node_hub_get_cam_applied_config(s_device_popup_node.mac, &applied);
+        set_cfg_state_label(s_capture_interval_label, STR_LABEL_CAPTURE_INTERVAL,
+            (have && applied.capture_interval_sec == device_config_get_cam_capture_interval_sec(s_device_popup_node.mac)) ? 1 : 0);
+        set_cfg_state_label(s_xclk_label, STR_LABEL_XCLK,
+            (have && applied.xclk_mhz == device_config_get_xclk_mhz(s_device_popup_node.mac)) ? 1 : 0);
+    }
+    if (s_response_interval_label) {
+        /* 시스템 공통값 — 페어링된 캠 전부가 받았으면 적용됨, 캠이 없으면 표시 안 함 */
+        static node_hub_node_t cams[NODE_HUB_MAX_NODES];  /* 스택 대신(구조체가 큼) */
+        int count = node_hub_get_nodes(HUB_NODE_KIND_CAM, cams, NODE_HUB_MAX_NODES);
+        uint32_t saved = device_config_get_response_interval_sec();
+        int state = -1;
+        for (int i = 0; i < count; i++) {
+            if (cams[i].conn_state != NODE_CONN_PAIRED) continue;
+            bool ok = cams[i].cfg_applied_valid && cams[i].cfg_applied.response_interval_sec == saved;
+            state = (state == 0 || !ok) ? 0 : 1;
+        }
+        set_cfg_state_label(s_response_interval_label, STR_LABEL_RESPONSE_INTERVAL, state);
+    }
 }
 
 static void cb_apply_capture_interval(lv_event_t *e)
 {
     (void)e;
-    /* 2026-09-18(카메라별 설정 팝업으로 이관) — 이 콜백은 장치별 설정 팝업이 열려있을
-     * 때만 존재하는 위젯에 붙으므로, 대상은 항상 그 팝업의 카메라(s_device_popup_node) —
-     * 예전의 "설정탭에서 고른 카메라(s_selected_cam_mac)" 개념은 더 이상 안 씀 */
+    /* 2026-09-18(카메라별 설정 팝업으로 이관) — 대상은 항상 그 팝업의 카메라(s_device_popup_node).
+     * 2026-09-26(사용자 설계) — 저장만, 캠이 깨어날 때 전달(refresh_cam_config_state 주석) */
     uint16_t idx = lv_dropdown_get_selected(s_capture_interval_dd);
     uint32_t sec = (idx < (sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0])))
                    ? s_capture_interval_values[idx] : 0;
-    s_config_apply_target = CONFIG_APPLY_TARGET_CAPTURE;
-    s_config_apply_pending_idx = idx;
-    s_config_apply_timeout_ms_override = 0;  /* 응답성 전용 보정값 — 이 요청엔 안 씀 */
-    /* device_config에는 항상 저장되고, CAM은 매 웨이크(=매 접속)마다 무조건 최신값을
-     * 다시 받아가므로(push_cam_config_to()가 PAIR_ACK 시점에도 자동 호출됨) WAITING이어도
-     * "진짜 실패"가 아니라 "다음 접속에 반영될 정상 대기 상태"임 — 2026-08-10, 사용자
-     * 지적으로 require_active_or_report()(2007 에러) 대신 응답성 적용과 동일하게 정보
-     * 로그만 남기도록 수정(처음엔 실수로 2007과 "저장됨" 안내가 동시에 뜨는 모순이 있었음) */
     node_hub_apply_cam_capture_interval_sec(s_device_popup_node.mac, sec);
-    if (node_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
-        ui_log_add("Capture interval saved - applied automatically on CAM reconnect");
-        return;
-    }
-    show_config_apply_popup();
+    s_capture_interval_applied_idx = idx;
+    update_capture_apply_enabled();
+    refresh_cam_config_state(NULL);
+    ui_log_add("Capture interval saved - applied on next CAM wake");
 }
 
 /* 2026-09-05 — 센스는 콘 개입 없이 자기 주기대로 자율적으로 깨어(사용자 설계) 매 웨이크
@@ -6095,53 +6061,29 @@ static void cb_apply_sens_measure_interval(lv_event_t *e)
 static void cb_apply_xclk(lv_event_t *e)
 {
     (void)e;
+    /* 2026-09-26(사용자 설계) — 저장만, 캠이 깨어날 때 전달 */
     uint16_t idx = lv_dropdown_get_selected(s_xclk_dd);
     uint8_t mhz = (idx < (sizeof(s_xclk_values) / sizeof(s_xclk_values[0])))
                   ? s_xclk_values[idx] : s_xclk_values[0];
-    s_config_apply_target = CONFIG_APPLY_TARGET_XCLK;
-    s_config_apply_pending_idx = idx;
-    s_config_apply_timeout_ms_override = 0;  /* 응답성 전용 보정값 — 이 요청엔 안 씀 */
     node_hub_apply_cam_xclk_mhz(s_device_popup_node.mac, mhz);
-    if (node_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
-        ui_log_add("XCLK saved - applied automatically on CAM reconnect");
-        return;
-    }
-    show_config_apply_popup();
+    s_xclk_applied_idx = idx;
+    update_xclk_apply_enabled();
+    refresh_cam_config_state(NULL);
+    ui_log_add("XCLK saved - applied on next CAM wake");
 }
 
 static void cb_apply_response_interval(lv_event_t *e)
 {
     (void)e;
+    /* 2026-09-26(사용자 설계) — 저장만, 각 캠이 다음 웨이크에 CASK CONFIG로 받아감 */
     uint16_t idx = lv_dropdown_get_selected(s_response_interval_dd);
     uint32_t sec = (idx < (sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0])))
                    ? s_response_interval_values[idx] : s_response_interval_values[0];
-    s_config_apply_target = CONFIG_APPLY_TARGET_RESPONSE;
-    s_config_apply_pending_idx = idx;
-    /* 2026-08-23 — CAM은 새 값이 아니라 옛 값(지금 이 순간 저장돼있는 값)만큼 자고 있을 수
-     * 있으므로(예: 30초->Live), old/new 중 큰 쪽 기준으로 이번 팝업만 타임아웃을 늘림 —
-     * node_hub_apply_response_interval_sec()가 저장값을 새 값으로 바로 덮어쓰기 전에
-     * 옛 값을 먼저 읽어둬야 함 */
-    uint32_t old_sec = device_config_get_response_interval_sec();
-    uint32_t wait_sec = (old_sec > sec) ? old_sec : sec;
-    if (wait_sec > 30U) wait_sec = 30U;
-    s_config_apply_timeout_ms_override = wait_sec * 1000U + 3000U;
-    /* 반환값으로 판단(2026-08-10) — 이 설정은 특정 CAM 하나가 아니라 "지금 ACTIVE한 CAM
-     * 전부"가 대상이라 require_active_or_report()의 mac 하나 기준 검사가 안 맞음. 대상이
-     * 하나도 없으면(전부 WAITING) 값은 저장됐지만 응답 대기 팝업은 안 띄움 — 다른 4개
-     * 통신 기능과 동일 원칙 */
-    if (!node_hub_apply_response_interval_sec(sec)) {
-        /* 2026-09-07 버그수정 — 페어링된 CAM이 하나도 없으면(예: 센스만 연결된 상태)
-         * node_hub_apply_response_interval_sec()가 false를 반환하는데(ACK 대기 대상이
-         * CAM뿐이라, 센스는 매 사이클 자동으로 최신값을 받아가서 별도 ACK가 필요없음),
-         * 여기서 그냥 return해버리면 값은 실제로 저장됐는데도 s_response_interval_applied_idx가
-         * 안 갱신돼서 Apply 버튼이 영원히 활성 상태로 남았음(cb_apply_adaptive_response()의
-         * 즉시적용 패턴과 동일하게 여기서도 바로 반영) */
-        s_response_interval_applied_idx = idx;
-        update_response_apply_enabled();
-        ui_log_add("Response interval saved - applied automatically on CAM reconnect");
-        return;
-    }
-    show_config_apply_popup();
+    node_hub_apply_response_interval_sec(sec);
+    s_response_interval_applied_idx = idx;
+    update_response_apply_enabled();
+    refresh_cam_config_state(NULL);
+    ui_log_add("Response interval saved - applied on next CAM wake");
 }
 
 /* 2026-08-21 — AGC/AEC 스위치. 값이 불리언 하나뿐이고 진단용이라, 촬영주기/응답성의
@@ -6605,6 +6547,7 @@ void ui_init(void)
 
     refresh_clock(NULL);  /* 첫 타이머 tick 전까지 빈 채로 안 보이게 즉시 한 번 채움 */
     lv_timer_create(refresh_clock, 1000, NULL);
+    lv_timer_create(refresh_cam_config_state, 1000, NULL);  /* CAM 설정 적용 대기/적용됨 표시 */
 
     /* 2026-09-08(사용자 지시 — "상단바 통계 버튼을 없애고, 센서 판넬 Sensor 역상을 누르면
      * 열리게", "순서를... 시간-네트워크-상태-Settings로") — 통계 버튼 제거(빈 자리는 그냥

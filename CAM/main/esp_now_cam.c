@@ -744,6 +744,53 @@ void esp_now_cam_set_status_led(gpio_num_t pin)
  * 직전 보고 이후의 델타만 잡힘 */
 static uint32_t s_last_wake_hello_report_ms = 0;
 
+/* WAKE_HELLO 한 번(reliable 200ms×3) — fast path와 전송 중 체크인(esp_now_cam_checkin_during_transfer) 공용.
+ * notify_speaker=false면 소리 안 냄(전송 중 1초 주기 체크인이 매번 울리지 않게) */
+static esp_err_t send_wake_hello(bool notify_speaker)
+{
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    esp_now_wake_hello_t hello = {
+        .version             = ESP_NOW_LINK_VERSION,
+        .msg_type            = ESP_NOW_MSG_WAKE_HELLO,
+        .wake_reason          = (uint8_t)cam_node_get_wake_reason(),
+        .awake_uptime_ms      = now_ms - s_last_wake_hello_report_ms,
+        .sleep_interval_sec   = cam_node_get_response_interval_sec(),
+        .actual_last_sleep_sec = cam_node_get_last_actual_sleep_sec(),
+    };
+    s_last_wake_hello_report_ms = now_ms;
+    uint16_t batt_raw = 0, batt_mv = 0;
+    cam_node_read_battery_mv(&batt_raw, &batt_mv);
+    hello.battery_adc_raw = batt_raw;
+    hello.battery_mv      = batt_mv;
+
+    static const uint8_t s_wake_hello_ack_types[] = { ESP_NOW_MSG_WAKE_HELLO_ACK };
+    esp_now_wake_hello_ack_t ack;
+    if (notify_speaker) cam_speaker_notify(SPK_EVT_WAKE_HELLO);
+    /* 2026-08-26(순서 버그 수정) — CNTL이 WAKE_HELLO_ACK 직후 곧바로 CONFIG+SLEEP_NOW를
+     * 보내므로, 그게 도착하기 전에(전송 직전) 미리 대기 상태를 깨끗하게 함 — cam_node.c의
+     * cam_node_reset_sleep_now_state() 주석 참고 */
+    cam_node_reset_sleep_now_state();
+    return esp_now_reliable_request(s_hub_mac, &hello, sizeof(hello),
+                                    s_wake_hello_ack_types, 1,
+                                    200, 3,  /* 2026-09-05 — 100ms는 CNTL이 사진전송
+                                                뒷정리 등으로 순간 바쁠 때 너무 타이트해서
+                                                불필요한 재전송을 유발(node_hub.c의
+                                                WAKE_HELLO_ACK 재시도 수정과 짝) */
+                                    &ack, sizeof(ack), NULL);
+}
+
+/* 2026-09-26(사용자 설계 — 청크 전송 중에도 CASK) — 사진 전송 중에는 메인 루프가 전송 완료를 기다리느라
+ * 체크인을 안 해서, 그동안 콘이 명령(CASK 할일)을 줄 기회가 없었음. 전송 대기 중에 이걸 주기적으로 불러
+ * WAKE_HELLO만 보냄 — 콘이 CASK(CONFIG/할일/SLEEP_NOW)로 응답. 실패해도 폴백 스캔·상태 변경 없이 무시
+ * (전송은 계속되고, 다음 주기에 다시 체크인) */
+bool esp_now_cam_checkin_during_transfer(void)
+{
+    if (s_conn_state != CAM_CONN_PAIRED) return false;
+    esp_err_t err = send_wake_hello(false);
+    if (err != ESP_OK) ESP_LOGW(TAG, "전송 중 체크인 무응답 — 무시(전송 계속)");
+    return err == ESP_OK;
+}
+
 static bool esp_now_cam_try_wake_hello_fast_path(void)
 {
     if (!s_wake_hub_known) return false;
@@ -763,35 +810,7 @@ static bool esp_now_cam_try_wake_hello_fast_path(void)
     esp_now_rate_config_t rate_cfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };
     esp_now_set_peer_rate_config(s_hub_mac, &rate_cfg);
 
-    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    esp_now_wake_hello_t hello = {
-        .version             = ESP_NOW_LINK_VERSION,
-        .msg_type            = ESP_NOW_MSG_WAKE_HELLO,
-        .wake_reason          = (uint8_t)cam_node_get_wake_reason(),
-        .awake_uptime_ms      = now_ms - s_last_wake_hello_report_ms,
-        .sleep_interval_sec   = cam_node_get_response_interval_sec(),
-        .actual_last_sleep_sec = cam_node_get_last_actual_sleep_sec(),
-    };
-    s_last_wake_hello_report_ms = now_ms;
-    uint16_t batt_raw = 0, batt_mv = 0;
-    cam_node_read_battery_mv(&batt_raw, &batt_mv);
-    hello.battery_adc_raw = batt_raw;
-    hello.battery_mv      = batt_mv;
-
-    static const uint8_t s_wake_hello_ack_types[] = { ESP_NOW_MSG_WAKE_HELLO_ACK };
-    esp_now_wake_hello_ack_t ack;
-    cam_speaker_notify(SPK_EVT_WAKE_HELLO);
-    /* 2026-08-26(순서 버그 수정) — CNTL이 WAKE_HELLO_ACK 직후 곧바로 CONFIG+SLEEP_NOW를
-     * 보내므로, 그게 도착하기 전에(전송 직전) 미리 대기 상태를 깨끗하게 함 — cam_node.c의
-     * cam_node_reset_sleep_now_state() 주석 참고 */
-    cam_node_reset_sleep_now_state();
-    esp_err_t err = esp_now_reliable_request(s_hub_mac, &hello, sizeof(hello),
-                                              s_wake_hello_ack_types, 1,
-                                              200, 3,  /* 2026-09-05 — 100ms는 CNTL이 사진전송
-                                                          뒷정리 등으로 순간 바쁠 때 너무 타이트해서
-                                                          불필요한 재전송을 유발(node_hub.c의
-                                                          WAKE_HELLO_ACK 재시도 수정과 짝) */
-                                              &ack, sizeof(ack), NULL);
+    esp_err_t err = send_wake_hello(true);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WAKE_HELLO 무응답(3회) — 폴백 스캔으로 전환");
         s_conn_state = CAM_CONN_ORPHAN;  /* 재시도 중이었다면(이미 PAIRED였을 수 있음) 정리 */

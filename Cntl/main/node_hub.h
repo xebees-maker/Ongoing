@@ -101,6 +101,17 @@ typedef struct {
      * 때마다 직접 누적(CAM은 딥슬립마다 완전 재부팅이라 자기 사이클 수를 기억 못 함) */
     bool            has_deepsleep_stats;
     uint32_t        ds_cycle_count;
+    /* 2026-09-26 — 직전 WAKE_HELLO(_SENS) 원본과 받은 시각 — reliable 재전송(같은 바이트)을 새 사이클로
+     * 착각해 CASK를 두 벌 보내지 않도록(node_hub.c의 is_duplicate_hello_locked 참고) */
+    uint8_t         last_hello[64];
+    uint8_t         last_hello_len;
+    uint32_t        last_hello_ms;
+    /* 2026-09-26(사용자 설계 — 설정은 저장만, 캠이 깰 때 CASK CONFIG로 전달) — 가장 최근 CASK에서 보낸 CONFIG와,
+     * 캠이 ACK한 CONFIG(=캠에 실제로 적용된 값). UI가 "적용 대기/적용됨" 표시에 씀(unix_time은 비교 안 함) */
+    esp_now_cam_config_t cfg_sent;
+    esp_now_cam_config_t cfg_applied;
+    bool            cfg_sent_valid;
+    bool            cfg_applied_valid;
     /* 직전에 실제로 잔 시간(초) — 누적 아님, 매 리포트마다 그대로 덮어씀(2026-08-10, 사용자
      * 지시). CAM이 RTC_DATA_ATTR로 딥슬립 경계 너머 전달한 값(cam_node.c 참고) — 예전엔
      * "앞으로 잘 예정 시간"을 누적해서 아직 안 잔 걸 잔 걸로 잘못 보여주는 버그가 있었음 */
@@ -251,18 +262,10 @@ void node_hub_apply_cam_aec_enable(const uint8_t *mac, bool enable);
 /* 2026-08-21 — XCLK(MHz) 프리셋, 위와 동일 패턴(카메라별 설정) */
 void node_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz);
 
-/* 설정탭 Apply 버튼 진행팝업용 상태 폴링(2026-08-08) — photo_rx_get_capture_stage()와
- * 같은 패턴. IDLE=아직 아무 것도 안 보냄, SENT=push_cam_config_to() 호출됨(node_request가
- * 재시도 중), ACKED=CAM_CONFIG_ACK 수신 확인. clear()는 팝업 닫을 때 호출해서 다음 Apply를
- * 위해 IDLE로 되돌림. */
-typedef enum {
-    HUB_CONFIG_APPLY_IDLE = 0,
-    HUB_CONFIG_APPLY_SENT,
-    HUB_CONFIG_APPLY_ACKED,
-} hub_config_apply_stage_t;
-
-hub_config_apply_stage_t node_hub_get_config_apply_stage(void);
-void node_hub_config_apply_stage_clear(void);
+/* 2026-09-26(사용자 설계) — CAM 설정 적용 버튼은 값을 저장만 함(자고 있는 캠에 명령을 줄 수 없으므로 기다리지
+ * 않음). 캠이 깨어나 CASK로 CONFIG를 받고 ACK하면, 그때 보낸 값이 적용된 값 — out에 복사하고 true. 아직 이
+ * 캠의 ACK를 한 번도 못 받았으면 false */
+bool node_hub_get_cam_applied_config(const uint8_t *mac, esp_now_cam_config_t *out);
 
 /* 노드별 실제 무응답 타임아웃(ms) — device_config의 시스템 응답성 설정값 배수(여유마진).
  * node_hub_get_nodes()/is_paired()가 내부적으로 이걸 씀 — UI가 "몇 초 뒤에 끊김으로

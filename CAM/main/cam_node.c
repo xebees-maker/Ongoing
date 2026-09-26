@@ -865,8 +865,17 @@ void app_main(void)
             !dev_console_auto_capture_paused() &&
             time(NULL) >= s_next_capture_due_unix_time) {
             if (esp_now_cam_enqueue_auto_capture()) {
+                /* 2026-09-26(사용자 설계 — 청크 전송 중에도 CASK) — 전송이 끝날 때까지 기다리되, 그동안에도
+                 * Live 루프와 같은 주기로 체크인해서 콘이 명령(CASK 할일)을 줄 수 있게 함. 이때 오는
+                 * SLEEP_NOW는 전송 중이라 따르지 않음(전송이 끝난 뒤 아래에서 마지막 값으로 판단) */
+                uint32_t last_checkin_ms = (uint32_t)(esp_timer_get_time() / 1000);
                 while (esp_now_cam_is_transfer_busy()) {
-                    xSemaphoreTake(s_wake_recheck_sem, pdMS_TO_TICKS(1000));
+                    xSemaphoreTake(s_wake_recheck_sem, pdMS_TO_TICKS(CASK_LIVE_PACE_MS));
+                    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                    if (esp_now_cam_is_transfer_busy() && now_ms - last_checkin_ms >= CASK_LIVE_PACE_MS) {
+                        last_checkin_ms = now_ms;
+                        esp_now_cam_checkin_during_transfer();
+                    }
                 }
                 s_next_capture_due_unix_time = time(NULL) + (time_t)s_capture_interval_sec;
             }

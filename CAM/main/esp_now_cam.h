@@ -35,6 +35,9 @@ bool esp_now_cam_is_busy(void);
  *         타임아웃으로 재시도할 때도 이 함수 하나만 다시 부르면 됨(esp_now_cam_init()도
  *         내부적으로 이 함수를 씀) */
 bool esp_now_cam_reconnect(void);
+/* 2026-09-26 — 사진 전송 대기 중 가벼운 체크인(WAKE_HELLO만, 실패해도 폴백 없음) — 콘이 전송 중에도 CASK로
+ * 명령을 줄 수 있게. 페어링 상태가 아니면 아무것도 안 하고 false */
+bool esp_now_cam_checkin_during_transfer(void);
 
 /** @brief 광고(채널 스캔) 중단 — 스윕 실패로 잠들기로 정한 직후 호출. 재부팅(딥슬립 복귀) 전까지
  *  다시 광고 안 함 */

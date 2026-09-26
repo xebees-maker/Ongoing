@@ -236,23 +236,12 @@ static void add_peer_if_needed(const uint8_t *mac)
     (void)mac;
 }
 
-static volatile hub_config_apply_stage_t s_config_apply_stage = HUB_CONFIG_APPLY_IDLE;
-
-hub_config_apply_stage_t node_hub_get_config_apply_stage(void) { return s_config_apply_stage; }
-void node_hub_config_apply_stage_clear(void) { s_config_apply_stage = HUB_CONFIG_APPLY_IDLE; }
-
-/* 2026-08-08 — device_config(Cntl이 소유하는 CAM 설정)의 "현재 값"을 mac 하나에 그대로
- * 밀어줌. 페어링 시 자동 전송(recv_cb의 PAIR_ACK/WAKE_HELLO 핸들러)과, 설정탭 Apply 버튼
- * (node_hub_apply_*) 둘 다 이 함수 하나로 통일 — "지금 저장된 값을 보낸다"는 의미가
- * 완전히 같으므로 재사용.
- * 2026-09-18 버그수정(사용자 리포트 — "4005 뜸") — track_apply_progress 파라미터 추가.
- * 예전 주석은 "자동전송 때도 s_config_apply_stage가 갱신되지만 그때는 아무도 안 봐서
- * 무해"였는데, 이 가정이 응답성이 짧을 때(예: 3s) 깨짐 — 자동전송이 1초 안팎으로 자주
- * 일어나서, 사용자가 Apply를 누른 직후(진행팝업이 이 상태를 실제로 지켜보는 중)에도
- * 자동전송이 끼어들어 SENT를 다시 덮어써버릴 수 있었음(진행팝업이 원래 요청의 ACK를
- * 놓쳐 4005로 빠지는 원인으로 의심). 자동전송 호출부는 이제 이 상태를 아예 안 건드림 —
- * 명시적 Apply 흐름만 진행팝업 상태를 추적 */
-static void push_cam_config_to(const uint8_t *mac, bool track_apply_progress)
+/* 2026-08-08 — device_config(Cntl이 소유하는 CAM 설정)의 "현재 값"을 mac 하나에 그대로 밀어줌.
+ * 2026-09-26(사용자 설계) — 이제 CASK(WAKE_HELLO)와 페어링 완료(PAIR_ACK) 때만 불림 — 적용 버튼은 저장만 함
+ * (예전의 적용 즉시 전송+진행팝업 추적은 자고 있는 캠에 보내 무응답·4005를 냈음).
+ * 보낸 값을 노드에 기록(cfg_sent)해 두고 CAM_CONFIG_ACK가 오면 적용된 값(cfg_applied)으로 옮김.
+ * locked_node: 호출부가 s_nodes_mutex를 이미 쥐고 있으면 그 노드, 아니면 NULL(여기서 잠금) */
+static void push_cam_config_to(const uint8_t *mac, node_hub_node_t *locked_node)
 {
     esp_now_cam_config_t cfg = {
         .version                = ESP_NOW_LINK_VERSION,
@@ -270,7 +259,15 @@ static void push_cam_config_to(const uint8_t *mac, bool track_apply_progress)
         .unix_time              = rtc_sync_get_unix_time(),
     };
     static const uint8_t s_config_ack_types[] = { ESP_NOW_MSG_CAM_CONFIG_ACK };
-    if (track_apply_progress) s_config_apply_stage = HUB_CONFIG_APPLY_SENT;
+    if (locked_node) {
+        locked_node->cfg_sent = cfg;
+        locked_node->cfg_sent_valid = true;
+    } else {
+        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        node_hub_node_t *n = find_node(mac);
+        if (n) { n->cfg_sent = cfg; n->cfg_sent_valid = true; }
+        xSemaphoreGive(s_nodes_mutex);
+    }
     node_request_enqueue(mac, &cfg, sizeof(cfg), s_config_ack_types, 1, 800, 3, "CAM config");
     ESP_LOGI(TAG, "CAM_CONFIG_SET -> 촬영주기=%us 응답성=%us AGC=%d AEC=%d XCLK=%uMHz NACK라운드=%u 큐잉됨",
              (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec,
@@ -301,6 +298,26 @@ static void push_sens_config_to(const uint8_t *mac)
 /* recv_cb(ADVERTISE 핸들러)가 먼저 쓰고 실제 정의는 파일 뒤쪽(node_hub_request_pair
  * 근처)에 있음 — 전방 선언 */
 static void node_hub_pair(const uint8_t *mac);
+
+/* 2026-09-26 — 캠/센스는 WAKE_HELLO(_SENS)를 reliable(200ms×3)로 보내서, ACK가 늦으면 같은 바이트를 그대로
+ * 재전송함. ACK가 브→CAN→콘→CAN→브를 왕복하는 지금 경로에선 200ms를 넘을 때가 있어, 재전송을 새 사이클로
+ * 받으면 CASK(CONFIG/할일/SLEEP_NOW)가 두 벌 나감(실기: 1ms 간격 사이클 두 개, 뒤쪽 CAM config 무응답).
+ * 1초 안에 같은 내용이면 재전송으로 봄 — 호출부는 ACK만 다시 보내고 CASK는 생략.
+ * s_nodes_mutex를 쥔 상태로 호출 */
+#define WAKE_HELLO_DUP_WINDOW_MS 1000
+static bool is_duplicate_hello_locked(node_hub_node_t *n, const uint8_t *data, int len, uint32_t now_ms)
+{
+    if (len > (int)sizeof(n->last_hello)) return false;
+    bool dup = (len == n->last_hello_len &&
+                (now_ms - n->last_hello_ms) < WAKE_HELLO_DUP_WINDOW_MS &&
+                memcmp(n->last_hello, data, (size_t)len) == 0);
+    if (!dup) {
+        memcpy(n->last_hello, data, (size_t)len);
+        n->last_hello_len = (uint8_t)len;
+        n->last_hello_ms  = now_ms;
+    }
+    return dup;
+}
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
@@ -510,7 +527,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * 타이밍) — 그래야 재부팅한 CAM이 Kconfig 기본값이 아니라 사용자가 마지막으로
              * Apply한 값으로 곧바로 동작함 */
             if (kind_copy == HUB_NODE_KIND_CAM) {
-                push_cam_config_to(info->src_addr, false);  /* 자동전송 — 진행팝업 상태 안 건드림 */
+                push_cam_config_to(info->src_addr, NULL);
             } else if (kind_copy == HUB_NODE_KIND_SENS) {
                 push_sens_config_to(info->src_addr);
             }
@@ -535,6 +552,16 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         node_hub_node_t *n = find_node(info->src_addr);
         if (!n || !n->ever_paired || n->user_unpaired) {
             xSemaphoreGive(s_nodes_mutex);
+            return;
+        }
+        if (is_duplicate_hello_locked(n, data, len, now_ms)) {
+            char dup_name[ESP_NOW_LINK_NAME_LEN];
+            strncpy(dup_name, n->name, sizeof(dup_name) - 1);
+            dup_name[sizeof(dup_name) - 1] = '\0';
+            xSemaphoreGive(s_nodes_mutex);
+            esp_now_wake_hello_ack_t dup_ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_WAKE_HELLO_ACK };
+            can_bridge_relay_send(info->src_addr, (const uint8_t *)&dup_ack, sizeof(dup_ack));
+            ESP_LOGI(TAG, "WAKE_HELLO 재전송 <- %s — ACK만 다시 보냄(CASK 생략)", dup_name);
             return;
         }
         n->last_seen_ms    = now_ms;
@@ -576,7 +603,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * "이번엔 할일 메시지가 오는지 안 오는지" 추측할 필요가 없어짐(node_hub_queue_action
          * 주석 참고) */
         if (n->kind == HUB_NODE_KIND_CAM) {
-            push_cam_config_to(info->src_addr, false);  /* 자동전송 — 진행팝업 상태 안 건드림 */
+            push_cam_config_to(info->src_addr, n);  /* s_nodes_mutex 쥔 상태 */
         }
         node_hub_pending_action_t action;
         if (dequeue_pending_action_locked(n, &action)) {
@@ -603,6 +630,16 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         node_hub_node_t *n = find_node(info->src_addr);
         if (!n || !n->ever_paired || n->user_unpaired) {
             xSemaphoreGive(s_nodes_mutex);
+            return;
+        }
+        if (is_duplicate_hello_locked(n, data, len, now_ms)) {
+            char dup_name[ESP_NOW_LINK_NAME_LEN];
+            strncpy(dup_name, n->name, sizeof(dup_name) - 1);
+            dup_name[sizeof(dup_name) - 1] = '\0';
+            xSemaphoreGive(s_nodes_mutex);
+            esp_now_wake_hello_sens_ack_t dup_ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_WAKE_HELLO_SENS_ACK };
+            can_bridge_relay_send(info->src_addr, (const uint8_t *)&dup_ack, sizeof(dup_ack));
+            ESP_LOGI(TAG, "WAKE_HELLO_SENS 재전송 <- %s — ACK만 다시 보냄(CASK 생략)", dup_name);
             return;
         }
         n->last_seen_ms    = now_ms;
@@ -711,7 +748,14 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 끝내지만, 그건 node_request 모듈 내부 상태일 뿐이라 UI(설정탭 Apply 진행팝업)가
          * 볼 방법이 없음 — capture_stage와 같은 이유로 여기서 별도 폴링 상태를 갱신 */
         if (len < (int)sizeof(esp_now_cam_config_ack_t)) return;
-        s_config_apply_stage = HUB_CONFIG_APPLY_ACKED;
+        /* 2026-09-26 — 가장 최근에 보낸 CONFIG가 캠에 적용됨(UI "적용됨" 판정, node_hub_get_cam_applied_config) */
+        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        node_hub_node_t *cn = find_node(info->src_addr);
+        if (cn && cn->cfg_sent_valid) {
+            cn->cfg_applied = cn->cfg_sent;
+            cn->cfg_applied_valid = true;
+        }
+        xSemaphoreGive(s_nodes_mutex);
 
     }
 }
@@ -914,8 +958,8 @@ void node_hub_request_pair(const uint8_t *mac)
 
 void node_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
 {
+    /* 2026-09-26(사용자 설계) — 저장만. 캠이 깨어날 때 CASK CONFIG로 전달됨(push_cam_config_to 주석) */
     device_config_set_cam_capture_interval_sec(mac, sec);
-    push_cam_config_to(mac, true);
 }
 
 void node_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec)
@@ -927,45 +971,44 @@ void node_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec)
 /* 2026-08-21 — AGC/AEC On/Off(세로줄 노이즈 진단용), 촬영주기와 같은 카메라별 설정 패턴 */
 void node_hub_apply_cam_agc_enable(const uint8_t *mac, bool enable)
 {
-    device_config_set_agc_enable(mac, enable);
-    /* AGC/AEC는 진행팝업 없이 즉시반영이라(ui_main.c cb_agc_switch_changed 주석 참고)
-     * s_config_apply_stage를 지켜보는 사람이 없음 — false로 둬서 혹시 동시에 다른 설정
-     * (촬영주기/XCLK)의 진행팝업이 떠있어도 그쪽 추적을 방해 안 하게 함 */
-    push_cam_config_to(mac, false);
+    device_config_set_agc_enable(mac, enable);  /* 저장만 — 위 촬영주기와 같음 */
 }
 
 void node_hub_apply_cam_aec_enable(const uint8_t *mac, bool enable)
 {
-    device_config_set_aec_enable(mac, enable);
-    push_cam_config_to(mac, false);
+    device_config_set_aec_enable(mac, enable);  /* 저장만 */
 }
 
 void node_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz)
 {
-    device_config_set_xclk_mhz(mac, mhz);
-    push_cam_config_to(mac, true);
+    device_config_set_xclk_mhz(mac, mhz);  /* 저장만 */
 }
 
 bool node_hub_apply_response_interval_sec(uint32_t sec)
 {
+    /* 2026-09-26(사용자 설계) — 저장만. 모든 캠이 각자 다음 CASK CONFIG로 받아감. 반환값: 지금 페어링된 캠이
+     * 있으면 true(UI 안내 문구용) */
     device_config_set_response_interval_sec(sec);
-
-    /* 시스템 공통 설정이므로 지금 페어링된 CAM 전부에게 다시 보냄(
-     * "페어링된 노드 순회" 패턴과 동일) — SENS는 아직 CAM_CONFIG_SET을 이해 못 하므로 CAM만 */
-    uint8_t targets[NODE_HUB_MAX_NODES][6];
-    int target_count = 0;
+    bool any = false;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count; i++) {
-        if (s_nodes[i].kind == HUB_NODE_KIND_CAM && s_nodes[i].conn_state == NODE_CONN_PAIRED) {
-            memcpy(targets[target_count++], s_nodes[i].mac, 6);
-        }
+        if (s_nodes[i].kind == HUB_NODE_KIND_CAM && s_nodes[i].conn_state == NODE_CONN_PAIRED) { any = true; break; }
     }
     xSemaphoreGive(s_nodes_mutex);
+    return any;
+}
 
-    for (int i = 0; i < target_count; i++) {
-        push_cam_config_to(targets[i], true);
+bool node_hub_get_cam_applied_config(const uint8_t *mac, esp_now_cam_config_t *out)
+{
+    bool ok = false;
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    node_hub_node_t *n = find_node(mac);
+    if (n && n->cfg_applied_valid) {
+        *out = n->cfg_applied;
+        ok = true;
     }
-    return target_count > 0;
+    xSemaphoreGive(s_nodes_mutex);
+    return ok;
 }
 
 void node_hub_unpair(const uint8_t *mac)
