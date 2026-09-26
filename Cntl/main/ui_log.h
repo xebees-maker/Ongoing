@@ -5,7 +5,7 @@
 
 /* 통계 탭 화면에 띄우는 소형 로그 뷰어 — 관심 있는 지점(사진 요청/응답/디코드 등)만 골라서
  * 여기 씀. esp_log_set_vprintf처럼 전체를 가로채지 않음(2026-08-01, 사용자 지시 — 화면이
- * 작아서 다 넣으면 못 읽음). LVGL에 의존하지 않아서 esp_now_photo.c 같은 하위 모듈에서도
+ * 작아서 다 넣으면 못 읽음). LVGL에 의존하지 않아서 photo_rx.c 같은 하위 모듈에서도
  * 바로 쓸 수 있음 — 실제 화면 렌더링은 ui_main.c가 ui_log_get_snapshot()으로 가져가서 함. */
 void ui_log_init(void);
 void ui_log_add(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -42,9 +42,9 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
                                              전송 자체를 안 하고 재연결을 시도함 */
 /* 2008: 예전 UI_ERR_SLEEP_NOW_FAILED — 2026-08-25 CASK 재설계로 SLEEP_NOW_REQUEST
  * 메커니즘 자체가 제거되어 함께 삭제. 번호는 재사용하지 않고 비워둠 */
-#define UI_ERR_TX_QUEUE_FULL        2009  /* esp_now_tx 전송 큐가 가득 차서 요청이 시도조차
+#define UI_ERR_TX_QUEUE_FULL        2009  /* node_request 전송 큐가 가득 차서 요청이 시도조차
                                              못 해보고 버려짐(2026-08-26) — 예전엔 ESP_LOGW만
-                                             남기고 화면엔 안 보였음(esp_now_tx.c 참고) */
+                                             남기고 화면엔 안 보였음(node_request.c 참고) */
 
 #define UI_ERR_META_TOO_BIG         3001  /* CAM이 보낸 사진이 고정 수신 버퍼보다 큼 */
 #define UI_ERR_CHUNK_MISSING        3002  /* 청크 누락 — 재조립 실패 */

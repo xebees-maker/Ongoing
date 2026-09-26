@@ -18,7 +18,7 @@
  * 새로 측정 성공할 때마다 증가시켜 캐스크(WAKE_HELLO_SENS)에 실어보냄(사용자 지시: "측정
  * 값이 없으면 그냥 웨헬 보내고, 있으면 보내도록", "콘이 달라지지 않은 측정값을 처리할
  * 필요 없도록"). 딥슬립 실제 시간은 캠과 동일하게 SLEEP_NOW.sleep_sec 그 자체를 그대로 씀
- * (esp_now_node_get_last_sleep_sec()) — 콘 쪽(esp_now_hub.c의 send_cask_sleep_now())이
+ * (esp_now_node_get_last_sleep_sec()) — 콘 쪽(node_hub.c의 send_cask_sleep_now())이
  * MIN(응답성, 이 센스의 측정주기)을 계산해서 보내므로, 응답성<측정주기일 때는 측정주기보다
  * 자주 깨지만(콘의 제어 기회 확보용) 위 게이팅 덕분에 그 웨이크들에서 재측정하지는 않음.
  * 센서종류/채널구성(sensor_kind/chan_type)은 매 캐스크가 아니라 페어링(PAIR_ACK) 때 1회만
@@ -707,7 +707,7 @@ void app_main(void)
 
         /* 2026-09-05(사용자 지시로 정정) — 딥슬립 실제 시간은 캠과 동일하게 SLEEP_NOW.
          * sleep_sec 그 자체를 그대로 씀(노드 쪽은 특별취급 없음). "센스는 자기 측정주기마다
-         * 깨야 한다"는 요구는 콘 쪽(esp_now_hub.c의 send_cask_sleep_now())이 이 노드의
+         * 깨야 한다"는 요구는 콘 쪽(node_hub.c의 send_cask_sleep_now())이 이 노드의
          * 측정주기를 기준값으로 써서 sleep_sec을 계산하는 것으로 충족됨 — 그래서 여기서
          * 받는 값이 곧 측정주기이고, 별도로 로컬 값을 다시 끼워 넣지 않음(그래야 실수로
          * "실제 잠든 시간 > 측정주기"가 되는 경로 자체가 없어짐) */

@@ -19,7 +19,7 @@ static const char *TAG = "device_config";
 /* 2026-08-29(사용자 지시: "여러 개 비번 저장 가능하지?") — SSID별로 비밀번호를 기억. 슬롯[0]이
  * 항상 "가장 최근에 set된(=활성)" 자격증명 — set할 때마다 해당 항목을 맨 앞으로 옮기는
  * LRU 방식이라 device_config_get_sta_ssid/password()의 기존 "활성 값 하나" 의미가 그대로
- * 유지됨(esp_now_hub.c 등 기존 호출부 변경 불필요) */
+ * 유지됨(node_hub.c 등 기존 호출부 변경 불필요) */
 #define STA_CREDENTIAL_SLOTS 8
 
 typedef struct __attribute__((packed)) {
@@ -79,7 +79,7 @@ typedef struct __attribute__((packed)) {
                                  (20MHz부터 노이즈 심해짐). UI 드롭다운은 그대로 5/10/20/24MHz
                                  유지, 빌드 시 기본값만 변경(사용자 지시) */
 /* 2026-09-18(모델 라이프사이클 원칙 리팩토링) — Sens 측정주기가 미설정일 때 쓸 디폴트.
- * esp_now_hub.c와 ui_main.c가 각자 "0이면 내가 아는 숫자로" 하드코딩했던 게(15와 60, 서로
+ * node_hub.c와 ui_main.c가 각자 "0이면 내가 아는 숫자로" 하드코딩했던 게(15와 60, 서로
  * 다른 값!) 오늘 지적받은 문제의 원인 — 이 #define은 딱 한 번, 아래 s_sens_sample_interval_
  * default_sec 초기화에만 쓰이고, 그 외 모든 코드는 이 변수(또는 getter)만 읽음 */
 #define SENS_SAMPLE_INTERVAL_SEC_DEFAULT 15
@@ -368,14 +368,14 @@ const char *device_config_find_sta_password(const char *ssid)
     return NULL;
 }
 
-#define NACK_MAX_ROUNDS_DEFAULT 3  /* esp_now_photo.c 기존 PHOTO_NACK_MAX_ROUNDS/esp_now_cam.c
+#define NACK_MAX_ROUNDS_DEFAULT 3  /* photo_rx.c 기존 PHOTO_NACK_MAX_ROUNDS/esp_now_cam.c
                                        기존 MAX_NACK_ROUNDS와 동일 값 — 이제 이 한 곳이 유일한
                                        출처(위 device_config_get_nack_max_rounds 선언부 참고) */
 
 uint8_t device_config_get_nack_max_rounds(void) { return NACK_MAX_ROUNDS_DEFAULT; }
 
 /* 2026-09-18(모델 라이프사이클 원칙 리팩토링 — "값이 없음"이라는 상태 자체를 없앰) — 예전엔
- * 미설정 시 0(sentinel)을 반환해서, 호출부(esp_now_hub.c/ui_main.c)가 각자 따로 "0이면
+ * 미설정 시 0(sentinel)을 반환해서, 호출부(node_hub.c/ui_main.c)가 각자 따로 "0이면
  * 내 나름의 기본값" 폴백을 하드코딩했고 그 값이 서로 달랐던 게(15 vs 60) 오늘 지적받은
  * 근본원인. 이제 미설정이어도 항상 유효한 값(s_sens_sample_interval_default_sec)을 반환 —
  * 호출부는 반환값을 그대로 신뢰하면 됨. "명시적으로 설정한 적 있는가"가 별도로 필요하면
@@ -464,7 +464,7 @@ bool device_config_is_known_device(const uint8_t *mac)
     return find_alias_slot(mac) != NULL;
 }
 
-/* 페어링 성공 시 esp_now_hub가 호출 — 이미 슬롯이 있으면(기존 alias 보존) 아무 것도 안 하고
+/* 페어링 성공 시 node_hub가 호출 — 이미 슬롯이 있으면(기존 alias 보존) 아무 것도 안 하고
  * 저장도 안 함(매 페어링마다 불필요한 flash write 방지), 없을 때만 빈 alias로 새로 만듦 */
 void device_config_mark_known_device(const uint8_t *mac)
 {

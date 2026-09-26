@@ -5,8 +5,8 @@
  * @brief   Cntl이 소유하는 CAM/SENS 원격 설정값의 단일 저장소(2026-08-08 설계).
  *          CAM/SENS는 이 값을 로컬에 저장하지 않음 — 페어링될 때마다 Cntl이 여기서 읽어서
  *          CAM_CONFIG_SET으로 밀어줌. 사용자가 설정탭에서 값을 바꾸면(Apply) 여기 저장되고,
- *          현재 페어링된 CAM에도 즉시 전송됨(esp_now_hub_apply_cam_capture_interval_sec/
- *          esp_now_hub_apply_response_interval_sec 참고).
+ *          현재 페어링된 CAM에도 즉시 전송됨(node_hub_apply_cam_capture_interval_sec/
+ *          node_hub_apply_response_interval_sec 참고).
  *
  *          촬영주기/AGC/AEC/XCLK는 카메라별(mac) 설정(배터리/SD/화질 트레이드오프가 카메라
  *          마다 다를 수 있음), 응답성/적응형 반응시간은 시스템 전체 공통 설정(연결성/절전
@@ -35,7 +35,7 @@ uint32_t device_config_get_response_interval_sec(void);
 void     device_config_set_response_interval_sec(uint32_t sec);
 
 /* 적응형 반응시간(초, 2026-08-10) — 마지막 사용자 조작(지금촬영/목록갱신/삭제/전체삭제/
- * 사진선택) 이후 이만큼 조용하면 esp_now_hub가 현재 페어링된 CAM에 SLEEP_NOW를 보내
+ * 사진선택) 이후 이만큼 조용하면 node_hub가 현재 페어링된 CAM에 SLEEP_NOW를 보내
  * 유휴여유를 기다리지 않고 즉시 재움. 기본값 10초. CAM에는 전송 안 함(Cntl 내부 판단
  * 기준일 뿐) */
 uint32_t device_config_get_adaptive_response_sec(void);
@@ -54,8 +54,8 @@ uint8_t device_config_get_xclk_mhz(const uint8_t *mac);
 void    device_config_set_xclk_mhz(const uint8_t *mac, uint8_t mhz);
 
 /* WiFi 모드(2026-08-29) — false=종속(STA, 기존 WIFI_SSID/PASSWORD 또는 아래 sta_ssid로 접속),
- * true=독립(AP, esp_now_hub.c의 CNTL_AP_SSID/PASSWORD/CHANNEL로 자체 AP). 기본값 false(STA) —
- * 기존 동작과 동일하게 유지. esp_now_hub.c가 부팅 시 이 값을 읽어 런타임에 분기(예전
+ * true=독립(AP, node_hub.c의 CNTL_AP_SSID/PASSWORD/CHANNEL로 자체 AP). 기본값 false(STA) —
+ * 기존 동작과 동일하게 유지. node_hub.c가 부팅 시 이 값을 읽어 런타임에 분기(예전
  * CNTL_WIFI_STANDALONE_AP_TEST 컴파일타임 스위치를 대체) */
 bool device_config_get_wifi_ap_mode(void);
 void device_config_set_wifi_ap_mode(bool ap_mode);
@@ -63,8 +63,8 @@ void device_config_set_wifi_ap_mode(bool ap_mode);
 /* STA 자격증명(2026-08-29, 여러 개 저장 가능하도록 재설계 — 사용자 지시) — 내부적으로
  * PSRAM에 할당된 슬롯 배열(device_config.c의 STA_CREDENTIAL_SLOTS)로 저장, set할 때마다
  * 그 SSID를 맨 앞(=활성)으로 옮김. get_sta_ssid/get_sta_password는 항상 "가장 최근에
- * set된(=활성)" 슬롯을 가리켜서 기존 호출부(esp_now_hub.c 등)는 그대로 씀. 빈 문자열이면
- * 미설정 상태 — 이땐 esp_now_hub.c가 기존 하드코딩 WIFI_SSID/WIFI_PASSWORD로 폴백 */
+ * set된(=활성)" 슬롯을 가리켜서 기존 호출부(node_hub.c 등)는 그대로 씀. 빈 문자열이면
+ * 미설정 상태 — 이땐 node_hub.c가 기존 하드코딩 WIFI_SSID/WIFI_PASSWORD로 폴백 */
 const char *device_config_get_sta_ssid(void);
 const char *device_config_get_sta_password(void);
 void        device_config_set_sta_credentials(const char *ssid, const char *password);
@@ -84,7 +84,7 @@ uint8_t device_config_get_nack_max_rounds(void);
  * CO2/암모니아 등) 캠의 촬영주기처럼 전역 하나로 두지 않고 STA 자격증명과 같은 mac 키
  * 슬롯 배열로 저장(사용자 지시: "센스마다 만들 필요도 있겠는데"). 2026-09-18: 없는 mac을
  * 조회해도 0(sentinel) 대신 항상 유효한 디폴트를 반환 — 호출부는 반환값을 그대로 신뢰할 것,
- * 0-체크로 각자 폴백하지 말 것(과거에 esp_now_hub.c/ui_main.c가 서로 다른 폴백값을 써서
+ * 0-체크로 각자 폴백하지 말 것(과거에 node_hub.c/ui_main.c가 서로 다른 폴백값을 써서
  * 불일치가 생겼던 문제). "명시적으로 설정한 적 있는가"는 아래 _is_set()으로 따로 확인 */
 uint32_t device_config_get_sens_sample_interval_sec(const uint8_t *mac);
 void     device_config_set_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec);
@@ -99,7 +99,7 @@ bool     device_config_sens_sample_interval_is_set(const uint8_t *mac);
 const char *device_config_get_alias(const uint8_t *mac);
 void        device_config_set_alias(const uint8_t *mac, const char *alias);
 bool        device_config_is_known_device(const uint8_t *mac);
-/* 페어링 성공 시 esp_now_hub가 호출 — 슬롯이 없으면 alias 빈 문자열로 새로 만듦(이미 있으면
+/* 페어링 성공 시 node_hub가 호출 — 슬롯이 없으면 alias 빈 문자열로 새로 만듦(이미 있으면
  * 손 안 댐, 기존 alias 보존) */
 void        device_config_mark_known_device(const uint8_t *mac);
 

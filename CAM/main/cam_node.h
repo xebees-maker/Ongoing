@@ -91,7 +91,7 @@ bool cam_node_ensure_camera_ready(void);
 /** @brief 배터리 전압 읽기(2026-08-22) — CH32V003 IO익스팬더 ADC(0x06) 원시값을 읽어
  *         스키매틱 분배비(R39=200K/R42=100K, ×3)와 CH32V003 ADC 추정 기준(10bit/3.3V)으로
  *         mV 환산. 실패 시 false(out_raw/out_mv 미정의) — mV->%% 변환은 Cntl 쪽 공통함수가
- *         담당(esp_now_hub.c), CAM은 mV까지만 계산해서 DEEP_SLEEP_STATS에 실어 보냄.
+ *         담당(node_hub.c), CAM은 mV까지만 계산해서 DEEP_SLEEP_STATS에 실어 보냄.
  * @param out_raw CH32V003 ADC 원시값(진단/실측대조용, 그대로 같이 보고됨)
  * @param out_mv  환산된 배터리 전압(mV)
  */

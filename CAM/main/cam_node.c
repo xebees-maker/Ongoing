@@ -104,11 +104,11 @@ static const char *TAG = "cam_node";
  * 기반으로 돌면 된다" — 로컬 저장 자체가 없다는 뜻). CAM은 그냥 부팅 시 Kconfig 기본값으로
  * 시작했다가, 페어링될 때마다 Cntl이 CAM_CONFIG_SET으로 보내주는 값으로 갱신만 함 — 재부팅
  * 되면 다시 Kconfig 기본값에서 시작하고 다음 페어링 때 Cntl이 다시 채워줌. 값을 실제로
- * 기억하는 주체는 Cntl(/assets/settings.bin) — esp_now_hub.c 참고.
+ * 기억하는 주체는 Cntl(/assets/settings.bin) — node_hub.c 참고.
  * (1차 설계였던 SD카드 저장은 두 가지 문제로 폐기: 1) 이 원칙과 안 맞음 2) SD 접근 자체가
  * ESP-NOW 동시활동과 겹치면 힙이 깨지는 걸 실기에서 발견함 — 아래 clamp는 그 안전장치로
  * 계속 남겨둠, 값의 출처가 뭐든 항상 유효함)
- * 2026-08-10 Deep Sleep 전환 — 이 값이 곧 딥슬립 사이클 길이(esp_now_hub.c 페어링 전까지는
+ * 2026-08-10 Deep Sleep 전환 — 이 값이 곧 딥슬립 사이클 길이(node_hub.c 페어링 전까지는
  * 이 기본값으로 한두 사이클 돔).
  * 2026-08-11, 사용자 지시로 0("즉시"/Live, 딥슬립 자체를 안 함)으로 변경 — Cntl한테서
  * 아직 실제 설정을 못 받은 최초 부팅/페어링 대기 구간엔 어떤 고정 주기로 자다깨다
@@ -326,7 +326,7 @@ uint8_t cam_node_get_wake_reason(void) { return (uint8_t)s_wake_reason; }
  * "판정"은 WAKE_HELLO_ACK 하나만으로 끝나는 게 아니라, CASK 전체(CONFIG->할일->SLEEP_NOW)가
  * 다 와야 비로소 성립한다 — 즉 이건 새 타이머 개념이 아니라, WAKE_HELLO의 100ms×3 재시도
  * 판정 범위를 CASK 전체로 넓힌 것. 값은 CNTL이 한 사이클에 순차로 보낼 수 있는 전부의 합
- * (2026-08-26 esp_now_tx.c의 effective_max_attempts 시간기반 부풀리기도 같은 날 삭제되어
+ * (2026-08-26 node_request.c의 effective_max_attempts 시간기반 부풀리기도 같은 날 삭제되어
  * 이제 각 메시지가 호출부가 넘긴 고정 횟수만 씀) — CONFIG 800ms×3=2.4s + 할일 중 가장 큰
  * PHOTO_LIST_REQUEST 3000ms×3=9s + SLEEP_NOW 300ms×3=0.9s = 최소 12.3s, 여유를 더해 15초 */
 #define CASK_TIMEOUT_MS                    15000
@@ -749,7 +749,7 @@ void app_main(void)
      * 초기화 비용(워밍업 포함) 자체가 한 번도 발생하지 않고 그대로 다시 잠듦 */
 
     /* Cntl과는 ESP-NOW로만 붙음 — 로컬 HTTP 대시보드도, AP도 안 씀(Cntl도 STA,
-     * esp_now_hub.c:171). AP 모드였을 때는 100ms마다 비콘을 계속 내보내야 했는데,
+     * node_hub.c:171). AP 모드였을 때는 100ms마다 비콘을 계속 내보내야 했는데,
      * 지금촬영 중 esp_camera_fb_get()의 긴 블로킹과 겹치면서 WiFi 스택 내부
      * (ieee80211_hostap_send_beacon_process, AP 전용 코드)가 실기에서 크래시하는 걸
      * 확인함(2026-08-01, Guru Meditation LoadProhibited) — max_connection=0으로 닫아도

@@ -1,6 +1,6 @@
-#include "esp_now_tx.h"
+#include "node_request.h"
 #include "can_bridge.h"
-#include "esp_now_hub.h"
+#include "node_hub.h"
 #include "ui_log.h"
 
 #include <string.h>
@@ -11,13 +11,13 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
-static const char *TAG = "esp_now_tx";
+static const char *TAG = "node_request";
 
 /* 2026-08-10 도입 -> 2026-08-26 삭제(사용자 지시) — 원래는 "CAM이 자고 있을 때 도착한 명령도
  * CAM의 다음 자연스러운 웨이크까지는 재시도해서 언젠가 닿게 하자"는 취지로, 응답성 설정
  * 기준으로 재시도 횟수를 시간 단위로 부풀렸었음(effective_max_attempts, 최대 30초+3초
  * 마진까지 — 즉 메시지 하나가 최대 33초까지 걸릴 수 있었음). 그런데 CASK 재설계 이후
- * esp_now_tx_enqueue()를 부르는 모든 경우(CONFIG/할일/SLEEP_NOW/PAIR_REQUEST 등)가 전부
+ * node_request_enqueue()를 부르는 모든 경우(CONFIG/할일/SLEEP_NOW/PAIR_REQUEST 등)가 전부
  * 캠이 방금 먼저 연락해왔을 때(WAKE_HELLO/ADVERTISE)의 응답으로만 나가서, 부르는 그 순간
  * 캠이 깨어있다는 게 이미 보장됨 — "자고 있을지 모르니 시간을 두고 재시도"할 이유 자체가
  * 없어짐. 이 시간 기반 부풀리기가 오히려 SLEEP_NOW 하나가 못 가면 캠이 CASK_SILENCE_TIMEOUT_MS
@@ -48,12 +48,12 @@ static const char *TAG = "esp_now_tx";
  * 들어오는데, 옛 8은 노드 3대만 겹쳐도 꽉 참. 30개 이상으로 늘림(사용자 지정) */
 #define TX_QUEUE_LEN   32
 
-/* 2026-09-10(재설계) — 기기별 워커 슬롯 수. esp_now_tx_enqueue()로 들어오는 mac은 전부
- * esp_now_hub.c가 이미 등록해둔 노드(ESP_NOW_HUB_MAX_NODES칸)에서만 나오므로, 동시에
+/* 2026-09-10(재설계) — 기기별 워커 슬롯 수. node_request_enqueue()로 들어오는 mac은 전부
+ * node_hub.c가 이미 등록해둔 노드(NODE_HUB_MAX_NODES칸)에서만 나오므로, 동시에
  * 존재할 수 있는 서로 다른 mac 수도 이 값을 절대 못 넘음 — 상시 태스크 사전할당이 아니라
  * 단순 "북키핑용 배열" 크기라 메모리 비용은 무시할 수준(태스크 스택은 실제로 만들어질
  * 때만 소비됨) */
-#define TX_MAX_WORKERS       ESP_NOW_HUB_MAX_NODES
+#define TX_MAX_WORKERS       NODE_HUB_MAX_NODES
 #define TX_WORKER_QUEUE_LEN  8      /* WAKE_HELLO 1회당 최대 3개(CONFIG/할일/SLEEP_NOW) +
                                      * 여유 — 이 정도면 한 기기에 몰려도 넉넉함 */
 #define TX_WORKER_IDLE_MS    2000   /* 이 시간 동안 새 항목이 없으면 워커가 스스로 종료 */
@@ -168,7 +168,7 @@ static void tx_worker_task(void *arg)
              * 이제 호출부마다 자기 상황에 맞는 전용 에러(UI_ERR_FETCH_NORESPONSE/
              * _LIST_NORESPONSE/_CAPTURE_NORESPONSE/_CONFIG_NORESPONSE 등, 각자의 상태머신
              * 폴링에서 이미 처리)가 있으므로 여기서는 진단용 로그만 남기고 UI 에러는 안 띄움.
-             * 자동 재연결(esp_now_hub_pair)처럼 애초에 사용자에게 알릴 필요 없는 백그라운드
+             * 자동 재연결(node_hub_pair)처럼 애초에 사용자에게 알릴 필요 없는 백그라운드
              * 요청도 있어서, 범용 계층에서 일괄 판단하는 게 애초에 무리였음 */
             ESP_LOGW(TAG, "%s 무응답(%d회 시도)", item.what, item.max_attempts);
         } else {
@@ -228,8 +228,8 @@ static void tx_dispatcher_task(void *arg)
         } else {
             w = find_free_slot_locked();
             if (!w) {
-                /* 이론상 도달 불가 — mac은 항상 esp_now_hub.c에 이미 등록된 노드(최대
-                 * ESP_NOW_HUB_MAX_NODES개)에서만 오므로 동시 워커 수도 그 이상 못 감 */
+                /* 이론상 도달 불가 — mac은 항상 node_hub.c에 이미 등록된 노드(최대
+                 * NODE_HUB_MAX_NODES개)에서만 오므로 동시 워커 수도 그 이상 못 감 */
                 ESP_LOGE(TAG, "%s: 워커 슬롯 부족(%d개 초과) — 버림", item.what, TX_MAX_WORKERS);
             } else {
                 /* 2026-09-21 — 큐 저장소/태스크 스택/큐 제어블록은 PSRAM, TCB만 Internal
@@ -255,7 +255,7 @@ static void tx_dispatcher_task(void *arg)
                     memcpy(w->mac, item.mac, sizeof(w->mac));
                     w->in_use = true;
                     xQueueSend(w->queue, &item, 0);  /* 태스크 생성 전에 미리 넣어둠 — 유실 없음 */
-                    xTaskCreateStatic(tx_worker_task, "tx_worker", TX_WORKER_STACK / sizeof(StackType_t),
+                    xTaskCreateStatic(tx_worker_task, "node_req_w", TX_WORKER_STACK / sizeof(StackType_t),
                                        w, TX_WORKER_PRIORITY, w->task_stack, w->task_tcb);
                 }
             }
@@ -264,7 +264,7 @@ static void tx_dispatcher_task(void *arg)
     }
 }
 
-void esp_now_tx_init(void)
+void node_request_init(void)
 {
     /* 2026-09-21(LVGL 제외 모든 버퍼는 PSRAM 우선) — 디스패처 입구 큐/태스크 스택도 부팅 시
      * 1회만 생기고 평생 유지되는 단일 인스턴스라 power_relay.c의 패턴을 그대로 씀: TCB만
@@ -284,15 +284,15 @@ void esp_now_tx_init(void)
     static StaticTask_t s_tx_dispatcher_tcb;
     StackType_t *tx_dispatcher_stack = heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
     if (tx_dispatcher_stack) {
-        xTaskCreateStatic(tx_dispatcher_task, "esp_now_tx_disp", 3072, NULL, 17,
+        xTaskCreateStatic(tx_dispatcher_task, "node_req_disp", 3072, NULL, 17,
                            tx_dispatcher_stack, &s_tx_dispatcher_tcb);
     } else {
         ESP_LOGE(TAG, "디스패처 태스크 스택 PSRAM 할당 실패 — 내부 RAM으로 폴백");
-        xTaskCreate(tx_dispatcher_task, "esp_now_tx_disp", 3072, NULL, 17, NULL);
+        xTaskCreate(tx_dispatcher_task, "node_req_disp", 3072, NULL, 17, NULL);
     }
 }
 
-void esp_now_tx_enqueue(const uint8_t *mac, const void *req, size_t req_len,
+void node_request_enqueue(const uint8_t *mac, const void *req, size_t req_len,
                          const uint8_t *accept_reply_types, size_t accept_reply_types_count,
                          uint32_t timeout_ms, int max_attempts, const char *what)
 {

@@ -97,7 +97,7 @@ static volatile bool s_transfer_busy = false;
  * 2026-08-05 — DONE 확인 대기용이었던 s_nack_queue/ESP_NOW_MSG_PHOTO_CHUNK_NACK 수신 경로는
  * esp_now_reliable_request()로 대체되어 제거됨(send_photo_from_buffer_sr() 참고) — 이제 DONE_ACK가
  * reliable 레이어의 응답으로 직접 돌아옴 */
-/* 2026-08-21 — 예전엔 이 값을 여기 상수로 하드코딩하고 Cntl(esp_now_photo.c)도 똑같은 값을
+/* 2026-08-21 — 예전엔 이 값을 여기 상수로 하드코딩하고 Cntl(photo_rx.c)도 똑같은 값을
  * 따로 하드코딩했었음. 두 쪽 다 "몇 라운드째인가"를 각자 판단 기준으로 쓰는 값이라 반드시
  * 같아야 하는데, 그 전제가 코드로 강제되지 않아서 실제로 off-by-one이 나서 어긋난 적 있음
  * (Cntl이 CAM은 이미 포기한 라운드를 계속 기다리는 버그, 3006 오탐으로 나타남) — 이제
@@ -605,7 +605,7 @@ static void resolve_name(void)
      * 이유도 없었음(이름 길이 여유 충분, ESP_NOW_LINK_NAME_LEN=16)(2026-08-05, 사용자 지적) */
     /* 2026-08-22 — 전력로그 한 줄이 화면폭을 넘겨서 "..."로 잘리는 문제(사용자 지적) —
      * "Cam-" 4글자를 "C" 1글자로 줄임(사용자 지시). classify_name()도 같이 맞춰야 함
-     * (esp_now_hub.c) */
+     * (node_hub.c) */
     snprintf(s_name, sizeof(s_name), "C%02X%02X%02X", s_mac[3], s_mac[4], s_mac[5]);
 }
 
@@ -661,7 +661,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         } else {
             /* 2026-08-04 — 예전엔 세대번호만 안 올리고 큐에는 그대로 다시 넣었음. ESP-NOW
              * 물리계층 자동 재전송으로 "같은" 요청이 두 번 들어오는 경우뿐 아니라, Cntl이
-             * 신뢰성을 위해 같은 요청을 의도적으로 여러 번 보내는 경우(아래 esp_now_photo.c
+             * 신뢰성을 위해 같은 요청을 의도적으로 여러 번 보내는 경우(아래 photo_rx.c
              * 참고)에도 그대로 큐에 쌓여서 같은 사진/배치를 몇 번씩 중복 전송하고 있었음 —
              * 진짜 새 요청이 아니면 아예 무시 */
             ESP_LOGI(TAG, "PHOTO_REQUEST 중복 수신(mode=%d param=%u) — 무시", req.mode, (unsigned)req.param);
@@ -724,7 +724,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * enter_advertising()으로 채널 스캔부터 다시 했는데, 채널이 안 바뀐 이상 불필요한
      * 낭비였음) */
     /* 2026-08-25(CASK 재설계) — UNPAIR은 유일하게 유지된 명시적 단발 통보(사용자의 실시간
-     * 조작이라 즉각 반영돼야 함, reliable로 승격됨 — esp_now_hub.c 참고). 이제 reliable
+     * 조작이라 즉각 반영돼야 함, reliable로 승격됨 — node_hub.c 참고). 이제 reliable
      * 요청이라 매칭되는 ACK를 반드시 돌려줘야 CNTL 쪽이 도달을 확인함 */
     if (msg_type == ESP_NOW_MSG_UNPAIR) {
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_unpair_t)) return;
@@ -744,7 +744,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     if (msg_type == ESP_NOW_MSG_CASK_WORK_NONE) {
         /* 2026-08-26(사용자 지시) — CASK "할일" 단계가 비어있을 때 오는 명시적 신호. 특별히
          * 할 일은 없고 ACK만 돌려줌 — 이게 옴으로써 캠은 이번 CASK엔 사진요청 등 큐잉된
-         * 액션이 없었다는 걸 확실히 앎(추측 불필요, esp_now_hub.c의 dequeue_pending_action_locked
+         * 액션이 없었다는 걸 확실히 앎(추측 불필요, node_hub.c의 dequeue_pending_action_locked
          * 참고) */
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_cask_work_none_t)) return;
         esp_now_cask_work_none_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE_ACK };
@@ -894,7 +894,7 @@ static bool esp_now_cam_try_wake_hello_fast_path(void)
                                               s_wake_hello_ack_types, 1,
                                               200, 3,  /* 2026-09-05 — 100ms는 CNTL이 사진전송
                                                           뒷정리 등으로 순간 바쁠 때 너무 타이트해서
-                                                          불필요한 재전송을 유발(esp_now_hub.c의
+                                                          불필요한 재전송을 유발(node_hub.c의
                                                           WAKE_HELLO_ACK 재시도 수정과 짝) */
                                               &ack, sizeof(ack), NULL);
     if (err != ESP_OK) {

@@ -19,7 +19,7 @@
  * CAM_DEEPSLEEP_RETRY_SLEEP_SEC가 이 값을 그대로 씀). 이걸 CNTL/CAM/Sens가 전부 참조하는
  * 공용 헤더에 두는 이유 — CNTL의 PAIR_REQUEST 재시도 총 구간이 이 값의 2배는 돼야 사용자가
  * 언제 버튼을 누르든 노드의 깨어있는 위상과 반드시 겹침(나이키스트 원칙, 사용자 지시 —
- * esp_now_hub.c의 PAIR_REQUEST_RETRY_ATTEMPTS 계산 참고). CNTL이 이 상수를 몰래 다른 값으로
+ * node_hub.c의 PAIR_REQUEST_RETRY_ATTEMPTS 계산 참고). CNTL이 이 상수를 몰래 다른 값으로
  * 따로 들고 있으면 다시 어긋날 수 있어서 CAM/Sens가 실제로 쓰는 값과 반드시 같은 자리에서
  * 가져와야 함 */
 #define ESP_NOW_NODE_UNPAIRED_RETRY_SEC 3
@@ -42,7 +42,7 @@ typedef enum {
                                         * 알고 keepalive를 계속 보냄, 사용자가 실기로 확인).
                                         * (2026-08-25) CASK 재설계에서도 유일하게 유지된 명시적
                                         * 단발 통보 — 사용자의 실시간 조작이라 즉각 반영돼야
-                                        * 하므로 reliable 스택으로 승격(esp_now_hub.c 참고) */
+                                        * 하므로 reliable 스택으로 승격(node_hub.c 참고) */
     ESP_NOW_MSG_CAPTURE_STATUS = 12,       /* CAM -> Cntl: 지금촬영 진행상태(접수/성공/실패) —
                                              * Cntl UI가 진행 팝업에 단계별로 표시하려고 추가 */
     ESP_NOW_MSG_PHOTO_LIST_REQUEST = 13,   /* Cntl -> CAM: 저장된 사진 "목록"만 요청(내용 전송 없음) */
@@ -124,7 +124,7 @@ typedef enum {
     ESP_NOW_MSG_SLEEP_NOW_ACK = 35,          /* CAM -> Cntl: SLEEP_NOW 수신 확인(2026-08-10 —
                                               * "chunk는 SR, 나머지는 reliable stack" 원칙에 따라
                                               * fire-and-forget에서 전환. Cntl은 이제
-                                              * esp_now_tx(esp_now_reliable_request)로 보내고 이
+                                              * node_request(esp_now_reliable_request)로 보내고 이
                                               * ACK을 기다림 — 유실 시 재시도, 매 사이클 진짜로
                                               * 전달됐는지 확인 가능해짐(격주기로 유실되던 문제
                                               * 진단 목적) */
@@ -191,7 +191,7 @@ typedef enum {
     ESP_NOW_MSG_UNPAIR_ACK = 48,
     /* Cntl -> CAM(2026-08-26, 사용자 지시) — CASK의 "할일" 단계가 항상 고정된 패킷 수로
      * 나가게 하는 명시적 "이번엔 대기 중인 사용자 액션 없음" 신호. 노드별 대기 큐
-     * (esp_now_hub_queue_action() 참고)가 비어있으면 실제 액션 메시지(PHOTO_REQUEST 등)
+     * (node_hub_queue_action() 참고)가 비어있으면 실제 액션 메시지(PHOTO_REQUEST 등)
      * 대신 이걸 보냄 — "할일 단계가 왔는지 안 왔는지"를 캠이 추측할 필요가 없어짐(항상
      * CONFIG -> 할일-또는-NONE -> SLEEP_NOW 3개 고정) */
     ESP_NOW_MSG_CASK_WORK_NONE = 49,

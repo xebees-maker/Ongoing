@@ -194,7 +194,7 @@ typedef enum {
     STR_SENSOR_VALUE_ROW_FMT,
     STR_SENSOR_VALUE_PENDING,
     /* 2026-09-07 — CRC는 통과했지만 값 자체가 물리적으로 불가능(예: 이산화탄소 0ppm)할 때
-     * 표시(제외 아님, esp_now_hub_node_t.chan_invalid 참고) */
+     * 표시(제외 아님, node_hub_node_t.chan_invalid 참고) */
     STR_SENSOR_VALUE_INVALID,
     /* 통계탭 값 판넬(2026-09-06, 사용자 설계) — 항목/값/시간 테이블 + 페이지콘트롤 */
     STR_PANEL_STATS_PEAK,

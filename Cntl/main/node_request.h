@@ -2,13 +2,13 @@
 
 /**
  * Cntl 전용 송신 스케줄러(Layer 1, 2026-08-05 도입 -> 2026-09-10 재설계). UI가 부르는
- * esp_now_hub_pair()/esp_now_photo_*() 요청 함수들은 그대로 즉시 리턴(요청을 여기로 큐잉만
+ * node_hub_pair()/esp_now_photo_*() 요청 함수들은 그대로 즉시 리턴(요청을 여기로 큐잉만
  * 함, 지금까지와 동일한 UX — UI 안 얼어붙음).
  *
  * 2026-09-10 재설계(사용자 설계, TX_QUEUE_FULL 근본원인 조사 후) — 예전엔 "큐 하나 + 소비
  * 태스크 하나"였는데, PAIR_REQUEST 하나가 응답 없을 때 최대 6.5초까지 재시도하며 그 태스크를
  * 독점해서 무관한 다른 기기의 전송까지 같이 막히는 head-of-line blocking이 있었음(콘 리붓
- * 직후 재페어링 폭주 시 32칸 큐가 넘치는 근본원인). 지금은 입구 큐(esp_now_tx_enqueue가
+ * 직후 재페어링 폭주 시 32칸 큐가 넘치는 근본원인). 지금은 입구 큐(node_request_enqueue가
  * 넣는 곳)를 "디스패처" 태스크 하나만 소비하는데, 디스패처는 무선 전송을 직접 하지 않고
  * mac별로 존재하는(또는 새로 만드는) 전용 워커 태스크의 개인 큐로 넘기기만 함(매우 빠름,
  * 절대 블로킹 안 됨). 실제 esp_now_reliable_request() 블로킹 호출은 각 워커 태스크 안에서만
@@ -36,13 +36,13 @@
 extern "C" {
 #endif
 
-void esp_now_tx_init(void);
+void node_request_init(void);
 
-/* mac으로 req(req_len바이트, TX_REQ_MAX_LEN 이하)를 큐잉 — esp_now_tx 태스크가 순서대로
+/* mac으로 req(req_len바이트, TX_REQ_MAX_LEN 이하)를 큐잉 — node_request 태스크가 순서대로
  * esp_now_reliable_request()로 보냄. accept_reply_types는 반드시 static(또는 그에 준하게
  * 오래 유지되는) 배열이어야 함 — 태스크가 나중에(비동기로) 읽음. what은 실패 로그에 쓸
  * 짧은 설명(문자열 리터럴 등 정적 문자열 권장) */
-void esp_now_tx_enqueue(const uint8_t *mac, const void *req, size_t req_len,
+void node_request_enqueue(const uint8_t *mac, const void *req, size_t req_len,
                          const uint8_t *accept_reply_types, size_t accept_reply_types_count,
                          uint32_t timeout_ms, int max_attempts, const char *what);
 

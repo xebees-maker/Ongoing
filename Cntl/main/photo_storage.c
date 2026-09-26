@@ -32,7 +32,7 @@ static const char *TAG = "photo_storage";
 /* ---- RAM 상태(2026-09-26, storage_mgr.h 참고) — 사용량 합계와 카메라별 다음 순번.
  * 예전엔 사용량을 매번 폴더 전체 스캔으로 구했고(LVGL 태스크에서 약 765ms), 저장할 때마다
  * next_seq_in_dir()로 카메라 폴더를 스캔했음. 이제 재스캔 때 한 번만 훑고 이후엔 여기서 관리 */
-#define PHOTO_SEQ_CACHE_CAP 8  /* ESP_NOW_HUB_MAX_NODES와 같은 값(이 파일은 저수준이라 헤더 의존 안 함) */
+#define PHOTO_SEQ_CACHE_CAP 8  /* NODE_HUB_MAX_NODES와 같은 값(이 파일은 저수준이라 헤더 의존 안 함) */
 typedef struct {
     uint8_t  mac[6];
     uint32_t next_seq;

@@ -144,7 +144,7 @@ static void add_peer_if_needed(const uint8_t mac[6])
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], esp_err_to_name(err));
         return;
     }
-    /* 2026-09-23(1단계) — 콘의 esp_now_hub.c에 있던 것 그대로 이식(사용자 지시: 콘엔
+    /* 2026-09-23(1단계) — 콘의 node_hub.c에 있던 것 그대로 이식(사용자 지시: 콘엔
      * ESP-NOW 관련 기능이 전혀 없어야 함 — 피어관리/레이트설정도 브 몫). CAM 쪽과 짝맞춤
      * (esp_now_cam.c 동일 설정) */
     esp_now_rate_config_t rate_cfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };

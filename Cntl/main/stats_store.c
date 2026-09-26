@@ -16,7 +16,7 @@
  *          SD I/O가 없음(storage_mgr.h 참고). 색인은 stats_store_rescan()이 만들고, 기록/삭제/
  *          정리 때 직접 갱신함.
  *
- *          레코드는 항상 esp_now_hub.c의 WAKE_HELLO_SENS 처리(단일 지점)에서만 추가되므로 각 주
+ *          레코드는 항상 node_hub.c의 WAKE_HELLO_SENS 처리(단일 지점)에서만 추가되므로 각 주
  *          파일 안의 순서 = 도착순 = Cntl 벽시계 기준 시간순(단조증가) — "N시간 전부터" 조회는
  *          첫 주 파일에서만 이진탐색으로 시작점을 찾고 이후 주 파일은 처음부터 읽음.
  *
@@ -165,7 +165,7 @@ const uint32_t STATS_SCALE_SECONDS[STATS_SCALE_COUNT] = { 3600, 43200, 86400, 25
  * 의존 안 함 — 그냥 작은 고정크기 배열로 충분(현재 SENSOR_CHAN_TYPE_COUNT=5, 여유있게 8) */
 #define STATS_AGG_MAX_CHAN_TYPES 8
 
-/* ESP_NOW_HUB_MAX_NODES(esp_now_hub.h)와 같은 값이지만 이 파일은 저수준이라 그 헤더에
+/* NODE_HUB_MAX_NODES(node_hub.h)와 같은 값이지만 이 파일은 저수준이라 그 헤더에
  * 의존 안 함(위 chan_type과 동일 원칙) — 실제 페어링 가능한 노드 수 이상은 어차피 안 옴 */
 #define STATS_AGG_MAX_MACS 8
 

@@ -377,9 +377,9 @@ void power_relay_start(void)
     /* 2026-09-09 CNTL 태스크 우선순위 체계(project_cntl_task_priority_scheme) — 통신17/
      * SR제어15/파일처리10 중 SR제어 자리를 여기서 처음 실사용.
      * 2026-09-16(실기 크래시 조사) — evaluate_relay()가 ui_main_query_power_source_value()를
-     * 거쳐 esp_now_hub_get_nodes(esp_now_hub_node_t[ESP_NOW_HUB_MAX_NODES] 지역배열, 노드
+     * 거쳐 node_hub_get_nodes(node_hub_node_t[NODE_HUB_MAX_NODES] 지역배열, 노드
      * 구조체 자체가 꽤 큼)까지 내려가는 깊은 호출체인 — main.c의 httpd 핸들러가 똑같은
-     * 호출(esp_now_hub_get_nodes)을 스택에서 하려고 기본 스택이 빠듯해서 8192로 올렸던
+     * 호출(node_hub_get_nodes)을 스택에서 하려고 기본 스택이 빠듯해서 8192로 올렸던
      * 전례(web_dashboard_start() 주석 참고)와 동일 소지가 있어 8192로 잡음.
      * 2026-09-16(사용자 지적 — "메모리 35K까지 줄었어, 위험해") — plain xTaskCreate()는
      * 스택을 내부RAM에서 할당함(esp_lv_adapter의 stack_in_psram=true와 같은 이유로 위험).

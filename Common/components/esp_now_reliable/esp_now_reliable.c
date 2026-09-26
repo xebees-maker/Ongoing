@@ -15,7 +15,7 @@ static const char *TAG = "esp_now_reliable";
 #define REPLY_BUF_CAP 1470
 
 /* API 호출 자체를 직렬화(여러 태스크가 동시에 불러도 순서대로 처리되게) — 실제로는
- * Cntl의 esp_now_tx/CAM의 photo_tx처럼 호출부가 이미 태스크 하나로 직렬화돼 있어서
+ * Cntl의 node_request/CAM의 photo_tx처럼 호출부가 이미 태스크 하나로 직렬화돼 있어서
  * 경합이 거의 없을 것으로 예상되지만, 안전을 위해 둠 */
 static SemaphoreHandle_t s_api_mutex = NULL;
 static SemaphoreHandle_t s_done_sem  = NULL;

@@ -56,7 +56,7 @@ typedef struct __attribute__((packed)) {
 bool stats_store_append_batch(const stats_record_t *records, uint32_t count);
 
 /* 2026-09-11(SD 신뢰성 항목4 — 쓰기경로도 사용자에게 알려야 함) — stats_store_append_batch()가
- * WAKE_HELLO_SENS 처리 중(esp_now_hub.c, ESP-NOW recv_cb 컨텍스트, LVGL 태스크 아님)에
+ * WAKE_HELLO_SENS 처리 중(node_hub.c, ESP-NOW recv_cb 컨텍스트, LVGL 태스크 아님)에
  * fopen 실패를 만나면 여기 true를 세팅. LVGL 태스크 쪽(ui_main.c의 1초 주기 refresh_dashboard)이
  * 매 틱 이 값을 확인+리셋(test-and-clear)해서 주화면 SD 상태를 갱신 — LVGL API를 다른
  * 태스크에서 직접 호출하면 안 되므로(스레드 안전성), 값 전달만 이 플래그로 하고 실제
@@ -123,7 +123,7 @@ bool stats_store_had_io_error(void);
 /* ════════════════════════════════════════════════════════════
  * 그래프용 스케일별 사전집계 저장 — [[project_cntl_stats_graph_redesign_2026_09_10]]
  * 매 stats_store_append_batch() 호출마다(원본 기록과 같은 지점) 내부적으로 같이 갱신됨
- * (이 헤더에 노출 안 함, esp_now_hub.c는 여전히 stats_store_append_batch()만 부르면 됨).
+ * (이 헤더에 노출 안 함, node_hub.c는 여전히 stats_store_append_batch()만 부르면 됨).
  * 읽기 때 원본 로그를 매번 다시 스캔하던 것(1주 창 기준 추정 26초+)을 피하기 위해, 쓸 때
  * 미리 대표값을 뽑아 별도 저장 — 스케일 5단계(1시간/12시간/1일/3일/1주) 각각 60포인트로
  * 나뉘는 버킷 폭으로 미리 뽑음(그래프가 항상 60포인트 고정이므로).

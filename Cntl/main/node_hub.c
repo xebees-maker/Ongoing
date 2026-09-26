@@ -1,7 +1,7 @@
-#include "esp_now_hub.h"
-#include "esp_now_photo.h"
+#include "node_hub.h"
+#include "photo_rx.h"
 #include "can_bridge.h"
-#include "esp_now_tx.h"
+#include "node_request.h"
 #include "rtc_sync.h"
 #include "ui_log.h"
 #include "device_config.h"
@@ -23,7 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-static const char *TAG = "esp_now_hub";
+static const char *TAG = "node_hub";
 
 /* Cntl 실제 sdkconfig 기준 STA 모드+SSID/PW — 이 PC(원래 PC)의 네트워크로 복원
  * (다른 PC 세션에서 그쪽 네트워크 hkhome으로 바뀌어 커밋됨 — 2026-08-08 원복) */
@@ -46,10 +46,10 @@ static const char *TAG = "esp_now_hub";
  * 딱 한 번 설정, 그 이후로는 읽기 전용 */
 static wifi_interface_t s_wifi_if = WIFI_IF_STA;
 
-static esp_now_hub_node_t s_nodes[ESP_NOW_HUB_MAX_NODES];
+static node_hub_node_t s_nodes[NODE_HUB_MAX_NODES];
 static int                s_node_count = 0;
 
-/* recv_cb()는 ESP-NOW/WiFi 드라이버 태스크에서 호출되고, esp_now_hub_get_nodes()/pair()/
+/* recv_cb()는 ESP-NOW/WiFi 드라이버 태스크에서 호출되고, node_hub_get_nodes()/pair()/
  * unpair()는 LVGL 워커 태스크(esp_lv_adapter)에서 호출됨 — 서로 다른 태스크가 락 없이
  * s_nodes[]/s_node_count를 동시에 건드리던 레이스가 있었음(연결 리스트가 간헐적으로 깨지고
  * 반응 없던 문제의 원인으로 추정). 아래 뮤텍스로 s_nodes[]/s_node_count 접근 전체를 보호. */
@@ -57,11 +57,11 @@ static SemaphoreHandle_t s_nodes_mutex = NULL;
 
 /* 2026-09-04(사용자 설계: "이벤트로 처리해") — 노드 연결상태(페어링 성사/해제)가 바뀔 때마다
  * 발생. 사진/목록과 동일 패턴: 웹은 세마포어로 블로킹 대기, 앱은 등록된 콜백으로 통지받음.
- * "연결실패"는 별도 이벤트가 아니라 esp_now_hub_wait_paired()가 이 이벤트로 깨어날 때마다
+ * "연결실패"는 별도 이벤트가 아니라 node_hub_wait_paired()가 이 이벤트로 깨어날 때마다
  * 자기 목표(mac)가 여전히 PAIRED가 아닌지 재확인하다가 자기 타임아웃에 도달하는 것 자체가
  * 실패 신호(사용자 지시: "타임아웃이 이벤트가 되는 것") — 별도 "실패" 신호를 안 만들어도 됨 */
 static SemaphoreHandle_t s_connect_event_sem = NULL;
-static esp_now_hub_event_cb_t s_connect_ready_cb = NULL;
+static node_hub_event_cb_t s_connect_ready_cb = NULL;
 
 static void fire_connect_event(void)
 {
@@ -69,9 +69,9 @@ static void fire_connect_event(void)
     if (s_connect_ready_cb) s_connect_ready_cb();
 }
 
-/* 적응형 반응시간(2026-08-10) — 마지막 사용자 조작 시각(esp_now_photo.c의 5개 액션 함수가
- * esp_now_hub_note_user_action()으로 갱신). 전역 하나로 충분 — 지금은 CAM이 보통 1대라
- * esp_now_hub_bench_start()/apply_response_interval_sec()이 이미 쓰는 단순화와 동일 원칙.
+/* 적응형 반응시간(2026-08-10) — 마지막 사용자 조작 시각(photo_rx.c의 5개 액션 함수가
+ * node_hub_note_user_action()으로 갱신). 전역 하나로 충분 — 지금은 CAM이 보통 1대라
+ * node_hub_bench_start()/apply_response_interval_sec()이 이미 쓰는 단순화와 동일 원칙.
  * 2026-08-25(CASK 재설계) — 예전엔 이 값을 별도 원샷 타이머(adaptive_deadline_timer)가
  * 소비해서 "타이머가 다 되면 모든 노드에 SLEEP_NOW를 먼저 보내러 가는" 능동적(push) 구조
  * 였음. 이제 그 판단은 CASK를 만드는 바로 그 순간(WAKE_HELLO 수신, send_cask_sleep_now()
@@ -79,7 +79,7 @@ static void fire_connect_event(void)
  * 없어짐 */
 static uint32_t s_last_user_action_ms = 0;
 
-void esp_now_hub_note_user_action(void)
+void node_hub_note_user_action(void)
 {
     s_last_user_action_ms = (uint32_t)(esp_timer_get_time() / 1000);
 }
@@ -89,14 +89,14 @@ void esp_now_hub_note_user_action(void)
  * 조건은 셋 다 동시에 참일 때뿐: (1) 최근 사용자 조작이 없고(적응형 반응시간 밖) (2) 응답성
  * 자체가 0(Live 모드)이 아니고 (3) 이 노드와 진행 중인 통신(트랜잭션)이 없음. 셋 중 하나라도
  * 아니면 sleep_sec=0 — "통신 중엔 안 재운다"는 원칙(사진 요청 등 CASK "할일"의 접수 ack와
- * 진짜 완료가 다른 경우까지 포함, esp_now_photo_is_transacting_with() 참고). (2)는 별도
+ * 진짜 완료가 다른 경우까지 포함, photo_rx_is_transacting_with() 참고). (2)는 별도
  * 분기 없이 else 값 자체가 0이라 자연히 흡수됨 */
-static void send_cask_sleep_now(esp_now_hub_node_t *n)
+static void send_cask_sleep_now(node_hub_node_t *n)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     uint32_t quiet_ms = now_ms - s_last_user_action_ms;
     uint32_t threshold_ms = device_config_get_adaptive_response_sec() * 1000U;
-    bool transacting = esp_now_photo_is_transacting_with(n->mac);
+    bool transacting = photo_rx_is_transacting_with(n->mac);
     /* 2026-09-05(사용자 지시로 재정정) — 딥슬립 실제 시간은 어느 노드 종류든 SLEEP_NOW의
      * sleep_sec 그 자체가 맞음(캠과 동일 구조, 노드 쪽은 특별취급 없이 이 값을 그대로 씀).
      * 센스는 MIN(응답성, 이 센스의 측정주기)만큼마다 깨야 함 — 응답성>측정주기면 측정주기
@@ -130,11 +130,11 @@ static void send_cask_sleep_now(esp_now_hub_node_t *n)
         .sleep_sec = sleep_sec,
     };
     static const uint8_t s_sleep_now_ack_types[] = { ESP_NOW_MSG_SLEEP_NOW_ACK };
-    esp_now_tx_enqueue(n->mac, &msg, sizeof(msg), s_sleep_now_ack_types, 1, 300, 3, "SLEEP_NOW");
+    node_request_enqueue(n->mac, &msg, sizeof(msg), s_sleep_now_ack_types, 1, 300, 3, "SLEEP_NOW");
 }
 
 /* 2026-08-25(CASK 재설계) — CNTL의 능동적 생존판단. 예전엔 last_seen_ms 타임아웃이
- * esp_now_hub_get_nodes()(화면 목록 필터)에서만 수동적으로 쓰여서, 실제 conn_state는
+ * node_hub_get_nodes()(화면 목록 필터)에서만 수동적으로 쓰여서, 실제 conn_state는
  * 안 바뀐 채 화면에서만 사라지는 어긋남이 있었음 — "CAM이 CNTL 살아있나 확인하던 걸
  * (핑퐁), CNTL이 CAM 살아있나 확인하는 걸로 뒤집는다"는 설계의 CNTL쪽 절반. 노드 종류
  * 구분 없이 전부 훑음(사용자 지시: "모든 노드는 같은 구조로 CNTL에 붙을 거라서 CNTL은
@@ -153,8 +153,8 @@ static void liveness_sweep_cb(void *arg)
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count; i++) {
-        esp_now_hub_node_t *n = &s_nodes[i];
-        uint32_t timeout_ms = esp_now_hub_node_timeout_ms(n);  /* 2026-09-05 — 노드별(특히
+        node_hub_node_t *n = &s_nodes[i];
+        uint32_t timeout_ms = node_hub_node_timeout_ms(n);  /* 2026-09-05 — 노드별(특히
                                                                     Sens 자체 샘플주기) 기준으로 */
         if (n->conn_state == NODE_CONN_PAIRED && now_ms - n->last_seen_ms > timeout_ms) {
             ESP_LOGW(TAG, "%s 무응답(%us 이상) — PAIRED에서 강등", n->name, (unsigned)(timeout_ms / 1000));
@@ -175,20 +175,20 @@ static hub_node_kind_t classify_name(const char *name)
     return HUB_NODE_KIND_UNKNOWN;
 }
 
-static esp_now_hub_node_t *find_or_add_node(const uint8_t *mac)
+static node_hub_node_t *find_or_add_node(const uint8_t *mac)
 {
     for (int i = 0; i < s_node_count; i++) {
         if (memcmp(s_nodes[i].mac, mac, 6) == 0) return &s_nodes[i];
     }
-    if (s_node_count < ESP_NOW_HUB_MAX_NODES) {
-        esp_now_hub_node_t *n = &s_nodes[s_node_count++];
+    if (s_node_count < NODE_HUB_MAX_NODES) {
+        node_hub_node_t *n = &s_nodes[s_node_count++];
         memcpy(n->mac, mac, 6);
         return n;
     }
     return NULL;  /* 테이블 가득 — 새 노드 무시 */
 }
 
-static esp_now_hub_node_t *find_node(const uint8_t *mac)
+static node_hub_node_t *find_node(const uint8_t *mac)
 {
     for (int i = 0; i < s_node_count; i++) {
         if (memcmp(s_nodes[i].mac, mac, 6) == 0) return &s_nodes[i];
@@ -196,20 +196,20 @@ static esp_now_hub_node_t *find_node(const uint8_t *mac)
     return NULL;
 }
 
-/* 2026-08-26(사용자 지시) — 노드별 사용자 액션 대기 큐. esp_now_photo.c의 5개 액션 함수가
+/* 2026-08-26(사용자 지시) — 노드별 사용자 액션 대기 큐. photo_rx.c의 5개 액션 함수가
  * 여기 넣기만 하고, 실제로 언제 내보낼지는 WAKE_HELLO 핸들러(아래)가 CASK의 "할일" 단계로
  * 중앙집중 판단함 */
-void esp_now_hub_queue_action(const uint8_t *mac, const void *req, size_t req_len,
+void node_hub_queue_action(const uint8_t *mac, const void *req, size_t req_len,
                                const uint8_t *ack_types, size_t ack_types_count,
                                uint32_t timeout_ms, int max_attempts, const char *what)
 {
-    if (req_len > ESP_NOW_HUB_PENDING_ACTION_MAX_LEN) {
+    if (req_len > NODE_HUB_PENDING_ACTION_MAX_LEN) {
         ESP_LOGE(TAG, "액션 큐잉 실패(%s) — 페이로드 %u > %u", what, (unsigned)req_len,
-                 (unsigned)ESP_NOW_HUB_PENDING_ACTION_MAX_LEN);
+                 (unsigned)NODE_HUB_PENDING_ACTION_MAX_LEN);
         return;
     }
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-    esp_now_hub_node_t *n = find_or_add_node(mac);
+    node_hub_node_t *n = find_or_add_node(mac);
     if (!n) {
         xSemaphoreGive(s_nodes_mutex);
         ESP_LOGW(TAG, "액션 큐잉 실패(%s) — 노드 테이블 가득", what);
@@ -218,15 +218,15 @@ void esp_now_hub_queue_action(const uint8_t *mac, const void *req, size_t req_le
     /* 링버퍼 가득 — 가장 오래된(head) 항목을 밀어내고 새로 넣음(무한 적체 방지, 사용자
      * 조작이 큐 용량보다 훨씬 빠르게 쌓이는 건 비정상 상황이라 오래된 것부터 버리는 게 맞음) */
     int idx;
-    if (n->action_queue_count < ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH) {
-        idx = (n->action_queue_head + n->action_queue_count) % ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH;
+    if (n->action_queue_count < NODE_HUB_PENDING_ACTION_QUEUE_DEPTH) {
+        idx = (n->action_queue_head + n->action_queue_count) % NODE_HUB_PENDING_ACTION_QUEUE_DEPTH;
         n->action_queue_count++;
     } else {
         idx = n->action_queue_head;
-        n->action_queue_head = (n->action_queue_head + 1) % ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH;
+        n->action_queue_head = (n->action_queue_head + 1) % NODE_HUB_PENDING_ACTION_QUEUE_DEPTH;
         ESP_LOGW(TAG, "%s 액션 큐 가득 — 가장 오래된 항목 버림", n->name);
     }
-    esp_now_hub_pending_action_t *slot = &n->action_queue[idx];
+    node_hub_pending_action_t *slot = &n->action_queue[idx];
     memcpy(slot->req, req, req_len);
     slot->req_len         = req_len;
     slot->ack_types       = ack_types;
@@ -239,12 +239,12 @@ void esp_now_hub_queue_action(const uint8_t *mac, const void *req, size_t req_le
 }
 
 /* CASK "할일" 단계에서 호출(s_nodes_mutex를 이미 쥔 상태로 불림) — 있으면 하나 꺼내고 true,
- * 없으면 false. 실제 전송은 호출부(WAKE_HELLO 핸들러)가 esp_now_tx_enqueue()로 함 */
-static bool dequeue_pending_action_locked(esp_now_hub_node_t *n, esp_now_hub_pending_action_t *out)
+ * 없으면 false. 실제 전송은 호출부(WAKE_HELLO 핸들러)가 node_request_enqueue()로 함 */
+static bool dequeue_pending_action_locked(node_hub_node_t *n, node_hub_pending_action_t *out)
 {
     if (n->action_queue_count == 0) return false;
     *out = n->action_queue[n->action_queue_head];
-    n->action_queue_head = (n->action_queue_head + 1) % ESP_NOW_HUB_PENDING_ACTION_QUEUE_DEPTH;
+    n->action_queue_head = (n->action_queue_head + 1) % NODE_HUB_PENDING_ACTION_QUEUE_DEPTH;
     n->action_queue_count--;
     return true;
 }
@@ -260,12 +260,12 @@ static void add_peer_if_needed(const uint8_t *mac)
 
 static volatile hub_config_apply_stage_t s_config_apply_stage = HUB_CONFIG_APPLY_IDLE;
 
-hub_config_apply_stage_t esp_now_hub_get_config_apply_stage(void) { return s_config_apply_stage; }
-void esp_now_hub_config_apply_stage_clear(void) { s_config_apply_stage = HUB_CONFIG_APPLY_IDLE; }
+hub_config_apply_stage_t node_hub_get_config_apply_stage(void) { return s_config_apply_stage; }
+void node_hub_config_apply_stage_clear(void) { s_config_apply_stage = HUB_CONFIG_APPLY_IDLE; }
 
 /* 2026-08-08 — device_config(Cntl이 소유하는 CAM 설정)의 "현재 값"을 mac 하나에 그대로
  * 밀어줌. 페어링 시 자동 전송(recv_cb의 PAIR_ACK/WAKE_HELLO 핸들러)과, 설정탭 Apply 버튼
- * (esp_now_hub_apply_*) 둘 다 이 함수 하나로 통일 — "지금 저장된 값을 보낸다"는 의미가
+ * (node_hub_apply_*) 둘 다 이 함수 하나로 통일 — "지금 저장된 값을 보낸다"는 의미가
  * 완전히 같으므로 재사용.
  * 2026-09-18 버그수정(사용자 리포트 — "4005 뜸") — track_apply_progress 파라미터 추가.
  * 예전 주석은 "자동전송 때도 s_config_apply_stage가 갱신되지만 그때는 아무도 안 봐서
@@ -293,7 +293,7 @@ static void push_cam_config_to(const uint8_t *mac, bool track_apply_progress)
     };
     static const uint8_t s_config_ack_types[] = { ESP_NOW_MSG_CAM_CONFIG_ACK };
     if (track_apply_progress) s_config_apply_stage = HUB_CONFIG_APPLY_SENT;
-    esp_now_tx_enqueue(mac, &cfg, sizeof(cfg), s_config_ack_types, 1, 800, 3, "CAM config");
+    node_request_enqueue(mac, &cfg, sizeof(cfg), s_config_ack_types, 1, 800, 3, "CAM config");
     ESP_LOGI(TAG, "CAM_CONFIG_SET -> 촬영주기=%us 응답성=%us AGC=%d AEC=%d XCLK=%uMHz NACK라운드=%u 큐잉됨",
              (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec,
              (int)cfg.agc_enable, (int)cfg.aec_enable, (unsigned)cfg.xclk_mhz,
@@ -316,13 +316,13 @@ static void push_sens_config_to(const uint8_t *mac)
         .unix_time           = rtc_sync_get_unix_time(),
     };
     static const uint8_t s_sens_config_ack_types[] = { ESP_NOW_MSG_SENS_CONFIG_ACK };
-    esp_now_tx_enqueue(mac, &cfg, sizeof(cfg), s_sens_config_ack_types, 1, 800, 3, "Sens config");
+    node_request_enqueue(mac, &cfg, sizeof(cfg), s_sens_config_ack_types, 1, 800, 3, "Sens config");
     ESP_LOGI(TAG, "SENS_CONFIG_SET -> 샘플링주기=%us 큐잉됨", (unsigned)cfg.sample_interval_sec);
 }
 
-/* recv_cb(ADVERTISE 핸들러)가 먼저 쓰고 실제 정의는 파일 뒤쪽(esp_now_hub_request_pair
+/* recv_cb(ADVERTISE 핸들러)가 먼저 쓰고 실제 정의는 파일 뒤쪽(node_hub_request_pair
  * 근처)에 있음 — 전방 선언 */
-static void esp_now_hub_pair(const uint8_t *mac);
+static void node_hub_pair(const uint8_t *mac);
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
@@ -340,7 +340,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * find_or_add_node()로 생긴 다음 수신부터 채워짐 */
     if (info && info->rx_ctrl) {
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-        esp_now_hub_node_t *rssi_node = find_node(info->src_addr);
+        node_hub_node_t *rssi_node = find_node(info->src_addr);
         if (rssi_node) {
             rssi_node->rssi = (int8_t)info->rx_ctrl->rssi;
             rssi_node->has_rssi = true;
@@ -354,7 +354,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (msg->version != ESP_NOW_LINK_VERSION) return;
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-        esp_now_hub_node_t *n = find_or_add_node(info->src_addr);
+        node_hub_node_t *n = find_or_add_node(info->src_addr);
         if (!n) {
             xSemaphoreGive(s_nodes_mutex);
             ESP_LOGW(TAG, "노드 테이블 가득 — %s 무시", msg->name);
@@ -379,7 +379,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         bool was_user_unpaired = n->user_unpaired;
         bool ever_paired = n->ever_paired;
         /* 2026-08-24 — 사용자가 "연결"을 눌러 대기 중이면, 지금 이 광고를 실제로 받은 이
-         * 순간(채널이 같다는 게 방금 증명됨)에 소비 — esp_now_hub_request_pair() 참고.
+         * 순간(채널이 같다는 게 방금 증명됨)에 소비 — node_hub_request_pair() 참고.
          * 시간 대신 "광고 수신으로 트리거된 시도 횟수"로 3번까지만 허용 */
         bool user_pair_wanted = n->user_pair_wanted;
         if (user_pair_wanted) {
@@ -405,10 +405,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 막 페어링이 풀린 순간)만 보고 재연결을 시도하면, 그 시도 자체가 무선 유실 등으로
          * 실패했을 때(실기에서 확인됨 — "5회 시도 모두 무응답") 이후 어떤 ADVERTISE가 와도
          * 다시 시도할 계기가 없어 영구히 "연결 대기 중"에 멈춰버림. ever_paired(이번 Cntl
-         * 부팅 세션에서 한 번이라도 페어링 성공했는가, esp_now_hub_node_t 참고)를 대신
+         * 부팅 세션에서 한 번이라도 페어링 성공했는가, node_hub_node_t 참고)를 대신
          * 써서 — 성공/실패와 무관하게 이 노드가 다시 광고할 때마다(즉 매 웨이크 사이클마다)
          * 재연결을 계속 재시도함. 사용자가 명시적으로 연결 해제한 노드(user_unpaired)는
-         * 그대로 안 건드림 — 다음에 사용자가 직접 다시 붙여야 함(esp_now_hub_unpair의
+         * 그대로 안 건드림 — 다음에 사용자가 직접 다시 붙여야 함(node_hub_unpair의
          * 원래 의도 유지) */
         /* 2026-08-24(사용자 지시) — was_paired(Cntl 자신이 방금까지 PAIRED로 알고 있었음)는
          * user_unpaired 이력과 무관하게 무조건 재페어링을 트리거함. Cntl이 스스로 PAIRED로
@@ -425,7 +425,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             (device_config_get_auto_connect_new() ||
              (device_config_get_auto_connect_known() && device_config_is_known_device(mac_copy)));
         if (was_paired || (ever_paired && !was_user_unpaired) || user_pair_wanted || auto_connect_wanted) {
-            esp_now_hub_pair(mac_copy);
+            node_hub_pair(mac_copy);
         }
 
         /* 2026-08-24(사용자 지시) — user_pair_wanted로 인해 이번에 PAIR_REQUEST를 보냈으면
@@ -448,7 +448,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         const esp_now_pair_ack_t *ack = (const esp_now_pair_ack_t *)data;
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-        esp_now_hub_node_t *n = find_node(info->src_addr);
+        node_hub_node_t *n = find_node(info->src_addr);
         bool became_paired = false;
         bool first_ever_pairing = false;  /* 2026-08-10 — 이번 부팅 세션에서 이 노드와 "정말
                                               처음" 붙는 순간만 true. 매 재페어링(단순 생존확인
@@ -460,7 +460,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             kind_copy = n->kind;
             /* 2026-09-05(사용자 지시) — 센서종류/채널구성은 페어링 완료 이 순간에 1회만
              * 옴(esp_now_pair_ack_t 참고, 매 캐스크마다 다시 안 옴) — 여기서 받아서 기억해두면
-             * 이후 WAKE_HELLO_SENS 처리(esp_now_hub.c 아래쪽)가 이 값을 계속 재사용함.
+             * 이후 WAKE_HELLO_SENS 처리(node_hub.c 아래쪽)가 이 값을 계속 재사용함.
              * 캠은 이 필드들을 0으로 보내므로(아직 카메라 기종 미구현) kind==SENS일 때만 씀 */
             if (n->kind == HUB_NODE_KIND_SENS) {
                 n->sensor_kind     = ack->sensor_kind;
@@ -479,7 +479,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * 안 갱신돼서 5초 타임아웃 뒤 리스트에서 완전히 사라져버림 */
             n->last_seen_ms = now_ms;
             /* 재연결(paired=true로 되돌리는 것)만 user_unpaired로 막음 — 사용자가
-             * esp_now_hub_pair()를 다시 불러야(리스트에서 다시 연결 허용) 풀림.
+             * node_hub_pair()를 다시 불러야(리스트에서 다시 연결 허용) 풀림.
              * became_paired는 "방금 막 페어링됨(false->true 전환)"일 때만 true여야 함 —
              * 예전엔 n->paired가 이미 true였어도 PAIR_ACK(1초 keepalive)가 올 때마다 매번
              * true로 잡혀서, 페어링된 CAM/Sens에 SET_TIME을 1초마다 무한정 계속 보내고
@@ -492,7 +492,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 n->conn_state = NODE_CONN_PAIRED;
                 n->ever_paired = true;  /* 2026-08-10 — 한 번 세팅되면 이번 부팅 세션 내내
                                             유지, ADVERTISE 핸들러의 자동 재페어링 판단에 씀 */
-                n->last_paired_ms = now_ms;  /* esp_now_hub_is_reconnect_stuck()의 기준시각 */
+                n->last_paired_ms = now_ms;  /* node_hub_is_reconnect_stuck()의 기준시각 */
                 became_paired = !was_paired;
                 first_ever_pairing = became_paired && !was_ever_paired;
                 strncpy(name_copy, n->name, sizeof(name_copy) - 1);
@@ -521,7 +521,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * 실사용 중 -mm:ss 타임스탬프 분석으로 발견). first_ever_pairing(이번 세션 이
              * 노드와 정말 처음 붙는 순간)에만 리셋해서 최초 연결 직후엔 반응시간을 주고,
              * 그 이후 순수 생존확인 사이클은 리셋 안 해서 할 일 없으면 곧바로 재울 수 있게 함 */
-            if (first_ever_pairing) esp_now_hub_note_user_action();
+            if (first_ever_pairing) node_hub_note_user_action();
             size_t m3 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
             /* 2026-08-25(CASK 재설계) — 예전엔 여기서 SET_TIME을 별도 reliable 요청으로
              * 보냈는데, 그 unix_time을 이제 push_cam_config_to()의 CAM_CONFIG_SET에 실어
@@ -554,7 +554,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         const esp_now_wake_hello_t *hello = (const esp_now_wake_hello_t *)data;
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-        esp_now_hub_node_t *n = find_node(info->src_addr);
+        node_hub_node_t *n = find_node(info->src_addr);
         if (!n || !n->ever_paired || n->user_unpaired) {
             xSemaphoreGive(s_nodes_mutex);
             return;
@@ -595,21 +595,21 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         /* CASK — 항상 고정 3단계(2026-08-26, 사용자 지시로 재설계): CONFIG(항상 먼저, 캠이
          * 설정을 로컬에 저장 안 하므로 매번 필요) -> 할일(대기 큐에 있으면 그것, 없으면
          * 명시적 CASK_WORK_NONE) -> SLEEP_NOW(항상 마지막). 패킷 수가 매번 똑같아야 캠이
-         * "이번엔 할일 메시지가 오는지 안 오는지" 추측할 필요가 없어짐(esp_now_hub_queue_action
+         * "이번엔 할일 메시지가 오는지 안 오는지" 추측할 필요가 없어짐(node_hub_queue_action
          * 주석 참고) */
         if (n->kind == HUB_NODE_KIND_CAM) {
             push_cam_config_to(info->src_addr, false);  /* 자동전송 — 진행팝업 상태 안 건드림 */
         }
-        esp_now_hub_pending_action_t action;
+        node_hub_pending_action_t action;
         if (dequeue_pending_action_locked(n, &action)) {
-            esp_now_tx_enqueue(info->src_addr, action.req, action.req_len,
+            node_request_enqueue(info->src_addr, action.req, action.req_len,
                                 action.ack_types, action.ack_types_count,
                                 action.timeout_ms, action.max_attempts, action.what);
             ESP_LOGI(TAG, "CASK 할일 -> %s: %s (대기열 %d개 남음)", n->name, action.what, n->action_queue_count);
         } else {
             esp_now_cask_work_none_t none = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE };
             static const uint8_t s_work_none_ack_types[] = { ESP_NOW_MSG_CASK_WORK_NONE_ACK };
-            esp_now_tx_enqueue(info->src_addr, &none, sizeof(none), s_work_none_ack_types, 1, 500, 3, "No work");
+            node_request_enqueue(info->src_addr, &none, sizeof(none), s_work_none_ack_types, 1, 500, 3, "No work");
         }
         send_cask_sleep_now(n);
         xSemaphoreGive(s_nodes_mutex);
@@ -622,7 +622,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         const esp_now_wake_hello_sens_t *hello = (const esp_now_wake_hello_sens_t *)data;
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-        esp_now_hub_node_t *n = find_node(info->src_addr);
+        node_hub_node_t *n = find_node(info->src_addr);
         if (!n || !n->ever_paired || n->user_unpaired) {
             xSemaphoreGive(s_nodes_mutex);
             return;
@@ -707,16 +707,16 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (n->kind == HUB_NODE_KIND_SENS) {
             push_sens_config_to(info->src_addr);
         }
-        esp_now_hub_pending_action_t action;
+        node_hub_pending_action_t action;
         if (dequeue_pending_action_locked(n, &action)) {
-            esp_now_tx_enqueue(info->src_addr, action.req, action.req_len,
+            node_request_enqueue(info->src_addr, action.req, action.req_len,
                                 action.ack_types, action.ack_types_count,
                                 action.timeout_ms, action.max_attempts, action.what);
             ESP_LOGI(TAG, "CASK 할일 -> %s: %s (대기열 %d개 남음)", n->name, action.what, n->action_queue_count);
         } else {
             esp_now_cask_work_none_t none = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE };
             static const uint8_t s_work_none_ack_types[] = { ESP_NOW_MSG_CASK_WORK_NONE_ACK };
-            esp_now_tx_enqueue(info->src_addr, &none, sizeof(none), s_work_none_ack_types, 1, 500, 3, "No work");
+            node_request_enqueue(info->src_addr, &none, sizeof(none), s_work_none_ack_types, 1, 500, 3, "No work");
         }
         send_cask_sleep_now(n);
         xSemaphoreGive(s_nodes_mutex);
@@ -807,12 +807,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                msg_type == ESP_NOW_MSG_PHOTO_DELETE_ACK || msg_type == ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK ||
                msg_type == ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST) {
         /* ESP-NOW는 recv_cb를 하나만 등록할 수 있어서, 사진 관련 프로토콜(전송/목록/삭제/
-         * 지금촬영 진행상태) 처리는 전부 esp_now_photo.c로 넘김 */
-        esp_now_photo_on_recv(msg_type, info ? info->src_addr : NULL, data, len);
+         * 지금촬영 진행상태) 처리는 전부 photo_rx.c로 넘김 */
+        photo_rx_on_recv(msg_type, info ? info->src_addr : NULL, data, len);
 
     } else if (msg_type == ESP_NOW_MSG_CAM_CONFIG_ACK) {
-        /* esp_now_reliable_on_recv(위)가 이미 esp_now_tx 태스크를 깨워서 재시도 루프를
-         * 끝내지만, 그건 esp_now_tx 모듈 내부 상태일 뿐이라 UI(설정탭 Apply 진행팝업)가
+        /* esp_now_reliable_on_recv(위)가 이미 node_request 태스크를 깨워서 재시도 루프를
+         * 끝내지만, 그건 node_request 모듈 내부 상태일 뿐이라 UI(설정탭 Apply 진행팝업)가
          * 볼 방법이 없음 — capture_stage와 같은 이유로 여기서 별도 폴링 상태를 갱신 */
         if (len < (int)sizeof(esp_now_cam_config_ack_t)) return;
         s_config_apply_stage = HUB_CONFIG_APPLY_ACKED;
@@ -824,7 +824,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
  * 상태(빈 문자열)면 ui_main.c가 URL 자체를 숨김 */
 static char s_own_ip_str[16] = "";
 
-const char *esp_now_hub_get_own_ip_str(void)
+const char *node_hub_get_own_ip_str(void)
 {
     return s_own_ip_str;
 }
@@ -846,7 +846,7 @@ static void get_active_or_fallback_sta(const char **out_ssid, const char **out_p
     }
 }
 
-const char *esp_now_hub_get_active_sta_ssid(void)
+const char *node_hub_get_active_sta_ssid(void)
 {
     const char *ssid, *password;
     get_active_or_fallback_sta(&ssid, &password);
@@ -854,16 +854,16 @@ const char *esp_now_hub_get_active_sta_ssid(void)
 }
 
 /* 2026-09-08(사용자 재설계 — 상단바 네트워크 컨트롤에 "AP라면 SSID도" 표기) */
-const char *esp_now_hub_get_ap_ssid(void)
+const char *node_hub_get_ap_ssid(void)
 {
     return CNTL_AP_SSID;
 }
 
-/* 2026-08-29 — "찾기" 팝업의 실시간 접속 시도(esp_now_hub_test_sta_connect) 상태.
+/* 2026-08-29 — "찾기" 팝업의 실시간 접속 시도(node_hub_test_sta_connect) 상태.
  * s_sta_test_active일 때만 아래 wifi_event_handler가 정상 재연결 루프 대신 이 분기를 탐 */
 static bool                     s_sta_reconnect_paused = false;
 
-void esp_now_hub_set_sta_reconnect_paused(bool paused)
+void node_hub_set_sta_reconnect_paused(bool paused)
 {
     s_sta_reconnect_paused = paused;
 }
@@ -887,7 +887,7 @@ static void sta_boot_giveup_timer_cb(void *arg)
     }
 }
 
-bool esp_now_hub_sta_boot_giveup(void)
+bool node_hub_sta_boot_giveup(void)
 {
     return s_sta_boot_giveup;
 }
@@ -895,7 +895,7 @@ bool esp_now_hub_sta_boot_giveup(void)
 /* 2026-08-29 버그수정(사용자 리포트: "비번 입력하느라 시간이 걸리면 연결이 반복 실패") —
  * esp_wifi_sta_get_ap_info()는 "완전히 연결됨" 여부만 알려줘서, "지금 한창 인증/연결
  * 시도 중(아직 연결은 안 됐지만 idle도 아님)"인 상태를 "연결 안 됨"으로 오판함. 이 상태에서
- * esp_now_hub_test_sta_connect()가 disconnect() 없이 곧장 새 설정으로 connect()를 걸면
+ * node_hub_test_sta_connect()가 disconnect() 없이 곧장 새 설정으로 connect()를 걸면
  * 진행 중이던 인증 핸드셰이크 한복판에 끼어들어서 계속 AUTH_EXPIRE로 깨짐(실측 로그로 확인).
  * esp_wifi_connect()를 걸 때마다 true, 진짜 STA_DISCONNECTED 이벤트를 받을 때만 false로
  * 스스로 추적 — "연결됐거나 연결 시도 중"을 타이머/추측 없이 이벤트로 정확히 앎 */
@@ -917,8 +917,8 @@ static bool                     s_sta_test_active = false;
  * 시작하도록 함 */
 typedef enum { STA_TEST_PHASE_DISCONNECTING, STA_TEST_PHASE_CONNECTING } sta_test_phase_t;
 static sta_test_phase_t          s_sta_test_phase;
-static esp_now_hub_sta_test_cb_t s_sta_test_cb = NULL;
-static esp_now_hub_sta_test_stage_cb_t s_sta_test_stage_cb = NULL;
+static node_hub_sta_test_cb_t s_sta_test_cb = NULL;
+static node_hub_sta_test_stage_cb_t s_sta_test_stage_cb = NULL;
 static void                     *s_sta_test_ctx = NULL;
 static char                     s_sta_test_ssid[33] = "";
 static char                     s_sta_test_password[65] = "";
@@ -930,7 +930,7 @@ static void sta_test_finish(bool success)
     s_sta_test_active = false;
     if (s_sta_test_timeout_timer) esp_timer_stop(s_sta_test_timeout_timer);
 
-    esp_now_hub_sta_test_cb_t cb = s_sta_test_cb;
+    node_hub_sta_test_cb_t cb = s_sta_test_cb;
     void *ctx = s_sta_test_ctx;
     s_sta_test_cb = NULL;
     s_sta_test_ctx = NULL;
@@ -974,9 +974,9 @@ static void sta_test_begin_connecting(void)
     sta_do_connect();
 }
 
-void esp_now_hub_test_sta_connect(const char *ssid, const char *password,
-                                   esp_now_hub_sta_test_cb_t on_result,
-                                   esp_now_hub_sta_test_stage_cb_t on_stage, void *ctx)
+void node_hub_test_sta_connect(const char *ssid, const char *password,
+                                   node_hub_sta_test_cb_t on_result,
+                                   node_hub_sta_test_stage_cb_t on_stage, void *ctx)
 {
     if (s_sta_test_active) return;  /* 동시에 하나만 — UI가 모달이라 실질적으로 재진입 없음 */
     s_sta_reconnect_paused = false;  /* 스캔용으로 걸려있었을 수 있는 일시정지 해제 — 이제부터는
@@ -1043,7 +1043,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
                      * 성공함(정상 동작 — 예전 성공 로그에도 "Association refused
                      * temporarily... comeback time" 이후 재시도해서 붙는 과정이 있었음).
                      * 여기서 실패로 결론짓지 않고 그냥 다시 connect() — 진짜 실패(비번 틀림
-                     * 등) 판정은 esp_now_hub_test_sta_connect()가 걸어둔 25초 타임아웃
+                     * 등) 판정은 node_hub_test_sta_connect()가 걸어둔 25초 타임아웃
                      * 하나로만 함 */
                     sta_do_connect();
                 }
@@ -1052,7 +1052,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             /* 2026-08-29 버그수정(사용자 리포트: "찾기 팝업... 검색된 네트워크 없습니다") —
              * esp_wifi_scan_start()는 STA가 연결 시도 중이면 실패한다. 이 재연결 루프가
              * 끊길 때마다 바로 다시 connect()를 걸어서 스캔이 낄 조용한 틈이 없었음 —
-             * 스캔 팝업이 열려있는 동안은(esp_now_hub_set_sta_reconnect_paused) 재연결을
+             * 스캔 팝업이 열려있는 동안은(node_hub_set_sta_reconnect_paused) 재연결을
              * 안 걸고 그냥 끊긴 채로 둠. s_sta_boot_giveup — 부팅 후 25초간 한 번도 못
              * 붙었으면(2026-08-30) 더 이상 자동 재시도 안 함(화면엔 "AP 없음") — "찾기"로
              * 수동 연결하면 GOT_IP 핸들러에서 이 플래그가 풀림 */
@@ -1125,7 +1125,7 @@ static void wifi_bringup(void)
         ESP_LOGI(TAG, "SoftAP 시작: SSID=%s CH=%d (독립 AP 모드)", CNTL_AP_SSID, CNTL_AP_CHANNEL);
 
         /* AP 자신의 IP는 STA처럼 IP_EVENT로 오는 게 아니라 시작 즉시 고정값이라, 대시보드
-         * 웹 URL(s_own_ip_str, esp_now_hub_get_own_ip_str())에 바로 채워넣음 */
+         * 웹 URL(s_own_ip_str, node_hub_get_own_ip_str())에 바로 채워넣음 */
         esp_netif_ip_info_t ip_info;
         if (esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK) {
             snprintf(s_own_ip_str, sizeof(s_own_ip_str), IPSTR, IP2STR(&ip_info.ip));
@@ -1146,7 +1146,7 @@ static void wifi_bringup(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 }
 
-void esp_now_hub_init(void)
+void node_hub_init(void)
 {
     /* recv_cb가 등록되기 전에 먼저 만들어둬야 함 — 등록 직후부터 다른 태스크에서
      * s_nodes[]를 건드릴 수 있음 */
@@ -1183,7 +1183,7 @@ void esp_now_hub_init(void)
     ESP_LOGI(TAG, "ESP-NOW 허브 시작됨 (STA)");
 }
 
-uint8_t esp_now_hub_get_wifi_channel(void)
+uint8_t node_hub_get_wifi_channel(void)
 {
     uint8_t channel = 0;
     wifi_second_chan_t second_chan;
@@ -1204,7 +1204,7 @@ uint8_t esp_now_hub_get_wifi_channel(void)
  * 있을 뿐인 Sens가 "무응답"으로 오판되어 목록에서 깜빡임 — 노드 자신이 리포트한
  * ds_last_sleep_interval_sec(WAKE_HELLO_SENS로 옴)이 있으면 그걸 쓰고, 없으면(아직 한 번도
  * 못 받음, 또는 CAM) 기존처럼 전역 응답성 설정으로 폴백 */
-uint32_t esp_now_hub_node_timeout_ms(const esp_now_hub_node_t *n)
+uint32_t node_hub_node_timeout_ms(const node_hub_node_t *n)
 {
     uint32_t interval_sec = 0;
     if (n && n->kind == HUB_NODE_KIND_SENS && n->has_deepsleep_stats) {
@@ -1212,19 +1212,19 @@ uint32_t esp_now_hub_node_timeout_ms(const esp_now_hub_node_t *n)
     } else {
         interval_sec = device_config_get_response_interval_sec();
     }
-    if (interval_sec == 0) return ESP_NOW_HUB_NODE_TIMEOUT_MS;
+    if (interval_sec == 0) return NODE_HUB_NODE_TIMEOUT_MS;
     uint32_t computed = interval_sec * 1000U * HUB_NODE_TIMEOUT_MARGIN_MULT;
-    return computed > ESP_NOW_HUB_NODE_TIMEOUT_MS ? computed : ESP_NOW_HUB_NODE_TIMEOUT_MS;
+    return computed > NODE_HUB_NODE_TIMEOUT_MS ? computed : NODE_HUB_NODE_TIMEOUT_MS;
 }
 
-int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max)
+int node_hub_get_nodes(hub_node_kind_t kind, node_hub_node_t *out, int max)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     int count = 0;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count && count < max; i++) {
         if (kind != HUB_NODE_KIND_UNKNOWN && s_nodes[i].kind != kind) continue;
-        uint32_t timeout_ms = esp_now_hub_node_timeout_ms(&s_nodes[i]);
+        uint32_t timeout_ms = node_hub_node_timeout_ms(&s_nodes[i]);
         if (now_ms - s_nodes[i].last_seen_ms > timeout_ms) continue;
         out[count++] = s_nodes[i];
     }
@@ -1232,13 +1232,13 @@ int esp_now_hub_get_nodes(hub_node_kind_t kind, esp_now_hub_node_t *out, int max
     return count;
 }
 
-bool esp_now_hub_is_reconnect_stuck(const uint8_t *mac)
+bool node_hub_is_reconnect_stuck(const uint8_t *mac)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     bool stuck = false;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-    esp_now_hub_node_t *n = find_node(mac);
-    uint32_t timeout_ms = esp_now_hub_node_timeout_ms(n);
+    node_hub_node_t *n = find_node(mac);
+    uint32_t timeout_ms = node_hub_node_timeout_ms(n);
     if (n && n->ever_paired && n->conn_state != NODE_CONN_PAIRED && (now_ms - n->last_paired_ms) > timeout_ms) {
         stuck = true;
     }
@@ -1254,11 +1254,11 @@ bool esp_now_hub_is_reconnect_stuck(const uint8_t *mac)
  * 초록 */
 #define HUB_NODE_ACTIVE_WINDOW_MS 3000
 
-hub_conn_state_t esp_now_hub_get_conn_state(const uint8_t *mac)
+hub_conn_state_t node_hub_get_conn_state(const uint8_t *mac)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-    esp_now_hub_node_t *n = find_node(mac);
+    node_hub_node_t *n = find_node(mac);
     bool ever_paired = n && n->ever_paired;
     bool radio_paired = n && (n->conn_state == NODE_CONN_PAIRED);
     bool recently_active = n && (now_ms - n->last_seen_ms < HUB_NODE_ACTIVE_WINDOW_MS);
@@ -1270,7 +1270,7 @@ hub_conn_state_t esp_now_hub_get_conn_state(const uint8_t *mac)
      * 감지하기 위한 값)을 기다릴 필요 없이 곧장 WAITING으로 — 의도적 연결해제와 예기치 못한
      * 끊김은 성격이 다른데 같은 타임아웃으로 취급하고 있었음(실기에서 확인: 연결해제 버튼을
      * 눌러도 화면이 몇~수십 초 동안 "연결됨"으로 남아있던 원인) */
-    if (!ever_paired || user_unpaired || esp_now_hub_is_reconnect_stuck(mac)) return HUB_CONN_STATE_WAITING;
+    if (!ever_paired || user_unpaired || node_hub_is_reconnect_stuck(mac)) return HUB_CONN_STATE_WAITING;
     return (radio_paired && recently_active) ? HUB_CONN_STATE_ACTIVE : HUB_CONN_STATE_PAIRED;
 }
 
@@ -1282,18 +1282,18 @@ hub_conn_state_t esp_now_hub_get_conn_state(const uint8_t *mac)
  * 직접 불렀는데, 그러면 Cntl의 고정채널과 캠의 스캔채널이 우연히 겹치길 바라며 독립 재시도
  * 버스트를 쏘는 구조적 도박이었음(사용자 지적: "원론적으로 해결"). 이제 이 함수는 채널이
  * 이미 맞다고 증명된 순간(=이 노드의 ADVERTISE를 방금 수신한 시점)에만 호출됨 —
- * esp_now_hub_request_pair()(사용자 버튼)와 자동 재페어링 둘 다 여기로 수렴 */
-static void esp_now_hub_pair(const uint8_t *mac)
+ * node_hub_request_pair()(사용자 버튼)와 자동 재페어링 둘 다 여기로 수렴 */
+static void node_hub_pair(const uint8_t *mac)
 {
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-    esp_now_hub_node_t *n = find_node(mac);
+    node_hub_node_t *n = find_node(mac);
     bool ok = (n && n->conn_state != NODE_CONN_PAIRED);
     char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
     if (ok) {
         n->user_unpaired = false;  /* 사용자가 다시 연결을 시도하는 것 — keepalive 무시 플래그 해제 */
         strncpy(name_copy, n->name, sizeof(name_copy) - 1);
         /* 2026-08-24 — 시간 기반 대기창 폐기. PAIR_PENDING 표시는 UI 상태 문구용으로만 남김
-         * (esp_now_hub_get_conn_state() 등). "몇 번 더 시도할지"는 이제 호출부(ADVERTISE
+         * (node_hub_get_conn_state() 등). "몇 번 더 시도할지"는 이제 호출부(ADVERTISE
          * 핸들러)의 pair_req_attempts_left가 담당함 */
         n->conn_state = NODE_CONN_PAIR_PENDING;
     }
@@ -1306,10 +1306,10 @@ static void esp_now_hub_pair(const uint8_t *mac)
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_PAIR_REQUEST,
     };
-    /* 2026-08-05 Layer 1 — esp_now_tx 태스크로 큐잉(reliable_request로 PAIR_ACK을 기다리며
+    /* 2026-08-05 Layer 1 — node_request 태스크로 큐잉(reliable_request로 PAIR_ACK을 기다리며
      * 재시도). 이 함수 자체는 그대로 즉시 리턴(UI 안 얼어붙음, 기존과 동일한 UX) — 실제
-     * 페어링 상태 반영은 지금처럼 recv_cb의 PAIR_ACK 핸들러가 그대로 담당함(esp_now_tx는
-     * 상태를 안 건드리는 순수 전송 스케줄러, esp_now_tx.h 참고) */
+     * 페어링 상태 반영은 지금처럼 recv_cb의 PAIR_ACK 핸들러가 그대로 담당함(node_request는
+     * 상태를 안 건드리는 순수 전송 스케줄러, node_request.h 참고) */
     static const uint8_t s_pair_ack_types[] = { ESP_NOW_MSG_PAIR_ACK };
     /* 2026-08-21 나이키스트 재설계(사용자 지시) — 노드(CAM/Sens)는 페어링 전엔 응답성
      * 설정과 무관하게 "짧게 깨서 시도, 안 되면 짧게 자고 재시도"를 반복함
@@ -1322,18 +1322,18 @@ static void esp_now_hub_pair(const uint8_t *mac)
      * 부팅/WiFi초기화 오버헤드(~1.8초, 이름 붙은 상수 없이 그때그때 걸리는 시간이라
      * 하드코딩하면 휴리스틱이 됨, 사용자 지적)는 이 공식에 안 넣음 — 6초(3초×2)가 실측
      * 죽는시간(~4.8초)보다 이미 크므로 별도로 안 넣어도 안전마진 안에 들어옴 */
-    esp_now_tx_enqueue(mac, &req, sizeof(req), s_pair_ack_types, 1,
+    node_request_enqueue(mac, &req, sizeof(req), s_pair_ack_types, 1,
                         PAIR_REQUEST_RETRY_TIMEOUT_MS, PAIR_REQUEST_RETRY_ATTEMPTS, "Pairing");
     ESP_LOGI(TAG, "PAIR_REQUEST -> %s 큐잉됨", name_copy);
 }
 
 /* 2026-08-24(사용자 지시) — "연결" 버튼의 새 진입점. 여기선 아무것도 안 보내고 플래그만
- * 세움 — 실제 전송은 ADVERTISE 핸들러가 이 노드의 광고를 실제로 받는 순간에 esp_now_hub_pair()
+ * 세움 — 실제 전송은 ADVERTISE 핸들러가 이 노드의 광고를 실제로 받는 순간에 node_hub_pair()
  * 를 부르면서 함(그 순간 채널이 같다는 게 이미 증명됨) */
-void esp_now_hub_request_pair(const uint8_t *mac)
+void node_hub_request_pair(const uint8_t *mac)
 {
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-    esp_now_hub_node_t *n = find_node(mac);
+    node_hub_node_t *n = find_node(mac);
     char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
     bool ok = (n && n->conn_state != NODE_CONN_PAIRED);
     if (ok) {
@@ -1348,7 +1348,7 @@ void esp_now_hub_request_pair(const uint8_t *mac)
     }
 }
 
-void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode)
+void node_hub_bench_start(uint16_t duration_sec, uint8_t mode)
 {
     uint8_t target_mac[6] = { 0 };
     bool found = false;
@@ -1380,20 +1380,20 @@ void esp_now_hub_bench_start(uint16_t duration_sec, uint8_t mode)
     ESP_LOGI(TAG, "BENCH_START(mode=%u, %u초) -> %s: %s", mode, duration_sec, name_copy, esp_err_to_name(err));
 }
 
-void esp_now_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
+void node_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
 {
     device_config_set_cam_capture_interval_sec(mac, sec);
     push_cam_config_to(mac, true);
 }
 
-void esp_now_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec)
+void node_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec)
 {
     device_config_set_sens_sample_interval_sec(mac, sec);
     push_sens_config_to(mac);
 }
 
 /* 2026-08-21 — AGC/AEC On/Off(세로줄 노이즈 진단용), 촬영주기와 같은 카메라별 설정 패턴 */
-void esp_now_hub_apply_cam_agc_enable(const uint8_t *mac, bool enable)
+void node_hub_apply_cam_agc_enable(const uint8_t *mac, bool enable)
 {
     device_config_set_agc_enable(mac, enable);
     /* AGC/AEC는 진행팝업 없이 즉시반영이라(ui_main.c cb_agc_switch_changed 주석 참고)
@@ -1402,25 +1402,25 @@ void esp_now_hub_apply_cam_agc_enable(const uint8_t *mac, bool enable)
     push_cam_config_to(mac, false);
 }
 
-void esp_now_hub_apply_cam_aec_enable(const uint8_t *mac, bool enable)
+void node_hub_apply_cam_aec_enable(const uint8_t *mac, bool enable)
 {
     device_config_set_aec_enable(mac, enable);
     push_cam_config_to(mac, false);
 }
 
-void esp_now_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz)
+void node_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz)
 {
     device_config_set_xclk_mhz(mac, mhz);
     push_cam_config_to(mac, true);
 }
 
-bool esp_now_hub_apply_response_interval_sec(uint32_t sec)
+bool node_hub_apply_response_interval_sec(uint32_t sec)
 {
     device_config_set_response_interval_sec(sec);
 
-    /* 시스템 공통 설정이므로 지금 페어링된 CAM 전부에게 다시 보냄(esp_now_hub_bench_start의
+    /* 시스템 공통 설정이므로 지금 페어링된 CAM 전부에게 다시 보냄(node_hub_bench_start의
      * "페어링된 노드 순회" 패턴과 동일) — SENS는 아직 CAM_CONFIG_SET을 이해 못 하므로 CAM만 */
-    uint8_t targets[ESP_NOW_HUB_MAX_NODES][6];
+    uint8_t targets[NODE_HUB_MAX_NODES][6];
     int target_count = 0;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count; i++) {
@@ -1436,10 +1436,10 @@ bool esp_now_hub_apply_response_interval_sec(uint32_t sec)
     return target_count > 0;
 }
 
-void esp_now_hub_unpair(const uint8_t *mac)
+void node_hub_unpair(const uint8_t *mac)
 {
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-    esp_now_hub_node_t *n = find_node(mac);
+    node_hub_node_t *n = find_node(mac);
     char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
     if (n) {
         strncpy(name_copy, n->name, sizeof(name_copy) - 1);
@@ -1453,31 +1453,31 @@ void esp_now_hub_unpair(const uint8_t *mac)
 
     /* 2026-08-25(CASK 재설계, 사용자 지시) — UNPAIR은 사용자의 실시간 조작이라 즉각·확실히
      * 반영돼야 해서 reliable 스택으로 승격(예전엔 raw esp_now_send라, 유실되면 캠은 영원히
-     * 자기가 여전히 페어드인 줄 알았음 — 알려진 결함이었음). esp_now_tx_enqueue()는
+     * 자기가 여전히 페어드인 줄 알았음 — 알려진 결함이었음). node_request_enqueue()는
      * 비동기(큐잉만 하고 바로 리턴)라, 예전처럼 이 자리에서 곧바로 esp_now_del_peer()를
      * 부르면 실제 전송(및 재시도)이 일어나기도 전에 피어가 사라져서 전송 자체가 실패하는
      * 레이스가 생김 — 그래서 피어는 이제 안 지움(등록된 채로 남아도 기능상 무해, 최대
-     * ESP_NOW_HUB_MAX_NODES개뿐이라 자리 걱정도 없음) */
+     * NODE_HUB_MAX_NODES개뿐이라 자리 걱정도 없음) */
     esp_now_unpair_t msg = {
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_UNPAIR,
     };
     static const uint8_t s_unpair_ack_types[] = { ESP_NOW_MSG_UNPAIR_ACK };
-    esp_now_tx_enqueue(mac, &msg, sizeof(msg), s_unpair_ack_types, 1, 300, 3, "UNPAIR");
+    node_request_enqueue(mac, &msg, sizeof(msg), s_unpair_ack_types, 1, 300, 3, "UNPAIR");
     ESP_LOGI(TAG, "연결 해제: %s (UNPAIR 큐잉됨)", name_copy);
 }
 
-void esp_now_hub_set_connect_event_cb(esp_now_hub_event_cb_t cb)
+void node_hub_set_connect_event_cb(node_hub_event_cb_t cb)
 {
     s_connect_ready_cb = cb;
 }
 
-bool esp_now_hub_wait_paired(const uint8_t *mac, uint32_t timeout_ms)
+bool node_hub_wait_paired(const uint8_t *mac, uint32_t timeout_ms)
 {
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
     for (;;) {
-        esp_now_hub_node_t tmp[ESP_NOW_HUB_MAX_NODES];
-        int n = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, tmp, ESP_NOW_HUB_MAX_NODES);
+        node_hub_node_t tmp[NODE_HUB_MAX_NODES];
+        int n = node_hub_get_nodes(HUB_NODE_KIND_CAM, tmp, NODE_HUB_MAX_NODES);
         for (int i = 0; i < n; i++) {
             if (memcmp(tmp[i].mac, mac, 6) == 0 && tmp[i].conn_state == NODE_CONN_PAIRED) return true;
         }

@@ -1,14 +1,14 @@
 #include "ui_main.h"
 #include "ui_strings.h"
 #include "ui_font.h"
-#include "esp_now_hub.h"
+#include "node_hub.h"
 #include "device_config.h"
 #include "stats_store.h"
 #include "sd_storage.h"
 #include "photo_storage.h"
 #include "storage_mgr.h"
 #include "sens_kind_store.h"
-#include "esp_now_photo.h"
+#include "photo_rx.h"
 #include "ui_log.h"
 #include "rtc_sync.h"
 #include "esp_heap_caps.h"
@@ -123,22 +123,22 @@ static lv_obj_t          *s_photo_box           = NULL;  /* 사진 판넬 — �
 static lv_obj_t          *s_photo_image         = NULL;  /* s_photo_box 안의 lv_image(사진 오기 전엔 NULL) */
 /* 2026-08-21 — 내부(비-PSRAM) DRAM이 httpd_start 실패(5005)를 겪을 만큼 빠듯했던 걸 실기로
  * 확인 — PSRAM으로 옮김(ui_init()에서 할당) */
-static esp_now_hub_node_t *s_dash_nodes = NULL;
-static esp_now_hub_node_t *s_dash_nodes_prev = NULL;
+static node_hub_node_t *s_dash_nodes = NULL;
+static node_hub_node_t *s_dash_nodes_prev = NULL;
 static int                s_dash_count_prev = -1;  /* -1: 아직 비교 대상 없음(첫 실행은 항상 그림) */
 
 /* 2026-09-08(카메라 팝업 추출 — 주화면 카메라판넬에 남는 목록) — CAM 노드만 필터링해서
  * 보여줌 */
-static lv_obj_t *s_camera_dash_row_objs[ESP_NOW_HUB_MAX_NODES];
-static uint8_t   s_camera_dash_row_macs[ESP_NOW_HUB_MAX_NODES][6];
-static char      s_camera_dash_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];  /* 항상 진짜 장치명(ID) */
+static lv_obj_t *s_camera_dash_row_objs[NODE_HUB_MAX_NODES];
+static uint8_t   s_camera_dash_row_macs[NODE_HUB_MAX_NODES][6];
+static char      s_camera_dash_row_names[NODE_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];  /* 항상 진짜 장치명(ID) */
 /* 2026-09-09(사용자 설계 — "장치명 배열에 Alias field를 추가하는 게 맞아보이는데") — name과
  * 나란히, 같은 dash_changed 시점에 채워지는 표시용 Alias(없으면 빈 문자열). name을 절대
  * 덮어쓰지 않음 — build_device_popup() 등 ID가 필요한 곳은 항상 name을 씀 */
-static char      s_camera_dash_row_alias[ESP_NOW_HUB_MAX_NODES][DEVICE_CONFIG_ALIAS_MAX_LEN];
+static char      s_camera_dash_row_alias[NODE_HUB_MAX_NODES][DEVICE_CONFIG_ALIAS_MAX_LEN];
 static int       s_camera_dash_row_count = 0;
-static char      s_camera_dash_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
-static lv_obj_t *s_camera_dash_row_signal[ESP_NOW_HUB_MAX_NODES];
+static char      s_camera_dash_row_last_text[NODE_HUB_MAX_NODES][96];
+static lv_obj_t *s_camera_dash_row_signal[NODE_HUB_MAX_NODES];
 
 /* 2026-09-08(연결 기능 주화면 이관) — Sensor 판넬에 남는 "연결됨" 목록, 카메라 대시 목록과
  * 완전히 동일한 패턴 + 측정주기(개별설정값) 표시만 추가 */
@@ -148,18 +148,18 @@ static lv_obj_t          *s_sensor_dash_list    = NULL;
  * 필요 없어 보여") — "연결됨" 표제는 제거, 목록 자체로 충분 */
 static lv_obj_t          *s_sensor_pending_lbl   = NULL;
 static lv_obj_t          *s_camera_pending_lbl   = NULL;
-static lv_obj_t *s_sensor_dash_row_objs[ESP_NOW_HUB_MAX_NODES];
-static uint8_t   s_sensor_dash_row_macs[ESP_NOW_HUB_MAX_NODES][6];
-static char      s_sensor_dash_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];  /* 항상 진짜 장치명(ID) */
-static char      s_sensor_dash_row_alias[ESP_NOW_HUB_MAX_NODES][DEVICE_CONFIG_ALIAS_MAX_LEN];  /* 표시용, name과 별도(위 카메라 배열 주석 참고) */
+static lv_obj_t *s_sensor_dash_row_objs[NODE_HUB_MAX_NODES];
+static uint8_t   s_sensor_dash_row_macs[NODE_HUB_MAX_NODES][6];
+static char      s_sensor_dash_row_names[NODE_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];  /* 항상 진짜 장치명(ID) */
+static char      s_sensor_dash_row_alias[NODE_HUB_MAX_NODES][DEVICE_CONFIG_ALIAS_MAX_LEN];  /* 표시용, name과 별도(위 카메라 배열 주석 참고) */
 static int       s_sensor_dash_row_count = 0;
-static char      s_sensor_dash_row_last_text[ESP_NOW_HUB_MAX_NODES][96];
-static lv_obj_t *s_sensor_dash_row_signal[ESP_NOW_HUB_MAX_NODES];
+static char      s_sensor_dash_row_last_text[NODE_HUB_MAX_NODES][96];
+static lv_obj_t *s_sensor_dash_row_signal[NODE_HUB_MAX_NODES];
 /* 2026-09-15(사용자 설계 — "각 센서별로 T, H, C, A로 값을 표기") — 설명 라벨(왼쪽, 자연폭)과
  * 별개로 실제 채널값(오른쪽, flex_grow+우정렬)을 담는 두번째 라벨. ">" 슈브런 바로 앞까지
  * 밀착시켜야 해서(사용자 지시) 라벨을 쪼갬 */
-static lv_obj_t *s_sensor_dash_row_value[ESP_NOW_HUB_MAX_NODES];
-static char      s_sensor_dash_row_last_value_text[ESP_NOW_HUB_MAX_NODES][96];
+static lv_obj_t *s_sensor_dash_row_value[NODE_HUB_MAX_NODES];
+static char      s_sensor_dash_row_last_value_text[NODE_HUB_MAX_NODES][96];
 
 /* 2026-09-16(SR/Power Control) — Sens/CAM과 달리 페어링이 아니라 콘 고정 GPIO 2개(항상
  * 존재, project_cntl_sr_power_control_plan_2026_09_15 참고). 그래서 sens_dash처럼 "대상
@@ -182,7 +182,7 @@ static bool               s_has_selected_cam = false;  /* 지금촬영/목록/�
 /* CAM 선택 드롭다운(camera_toolbar 맨 앞) — 이 앱 첫 lv_dropdown 사용. 옵션 문자열의 각
  * 줄(인덱스)이 어느 mac인지는 LVGL이 몰라서 별도로 같이 들고 있어야 함 */
 static lv_obj_t          *s_camera_select_dd = NULL;
-static uint8_t            s_cam_dd_macs[ESP_NOW_HUB_MAX_NODES][6];
+static uint8_t            s_cam_dd_macs[NODE_HUB_MAX_NODES][6];
 static int                s_cam_dd_count = 0;
 
 /* 2026-09-05 — 측정 주기 Apply 대상 센서. 카메라의 상황판 드롭다운 선택기와 달리, 사용자
@@ -318,7 +318,7 @@ static void cb_camera_dash_row_clicked(lv_event_t *e);
 static void cb_sensor_dash_row_clicked(lv_event_t *e);
 
 /* 적응형 반응시간 행(2026-08-10) — 마지막 사용자 조작 후 이만큼 조용해야 CAM에 SLEEP_NOW.
- * CAM에는 전송 안 되는 Cntl 내부 판단값이라(esp_now_hub.c 참고), Apply해도 네트워크 왕복이
+ * CAM에는 전송 안 되는 Cntl 내부 판단값이라(node_hub.c 참고), Apply해도 네트워크 왕복이
  * 없어서 진행팝업 없이 즉시 반영됨(다른 두 Apply 버튼과 다른 점) */
 static lv_obj_t *s_adaptive_response_dd    = NULL;
 static lv_obj_t *s_adaptive_apply_btn      = NULL;
@@ -358,7 +358,7 @@ static const uint32_t s_capture_interval_values[]  = { 0, 10, 30, 1800, 3600, 10
  * 2026-08-11, 사용자 지시로 첫 단계를 1(1초마다 반복 취침)에서 0(센티널 — "아예 안 재움")
  * 으로 정정 — "즉시" 등급은 원래부터 짧은 주기로 반복 취침한다는 뜻이 아니라 딥슬립
  * 자체를 안 한다는 의도였음(오해로 1초 리터럴 값이 들어가 있었음). 0이면 CNTL은
- * SLEEP_NOW를 아예 안 보내고(esp_now_hub.c try_send_sleep_now), CAM도 재요청 없이 그냥
+ * SLEEP_NOW를 아예 안 보내고(node_hub.c try_send_sleep_now), CAM도 재요청 없이 그냥
  * 계속 깨있음(cam_node.c cam_node_wake_window_done) */
 static const uint32_t s_response_interval_values[] = { 0, 3, 10, 30, 60 };
 /* 적응형 반응시간(2026-08-10) — 10초/30초/1분/5분(2026-08-11, 사용자 지시로 5분 추가).
@@ -382,7 +382,7 @@ static int find_value_index(const uint32_t *values, int count, uint32_t v)
  * 캐시만 invalidate(lv_image_cache_drop)함(2026-08-01, 사용자 지적 — 반복 사용할 버퍼는
  * 처음에 미리 잡아두고 계속 쓰는 게 맞음). 예전엔 사진 선택마다 jpeg_free_align+
  * jpeg_calloc_align을 반복해서 PSRAM 조각화의 원인이 됐었음(사진 수신버퍼를 고정
- * 크기로 바꾼 것과 같은 이유 — esp_now_photo.c 참고). 전체화면 뷰어(1600x960)는
+ * 크기로 바꾼 것과 같은 이유 — photo_rx.c 참고). 전체화면 뷰어(1600x960)는
  * PSRAM 예산에 안 맞아 제거함(2026-08-01, 사용자 지시) */
 #define PHOTO_PANEL_BUF_CAP  ((size_t)PHOTO_PANEL_DECODE_W  * PHOTO_PANEL_DECODE_H  * 2 * 11 / 10)
 static uint8_t          *s_photo_jpeg_buf = NULL;
@@ -392,7 +392,7 @@ static lv_image_dsc_t    s_photo_dsc;
  * 콘 SD에서 통째로 읽어온 그대로 유지(디코드는 s_photo_jpeg_buf 쪽에 별도로 함) — 웹의
  * "원본 그대로 보기"(/photo, /api/photo_fetch)가 그대로 재사용(ui_main_get_selected_photo_raw
  * 참고, "웹기생" 설계: 웹은 콘이 이미 선택해서 들고 있는 바이트를 그대로 읽어갈 뿐, 독자적으로
- * 다시 읽지 않음). 상한은 esp_now_photo.c의 PHOTO_RECV_BUF_CAP(수신 가능한 최대 사진 크기)과
+ * 다시 읽지 않음). 상한은 photo_rx.c의 PHOTO_RECV_BUF_CAP(수신 가능한 최대 사진 크기)과
  * 반드시 같아야 함 — 그보다 큰 사진은 애초에 콘에 도착할 수 없었음 */
 #define PHOTO_RAW_BUF_CAP (1024 * 1024)
 static uint8_t *s_photo_raw_buf = NULL;
@@ -617,7 +617,7 @@ static lv_obj_t          *s_device_disconnect_btn = NULL;  /* 2026-09-08 — 웹
 static lv_obj_t          *s_device_alias_apply_btn = NULL;
 static char               s_device_alias_applied_text[DEVICE_CONFIG_ALIAS_MAX_LEN];
 static bool                s_device_popup_is_sensor = false;
-static esp_now_hub_node_t  s_device_popup_node;
+static node_hub_node_t  s_device_popup_node;
 
 /* 2026-09-16(SR/Power Control, 순수 대화로 재설계 — "공학 관점에선 좋은데 사용자 관점에선
  * 쓰기 힘들다") — 문장형 골격("(채널)가 (오르면/내리면) (켜/꺼)라") + AI On/Off 토글.
@@ -668,7 +668,7 @@ static lv_obj_t  *s_relay_advanced_box    = NULL;
 static lv_obj_t  *s_relay_basedon_dd      = NULL;   /* Group/Device */
 static lv_obj_t  *s_relay_group_choice_dd  = NULL;  /* Air T(Basic)/Air T(Fine)/Agar — Based on==Group && 채널==온도일 때만 */
 static lv_obj_t  *s_relay_device_dd       = NULL;   /* Based on==Device일 때만 */
-static uint8_t    s_relay_device_dd_macs[ESP_NOW_HUB_MAX_NODES][6];
+static uint8_t    s_relay_device_dd_macs[NODE_HUB_MAX_NODES][6];
 static int        s_relay_device_dd_count = 0;
 static lv_obj_t  *s_relay_source_stat_dd  = NULL;   /* Max/Min/Avg — Group/Device 공통, 라벨 없음 */
 static lv_obj_t  *s_relay_trend_switch       = NULL;
@@ -703,7 +703,7 @@ typedef struct {
     bool     used;
     uint32_t last_cycle_count;
 } power_log_track_t;
-static power_log_track_t s_power_log_track[ESP_NOW_HUB_MAX_NODES];
+static power_log_track_t s_power_log_track[NODE_HUB_MAX_NODES];
 /* 2026-08-21 — 내부(비-PSRAM) DRAM이 httpd_start 실패(5005)를 겪을 만큼 빠듯했던 걸 실기로
  * 확인 — 텍스트 로그 버퍼라 PSRAM으로 옮김(ui_init()에서 할당, 다른 고정버퍼들과 동일 원칙) */
 #define POWER_LOG_BUF_CAP 2048
@@ -1169,7 +1169,7 @@ static lv_obj_t *create_modal_btn_row(lv_obj_t *box)
  * s_err_table이 하드코딩 한글 문자열이라(이번 세션 영문화 작업에서 빠뜨림) 비트맵 폰트로는
  * 깨져 보였고, 게다가 코드 4개가 테이블에 아예 없어서 "알 수 없는 에러" 폴백으로 떨어졌음
  * (device_config 버전업으로 부팅 때마다 뜨는 5007 CONFIG_FILE_MISMATCH가 바로 이 경우).
- * ui_log.c는 esp_now_photo.c 같은 하위 모듈에서도 쓰는 저수준 모듈이라 ui_strings 의존을
+ * ui_log.c는 photo_rx.c 같은 하위 모듈에서도 쓰는 저수준 모듈이라 ui_strings 의존을
  * 새로 얹지 않고, ui_str()을 이미 쓰는 이 파일(ui_main.c)에 매핑을 둠 — ui_log.h의
  * UI_ERR_* 순서와 1:1 대응 */
 static ui_str_id_t err_code_to_desc_str(int code)
@@ -1342,7 +1342,7 @@ static void cb_logo_title_tap(lv_event_t *e)
     lv_obj_t *box = create_modal();
     create_modal_title(box, STR_TITLE_WEB_QR, MODAL_KIND_NORMAL);
 
-    const char *ip = esp_now_hub_get_own_ip_str();
+    const char *ip = node_hub_get_own_ip_str();
     if (ip[0] == '\0') {
         lv_obj_t *lbl = lv_label_create(box);
         lv_label_set_text(lbl, ui_str(STR_MSG_WEB_QR_NO_IP));
@@ -1697,18 +1697,18 @@ static void fill_rgb565_dsc(lv_image_dsc_t *dsc, uint8_t *pixel_buf, uint16_t w,
  * ════════════════════════════════════════════════════════════ */
 static void cb_pair_confirm(lv_event_t *e)
 {
-    esp_now_hub_node_t *node = (esp_now_hub_node_t *)lv_event_get_user_data(e);
-    esp_now_hub_request_pair(node->mac);
+    node_hub_node_t *node = (node_hub_node_t *)lv_event_get_user_data(e);
+    node_hub_request_pair(node->mac);
     cb_modal_close(e);
 }
 
 static void cb_unpair_confirm(void *ctx)
 {
-    esp_now_hub_node_t *node = (esp_now_hub_node_t *)ctx;
-    esp_now_hub_unpair(node->mac);
+    node_hub_node_t *node = (node_hub_node_t *)ctx;
+    node_hub_unpair(node->mac);
 }
 
-static void show_pair_confirm_popup(esp_now_hub_node_t *node)
+static void show_pair_confirm_popup(node_hub_node_t *node)
 {
     lv_obj_t *box = create_modal();
     create_modal_title(box, STR_TITLE_CONFIRM, MODAL_KIND_NORMAL);
@@ -1724,7 +1724,7 @@ static void show_pair_confirm_popup(esp_now_hub_node_t *node)
 
 /* 연결된 장치를 탭했을 때 — 지금은 장치별 설정 항목이 없어서 연결 해제 확인만 함
  * (설정 항목 생기면 여기 확장 예정, 예: CAM 화이트밸런스/촬영주기) */
-static void show_unpair_confirm_popup(esp_now_hub_node_t *node)
+static void show_unpair_confirm_popup(node_hub_node_t *node)
 {
     char msg[64];
     snprintf(msg, sizeof(msg), "%s\n%s", node->name, ui_str(STR_MSG_UNPAIR_CONFIRM));
@@ -1737,16 +1737,16 @@ static void show_unpair_confirm_popup(esp_now_hub_node_t *node)
 static lv_obj_t          *s_camera_list = NULL;
 /* 2026-08-21 — 내부(비-PSRAM) DRAM이 httpd_start 실패(5005)를 겪을 만큼 빠듯했던 걸 실기로
  * 확인 — PSRAM으로 옮김(ui_init()에서 할당) */
-static esp_now_hub_node_t *s_camera_nodes = NULL;
-static esp_now_hub_node_t *s_camera_nodes_prev = NULL;
+static node_hub_node_t *s_camera_nodes = NULL;
+static node_hub_node_t *s_camera_nodes_prev = NULL;
 static int                s_camera_count_prev = -1;  /* -1: 아직 비교 대상 없음(첫 실행은 항상 그림) */
 
 /* 요약판넬(s_summary_row_objs)과 동일한 이유(2026-08-10) — 행 구조 자체는 ever_paired
  * 기준으로만 다시 그려지므로, 라디오 레벨 paired 토글(페어됨<->통신 중)만으로는 재생성이
  * 안 트리거됨 — 이 배열로 행 텍스트만 매 틱 따로 갱신 */
-static lv_obj_t *s_camera_row_objs[ESP_NOW_HUB_MAX_NODES];
-static uint8_t   s_camera_row_macs[ESP_NOW_HUB_MAX_NODES][6];
-static char      s_camera_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
+static lv_obj_t *s_camera_row_objs[NODE_HUB_MAX_NODES];
+static uint8_t   s_camera_row_macs[NODE_HUB_MAX_NODES][6];
+static char      s_camera_row_names[NODE_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
 static int       s_camera_row_count = 0;
 
 static void force_camera_list_redraw(void)
@@ -1761,7 +1761,7 @@ static void force_camera_list_redraw(void)
  * ever_paired(세션 내 한 번이라도 페어링됨, sticky) 기준이어야 함. 라디오 레벨 paired는
  * CAM 딥슬립 사이클마다 정상적으로 순간 false를 스치므로, 이 필드로 비교하면 매 사이클
  * 리스트가 깜빡이며 다시 그려짐(사용자 지적 — 목록/판넬이 끊김처럼 보이는 원인) */
-static bool node_display_equal(const esp_now_hub_node_t *a, const esp_now_hub_node_t *b)
+static bool node_display_equal(const node_hub_node_t *a, const node_hub_node_t *b)
 {
     return memcmp(a->mac, b->mac, sizeof(a->mac)) == 0 &&
            a->kind == b->kind && a->ever_paired == b->ever_paired &&
@@ -1773,7 +1773,7 @@ static bool node_display_equal(const esp_now_hub_node_t *a, const esp_now_hub_no
 static void cb_camera_item_clicked(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
-    esp_now_hub_node_t *node = (esp_now_hub_node_t *)lv_obj_get_user_data(btn);
+    node_hub_node_t *node = (node_hub_node_t *)lv_obj_get_user_data(btn);
     if (!node) return;
     show_pair_confirm_popup(node);
 }
@@ -1784,7 +1784,7 @@ static void cb_camera_item_clicked(lv_event_t *e)
 static void refresh_camera_row_status_text(void)
 {
     for (int i = 0; i < s_camera_row_count; i++) {
-        hub_conn_state_t st = esp_now_hub_get_conn_state(s_camera_row_macs[i]);
+        hub_conn_state_t st = node_hub_get_conn_state(s_camera_row_macs[i]);
         ui_str_id_t status_id = (st == HUB_CONN_STATE_WAITING) ? STR_STATUS_CONNECTING
                                : (st == HUB_CONN_STATE_ACTIVE) ? STR_STATUS_ACTIVE
                                : STR_STATUS_PAIRED;
@@ -1799,18 +1799,18 @@ static void refresh_camera_list(lv_timer_t *t)
 {
     (void)t;
     if (!s_camera_nodes || !s_camera_nodes_prev) return;  /* PSRAM 할당 실패 시(극히 드묾) */
-    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, s_camera_nodes, ESP_NOW_HUB_MAX_NODES);
+    int total = node_hub_get_nodes(HUB_NODE_KIND_CAM, s_camera_nodes, NODE_HUB_MAX_NODES);
 
     /* 2026-09-08(연결 기능 주화면 이관) — 이 목록은 이제 "대기중"만 보여줌(연결된 장치는
      * s_camera_dash_list로 이관). node_display_equal은 conn_state를 안 보므로(mac/kind/
      * ever_paired/name만 비교) 대기중<->연결 전이만으로는 원본 노드 비교로 재생성이 안
      * 트리거됨 — WAITING만 걸러낸 별도 스냅샷을 만들어 그걸로 비교해야 전이 시 행이
      * 실제로 나타나거나 사라짐 */
-    esp_now_hub_node_t waiting[ESP_NOW_HUB_MAX_NODES];
+    node_hub_node_t waiting[NODE_HUB_MAX_NODES];
     int count = 0;
     for (int i = 0; i < total; i++) {
-        if (esp_now_hub_get_conn_state(s_camera_nodes[i].mac) != HUB_CONN_STATE_WAITING) continue;
-        if (count < ESP_NOW_HUB_MAX_NODES) waiting[count++] = s_camera_nodes[i];
+        if (node_hub_get_conn_state(s_camera_nodes[i].mac) != HUB_CONN_STATE_WAITING) continue;
+        if (count < NODE_HUB_MAX_NODES) waiting[count++] = s_camera_nodes[i];
     }
 
     bool changed = (count != s_camera_count_prev);
@@ -1818,7 +1818,7 @@ static void refresh_camera_list(lv_timer_t *t)
         if (!node_display_equal(&waiting[i], &s_camera_nodes_prev[i])) changed = true;
     }
     if (changed) {
-        memcpy(s_camera_nodes_prev, waiting, sizeof(esp_now_hub_node_t) * count);
+        memcpy(s_camera_nodes_prev, waiting, sizeof(node_hub_node_t) * count);
         s_camera_count_prev = count;
 
         /* 그 순간 사용자가 행을 누르고 있는 중이면 LVGL 입력장치가 방금 지워진 객체를 계속
@@ -1846,14 +1846,14 @@ static void refresh_camera_list(lv_timer_t *t)
                  * 리턴 후 가리키면 안 됨(2026-09-08, 이관 중 바로잡음) */
                 lv_obj_set_user_data(row, &s_camera_nodes_prev[i]);
                 lv_obj_add_event_cb(row, cb_camera_item_clicked, LV_EVENT_CLICKED, NULL);
-                if (i < ESP_NOW_HUB_MAX_NODES) {
+                if (i < NODE_HUB_MAX_NODES) {
                     s_camera_row_objs[i] = row;
                     memcpy(s_camera_row_macs[i], s_camera_nodes_prev[i].mac, 6);
                     strncpy(s_camera_row_names[i], s_camera_nodes_prev[i].name, ESP_NOW_LINK_NAME_LEN - 1);
                     s_camera_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
                 }
             }
-            s_camera_row_count = (count < ESP_NOW_HUB_MAX_NODES) ? count : ESP_NOW_HUB_MAX_NODES;
+            s_camera_row_count = (count < NODE_HUB_MAX_NODES) ? count : NODE_HUB_MAX_NODES;
         }
     }
     refresh_camera_row_status_text();  /* 2026-08-10 — 구조 변경 여부와 무관하게 매 틱 갱신 */
@@ -1867,13 +1867,13 @@ static void refresh_camera_list(lv_timer_t *t)
  * node->mac 기준으로만 동작하는 범용 코드라 그대로 재사용 — 새로 만들 필요 없음.
  * ════════════════════════════════════════════════════════════ */
 static lv_obj_t          *s_sensor_list = NULL;
-static esp_now_hub_node_t *s_sensor_nodes = NULL;
-static esp_now_hub_node_t *s_sensor_nodes_prev = NULL;
+static node_hub_node_t *s_sensor_nodes = NULL;
+static node_hub_node_t *s_sensor_nodes_prev = NULL;
 static int                s_sensor_count_prev = -1;
 
-static lv_obj_t *s_sensor_row_objs[ESP_NOW_HUB_MAX_NODES];
-static uint8_t   s_sensor_row_macs[ESP_NOW_HUB_MAX_NODES][6];
-static char      s_sensor_row_names[ESP_NOW_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
+static lv_obj_t *s_sensor_row_objs[NODE_HUB_MAX_NODES];
+static uint8_t   s_sensor_row_macs[NODE_HUB_MAX_NODES][6];
+static char      s_sensor_row_names[NODE_HUB_MAX_NODES][ESP_NOW_LINK_NAME_LEN];
 static int       s_sensor_row_count = 0;
 
 static void force_sensor_list_redraw(void)
@@ -1912,17 +1912,17 @@ static void select_sensor(const uint8_t *mac)
 static void cb_sensor_item_clicked(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
-    esp_now_hub_node_t *node = (esp_now_hub_node_t *)lv_obj_get_user_data(btn);
+    node_hub_node_t *node = (node_hub_node_t *)lv_obj_get_user_data(btn);
     if (!node) return;
     show_pair_confirm_popup(node);
 }
 
-static char s_sensor_row_last_text[ESP_NOW_HUB_MAX_NODES][48];
+static char s_sensor_row_last_text[NODE_HUB_MAX_NODES][48];
 
 static void refresh_sensor_row_status_text(void)
 {
     for (int i = 0; i < s_sensor_row_count; i++) {
-        hub_conn_state_t st = esp_now_hub_get_conn_state(s_sensor_row_macs[i]);
+        hub_conn_state_t st = node_hub_get_conn_state(s_sensor_row_macs[i]);
         ui_str_id_t status_id = (st == HUB_CONN_STATE_WAITING) ? STR_STATUS_CONNECTING
                                : (st == HUB_CONN_STATE_ACTIVE) ? STR_STATUS_ACTIVE
                                : STR_STATUS_PAIRED;
@@ -1943,15 +1943,15 @@ static void refresh_sensor_list(lv_timer_t *t)
 {
     (void)t;
     if (!s_sensor_nodes || !s_sensor_nodes_prev) return;  /* PSRAM 할당 실패 시(극히 드묾) */
-    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, s_sensor_nodes, ESP_NOW_HUB_MAX_NODES);
+    int total = node_hub_get_nodes(HUB_NODE_KIND_SENS, s_sensor_nodes, NODE_HUB_MAX_NODES);
 
     /* 2026-09-08(연결 기능 주화면 이관) — refresh_camera_list와 동일 이유로 WAITING만 걸러낸
      * 별도 스냅샷 사용(node_display_equal은 conn_state를 안 봄) */
-    esp_now_hub_node_t waiting[ESP_NOW_HUB_MAX_NODES];
+    node_hub_node_t waiting[NODE_HUB_MAX_NODES];
     int count = 0;
     for (int i = 0; i < total; i++) {
-        if (esp_now_hub_get_conn_state(s_sensor_nodes[i].mac) != HUB_CONN_STATE_WAITING) continue;
-        if (count < ESP_NOW_HUB_MAX_NODES) waiting[count++] = s_sensor_nodes[i];
+        if (node_hub_get_conn_state(s_sensor_nodes[i].mac) != HUB_CONN_STATE_WAITING) continue;
+        if (count < NODE_HUB_MAX_NODES) waiting[count++] = s_sensor_nodes[i];
     }
 
     bool changed = (count != s_sensor_count_prev);
@@ -1959,7 +1959,7 @@ static void refresh_sensor_list(lv_timer_t *t)
         if (!node_display_equal(&waiting[i], &s_sensor_nodes_prev[i])) changed = true;
     }
     if (changed) {
-        memcpy(s_sensor_nodes_prev, waiting, sizeof(esp_now_hub_node_t) * count);
+        memcpy(s_sensor_nodes_prev, waiting, sizeof(node_hub_node_t) * count);
         s_sensor_count_prev = count;
 
         lv_indev_reset(NULL, s_sensor_list);
@@ -1979,7 +1979,7 @@ static void refresh_sensor_list(lv_timer_t *t)
                  * 배열이라 함수 리턴 후 가리키면 안 됨(refresh_camera_list와 동일 수정) */
                 lv_obj_set_user_data(row, &s_sensor_nodes_prev[i]);
                 lv_obj_add_event_cb(row, cb_sensor_item_clicked, LV_EVENT_CLICKED, NULL);
-                if (i < ESP_NOW_HUB_MAX_NODES) {
+                if (i < NODE_HUB_MAX_NODES) {
                     s_sensor_row_objs[i] = row;
                     memcpy(s_sensor_row_macs[i], s_sensor_nodes_prev[i].mac, 6);
                     strncpy(s_sensor_row_names[i], s_sensor_nodes_prev[i].name, ESP_NOW_LINK_NAME_LEN - 1);
@@ -1987,7 +1987,7 @@ static void refresh_sensor_list(lv_timer_t *t)
                     s_sensor_row_last_text[i][0] = '\0';  /* 새로 만든 라벨 — 다음 틱에 무조건 한 번은 채워지도록 */
                 }
             }
-            s_sensor_row_count = (count < ESP_NOW_HUB_MAX_NODES) ? count : ESP_NOW_HUB_MAX_NODES;
+            s_sensor_row_count = (count < NODE_HUB_MAX_NODES) ? count : NODE_HUB_MAX_NODES;
         }
     }
     refresh_sensor_row_status_text();
@@ -2034,7 +2034,7 @@ static bool capture_popup_is_active(void);  /* 아래 정의(capture_popup_tick_
  * 안 건드림. OnTap(cb_photo_row_select)/목록 재구성(refresh_photo_list_ui) 전부 "선택이
  * 바뀌었다"는 사실만 여기로 알림. 웹도 이 함수를 직접 안 부르고 cb_photo_row_select 자체를
  * 탭 합성으로 거쳐 감(ui_main_inject_photo_select, "PC 원격제어처럼" 설계).
- * 2026-08-30 버그수정 — esp_now_hub_note_user_action()이 예전엔 start_single_receive()
+ * 2026-08-30 버그수정 — node_hub_note_user_action()이 예전엔 start_single_receive()
  * 안에서만(=실제 요청이 lv_async_call을 거쳐 시작될 때) 불려서, 탭/선택 시점과 그 사이에
  * 간극이 있었음. 이 간극에 WAKE_HELLO가 걸리면 적응형 판단(send_cask_sleep_now)이 아직
  * "방금 조작 있었음"을 못 보고 진짜 sleep_sec을 내보내는 레이스가 있었음(사용자 실기 확인:
@@ -2047,20 +2047,20 @@ static void set_selected_photo(uint8_t kind, uint32_t seq)
     s_selected_kind = kind;
     s_selected_seq = seq;
     s_has_selected_photo = true;
-    esp_now_hub_note_user_action();
+    node_hub_note_user_action();
     display_photo(kind, seq);
 }
 
 /* 2026-08-10 — 사진가져오기/목록갱신/지금촬영/전체삭제 4곳이 전부 같은 문제를 겪고 있었음:
- * WAITING(진짜 연결 안 됨)일 때 그냥 요청+진행팝업을 띄우면, esp_now_photo.c 내부의
+ * WAITING(진짜 연결 안 됨)일 때 그냥 요청+진행팝업을 띄우면, photo_rx.c 내부의
  * require_paired()가 요청 자체를 조용히 안 보내는데 팝업은 그걸 몰라서 cam_response_timeout_ms()
  * 예산을 다 채운 뒤에야 "무응답"으로 오인 표시함(3006/3007/4004 등, 원인이 다 같음). 액션마다
  * 반복 작성하지 않고 여기 한 곳으로 모음 — 나중에 SENS를 붙일 때도(같은 connectionless
  * WAITING/PAIRED/ACTIVE 모델이므로) mac만 바꿔 그대로 재사용 가능. what은 로그/토스트에 쓸
- * 짧은 동작 이름("사진 가져오기" 등, esp_now_tx_enqueue의 what과 같은 관례) */
+ * 짧은 동작 이름("사진 가져오기" 등, node_request_enqueue의 what과 같은 관례) */
 static bool require_active_or_report(const uint8_t *mac, const char *what)
 {
-    if (esp_now_hub_get_conn_state(mac) == HUB_CONN_STATE_WAITING) {
+    if (node_hub_get_conn_state(mac) == HUB_CONN_STATE_WAITING) {
         ui_log_add_err(UI_ERR_NOT_PAIRED, "%s unavailable - waiting for CAM connection", what);
         return false;
     }
@@ -2068,10 +2068,10 @@ static bool require_active_or_report(const uint8_t *mac, const char *what)
 }
 
 /* 2026-09-19(SD 제거 재설계 — 사진목록 UI 로컬화) — 사진 수신 완료(성공/실패) 이벤트의 앱 쪽
- * 반응. 이제 esp_now_photo_state READY는 오직 "CAM이 방금 찍은 사진을 콘에 푸시해왔다"는
+ * 반응. 이제 photo_rx 상태 READY는 오직 "CAM이 방금 찍은 사진을 콘에 푸시해왔다"는
  * 뜻만 남음(지금촬영/주기촬영 둘 다 이 경로 하나로 도착 — CNTL이 먼저 요청해서 받아오는
- * esp_now_photo_fetch_by_id()는 더 이상 안 씀, CAM에 SD가 없어져 애초에 응답할 수도 없음).
- * SD 저장은 esp_now_photo.c의 handle_done()이 이미 동기로 끝내놓은 뒤에 이 이벤트가 옴 —
+ * photo_rx_fetch_by_id()는 더 이상 안 씀, CAM에 SD가 없어져 애초에 응답할 수도 없음).
+ * SD 저장은 photo_rx.c의 handle_done()이 이미 동기로 끝내놓은 뒤에 이 이벤트가 옴 —
  * 여기선 상태만 소비(ack)하고, 지금 카메라 판넬이 열려있으면 로컬 목록도 최신화 */
 static void cb_async_photo_result(void *user_data)
 {
@@ -2081,13 +2081,13 @@ static void cb_async_photo_result(void *user_data)
      * 다음 틱에 상태를 놓쳐 정체 타임아웃으로 오판한다(2026-09-04 fetch_popup 시절과 동일
      * 이유) */
     if (capture_popup_is_active()) return;
-    esp_now_photo_state_t st = esp_now_photo_get_state();
-    if (st == ESP_NOW_PHOTO_STATE_READY) {
-        esp_now_photo_ready_ack();
+    photo_rx_state_t st = photo_rx_get_state();
+    if (st == PHOTO_RX_STATE_READY) {
+        photo_rx_ready_ack();
         if (s_has_selected_cam) refresh_photo_list_ui(-1);  /* 주기촬영 등 배경 도착 — 선택은
                                                                  안 건드리고 목록만 최신화 */
-    } else if (st == ESP_NOW_PHOTO_STATE_ERROR) {
-        esp_now_photo_clear();
+    } else if (st == PHOTO_RX_STATE_ERROR) {
+        photo_rx_clear();
     }
 }
 
@@ -2180,7 +2180,7 @@ static void cb_photo_delete_btn(lv_event_t *e)
  * 목록 갱신 시(refresh_photo_list_ui) 둘 다에서 다시 그려야 해서 분리(2026-08-04).
  * "개(Pic.)" 표기는 괄호 안이 영문 모드일 때만 쓰는 표기라는 뜻이었음(사용자 정정:
  * 한글모드="N개", 영문모드="N Pic.", 둘 다 같이 보이면 안 됨).
- * 2026-09-19 — CAM이 보고하던 자기 SD 사용량(esp_now_photo_list_get_sd_usage, CAM SD 제거로
+ * 2026-09-19 — CAM이 보고하던 자기 SD 사용량(photo_rx_list_get_sd_usage, CAM SD 제거로
  * 더 이상 의미 없음) 대신 콘 자신의 SD 사용량(refresh_storage_status_label과 동일 소스)으로
  * 교체, 개수는 이 카메라 폴더의 전체 개수(현재 페이지 개수가 아님) */
 static void update_list_info_label(void)
@@ -2385,7 +2385,7 @@ static void photo_jump_next_page_cb(lv_event_t *e)
  * 예전엔 이 함수가 매번 jpeg_calloc_align으로 새로 할당했는데, 판넬/뷰어 둘 다 목표
  * 해상도가 고정이라 그럴 필요가 없고, 오히려 반복되는 free+malloc이 압축본 캐시 슬롯들과
  * 뒤섞이며 PSRAM을 조각내서 이 malloc 자체가 실패하는 원인이 됐음(recv 버퍼를 고정 크기로
- * 바꾼 것과 동일한 문제 — esp_now_photo.c 참고). 이제 버퍼는 호출부 소유, 여기선 안 잡고
+ * 바꾼 것과 동일한 문제 — photo_rx.c 참고). 이제 버퍼는 호출부 소유, 여기선 안 잡고
  * 안 해제함 — 성공하면 true. */
 static bool decode_jpeg_scaled(const uint8_t *jpeg_data, size_t jpeg_len,
                                 uint16_t target_w, uint16_t target_h,
@@ -2510,17 +2510,17 @@ static void display_photo(uint8_t kind, uint32_t seq)
  * 흐름이 공유(2026-08-01) — 호출부는 tick_fn만 공급: box 안에 자기 stage 라벨을 채우고,
  * true를 반환하면 완료로 보고 팝업이 자동으로 닫힘. "취소"는 로컬 UI만 닫을 뿐 CAM에
  * 보낸 요청 자체를 취소하지는 않음(이 프로토콜에 그런 abort 메시지가 없음) — CAM은 계속
- * 처리하고 응답이 오면 esp_now_photo 쪽 상태는 갱신되지만 화면에 반영은 안 됨.
+ * 처리하고 응답이 오면 photo_rx 쪽 상태는 갱신되지만 화면에 반영은 안 됨.
  * ════════════════════════════════════════════════════════════ */
 typedef bool (*progress_tick_fn_t)(lv_obj_t *box);  /* true=완료, 팝업 자동 닫힘 */
 
 /* CAM 응답을 무한정 기다리지 않기 위한 공용 타임아웃 — 지금촬영/모두지우기/사진가져오기가
  * 전부 이 값을 씀(각자 계산 기준은 다를 수 있음: 총 경과시간 vs 마지막 진행 이후 경과시간).
  * 2026-08-10 — 고정 8초였던 걸 "응답성" 설정에 맞춰 늘어나게 바꿈: CAM이 정상적으로(버그
- * 아님) 딥슬립 중이었을 때 명령이 도착하면 esp_now_tx.c도 이제 응답성 예산만큼 재시도하는데,
+ * 아님) 딥슬립 중이었을 때 명령이 도착하면 node_request.c도 이제 응답성 예산만큼 재시도하는데,
  * 이 값이 그보다 짧게 고정돼 있으면 실제 재시도가 아직 끝나기도 전에 팝업이 먼저 NORESPONSE로
- * 포기해버려서 esp_now_tx.c 쪽 수정이 무의미해짐(실사용 중 3006 반복으로 발견). 같은
- * 30초 상한/여유마진 원칙을 여기서도 그대로 재사용(esp_now_tx.c의 TX_RESPONSE_BUDGET_CAP_SEC/
+ * 포기해버려서 node_request.c 쪽 수정이 무의미해짐(실사용 중 3006 반복으로 발견). 같은
+ * 30초 상한/여유마진 원칙을 여기서도 그대로 재사용(node_request.c의 TX_RESPONSE_BUDGET_CAP_SEC/
  * TX_WAKE_MARGIN_MS와 값 동기화 — 두 곳 중 하나만 바뀌면 다시 어긋나므로 값 바꿀 땐 같이) */
 static uint32_t cam_response_timeout_ms(void)
 {
@@ -2654,7 +2654,7 @@ static esp_now_capture_stage_t s_capture_last_seen_stage;  /* 전환 감지용(2
 
 static uint32_t capture_stage_timeout_ms(esp_now_capture_stage_t stage)
 {
-    if (stage == ESP_NOW_CAPTURE_STAGE_INIT_NEEDED || stage == ESP_NOW_CAPTURE_STAGE_CAPTURING) {
+    if (stage == PHOTO_RX_CAPTURE_STAGE_INIT_NEEDED || stage == PHOTO_RX_CAPTURE_STAGE_CAPTURING) {
         return CAM_CAPTURE_HW_TIMEOUT_MS;
     }
     return cam_response_timeout_ms();
@@ -2668,7 +2668,7 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
     lv_color_t red   = lv_palette_main(LV_PALETTE_RED);
 
     if (s_capture_popup_stage == CAPTURE_POPUP_STAGE_WAIT_RESULT) {
-        esp_now_capture_stage_t stage = esp_now_photo_get_capture_stage();
+        esp_now_capture_stage_t stage = photo_rx_get_capture_stage();
 
         if (stage != s_capture_last_seen_stage) {
             /* 단계가 바뀔 때마다 그 시점부터 새 예산 시작(전체삭제의 RECEIVED/WAIT_DONE
@@ -2677,16 +2677,16 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
             s_capture_last_seen_stage = stage;
             s_capture_popup_stage_start_ms = lv_tick_get();
             switch (stage) {
-                case ESP_NOW_CAPTURE_STAGE_ACKED:
+                case PHOTO_RX_CAPTURE_STAGE_ACKED:
                     set_stage_label(s_capture_stage_label, 0, STR_CAPTURE_STAGE1_DONE, green);
                     break;
-                case ESP_NOW_CAPTURE_STAGE_INIT_NEEDED:
+                case PHOTO_RX_CAPTURE_STAGE_INIT_NEEDED:
                     set_stage_label(s_capture_stage_label, 1, STR_CAPTURE_STAGE2_INIT_NEEDED, grey);
                     break;
-                case ESP_NOW_CAPTURE_STAGE_INIT_DONE:
+                case PHOTO_RX_CAPTURE_STAGE_INIT_DONE:
                     set_stage_label(s_capture_stage_label, 1, STR_CAPTURE_STAGE2_INIT_DONE, green);
                     break;
-                case ESP_NOW_CAPTURE_STAGE_CAPTURING:
+                case PHOTO_RX_CAPTURE_STAGE_CAPTURING:
                     set_stage_label(s_capture_stage_label, 1, STR_CAPTURE_STAGE2_CAPTURING, grey);
                     break;
                 default:
@@ -2694,7 +2694,7 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
             }
         }
 
-        bool resolved  = (stage == ESP_NOW_CAPTURE_STAGE_CAPTURED || stage == ESP_NOW_CAPTURE_STAGE_CAPTURE_FAILED);
+        bool resolved  = (stage == PHOTO_RX_CAPTURE_STAGE_CAPTURED || stage == PHOTO_RX_CAPTURE_STAGE_CAPTURE_FAILED);
         bool timedout  = !resolved && lv_tick_elaps(s_capture_popup_stage_start_ms) > capture_stage_timeout_ms(stage);
         if (!resolved && !timedout) return false;
 
@@ -2711,11 +2711,11 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
             return true;
         }
 
-        bool ok = (stage == ESP_NOW_CAPTURE_STAGE_CAPTURED);
+        bool ok = (stage == PHOTO_RX_CAPTURE_STAGE_CAPTURED);
         set_stage_label(s_capture_stage_label, 0, STR_CAPTURE_STAGE1_DONE, green);
         set_stage_label(s_capture_stage_label, 1, ok ? STR_CAPTURE_STAGE2_SUCCESS : STR_CAPTURE_STAGE2_FAILED,
                          ok ? green : red);
-        esp_now_photo_capture_stage_clear();
+        photo_rx_capture_stage_clear();
 
         /* 2단계가 성공이든 실패든(무응답은 위에서 이미 처리하고 끝났음) 콘에 실제로
          * 도착하는지는 별도로 기다림 — 촬영 성공과 전송 완료는 다른 단계(2026-09-19: CAM이
@@ -2728,21 +2728,21 @@ static bool capture_popup_tick_fn(lv_obj_t *box)
     }
 
     /* CAPTURE_POPUP_STAGE_WAIT_UPLOAD — 2026-09-19(SD 제거 재설계) — 예전엔 여기서 CAM에게
-     * 목록을 다시 물었지만, 이제 CAM은 찍은 사진을 스스로 콘에 푸시하므로(esp_now_photo.c의
+     * 목록을 다시 물었지만, 이제 CAM은 찍은 사진을 스스로 콘에 푸시하므로(photo_rx.c의
      * handle_done()이 photo_storage_save()까지 동기로 끝냄) 그 도착(READY)만 기다렸다가
      * 로컬 목록을 새로고침하면 됨 — ESP-NOW 왕복이 하나 통째로 없어짐.
      * cb_async_photo_result()가 이 팝업이 떠 있는 동안은 이 상태 소비를 양보하므로
      * (capture_popup_is_active() 참고) 여기서 직접 소비함 */
-    esp_now_photo_state_t pst = esp_now_photo_get_state();
-    if (pst == ESP_NOW_PHOTO_STATE_READY) {
-        esp_now_photo_ready_ack();
+    photo_rx_state_t pst = photo_rx_get_state();
+    if (pst == PHOTO_RX_STATE_READY) {
+        photo_rx_ready_ack();
         s_photo_page_index = 0;  /* 방금 찍은 게 최신이니 첫 페이지로 */
         refresh_photo_list_ui(0);  /* 페이지 안 0번째 = 최신 */
         set_stage_label(s_capture_stage_label, 2, STR_CAPTURE_STAGE3_DONE, green);
         return true;
     }
-    if (pst == ESP_NOW_PHOTO_STATE_ERROR) {
-        esp_now_photo_clear();
+    if (pst == PHOTO_RX_STATE_ERROR) {
+        photo_rx_clear();
         set_stage_label(s_capture_stage_label, 2, STR_CAPTURE_STAGE3_UNKNOWN, red);
         return true;
     }
@@ -2762,7 +2762,7 @@ static void show_capture_popup(void)
 {
     s_capture_popup_stage = CAPTURE_POPUP_STAGE_WAIT_RESULT;
     s_capture_popup_stage_start_ms = lv_tick_get();
-    s_capture_last_seen_stage = ESP_NOW_CAPTURE_STAGE_SENT;
+    s_capture_last_seen_stage = PHOTO_RX_CAPTURE_STAGE_SENT;
 
     lv_obj_t *box = show_progress_popup(capture_popup_tick_fn);
 
@@ -2787,7 +2787,7 @@ static void cb_capture_now(lv_event_t *e)
     if (!require_active_or_report(s_selected_cam_mac, "Capture now")) return;
 
     show_capture_popup();
-    esp_now_photo_capture_now(s_selected_cam_mac);
+    photo_rx_capture_now(s_selected_cam_mac);
 }
 
 /* 2026-09-19(SD 제거 재설계 — 사진목록 UI 로컬화) — "목록에서 사진 선택 → 가져오기 진행
@@ -2892,14 +2892,14 @@ static void cb_camera_select_changed(lv_event_t *e)
  * 혼재 시나리오까지 지원) — macs[0..live_count)는 라이브(nodes[i] 유효), macs[live_count..count)는
  * SD 이력만 있는 known-only(살아있는 노드 정보가 없어 nodes 배열 범위 밖 — MAC 기반 이름으로
  * 폴백) */
-static void rebuild_camera_dropdown_if_changed(const esp_now_hub_node_t *nodes, int live_count,
+static void rebuild_camera_dropdown_if_changed(const node_hub_node_t *nodes, int live_count,
                                                 const uint8_t macs[][6], int count)
 {
     /* 2026-09-10(사용자 지시 — "카메라 팝업에서 카메라 목록 선택을 alias로 바꿈") — 대시보드
      * 행(3351/3469줄)과 동일한 alias-or-name 패턴. 버퍼는 alias가 name보다 길 수 있어서
      * DEVICE_CONFIG_ALIAS_MAX_LEN 기준으로 잡음(예전엔 ESP_NOW_LINK_NAME_LEN 기준이라 alias
      * 적용 시 넘칠 수 있었음) */
-    char options[ESP_NOW_HUB_MAX_NODES * (DEVICE_CONFIG_ALIAS_MAX_LEN + 1)];
+    char options[NODE_HUB_MAX_NODES * (DEVICE_CONFIG_ALIAS_MAX_LEN + 1)];
     size_t off = 0;
     for (int i = 0; i < count; i++) {
         const char *alias = device_config_get_alias(macs[i]);
@@ -3022,8 +3022,8 @@ static void format_value_capped(char *buf, size_t buf_size, float v)
  * 지금 노드 목록에서 못 찾으면(오래된 기록) mac 뒤 2바이트로 폴백 표시 */
 static void find_node_name_by_mac(const uint8_t mac[6], char *out, size_t out_cap)
 {
-    esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
-    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, ESP_NOW_HUB_MAX_NODES);
+    node_hub_node_t nodes[NODE_HUB_MAX_NODES];
+    int total = node_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, NODE_HUB_MAX_NODES);
     for (int i = 0; i < total; i++) {
         if (memcmp(nodes[i].mac, mac, 6) == 0) {
             snprintf(out, out_cap, "%s", nodes[i].name);
@@ -3035,7 +3035,7 @@ static void find_node_name_by_mac(const uint8_t mac[6], char *out, size_t out_ca
 
 /* 2026-09-15(사용자 설계 — 부위/정밀도 대화, "Sensor kind는... 접속한 장치의 센서 정보를
  * 보고 부위, 정밀도를 판단할 수 있게 하드코딩해야 할 듯") — sensor_kind_t(+chan_type) ->
- * {뷰 그룹, 정밀여부} 고정 매핑. 새 저장 포맷 불필요 — esp_now_hub_node_t.sensor_kind를
+ * {뷰 그룹, 정밀여부} 고정 매핑. 새 저장 포맷 불필요 — node_hub_node_t.sensor_kind를
  * find_node_name_by_mac()과 동일한 방식으로 조회해서 판단(project_cntl_stats_grouping_2026_09_15
  * 참고). SHT40/DHT22는 앞으로도 안 씀(사용자 확인)이라 표에 없음 — 없는 (kind,chan_type)은
  * "미분류"로 처리. */
@@ -3045,7 +3045,7 @@ typedef enum {
     STATS_VIEW_GROUP_GAS  = 2,  /* 이산화탄소/암모니아 */
 } stats_view_group_t;
 
-/* ESP_NOW_HUB_MAX_NODES(esp_now_hub.h)와 같은 값 — 한 그룹에 속할 수 있는 mac의 상한
+/* NODE_HUB_MAX_NODES(node_hub.h)와 같은 값 — 한 그룹에 속할 수 있는 mac의 상한
  * (stats_store.c의 STATS_AGG_MAX_MACS와 동일 값, 이 파일은 그쪽 내부 상수에 의존 안 함) */
 #define STATS_AGG_MAX_MACS_UI 8
 
@@ -3078,8 +3078,8 @@ static const stats_kind_channel_info_t s_stats_kind_channel_table[] = {
 
 static uint8_t find_node_kind_by_mac(const uint8_t mac[6])
 {
-    esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
-    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, ESP_NOW_HUB_MAX_NODES);
+    node_hub_node_t nodes[NODE_HUB_MAX_NODES];
+    int total = node_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, NODE_HUB_MAX_NODES);
     for (int i = 0; i < total; i++) {
         if (memcmp(nodes[i].mac, mac, 6) == 0) return nodes[i].sensor_kind;
     }
@@ -3098,7 +3098,7 @@ static bool stats_is_agar_fake_source(uint8_t kind, uint8_t chan_type)
 
 /* mac+chan_type -> {그룹, 정밀여부}. 미분류(매핑에 없는 kind, 또는 아예 모르는 mac)면 false.
  * 테스트 오버라이드 없음 — 항상 실제 분류표 그대로(Air는 항상 실측대로 표시됨).
- * 라이브 노드(esp_now_hub_get_nodes())에서 직접 얻은 mac을 분류할 때만 씀(예: SR/Power
+ * 라이브 노드(node_hub_get_nodes())에서 직접 얻은 mac을 분류할 때만 씀(예: SR/Power
  * Control 소스 장치 선택 — 그 드랍다운은 라이브 노드만 나열하므로 여기선 mac 역조회가
  * 안전함). 그래프/개괄판넬 쪽은 아래 stats_classify_by_kind()로 대체됨(2026-09-19) */
 static bool stats_classify(const uint8_t mac[6], uint8_t chan_type,
@@ -4334,7 +4334,7 @@ static lv_obj_t *create_signal_widget(lv_obj_t *parent)
  * 대체함(is_active 인자 추가). 카메라 행은 기존 동작 유지(항상 파랑, true로 호출) */
 /* 2026-09-15(사용자 정정 — "파랑(액티브)-통신 중, 녹색(페어드)-자는 중, 빨강(문제)-오르판
  * 가기 전 상태") — Active=파랑, Paired(정상 대기/딥슬립)=녹색, near_orphan(고아 타임아웃에
- * 근접)=빨강. near_orphan은 호출부가 last_seen_ms/esp_now_hub_node_timeout_ms()로 계산 */
+ * 근접)=빨강. near_orphan은 호출부가 last_seen_ms/node_hub_node_timeout_ms()로 계산 */
 static void update_signal_widget(lv_obj_t *box, bool has_rssi, int8_t rssi, bool is_active, bool near_orphan)
 {
     int filled;
@@ -4424,7 +4424,7 @@ static void refresh_dashboard(lv_timer_t *t)
     (void)t;
     refresh_power_control_panel();
 
-    /* 2026-09-11(SD 신뢰성 재설계 항목4) — 쓰기경로(esp_now_hub.c recv_cb, LVGL 태스크 아님)가
+    /* 2026-09-11(SD 신뢰성 재설계 항목4) — 쓰기경로(node_hub.c recv_cb, LVGL 태스크 아님)가
      * SD I/O 실패를 만났으면 여기(LVGL 태스크, 매 틱)서 test-and-clear로 가져와 회로차단기를
      * 세움 — 읽기실패와 마찬가지로 사용자에게 알리고 재연결/포맷으로 대응하게 함 */
     if (stats_store_take_write_io_error()) {
@@ -4434,7 +4434,7 @@ static void refresh_dashboard(lv_timer_t *t)
 
     /* 2026-08-21 — 웹 대시보드 URL(사용자 지시). IP는 WiFi 재연결 등으로 바뀔 수 있어서
      * 매 틱 다시 읽음(가벼운 문자열 비교라 비용 무시 가능) — 없으면(빈 문자열) 숨김 */
-    const char *ip = esp_now_hub_get_own_ip_str();
+    const char *ip = node_hub_get_own_ip_str();
     if (ip[0] != '\0') {
         lv_label_set_text_fmt(s_web_url_label, "http://%s:80", ip);
         lv_obj_remove_flag(s_web_row, LV_OBJ_FLAG_HIDDEN);
@@ -4485,14 +4485,14 @@ static void refresh_dashboard(lv_timer_t *t)
     if (!s_dash_nodes || !s_dash_nodes_prev) return;  /* PSRAM 할당 실패 시(극히 드묾) */
 
     /* 판넬1: 요약 — 페어링된(연결된) 장치 전부(CAM+SENS), 정상 표시 */
-    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_UNKNOWN, s_dash_nodes, ESP_NOW_HUB_MAX_NODES);
+    int total = node_hub_get_nodes(HUB_NODE_KIND_UNKNOWN, s_dash_nodes, NODE_HUB_MAX_NODES);
 
     bool dash_changed = (total != s_dash_count_prev);
     for (int i = 0; !dash_changed && i < total; i++) {
         if (!node_display_equal(&s_dash_nodes[i], &s_dash_nodes_prev[i])) dash_changed = true;
         /* 2026-09-04 버그수정 — node_display_equal()은 mac/kind/ever_paired/name만 봐서
          * conn_state(끊기 시 PAIRED->ORPHAN)는 변화로 안 잡힘. 그래서 끊기 직후에도 이
-         * 노드가 esp_now_hub_get_nodes()의 last_seen_ms 타임아웃(응답성*6)에 걸려 목록에서
+         * 노드가 node_hub_get_nodes()의 last_seen_ms 타임아웃(응답성*6)에 걸려 목록에서
          * 빠지기 전까지 요약판넬 행이 안 지워지고 남아있었음(실기 확인: 끊기 후에도
          * 한동안 "연결중"으로 보임) — conn_state 변화도 직접 비교해서 즉시 재생성 트리거 */
         else if (s_dash_nodes[i].conn_state != s_dash_nodes_prev[i].conn_state) dash_changed = true;
@@ -4501,7 +4501,7 @@ static void refresh_dashboard(lv_timer_t *t)
      * Sensor/Camera 판넬로 이관. dash_changed/s_dash_nodes_prev/s_dash_count_prev 자체는
      * 아래 Sensor/Camera 대시 목록 재생성 판단에 계속 씀 */
     if (dash_changed) {
-        memcpy(s_dash_nodes_prev, s_dash_nodes, sizeof(esp_now_hub_node_t) * total);
+        memcpy(s_dash_nodes_prev, s_dash_nodes, sizeof(node_hub_node_t) * total);
         s_dash_count_prev = total;
     }
 
@@ -4509,12 +4509,12 @@ static void refresh_dashboard(lv_timer_t *t)
      * append_sensor_value_row/s_sensor_todo)는 없애고 Summary의 실시간 순시치 블록이
      * 대신 담당(아래 refresh_summary_live_values 참고). 여기는 카메라 판넬과 완전히 같은
      * "연결됨" 장치행 목록만 */
-    esp_now_hub_node_t sens_nodes[ESP_NOW_HUB_MAX_NODES];
-    uint8_t             sens_macs[ESP_NOW_HUB_MAX_NODES][6];
+    node_hub_node_t sens_nodes[NODE_HUB_MAX_NODES];
+    uint8_t             sens_macs[NODE_HUB_MAX_NODES][6];
     int sens_count = 0;
     for (int i = 0; i < total; i++) {
         if (s_dash_nodes[i].kind != HUB_NODE_KIND_SENS) continue;
-        if (esp_now_hub_get_conn_state(s_dash_nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
+        if (node_hub_get_conn_state(s_dash_nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
         sens_nodes[sens_count] = s_dash_nodes[i];
         memcpy(sens_macs[sens_count], s_dash_nodes[i].mac, 6);
         sens_count++;
@@ -4523,7 +4523,7 @@ static void refresh_dashboard(lv_timer_t *t)
     if (dash_changed) {
         lv_indev_reset(NULL, s_sensor_dash_list);
         lv_obj_clean(s_sensor_dash_list);
-        for (int i = 0; i < sens_count && i < ESP_NOW_HUB_MAX_NODES; i++) {
+        for (int i = 0; i < sens_count && i < NODE_HUB_MAX_NODES; i++) {
             lv_obj_t *row = lv_obj_create(s_sensor_dash_list);
             lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
             lv_obj_set_style_border_width(row, 0, 0);
@@ -4590,10 +4590,10 @@ static void refresh_dashboard(lv_timer_t *t)
             s_sensor_dash_row_last_text[i][0] = '\0';
             s_sensor_dash_row_last_value_text[i][0] = '\0';
         }
-        s_sensor_dash_row_count = (sens_count < ESP_NOW_HUB_MAX_NODES) ? sens_count : ESP_NOW_HUB_MAX_NODES;
+        s_sensor_dash_row_count = (sens_count < NODE_HUB_MAX_NODES) ? sens_count : NODE_HUB_MAX_NODES;
     }
     for (int i = 0; i < s_sensor_dash_row_count; i++) {
-        hub_conn_state_t st = esp_now_hub_get_conn_state(s_sensor_dash_row_macs[i]);
+        hub_conn_state_t st = node_hub_get_conn_state(s_sensor_dash_row_macs[i]);
         char buf[96];
         /* 표시용으로만 여기서 alias-or-name 선택(지역 변수) — name 필드 자체는 절대 안 바뀜 */
         const char *display_name = (s_sensor_dash_row_alias[i][0] != '\0')
@@ -4648,7 +4648,7 @@ static void refresh_dashboard(lv_timer_t *t)
             }
             {
                 uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-                uint32_t timeout_ms = esp_now_hub_node_timeout_ms(&sens_nodes[j]);
+                uint32_t timeout_ms = node_hub_node_timeout_ms(&sens_nodes[j]);
                 uint32_t elapsed_ms = now_ms - sens_nodes[j].last_seen_ms;
                 /* 2026-09-15(사용자 설계) — 타임아웃의 80% 이상 지나면 "오르판 가기 직전"
                  * 경고로 빨강. 그 전까지는 PAIRED=정상 딥슬립(녹색) */
@@ -4690,15 +4690,15 @@ static void refresh_dashboard(lv_timer_t *t)
     /* 판넬3: 카메라 — 페어링된 CAM을 전부 모아 드롭다운을 채우고, 지금 선택된 CAM이 여전히
      * 그 안에 있으면 유지·아니면 첫 번째로 자동 폴백(2026-08-05, 여러 CAM 동시 페어링 지원
      * — select_camera()/rebuild_camera_dropdown_if_changed() 참고, 위 함수 설명 참고) */
-    esp_now_hub_node_t cam_nodes[ESP_NOW_HUB_MAX_NODES];
-    uint8_t            cam_macs[ESP_NOW_HUB_MAX_NODES][6];
+    node_hub_node_t cam_nodes[NODE_HUB_MAX_NODES];
+    uint8_t            cam_macs[NODE_HUB_MAX_NODES][6];
     int cam_count = 0;
     for (int i = 0; i < total; i++) {
         /* 2026-08-10 connectionless 모델 — WAITING이 아니면(PAIRED든 ACTIVE든) 계속
          * "아는 카메라"로 취급. CAM이 딥슬립 사이 무선 무응답 구간(라디오 레벨 paired=false)
          * 이어도 목록/판넬이 깜빡이며 빠졌다 나왔다 하지 않게 함(사용자 지적) */
         if (s_dash_nodes[i].kind != HUB_NODE_KIND_CAM) continue;
-        if (esp_now_hub_get_conn_state(s_dash_nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
+        if (node_hub_get_conn_state(s_dash_nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
         cam_nodes[cam_count] = s_dash_nodes[i];
         memcpy(cam_macs[cam_count], s_dash_nodes[i].mac, 6);
         cam_count++;
@@ -4711,7 +4711,7 @@ static void refresh_dashboard(lv_timer_t *t)
      * 2026-09-22(사용자 지적 — 폴링 재사용 금지, "팝업 열렸을 때만 확인하면 되잖아") —
      * 이 목록은 카메라 팝업이 실제로 열려있을 때만 쓰이므로, 팝업이 닫혀있으면 SD를 아예
      * 안 건드림(5초 캐싱도 여전히 폴링이라 부적절 — 팝업 닫혀있는 동안은 호출 자체가 0) */
-    uint8_t known_cam_macs[ESP_NOW_HUB_MAX_NODES][6];
+    uint8_t known_cam_macs[NODE_HUB_MAX_NODES][6];
     int known_cam_count_raw = 0;
     if (s_camera_popup) {
         /* 2026-09-22(사용자 지시 — "팝업 열 때마다 말하지 않아도 측정해야되") — 팝업이
@@ -4719,19 +4719,19 @@ static void refresh_dashboard(lv_timer_t *t)
          * 옮긴 것 — 사용자 지적). 열려있는 매 틱마다 실제로 메모리가 또 줄어드는지 직접
          * 추적 — 계속 줄면 진짜 누수, 한 번 줄고 멈추면 일회성 비용 */
         size_t heap_before_scan = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-        known_cam_count_raw = (int)photo_storage_list_camera_macs(known_cam_macs, ESP_NOW_HUB_MAX_NODES);
+        known_cam_count_raw = (int)photo_storage_list_camera_macs(known_cam_macs, NODE_HUB_MAX_NODES);
         size_t heap_after_scan = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         ESP_LOGW(TAG, "MEMDIAG 카메라팝업 열려있음(틱): internal %u -> %u (변화 %d bytes)",
                  (unsigned)heap_before_scan, (unsigned)heap_after_scan,
                  (int)heap_after_scan - (int)heap_before_scan);
     }
-    uint8_t dd_macs[ESP_NOW_HUB_MAX_NODES][6];
+    uint8_t dd_macs[NODE_HUB_MAX_NODES][6];
     int dd_count = 0;
-    for (int i = 0; i < cam_count && dd_count < ESP_NOW_HUB_MAX_NODES; i++) {
+    for (int i = 0; i < cam_count && dd_count < NODE_HUB_MAX_NODES; i++) {
         memcpy(dd_macs[dd_count], cam_macs[i], 6);
         dd_count++;
     }
-    for (int i = 0; i < known_cam_count_raw && dd_count < ESP_NOW_HUB_MAX_NODES; i++) {
+    for (int i = 0; i < known_cam_count_raw && dd_count < NODE_HUB_MAX_NODES; i++) {
         bool already_live = false;
         for (int j = 0; j < cam_count; j++) {
             if (memcmp(known_cam_macs[i], cam_macs[j], 6) == 0) { already_live = true; break; }
@@ -4748,7 +4748,7 @@ static void refresh_dashboard(lv_timer_t *t)
     if (dash_changed) {
         lv_indev_reset(NULL, s_camera_dash_list);
         lv_obj_clean(s_camera_dash_list);
-        for (int i = 0; i < cam_count && i < ESP_NOW_HUB_MAX_NODES; i++) {
+        for (int i = 0; i < cam_count && i < NODE_HUB_MAX_NODES; i++) {
             lv_obj_t *row = lv_obj_create(s_camera_dash_list);
             lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
             lv_obj_set_style_border_width(row, 0, 0);
@@ -4794,10 +4794,10 @@ static void refresh_dashboard(lv_timer_t *t)
             s_camera_dash_row_alias[i][sizeof(s_camera_dash_row_alias[i]) - 1] = '\0';
             s_camera_dash_row_last_text[i][0] = '\0';
         }
-        s_camera_dash_row_count = (cam_count < ESP_NOW_HUB_MAX_NODES) ? cam_count : ESP_NOW_HUB_MAX_NODES;
+        s_camera_dash_row_count = (cam_count < NODE_HUB_MAX_NODES) ? cam_count : NODE_HUB_MAX_NODES;
     }
     for (int i = 0; i < s_camera_dash_row_count; i++) {
-        hub_conn_state_t st = esp_now_hub_get_conn_state(s_camera_dash_row_macs[i]);
+        hub_conn_state_t st = node_hub_get_conn_state(s_camera_dash_row_macs[i]);
         char buf[96];
         const char *display_name = (s_camera_dash_row_alias[i][0] != '\0')
                                     ? s_camera_dash_row_alias[i] : s_camera_dash_row_names[i];
@@ -4829,7 +4829,7 @@ static void refresh_dashboard(lv_timer_t *t)
             /* 2026-09-18(사용자 지적 — is_active를 true로 하드코딩해서 실제 상태와 무관하게
              * 표시되던 버그) — 센스의 near_orphan 계산과 동일 패턴으로 실제 상태 반영 */
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-            uint32_t timeout_ms = esp_now_hub_node_timeout_ms(&cam_nodes[j]);
+            uint32_t timeout_ms = node_hub_node_timeout_ms(&cam_nodes[j]);
             uint32_t elapsed_ms = now_ms - cam_nodes[j].last_seen_ms;
             bool near_orphan = (timeout_ms > 0) && ((uint64_t)elapsed_ms * 10 >= (uint64_t)timeout_ms * 8);
             update_signal_widget(s_camera_dash_row_signal[i], cam_nodes[j].has_rssi, cam_nodes[j].rssi,
@@ -4872,12 +4872,12 @@ static void refresh_dashboard(lv_timer_t *t)
      * 에러 2007이 뜨고", 이어서 "드롭다운에서 캠 바꿀 때마다 버튼 상태도 바뀌어야" 지적) —
      * camera_connected(그룹 전체 라이브 여부) 대신 "지금 선택된 그 MAC이 라이브인가"를
      * 개별 확인 — 혼재(라이브 1대+known 1대) 상황에서 드롭다운으로 known 쪽을 고르면
-     * 다른 카메라가 라이브여도 버튼은 비활성화돼야 함. esp_now_hub_get_conn_state()는
+     * 다른 카메라가 라이브여도 버튼은 비활성화돼야 함. node_hub_get_conn_state()는
      * hub가 아예 모르는 MAC(순수 SD 이력뿐)에도 안전하게 WAITING을 반환함(find_node
      * 실패 시 ever_paired=false로 처리) — require_active_or_report()와 동일 판정 기준 */
     if (s_camera_capture_btn) {
         bool selected_is_live = s_has_selected_cam &&
-            (esp_now_hub_get_conn_state(s_selected_cam_mac) != HUB_CONN_STATE_WAITING);
+            (node_hub_get_conn_state(s_selected_cam_mac) != HUB_CONN_STATE_WAITING);
         if (selected_is_live) lv_obj_remove_state(s_camera_capture_btn, LV_STATE_DISABLED);
         else                  lv_obj_add_state(s_camera_capture_btn, LV_STATE_DISABLED);
     }
@@ -4908,7 +4908,7 @@ static void refresh_dashboard(lv_timer_t *t)
      * 없음(cb_camera_btn_tap 참고) */
 
     /* 2026-09-04 — 사진 수신 완료 반응은 매틱 폴링 대신 이벤트(on_photo_result_event,
-     * esp_now_photo_set_ready_cb 등록)로 옮김. 지금촬영 팝업 쪽 완료 처리는 자신의 진행
+     * photo_rx_set_ready_cb 등록)로 옮김. 지금촬영 팝업 쪽 완료 처리는 자신의 진행
      * 팝업 tick이 별도로 계속 담당(그동안 이 배경 타이머 자체가 pause_bg_timers()로
      * 멈춰있어서 이벤트와 안 겹침). 목록/삭제는 2026-09-19부터 로컬 SD 읽기라 비동기 이벤트
      * 자체가 필요 없어짐 */
@@ -5026,22 +5026,22 @@ static void refresh_power_panel(lv_timer_t *t)
 {
     (void)t;
     if (!s_power_log_buf) return;  /* PSRAM 할당 실패 시(극히 드묾) */
-    esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
-    int count = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, nodes, ESP_NOW_HUB_MAX_NODES);
+    node_hub_node_t nodes[NODE_HUB_MAX_NODES];
+    int count = node_hub_get_nodes(HUB_NODE_KIND_CAM, nodes, NODE_HUB_MAX_NODES);
 
     bool appended = false;
     for (int i = 0; i < count; i++) {
         if (!nodes[i].has_deepsleep_stats) continue;
 
         power_log_track_t *tr = NULL;
-        for (int j = 0; j < ESP_NOW_HUB_MAX_NODES; j++) {
+        for (int j = 0; j < NODE_HUB_MAX_NODES; j++) {
             if (s_power_log_track[j].used && memcmp(s_power_log_track[j].mac, nodes[i].mac, 6) == 0) {
                 tr = &s_power_log_track[j];
                 break;
             }
         }
         if (!tr) {
-            for (int j = 0; j < ESP_NOW_HUB_MAX_NODES; j++) {
+            for (int j = 0; j < NODE_HUB_MAX_NODES; j++) {
                 if (!s_power_log_track[j].used) {
                     tr = &s_power_log_track[j];
                     tr->used = true;
@@ -5060,7 +5060,7 @@ static void refresh_power_panel(lv_timer_t *t)
          * 이벤트가 아님(항상 일어나는 일이라서) */
 
         /* ds_cycle_count는 Cntl이 리포트를 받을 때마다 직접 증가시키는 단조증가 카운터라
-         * (esp_now_hub.c) 이것 하나만 비교하면 "새 보고서가 왔는가"를 정확히 알 수 있음
+         * (node_hub.c) 이것 하나만 비교하면 "새 보고서가 왔는가"를 정확히 알 수 있음
          * (2026-08-10, Light Sleep 시절엔 count=0이 계속 이어지는 상태를 여러 필드로 힘겹게
          * 구분해야 했음 — 매 사이클이 곧 새 리포트인 이 구조에선 그 문제 자체가 없어짐) */
         if (tr->last_cycle_count == nodes[i].ds_cycle_count) continue;
@@ -5230,18 +5230,18 @@ static void refresh_clock(lv_timer_t *t)
         bool ap_mode = device_config_get_wifi_ap_mode();
         /* 2026-08-30(사용자 지시) — STA 모드에서 부팅 후 25초간 저장된 AP를 한 번도 못
          * 찾았으면, 계속 재시도 중임을 위장하지 말고 "AP 없음"을 명시. "찾기"로 수동
-         * 연결하면 esp_now_hub_sta_boot_giveup()이 자동으로 false가 되어 원래 표시로 복귀 */
-        if (!ap_mode && esp_now_hub_sta_boot_giveup()) {
+         * 연결하면 node_hub_sta_boot_giveup()이 자동으로 false가 되어 원래 표시로 복귀 */
+        if (!ap_mode && node_hub_sta_boot_giveup()) {
             snprintf(net_buf, sizeof(net_buf), "STA - %s", ui_str(STR_STATUS_NO_AP));
         } else if (ap_mode) {
             /* 2026-09-08(사용자 지시 — "AP라면 SSID가 뭔지도 표기") */
-            snprintf(net_buf, sizeof(net_buf), "AP - %s CH%u", esp_now_hub_get_ap_ssid(),
-                     (unsigned)esp_now_hub_get_wifi_channel());
+            snprintf(net_buf, sizeof(net_buf), "AP - %s CH%u", node_hub_get_ap_ssid(),
+                     (unsigned)node_hub_get_wifi_channel());
         } else {
             /* 2026-09-08(사용자 지시 — "자리가 충분하면 SSID도") — 채널도 계속 같이 표기
              * (2026-08-02 지시: 공유기 자동채널선택 변경을 알아채기 위함, 계속 유효) */
-            snprintf(net_buf, sizeof(net_buf), "STA - %s CH%u", esp_now_hub_get_active_sta_ssid(),
-                     (unsigned)esp_now_hub_get_wifi_channel());
+            snprintf(net_buf, sizeof(net_buf), "STA - %s CH%u", node_hub_get_active_sta_ssid(),
+                     (unsigned)node_hub_get_wifi_channel());
         }
         lv_label_set_text(s_network_ctrl_label, net_buf);
     }
@@ -5396,7 +5396,7 @@ static void cb_restart_btn(lv_event_t *e)
 /* ════════════════════════════════════════════════════════════
  * 네트워크(WiFi) 설정 — 독립(AP)/종속(STA) 전환 + "찾기"(STA SSID 스캔/선택/비밀번호입력)
  * (2026-08-29) 모드 전환도, WiFi 연결정보 변경도 둘 다 부팅 시 한 번만 적용되는 구조
- * (esp_now_hub.c의 wifi_bringup 참고)라, 저장 후엔 항상 재시작 확인 팝업(show_confirm_popup
+ * (node_hub.c의 wifi_bringup 참고)라, 저장 후엔 항상 재시작 확인 팝업(show_confirm_popup
  * 재사용)으로 마무리 — 살아있는 상태에서 esp_wifi 모드를 핫스왑하는 위험/복잡도를 피함
  * ════════════════════════════════════════════════════════════ */
 static void cb_network_mode_restart_confirmed(void *ctx)
@@ -5468,10 +5468,10 @@ static char s_wifi_selected_ssid[33] = "";
 static void update_wifi_status_label(void)
 {
     if (!s_wifi_status_lbl) return;
-    const char *ip = esp_now_hub_get_own_ip_str();
+    const char *ip = node_hub_get_own_ip_str();
     if (ip[0] != '\0') {
         lv_label_set_text_fmt(s_wifi_status_lbl, "%s: %s", ui_str(STR_STATUS_CONNECTED),
-                               esp_now_hub_get_active_sta_ssid());
+                               node_hub_get_active_sta_ssid());
     } else {
         lv_label_set_text(s_wifi_status_lbl, ui_str(STR_STATUS_NOT_CONNECTED));
     }
@@ -5480,7 +5480,7 @@ static void update_wifi_status_label(void)
 static void cb_wifi_scan_popup_close(lv_event_t *e)
 {
     (void)e;
-    esp_now_hub_set_sta_reconnect_paused(false);
+    node_hub_set_sta_reconnect_paused(false);
     s_wifi_status_lbl = NULL;
     s_wifi_list = NULL;
     lv_obj_delete(s_wifi_scan_popup);
@@ -5489,11 +5489,11 @@ static void cb_wifi_scan_popup_close(lv_event_t *e)
 
 /* 비밀번호 팝업(+ 그 아래 스캔목록 팝업까지) 정리 — 저장하든 취소든 성공/실패든 공통으로
  * 필요한 부분. s_wifi_pw_box를 직접 참조하므로 버튼/이벤트 없이도(비동기 콜백에서도) 호출
- * 가능(2026-08-29 — 실시간 접속 시도 결과가 esp_now_hub.c의 이벤트 콜백에서 비동기로
+ * 가능(2026-08-29 — 실시간 접속 시도 결과가 node_hub.c의 이벤트 콜백에서 비동기로
  * 오는데, 그땐 클릭 이벤트가 없어서 예전처럼 버튼에서 부모를 거슬러 올라갈 수 없었음) */
 static void close_wifi_popups(void)
 {
-    esp_now_hub_set_sta_reconnect_paused(false);
+    node_hub_set_sta_reconnect_paused(false);
     if (s_wifi_keyboard) { lv_obj_delete(s_wifi_keyboard); s_wifi_keyboard = NULL; }
     s_wifi_password_ta = NULL;
 
@@ -5520,8 +5520,8 @@ static void cb_wifi_pw_popup_close(lv_event_t *e)
     close_wifi_popups();
 }
 
-/* 2026-08-29(사용자 설계: "AP 찾고 선택하고 접속하는 과정은 재시작 안 함") — esp_now_hub.c의
- * esp_now_hub_test_sta_connect() 결과 콜백. WiFi 이벤트 태스크에서 비동기로 불리므로
+/* 2026-08-29(사용자 설계: "AP 찾고 선택하고 접속하는 과정은 재시작 안 함") — node_hub.c의
+ * node_hub_test_sta_connect() 결과 콜백. WiFi 이벤트 태스크에서 비동기로 불리므로
  * LVGL 조작 전체를 esp_lv_adapter_lock()으로 감싸야 함(wifi_scan_event_handler와 같은
  * 이유로 겪었던 화면깨짐 버그를 여기서 처음부터 피함) */
 static void wifi_test_result_async_cb(void *user_data)
@@ -5553,7 +5553,7 @@ static void wifi_test_result_async_cb(void *user_data)
  * 단계 전환을 토스트로 보여줌. wifi_test_result_async_cb와 같은 이유로 lv_async_call() 필요 */
 static void wifi_test_stage_async_cb(void *user_data)
 {
-    esp_now_hub_sta_test_stage_t stage = (esp_now_hub_sta_test_stage_t)(uintptr_t)user_data;
+    node_hub_sta_test_stage_t stage = (node_hub_sta_test_stage_t)(uintptr_t)user_data;
     if (stage == STA_TEST_STAGE_DISCONNECTING) {
         show_toast(ui_str(STR_MSG_WIFI_STAGE_DISCONNECTING), lv_palette_main(LV_PALETTE_BLUE));
     } else {
@@ -5561,7 +5561,7 @@ static void wifi_test_stage_async_cb(void *user_data)
     }
 }
 
-static void cb_wifi_test_connect_stage(esp_now_hub_sta_test_stage_t stage, void *ctx)
+static void cb_wifi_test_connect_stage(node_hub_sta_test_stage_t stage, void *ctx)
 {
     (void)ctx;
     lv_async_call(wifi_test_stage_async_cb, (void *)(uintptr_t)stage);
@@ -5606,7 +5606,7 @@ static void cb_wifi_connect_btn(lv_event_t *e)
     lv_obj_add_state(s_wifi_connect_btn, LV_STATE_DISABLED);
     lv_label_set_text(lv_obj_get_child(s_wifi_connect_btn, 0), ui_str(STR_MSG_WIFI_CONNECTING));
 
-    esp_now_hub_test_sta_connect(s_wifi_selected_ssid, s_wifi_test_password,
+    node_hub_test_sta_connect(s_wifi_selected_ssid, s_wifi_test_password,
                                   cb_wifi_test_connect_result, cb_wifi_test_connect_stage, NULL);
 }
 
@@ -5753,7 +5753,7 @@ static void wifi_scan_event_handler(void *arg, esp_event_base_t base, int32_t id
          * 연결된 SSID를 리스트에서 구분 가능하게 표시. LV_SYMBOL_OK 같은 심볼은 이 프로젝트
          * 커스텀 TTF에 없는 글리프라(다른 곳에서 이미 겪은 문제) 일반 텍스트 표식으로 대체 */
         const char *active_ssid = device_config_get_sta_ssid();
-        const char *own_ip = esp_now_hub_get_own_ip_str();
+        const char *own_ip = node_hub_get_own_ip_str();
         bool is_connected = (active_ssid[0] != '\0' && own_ip[0] != '\0' &&
                               strcmp(active_ssid, ssid) == 0);
         char label_buf[64];
@@ -5785,7 +5785,7 @@ static void trigger_wifi_scan(void)
     lv_obj_set_style_text_font(scanning_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 2026-08-29 버그수정(사용자 리포트: "팝업 뜨면서 찾는 기능은 안됨, 다시찾기 눌러야
-     * 시작") — esp_now_hub_set_sta_reconnect_paused(true)는 향후 재연결만 막지, 팝업이
+     * 시작") — node_hub_set_sta_reconnect_paused(true)는 향후 재연결만 막지, 팝업이
      * 뜨는 바로 그 순간 이미 진행 중이던 연결 시도까지 취소하진 않음. 그 시도가 아직 안
      * 끝난 채로 esp_wifi_scan_start()를 부르면 ESP_ERR_WIFI_STATE로 실패(IDF 특성:
      * 연결 시도 중엔 스캔 거부) — 그래서 최초 1회만 실패하고 "다시 찾기"(그땐 이미 그
@@ -5793,7 +5793,7 @@ static void trigger_wifi_scan(void)
     /* 2026-08-29 버그수정(사용자 지시: "찾기 팝업 열 때 먼저 끊지 마, 비번창에서 연결 누를
      * 때 끊어야 돼") — 여기서 미리 disconnect()하면 스캔만 열어봐도 실제 WiFi 연결이
      * 끊어져버리고, "이미 같은 AP" 단축 경로는 재연결을 안 시켜서 그대로 끊긴 채 남는 문제가
-     * 있었음. 실제 접속 전환은 esp_now_hub_test_sta_connect()가 접속 시도 시점에 자체적으로
+     * 있었음. 실제 접속 전환은 node_hub_test_sta_connect()가 접속 시도 시점에 자체적으로
      * disconnect-then-connect를 이미 처리하므로, 여기서는 더 이상 선제적으로 끊지 않음 */
     if (esp_wifi_scan_start(NULL, false) != ESP_OK) {
         lv_obj_clean(s_wifi_list);
@@ -5813,9 +5813,9 @@ static void cb_network_find_btn(lv_event_t *e)
 {
     (void)e;
     /* 2026-08-29 버그수정 — 스캔이 되려면 STA 재연결 루프가 잠깐 쉬어야 함(위
-     * esp_now_hub_set_sta_reconnect_paused 주석 참고). 팝업 닫힐 때(cb_wifi_scan_popup_close/
+     * node_hub_set_sta_reconnect_paused 주석 참고). 팝업 닫힐 때(cb_wifi_scan_popup_close/
      * close_wifi_popups) 반드시 해제됨 */
-    esp_now_hub_set_sta_reconnect_paused(true);
+    node_hub_set_sta_reconnect_paused(true);
 
     /* 2026-08-29(사용자 지시: "PSRAM도 몰아 넣어") — 최초 1회만 할당, 이후 재사용(찾기 팝업
      * 열 때마다 다시 만들 필요 없음) */
@@ -5872,7 +5872,7 @@ static void refresh_network_right_zone(void)
     if (!s_network_right_label || !s_network_find_btn) return;  /* 행이 아직 안 만들어짐 */
 
     bool ap_mode = device_config_get_wifi_ap_mode();
-    const char *ip = esp_now_hub_get_own_ip_str();
+    const char *ip = node_hub_get_own_ip_str();
 
     if (ap_mode) {
         /* IP는 사용자가 바꿀 수 있는 값이 아니라 정보 표시일 뿐이라 평범한 라벨 */
@@ -5886,13 +5886,13 @@ static void refresh_network_right_zone(void)
          * 2026-09-09(사용자 지적 — "상단바에는 연결된 AP SSID가 이미 보이고 있으니까
          * 내가 지적한 2군데는 버그야") — 2026-08-29엔 "찾기로 저장한 SSID 없으면 하드코딩
          * 폴백이어도 무조건 찾기로 표시"가 의도적 설계였지만, 이 설계 자체가 실제 연결
-         * 정보가 있는데도 안 보여주는 버그로 재판정됨 — 상단바(esp_now_hub_get_active_sta_ssid
+         * 정보가 있는데도 안 보여주는 버그로 재판정됨 — 상단바(node_hub_get_active_sta_ssid
          * 그대로 사용)와 똑같이 "진짜 연결됐는지"(ip 유무)만으로 판단하도록 정정.
          * device_config_get_sta_ssid() 게이트 제거 */
         lv_obj_add_flag(s_network_right_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_network_find_btn, LV_OBJ_FLAG_HIDDEN);
         if (ip[0] != '\0') {
-            lv_label_set_text(s_network_find_lbl, esp_now_hub_get_active_sta_ssid());
+            lv_label_set_text(s_network_find_lbl, node_hub_get_active_sta_ssid());
         } else {
             lv_label_set_text(s_network_find_lbl, ui_str(STR_BTN_FIND));
         }
@@ -5982,7 +5982,7 @@ static void update_adaptive_apply_enabled(void)
 
 static void cb_adaptive_response_changed(lv_event_t *e) { (void)e; update_adaptive_apply_enabled(); }
 
-/* CAM에 안 보내는 Cntl 내부값이라(esp_now_hub.c 참고) 네트워크 왕복이 없음 — 다른 두
+/* CAM에 안 보내는 Cntl 내부값이라(node_hub.c 참고) 네트워크 왕복이 없음 — 다른 두
  * Apply(촬영주기/응답성)처럼 진행팝업을 띄울 이유가 없어서 즉시 저장하고 버튼만 도로 끔 */
 static void cb_apply_adaptive_response(lv_event_t *e)
 {
@@ -5998,7 +5998,7 @@ static void cb_apply_adaptive_response(lv_event_t *e)
 static bool config_apply_tick_fn(lv_obj_t *box)
 {
     (void)box;
-    hub_config_apply_stage_t stage = esp_now_hub_get_config_apply_stage();
+    hub_config_apply_stage_t stage = node_hub_get_config_apply_stage();
     if (stage == HUB_CONFIG_APPLY_ACKED) {
         lv_label_set_text(s_config_apply_label, ui_str(STR_STATUS_OK));
         lv_obj_set_style_text_color(s_config_apply_label, lv_palette_main(LV_PALETTE_GREEN), 0);
@@ -6012,7 +6012,7 @@ static bool config_apply_tick_fn(lv_obj_t *box)
             s_xclk_applied_idx = s_config_apply_pending_idx;
             update_xclk_apply_enabled();
         }
-        esp_now_hub_config_apply_stage_clear();
+        node_hub_config_apply_stage_clear();
         return true;
     }
     uint32_t timeout_ms = s_config_apply_timeout_ms_override ? s_config_apply_timeout_ms_override
@@ -6021,7 +6021,7 @@ static bool config_apply_tick_fn(lv_obj_t *box)
         lv_label_set_text(s_config_apply_label, ui_str(STR_CONFIG_APPLY_STALLED));
         lv_obj_set_style_text_color(s_config_apply_label, lv_palette_main(LV_PALETTE_RED), 0);
         ui_log_add_err(UI_ERR_CONFIG_NORESPONSE, "Config apply request: no CAM response (timeout)");
-        esp_now_hub_config_apply_stage_clear();
+        node_hub_config_apply_stage_clear();
         return true;
     }
     return false;
@@ -6061,8 +6061,8 @@ static void cb_apply_capture_interval(lv_event_t *e)
      * "진짜 실패"가 아니라 "다음 접속에 반영될 정상 대기 상태"임 — 2026-08-10, 사용자
      * 지적으로 require_active_or_report()(2007 에러) 대신 응답성 적용과 동일하게 정보
      * 로그만 남기도록 수정(처음엔 실수로 2007과 "저장됨" 안내가 동시에 뜨는 모순이 있었음) */
-    esp_now_hub_apply_cam_capture_interval_sec(s_device_popup_node.mac, sec);
-    if (esp_now_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
+    node_hub_apply_cam_capture_interval_sec(s_device_popup_node.mac, sec);
+    if (node_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
         ui_log_add("Capture interval saved - applied automatically on CAM reconnect");
         return;
     }
@@ -6085,7 +6085,7 @@ static void cb_apply_sens_measure_interval(lv_event_t *e)
      * 실질적으로 없음 — 그래도 방어코드는 별도 숫자가 아니라 배열 자체를 참조 */
     uint32_t sec = (idx < (sizeof(s_sens_measure_interval_values) / sizeof(s_sens_measure_interval_values[0])))
                    ? s_sens_measure_interval_values[idx] : s_sens_measure_interval_values[0];
-    esp_now_hub_apply_sens_sample_interval_sec(s_selected_sensor_mac, sec);
+    node_hub_apply_sens_sample_interval_sec(s_selected_sensor_mac, sec);
     s_sens_measure_applied_idx = idx;
     update_sens_measure_apply_enabled();
     ui_log_add("Measure period saved - applied on next Sens wake");
@@ -6100,8 +6100,8 @@ static void cb_apply_xclk(lv_event_t *e)
     s_config_apply_target = CONFIG_APPLY_TARGET_XCLK;
     s_config_apply_pending_idx = idx;
     s_config_apply_timeout_ms_override = 0;  /* 응답성 전용 보정값 — 이 요청엔 안 씀 */
-    esp_now_hub_apply_cam_xclk_mhz(s_device_popup_node.mac, mhz);
-    if (esp_now_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
+    node_hub_apply_cam_xclk_mhz(s_device_popup_node.mac, mhz);
+    if (node_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
         ui_log_add("XCLK saved - applied automatically on CAM reconnect");
         return;
     }
@@ -6118,7 +6118,7 @@ static void cb_apply_response_interval(lv_event_t *e)
     s_config_apply_pending_idx = idx;
     /* 2026-08-23 — CAM은 새 값이 아니라 옛 값(지금 이 순간 저장돼있는 값)만큼 자고 있을 수
      * 있으므로(예: 30초->Live), old/new 중 큰 쪽 기준으로 이번 팝업만 타임아웃을 늘림 —
-     * esp_now_hub_apply_response_interval_sec()가 저장값을 새 값으로 바로 덮어쓰기 전에
+     * node_hub_apply_response_interval_sec()가 저장값을 새 값으로 바로 덮어쓰기 전에
      * 옛 값을 먼저 읽어둬야 함 */
     uint32_t old_sec = device_config_get_response_interval_sec();
     uint32_t wait_sec = (old_sec > sec) ? old_sec : sec;
@@ -6128,9 +6128,9 @@ static void cb_apply_response_interval(lv_event_t *e)
      * 전부"가 대상이라 require_active_or_report()의 mac 하나 기준 검사가 안 맞음. 대상이
      * 하나도 없으면(전부 WAITING) 값은 저장됐지만 응답 대기 팝업은 안 띄움 — 다른 4개
      * 통신 기능과 동일 원칙 */
-    if (!esp_now_hub_apply_response_interval_sec(sec)) {
+    if (!node_hub_apply_response_interval_sec(sec)) {
         /* 2026-09-07 버그수정 — 페어링된 CAM이 하나도 없으면(예: 센스만 연결된 상태)
-         * esp_now_hub_apply_response_interval_sec()가 false를 반환하는데(ACK 대기 대상이
+         * node_hub_apply_response_interval_sec()가 false를 반환하는데(ACK 대기 대상이
          * CAM뿐이라, 센스는 매 사이클 자동으로 최신값을 받아가서 별도 ACK가 필요없음),
          * 여기서 그냥 return해버리면 값은 실제로 저장됐는데도 s_response_interval_applied_idx가
          * 안 갱신돼서 Apply 버튼이 영원히 활성 상태로 남았음(cb_apply_adaptive_response()의
@@ -6145,14 +6145,14 @@ static void cb_apply_response_interval(lv_event_t *e)
 
 /* 2026-08-21 — AGC/AEC 스위치. 값이 불리언 하나뿐이고 진단용이라, 촬영주기/응답성의
  * 5단계 팝업(드롭다운+Apply+ACK대기) 대신 토글 즉시 반영 — 스위치의 통상적인 UX와도
- * 맞음. 그래도 실제 전송은 reliable stack(esp_now_tx) 그대로라 유실 걱정은 없음, 화면에
+ * 맞음. 그래도 실제 전송은 reliable stack(node_request) 그대로라 유실 걱정은 없음, 화면에
  * 진행상태만 안 보여줄 뿐 */
 static void cb_agc_switch_changed(lv_event_t *e)
 {
     (void)e;
     bool enable = lv_obj_has_state(s_agc_switch, LV_STATE_CHECKED);
-    esp_now_hub_apply_cam_agc_enable(s_device_popup_node.mac, enable);
-    if (esp_now_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
+    node_hub_apply_cam_agc_enable(s_device_popup_node.mac, enable);
+    if (node_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
         ui_log_add("AGC saved - applied automatically on CAM reconnect");
     }
 }
@@ -6161,8 +6161,8 @@ static void cb_aec_switch_changed(lv_event_t *e)
 {
     (void)e;
     bool enable = lv_obj_has_state(s_aec_switch, LV_STATE_CHECKED);
-    esp_now_hub_apply_cam_aec_enable(s_device_popup_node.mac, enable);
-    if (esp_now_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
+    node_hub_apply_cam_aec_enable(s_device_popup_node.mac, enable);
+    if (node_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
         ui_log_add("AEC saved - applied automatically on CAM reconnect");
     }
 }
@@ -6197,11 +6197,11 @@ static void cb_auto_connect_new_changed(lv_event_t *e)
 /* 페이지콘트롤 — 페이지탭 3개(상황판/통계/설정). 로고 + 상황판/통계 탭 내용(원래 데모의
  * Profile/Analytics 위젯)은 고치기 전 상태 그대로 활용 — 설정 탭만 새로 만든 그룹박스로 교체 */
 /* 2026-08-29 버그수정(사용자 리포트: "찾기" 팝업이 30초 넘게 "검색 중..."에 멈춤) — 원래
- * ui_init()이 이 등록을 직접 했는데, ui_init()은 esp_now_hub_init()보다 먼저 호출되고
- * (main.c app_main 참고) esp_event_loop_create_default()는 esp_now_hub_init() 내부에서
+ * ui_init()이 이 등록을 직접 했는데, ui_init()은 node_hub_init()보다 먼저 호출되고
+ * (main.c app_main 참고) esp_event_loop_create_default()는 node_hub_init() 내부에서
  * 호출됨 — 즉 등록 시점에 기본 이벤트루프가 아직 없어서 esp_event_handler_register()가
  * 조용히 실패하고 있었음(반환값 확인 안 해서 못 잡음). main.c의 ip_event_handler 등록과
- * 똑같은 이유로, main.c가 esp_now_hub_init() 호출 *이후*에 이 함수를 불러줘야 함 */
+ * 똑같은 이유로, main.c가 node_hub_init() 호출 *이후*에 이 함수를 불러줘야 함 */
 void ui_main_register_wifi_events(void)
 {
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, &wifi_scan_event_handler, NULL));
@@ -6209,7 +6209,7 @@ void ui_main_register_wifi_events(void)
 
 /* ════════════════════════════════════════════════════════════
  * 2026-09-04(사용자 설계: "PC 원격제어처럼") — 웹 입력을 실제 탭/팝업/확인 시퀀스로 합성.
- * 웹(httpd 태스크)이 직접 esp_now_hub_request_pair() 등을 부르는 대신, 온디바이스 탭이
+ * 웹(httpd 태스크)이 직접 node_hub_request_pair() 등을 부르는 대신, 온디바이스 탭이
  * 눌렀을 그 위젯에 그대로 lv_event_send()를 보냄 — 그래야 로직이 갈라질 여지가 없음
  * (project_cntl_web_full_ui_injection_design_2026_09_04 메모리 참고).
  * ════════════════════════════════════════════════════════════ */
@@ -6272,13 +6272,13 @@ static bool inject_fn_connect(void *arg)
      * 확인팝업을 띄움. 이 함수는 pair_confirm 버튼만 찾으므로 그 경우 못 찾고 false를
      * 반환하면서 연결해제 팝업만 화면에 덩그러니 남는 사고가 났음 — 이미 연결됐으면
      * 애초에 아무것도 안 건드리고 바로 성공 처리 */
-    if (esp_now_hub_get_conn_state(mac) != HUB_CONN_STATE_WAITING) return true;
+    if (node_hub_get_conn_state(mac) != HUB_CONN_STATE_WAITING) return true;
     lv_obj_t *row = find_camera_row_by_mac(mac);
     if (!row) return false;  /* 지금 목록에 없음 */
     lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_camera_item_clicked -> show_pair_confirm_popup */
     lv_obj_t *confirm = find_widget_by_event_cb(s_last_modal, cb_pair_confirm);
     if (!confirm) return false;
-    lv_obj_send_event(confirm, LV_EVENT_CLICKED, NULL);  /* -> cb_pair_confirm -> esp_now_hub_request_pair() */
+    lv_obj_send_event(confirm, LV_EVENT_CLICKED, NULL);  /* -> cb_pair_confirm -> node_hub_request_pair() */
     return true;
 }
 
@@ -6306,13 +6306,13 @@ static bool inject_fn_connect_sensor(void *arg)
     const uint8_t *mac = (const uint8_t *)arg;
     /* 2026-09-07 버그수정 — inject_fn_connect()와 동일 이유(사용자 지적: "앞으로 테스트
      * 때도 문제가 될 것 같아서") — 이미 연결됐으면 연결해제 확인팝업이 뜨는 걸 막음 */
-    if (esp_now_hub_get_conn_state(mac) != HUB_CONN_STATE_WAITING) return true;
+    if (node_hub_get_conn_state(mac) != HUB_CONN_STATE_WAITING) return true;
     lv_obj_t *row = find_sensor_row_by_mac(mac);
     if (!row) return false;
     lv_obj_send_event(row, LV_EVENT_CLICKED, NULL);  /* -> cb_sensor_item_clicked -> show_pair_confirm_popup */
     lv_obj_t *confirm = find_widget_by_event_cb(s_last_modal, cb_pair_confirm);
     if (!confirm) return false;
-    lv_obj_send_event(confirm, LV_EVENT_CLICKED, NULL);  /* -> cb_pair_confirm -> esp_now_hub_request_pair() */
+    lv_obj_send_event(confirm, LV_EVENT_CLICKED, NULL);  /* -> cb_pair_confirm -> node_hub_request_pair() */
     return true;
 }
 
@@ -6524,12 +6524,12 @@ void ui_init(void)
         ESP_LOGE(TAG, "원본 JPEG 버퍼 할당 실패(%u bytes)", (unsigned)PHOTO_RAW_BUF_CAP);
     }
 
-    s_dash_nodes      = heap_caps_malloc(sizeof(esp_now_hub_node_t) * ESP_NOW_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
-    s_dash_nodes_prev = heap_caps_malloc(sizeof(esp_now_hub_node_t) * ESP_NOW_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
-    s_camera_nodes      = heap_caps_malloc(sizeof(esp_now_hub_node_t) * ESP_NOW_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
-    s_camera_nodes_prev = heap_caps_malloc(sizeof(esp_now_hub_node_t) * ESP_NOW_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
-    s_sensor_nodes      = heap_caps_malloc(sizeof(esp_now_hub_node_t) * ESP_NOW_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
-    s_sensor_nodes_prev = heap_caps_malloc(sizeof(esp_now_hub_node_t) * ESP_NOW_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    s_dash_nodes      = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    s_dash_nodes_prev = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    s_camera_nodes      = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    s_camera_nodes_prev = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    s_sensor_nodes      = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    s_sensor_nodes_prev = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
     if (!s_dash_nodes || !s_dash_nodes_prev || !s_camera_nodes || !s_camera_nodes_prev ||
         !s_sensor_nodes || !s_sensor_nodes_prev) {
         ESP_LOGE(TAG, "노드 추적 버퍼 할당 실패 — 상황판/카메라/측정기 목록 표시 불가");
@@ -7101,8 +7101,8 @@ void ui_init(void)
 
     /* 2026-09-04(사용자 설계: "이벤트로 처리해") — 사진/목록/연결 완료 이벤트에 앱 쪽 반응을
      * 등록. 매틱 폴링하던 refresh_dashboard()의 해당 부분은 제거하고 여기로 옮김 */
-    esp_now_photo_set_ready_cb(on_photo_result_event);
-    esp_now_hub_set_connect_event_cb(on_connect_result_event);
+    photo_rx_set_ready_cb(on_photo_result_event);
+    node_hub_set_connect_event_cb(on_connect_result_event);
 }
 
 /* 2026-09-08(재설계) — 통계 팝업 닫기: 타이머 삭제 + 팝업 전체 삭제(lv_obj_delete — 이제
@@ -7970,8 +7970,8 @@ static void cb_device_alias_apply_clicked(lv_event_t *e)
 
 static void cb_device_disconnect_confirm(void *ctx)
 {
-    esp_now_hub_node_t *node = (esp_now_hub_node_t *)ctx;
-    esp_now_hub_unpair(node->mac);
+    node_hub_node_t *node = (node_hub_node_t *)ctx;
+    node_hub_unpair(node->mac);
     teardown_device_popup();
 }
 
@@ -8385,12 +8385,12 @@ static void relay_rebuild_device_dropdown(void)
     if (chan_idx >= sizeof(s_relay_chan_type_values) / sizeof(s_relay_chan_type_values[0])) chan_idx = 0;
     uint8_t want_chan = (uint8_t)s_relay_chan_type_values[chan_idx];
 
-    esp_now_hub_node_t nodes[ESP_NOW_HUB_MAX_NODES];
-    int total = esp_now_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, ESP_NOW_HUB_MAX_NODES);
-    char options[ESP_NOW_HUB_MAX_NODES * (ESP_NOW_LINK_NAME_LEN + 1) + 1];
+    node_hub_node_t nodes[NODE_HUB_MAX_NODES];
+    int total = node_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, NODE_HUB_MAX_NODES);
+    char options[NODE_HUB_MAX_NODES * (ESP_NOW_LINK_NAME_LEN + 1) + 1];
     options[0] = '\0';
     s_relay_device_dd_count = 0;
-    for (int i = 0; i < total && s_relay_device_dd_count < ESP_NOW_HUB_MAX_NODES; i++) {
+    for (int i = 0; i < total && s_relay_device_dd_count < NODE_HUB_MAX_NODES; i++) {
         bool has_chan = false;
         for (int c = 0; c < nodes[i].chan_count; c++) {
             if (nodes[i].chan_type[c] == want_chan) { has_chan = true; break; }
@@ -9760,7 +9760,7 @@ static void build_option_tab(void)
     update_response_help_text();  /* 부팅 직후 현재 선택값 반영 */
 
     /* 적응형 반응시간 행(2026-08-10) — 응답성 행과 같은 [라벨][드롭다운][Apply] 구조.
-     * CAM에 안 보내는 Cntl 내부값(esp_now_hub.c의 esp_now_hub_note_user_action 참고) */
+     * CAM에 안 보내는 Cntl 내부값(node_hub.c의 node_hub_note_user_action 참고) */
     lv_obj_t *adaptive_row = lv_obj_create(system_group_box);
     lv_obj_set_size(adaptive_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(adaptive_row, LV_FLEX_FLOW_ROW);

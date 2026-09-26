@@ -13,9 +13,9 @@
 #include "esp_http_server.h"
 #include "esp_event.h"
 #include "esp_netif.h"
-#include "esp_now_hub.h"
-#include "esp_now_photo.h"
-#include "esp_now_tx.h"
+#include "node_hub.h"
+#include "photo_rx.h"
+#include "node_request.h"
 #include "esp_lv_decoder.h"
 #include "ui_log.h"
 #include "rtc_sync.h"
@@ -34,14 +34,14 @@
 
 static const char *TAG = "lvgl9_demo";
 
-/* 2026-08-10 — 적응형 반응시간(esp_now_hub.h)의 "마지막 사용자 조작" 시각을 통신 관련
+/* 2026-08-10 — 적응형 반응시간(node_hub.h)의 "마지막 사용자 조작" 시각을 통신 관련
  * 5개 함수뿐 아니라 화면 터치 전체로 넓힘(보류했다가 재활성화 — 통신 경로에 남아있던 버그를
  * 먼저 잡은 뒤 진행하기로 사용자와 합의). LV_EVENT_PRESSED만 걸어도 충분 — 터치가 시작될
  * 때마다 한 번씩만 갱신되면 되고, 드래그 중 계속 오는 LV_EVENT_PRESSING까지 볼 필요 없음 */
 static void touch_activity_event_cb(lv_event_t *e)
 {
     (void)e;
-    esp_now_hub_note_user_action();
+    node_hub_note_user_action();
 }
 
 /* 2026-08-30(사용자 지시: "첫 페이지가, 장치목록/사진목록 보여주는 페이지가 의도한 거지?") —
@@ -60,8 +60,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
  * placeholder를 리턴하지 않고, 핸들러 안에서 READY/ERROR가 되거나 타임아웃될 때까지
  * 붙잡고 있다가 최종 결과 하나만 리턴. httpd 기본 워커가 하나뿐이라 그동안 다른 요청은
  * 대기하지만, 개인용 대시보드라 수용 가능한 트레이드오프로 판단(사용자 설계 확인)) —
- * 페어링된 첫 CAM 대상. esp_now_photo.c가 뮤텍스로 보호돼있어 httpd 워커 태스크에서
- * 직접 불러도 안전(esp_now_photo_list_request 구현 확인함). 큰 지역버퍼는 오늘 하루종일
+ * 페어링된 첫 CAM 대상. photo_rx.c가 뮤텍스로 보호돼있어 httpd 워커 태스크에서
+ * 직접 불러도 안전(photo_rx_list_request 구현 확인함). 큰 지역버퍼는 오늘 하루종일
  * 겪은 스택오버플로우 패턴을 피하려고 PSRAM에서 할당 */
 /* 2026-08-30(사용자 지시: "대기중인 장치 목록(CNTL과 동일한 형태)을 보여주고, 여기서 장치
  * 연결을 할 수 있게 해") — "AA11BB22CC33" 형식(콜론 없는 12자리 hex, URL 파라미터용)을
@@ -126,14 +126,14 @@ static esp_err_t photo_get_handler(httpd_req_t *req)
  * 호출") — assets에 업로드될 정적 HTML/JS(app.html)가 이 API들을 fetch()로 호출해서 화면을 그림 */
 static esp_err_t api_devices_get_handler(httpd_req_t *req)
 {
-    esp_now_hub_node_t cams[ESP_NOW_HUB_MAX_NODES];
-    int n = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, cams, ESP_NOW_HUB_MAX_NODES);
+    node_hub_node_t cams[NODE_HUB_MAX_NODES];
+    int n = node_hub_get_nodes(HUB_NODE_KIND_CAM, cams, NODE_HUB_MAX_NODES);
 
     char *body = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM);
     if (!body) { httpd_resp_send_500(req); return ESP_FAIL; }
     int len = snprintf(body, 2048, "[");
     for (int i = 0; i < n && len < 2048 - 150; i++) {
-        hub_conn_state_t cs = esp_now_hub_get_conn_state(cams[i].mac);
+        hub_conn_state_t cs = node_hub_get_conn_state(cams[i].mac);
         const char *status = (cs == HUB_CONN_STATE_WAITING) ? "waiting"
                             : (cs == HUB_CONN_STATE_ACTIVE)  ? "active" : "paired";
         /* 2026-09-04(사용자 설계: "앱의 문구들을 그대로 웹에서 써야한다") — status는 JS의
@@ -171,13 +171,13 @@ static esp_err_t api_connect_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    /* 2026-09-04(사용자 설계: "PC 원격제어처럼") — esp_now_hub_request_pair()를 직접 안 부르고
+    /* 2026-09-04(사용자 설계: "PC 원격제어처럼") — node_hub_request_pair()를 직접 안 부르고
      * 실제 카메라 행 탭+확인 팝업까지 합성. 합성 자체가 실패하면(지금 목록에 없음 등) 그
      * 자리에서 바로 실패 — 성공했으면 이벤트 기반 블로킹 대기("연결실패"는 이 대기가
      * 타임아웃에 도달하는 것 자체가 신호) */
     bool paired = false;
     if (ui_main_inject_connect(mac)) {
-        paired = esp_now_hub_wait_paired(mac, 25000);
+        paired = node_hub_wait_paired(mac, 25000);
     }
 
     /* 2026-09-04(사용자 설계: "앱의 문구들을 그대로 웹에서 써야한다") — JS가 따로 문구를
@@ -206,7 +206,7 @@ static esp_err_t api_connect_sensor_get_handler(httpd_req_t *req)
 
     bool paired = false;
     if (ui_main_inject_connect_sensor(mac)) {
-        paired = esp_now_hub_wait_paired(mac, 25000);
+        paired = node_hub_wait_paired(mac, 25000);
     }
 
     char body[96];
@@ -271,7 +271,7 @@ static esp_err_t api_disconnect_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     /* 2026-09-04("PC 원격제어처럼") — 카메라 행 탭+끊기 확인 팝업까지 합성. 로컬 상태변경이라
-     * 합성이 성공하면 그 안에서 이미 완료된 것(esp_now_hub_unpair()가 동기적) */
+     * 합성이 성공하면 그 안에서 이미 완료된 것(node_hub_unpair()가 동기적) */
     bool ok = ui_main_inject_disconnect(mac);
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     char body[96];
@@ -283,8 +283,8 @@ static esp_err_t api_disconnect_get_handler(httpd_req_t *req)
 
 static esp_err_t api_photos_get_handler(httpd_req_t *req)
 {
-    esp_now_hub_node_t cams[ESP_NOW_HUB_MAX_NODES];
-    int n = esp_now_hub_get_nodes(HUB_NODE_KIND_CAM, cams, ESP_NOW_HUB_MAX_NODES);
+    node_hub_node_t cams[NODE_HUB_MAX_NODES];
+    int n = node_hub_get_nodes(HUB_NODE_KIND_CAM, cams, NODE_HUB_MAX_NODES);
     int cam_idx = -1;
     for (int i = 0; i < n; i++) {
         if (cams[i].conn_state == NODE_CONN_PAIRED) { cam_idx = i; break; }
@@ -507,7 +507,7 @@ void web_dashboard_start(void)
      * 넉넉하니(같은 시점 free heap=263660B) 여기로 돌림(esp_lv_adapter의 stack_in_psram,
      * 폰트 버퍼의 font_buf_malloc과 동일 원칙) */
     config.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    /* 2026-08-30 — 핸들러들이 지역 노드 배열(esp_now_hub_node_t[8])을 스택에 두는데,
+    /* 2026-08-30 — 핸들러들이 지역 노드 배열(node_hub_node_t[8])을 스택에 두는데,
      * 기본 스택 크기가 빠듯할 수 있어 확대(PSRAM이라 비용 낮음) */
     config.stack_size = 8192;
     /* 2026-08-30 — URI 핸들러가 계속 늘어나서(root/photo/admin 2개 + API) 기본
@@ -579,7 +579,7 @@ void web_dashboard_start(void)
     ui_log_add("Web server started (heap=%uB, internal=%uB)", free_heap, free_internal);
 }
 
-/* 2026-08-21 — 예전엔 app_main() 맨 끝에서 esp_now_hub_init() 직후 곧바로 불렀는데, 그
+/* 2026-08-21 — 예전엔 app_main() 맨 끝에서 node_hub_init() 직후 곧바로 불렀는데, 그
  * 시점엔 WiFi가 아직 인증/연결 단계라 IP를 받기도 전이었음(실기 로그로 확인: httpd_start가
  * IP_EVENT_STA_GOT_IP보다 1초 이상 먼저 실행됨) — 이게 5005(httpd_start 실패)가 항상 뜨던
  * 원인. IP를 실제로 받은 뒤에 시작하도록 이벤트로 미룸. 재연결로 GOT_IP가 여러 번 올 수
@@ -738,23 +738,23 @@ void app_main(void)
     /* Cntl 통합 테스트 4단계 → CAM 연결 기능: WiFi+ESP-NOW 허브(페어링/노드테이블 포함) —
      * Cntl main.c와 동일하게 UI 뜬 뒤 마지막에 켬.
      * 2026-09-22(브릿지 역할 벤치테스트 시도 1 — 실패) — 이 초기화 전체를 건너뛰려 했더니
-     * UI의 주기 갱신(refresh_dashboard 등)이 esp_now_hub/tx가 만드는 세마포어/큐를 그대로
+     * UI의 주기 갱신(refresh_dashboard 등)이 node_hub/tx가 만드는 세마포어/큐를 그대로
      * 가정하고 있어서 NULL 핸들로 assert 크래시(xQueueSemaphoreTake)남. UI는 그대로 두면서
      * 초기화만 건너뛰는 건 이 코드베이스 구조상 안전하지 않음 — 그래서 초기화는 항상 정상
      * 진행하고, 대신 아래에서 recv_cb만 브릿지용으로 바꿔치기하는 방식으로 변경 */
-    esp_now_photo_init();
-    esp_now_hub_init();  /* 내부에서 esp_netif_init()+esp_event_loop_create_default() 호출 —
+    photo_rx_init();
+    node_hub_init();  /* 내부에서 esp_netif_init()+esp_event_loop_create_default() 호출 —
                              아래 이벤트 등록은 반드시 그 다음이어야 함 */
-    esp_now_tx_init();
+    node_request_init();
 
     /* SR(Power Control) 판정 루프 시작(2026-09-16) — GPIO 초기화 + 15초 주기 태스크.
-     * ui_main_query_power_source_value()가 esp_now_hub 노드 테이블/SD 집계를 읽으므로 그
-     * 둘이 갖춰진 뒤(SD는 위에서 이미 마운트됨, esp_now_hub는 방금 init)가 안전 */
+     * ui_main_query_power_source_value()가 node_hub 노드 테이블/SD 집계를 읽으므로 그
+     * 둘이 갖춰진 뒤(SD는 위에서 이미 마운트됨, node_hub는 방금 init)가 안전 */
     power_relay_start();
 
     /* 웹 대시보드는 실제로 IP를 받은 뒤에 시작(위 ip_event_handler 참고, 5005 버그 수정) */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                          &ip_event_handler, NULL, NULL));
 
-    ui_main_register_wifi_events();  /* 같은 이유로 여기서(esp_now_hub_init() 이후) 등록 */
+    ui_main_register_wifi_events();  /* 같은 이유로 여기서(node_hub_init() 이후) 등록 */
 }

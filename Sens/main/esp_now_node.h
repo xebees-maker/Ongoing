@@ -69,7 +69,7 @@ bool esp_now_node_report_reading(uint8_t chan_count, const uint8_t *chan_ok,
  * @brief 가장 최근 CASK 왕복에서 받은 SLEEP_NOW.sleep_sec — 0이면 계속 깨어있기(Live),
  *        그 외엔 그 값 그대로 실제 esp_sleep_enable_timer_wakeup()에 씀(캠과 동일 구조,
  *        노드 쪽 특별취급 없음). 2026-09-05(사용자 지시로 정정) — "센스는 자기 측정주기마다
- *        깨야 한다"는 요구는 콘 쪽(esp_now_hub.c의 send_cask_sleep_now())이 그 센스에
+ *        깨야 한다"는 요구는 콘 쪽(node_hub.c의 send_cask_sleep_now())이 그 센스에
  *        저장된 측정주기를 기준값으로 이 sleep_sec을 계산하는 것으로 충족됨 — 노드 쪽에서
  *        별도로 로컬 값을 다시 끼워 넣으면 "콘이 계산한 값과 실제로 자는 시간이 다를 수
  *        있음"이라는 어긋남 경로가 생기므로 만들지 않음.

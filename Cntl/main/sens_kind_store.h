@@ -7,7 +7,7 @@
  *          기본값으로 시작 — 그 상태에서 뭔가 저장되면 기존 파일이 기본값으로 덮어써짐),
  *          그 위험을 피하려고 처음부터 독립된 작은 파일로 설계.
  *
- *          esp_now_hub_node_t.sensor_kind는 순수 RAM이라 재부팅하면 사라짐 — Sens가 다시
+ *          node_hub_node_t.sensor_kind는 순수 RAM이라 재부팅하면 사라짐 — Sens가 다시
  *          깨어나 페어링할 때까지 stats_collect_group_macs()가 그 mac을 분류할 방법이 없어서
  *          "재부팅 후 한동안 통계가 안 보이는" 버그가 있었음(2026-09-19 실기 확인). 이 모듈이
  *          그 mac->kind 매핑을 영구 보관해서, 재부팅 직후에도 과거 기록을 분류할 수 있게 함.
@@ -27,7 +27,7 @@ void sens_kind_store_load(void);
 /* 없으면 0(SENSOR_KIND_UNKNOWN) 반환 */
 uint8_t sens_kind_store_get(const uint8_t mac[6]);
 
-/* 값이 실제로 바뀔 때만 파일에 다시 씀(esp_now_hub.c가 PAIR_ACK/keepalive마다 불러도
+/* 값이 실제로 바뀔 때만 파일에 다시 씀(node_hub.c가 PAIR_ACK/keepalive마다 불러도
  * 무해하도록 호출부에서도 한 번 더 비교하지만, 여기서도 방어적으로 비교) */
 void sens_kind_store_set(const uint8_t mac[6], uint8_t kind);
 
