@@ -17,7 +17,8 @@
     2. CAN Control 경로 — **완료**(415f8d3 분류 함수, 15e4877 콘 수신, deab0a9 브 수신+송신, ①~④ 마지막 커밋 참고)
        ②콘 수신 분리(can_rx가 ID로 Control/Data 조립기·큐·consume 태스크 2벌, Control 17/Data 15)
        ③브 수신 분리(동일 + 무선 수신 큐/릴레이 태스크 2벌) ④송신을 분류 함수로 Control/Data에 싣기
-    3. **다음**: esp_now_reliable 비동기화(노드별 슬롯) + 브 RELIABLE_SEND 대행 캠별 동시 처리 ← 페어링 붕괴 해결 확인
+    3. esp_now_reliable 비동기화 + 브 대행 비동기 — **완료**(마지막 커밋 참고). TWAI 송신 assert 우회, 수신 큐 256칸.
+       남은 실패는 주로 버스 에러(bit/stuff/ack)와 그로 인한 CF 순번 어긋남 → **다음 후보: 버스 에러 원인**
        (+ 의심: CAN 수신 ISR 원시 프레임 큐 16칸이 가득 차면 조용히 버림 → CF 순번 어긋남 원인인지 카운트로 확인)
     4. SR을 브에서 처리(순서만 맞춰 콘에 흘려보냄, 흐름 제어), 콘 photo_rx는 이어 붙이기+CRC
     5. CAPTURE_STATUS(RECEIVED) reliable로
