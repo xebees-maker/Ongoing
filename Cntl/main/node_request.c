@@ -255,8 +255,10 @@ static void tx_dispatcher_task(void *arg)
                     memcpy(w->mac, item.mac, sizeof(w->mac));
                     w->in_use = true;
                     xQueueSend(w->queue, &item, 0);  /* 태스크 생성 전에 미리 넣어둠 — 유실 없음 */
-                    xTaskCreateStatic(tx_worker_task, "node_req_w", TX_WORKER_STACK / sizeof(StackType_t),
-                                       w, TX_WORKER_PRIORITY, w->task_stack, w->task_tcb);
+                    /* 2026-09-26(설계 §3 — CAN 관련은 코어 1) — 워커는 CAN으로 RELIABLE_SEND를 보내므로 TWAI 인터럽트와
+                     * 같은 코어 1에 고정(can_bridge.c send_app_msg가 대행 없이 바로 보냄) */
+                    xTaskCreateStaticPinnedToCore(tx_worker_task, "node_req_w", TX_WORKER_STACK / sizeof(StackType_t),
+                                       w, TX_WORKER_PRIORITY, w->task_stack, w->task_tcb, 1);
                 }
             }
         }
@@ -280,15 +282,15 @@ void node_request_init(void)
     s_workers_mutex = xSemaphoreCreateMutex();
     /* 2026-09-09(사용자 설계 — "통신 17 SR제어 15 파일처리 10") — 디스패처는 통신 계층이라
      * 예전 tx_task와 동일하게 17. 실제 워커 태스크들도 같은 우선순위(TX_WORKER_PRIORITY)로
-     * 생성됨 */
+     * 생성됨. 2026-09-26(설계 §3) — 디스패처·워커 모두 코어 1 */
     static StaticTask_t s_tx_dispatcher_tcb;
     StackType_t *tx_dispatcher_stack = heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
     if (tx_dispatcher_stack) {
-        xTaskCreateStatic(tx_dispatcher_task, "node_req_disp", 3072, NULL, 17,
-                           tx_dispatcher_stack, &s_tx_dispatcher_tcb);
+        xTaskCreateStaticPinnedToCore(tx_dispatcher_task, "node_req_disp", 3072, NULL, 17,
+                           tx_dispatcher_stack, &s_tx_dispatcher_tcb, 1);
     } else {
         ESP_LOGE(TAG, "디스패처 태스크 스택 PSRAM 할당 실패 — 내부 RAM으로 폴백");
-        xTaskCreate(tx_dispatcher_task, "node_req_disp", 3072, NULL, 17, NULL);
+        xTaskCreatePinnedToCore(tx_dispatcher_task, "node_req_disp", 3072, NULL, 17, NULL, 1);
     }
 }
 
