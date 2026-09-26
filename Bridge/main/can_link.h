@@ -13,3 +13,6 @@ void can_link_init(void);
 
 /* bridge_esp_now.c가 캠에서 받은 프레임을 콘에 릴레이할 때 씀 */
 can_bridge_ctx_t *can_link_get_data_ctx(void);
+
+/* 2026-09-26 — app 메시지(app_header+body)를 경로 분류에 따라 Control/Data로 콘에 보냄 */
+esp_err_t can_link_send(const uint8_t *msg, size_t len);

@@ -10,13 +10,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
 
 /**
  * 2026-09-23 — 1차 개발 범위(사용자 확정: 환경설정/화면/브 고유 초기화/I2C->CAN 교체/캠이
  * 브에 붙는 것 확인)에 맞춰 정리. 콘의 can_test.c에서 검증된 ISO-TP 엔진(can_bridge_link)을
- * 그대로 쓰되, CONTROL 카테고리(PING/PONG 등)는 이번 범위에 없어서 뺐음 — 브는 CASK 판단을
+ * 그대로 쓰되, CONTROL 카테고리(PING/PONG 등)는 이번 범위에 없어서 뺐음(2026-09-26 — 설계 2-③에서
+ * CONTROL 경로 추가, 아래 can_rx_task 참고) — 브는 CASK 판단을
  * 전혀 안 하는 투명 릴레이(DATA 카테고리 하나)라 그것만 있으면 됨. 이전에 can_test.c의
  * PING/PONG 자동응답 로직을 그대로 옮겨왔던 건, 콘을 정리하기 전 옛 테스트 트래픽을 실제
  * ESP-NOW 전송으로 잘못 릴레이하는 부작용을 냈음(사용자 지적) — 필요 없는 걸 가져온 게
@@ -34,8 +36,21 @@ static twai_node_handle_t s_node = NULL;
 static can_bridge_ctx_t *s_data_ctx;
 static can_bridge_reassembly_t s_data_reasm;
 static can_bridge_queue_t s_data_complete_q;
+/* 2026-09-26(설계 Docs/설계_CAN링크_2026-09-26.md §2~3, 2-③) — CONTROL 경로 */
+static can_bridge_ctx_t *s_ctrl_ctx;
+static can_bridge_reassembly_t s_ctrl_reasm;
+static can_bridge_queue_t s_ctrl_complete_q;
 
 can_bridge_ctx_t *can_link_get_data_ctx(void) { return s_data_ctx; }
+
+/* 2026-09-26 — 콘으로 보낼 app 메시지를 경로 분류(can_bridge_path_for_app_msg)에 따라 Control/Data
+ * ctx로 보냄. 판단은 Common 한 곳에만 있음 */
+esp_err_t can_link_send(const uint8_t *msg, size_t len)
+{
+    can_bridge_ctx_t *ctx = (can_bridge_path_for_app_msg(msg, len) == CAN_BRIDGE_CAT_CONTROL) ? s_ctrl_ctx : s_data_ctx;
+    if (!ctx) return ESP_ERR_INVALID_STATE;
+    return can_bridge_send(ctx, msg, len);
+}
 
 typedef struct {
     uint32_t id;
@@ -88,18 +103,32 @@ static void can_rx_task(void *arg)
     raw_frame_t rf;
     for (;;) {
         if (xQueueReceive(s_raw_frame_q, &rf, portMAX_DELAY) != pdTRUE) continue;
-        if (rf.id != CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA) continue;  /* CONTROL 등 그 외는 무시(범위 밖) */
+
+        /* 2026-09-26 — ID로 경로 선택. 받는 쪽 FC는 자기 경로의 송신 ID로(현행 원칙) */
+        can_bridge_ctx_t *ctx;
+        can_bridge_reassembly_t *reasm;
+        can_bridge_queue_t *complete_q;
+        uint32_t fc_id;
+        if (rf.id == CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL) {
+            ctx = s_ctrl_ctx; reasm = &s_ctrl_reasm; complete_q = &s_ctrl_complete_q;
+            fc_id = CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL;
+        } else if (rf.id == CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA) {
+            ctx = s_data_ctx; reasm = &s_data_reasm; complete_q = &s_data_complete_q;
+            fc_id = CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA;
+        } else {
+            continue;
+        }
 
         uint8_t pci = (rf.len >= 1) ? ((rf.data[0] >> 4) & 0x0F) : 0xFF;
-        if (pci == ISO_TP_PCI_FC) { can_bridge_ctx_notify_fc(s_data_ctx, rf.data); continue; }
+        if (pci == ISO_TP_PCI_FC) { can_bridge_ctx_notify_fc(ctx, rf.data); continue; }
 
         uint8_t fc[8];
-        if (can_bridge_reassembly_feed(&s_data_reasm, rf.data, rf.len, fc, &s_data_complete_q)) {
+        if (can_bridge_reassembly_feed(reasm, rf.data, rf.len, fc, complete_q)) {
             /* 2026-09-25 — 지역 프레임을 드라이버에 넘기면 반환 뒤 ISR이 덮인 스택을 읽음(콘 실기
              * 크래시로 확인). PSRAM 송신 풀 슬롯에 복사해서 보냄 */
-            esp_err_t fc_err = can_bridge_tx_frame(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA, fc, 8, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
+            esp_err_t fc_err = can_bridge_tx_frame(s_node, fc_id, fc, 8, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
             if (fc_err != ESP_OK) {
-                ESP_LOGW(TAG, "FC 송신 실패: %s", esp_err_to_name(fc_err));
+                ESP_LOGW(TAG, "FC 송신 실패(id=0x%x): %s", (unsigned)fc_id, esp_err_to_name(fc_err));
             }
         }
     }
@@ -108,7 +137,9 @@ static void can_rx_task(void *arg)
 /* 2026-09-23(1단계 — 콘의 esp_now_reliable_request()를 브가 대행) — 기존 esp_now_reliable
  * 컴포넌트를 그대로 호출(재구현 안 함, 사용자 지시). 여기서 블로킹(최대 timeout_ms*max_attempts)
  * 되는데, can_consume_task 하나가 DATA 전체를 순차 처리하는 기존 모델 그대로(이 링크는
- * 어차피 세션 1개 원칙) — 그 동안 다른 DATA 처리가 밀리는 건 의도된 동작 */
+ * 어차피 세션 1개 원칙) — 그 동안 다른 DATA 처리가 밀리는 건 의도된 동작.
+ * 2026-09-26 — 설계 3단계에서 esp_now_reliable 비동기 API로 교체 예정(블로킹 없이 캠별 동시 대행).
+ * 그 전까지는 소비 태스크가 경로별 2개라 static 응답 버퍼를 뮤텍스로 보호 */
 static void handle_reliable_send(const can_bridge_app_header_t *hdr, const uint8_t *body, size_t body_len)
 {
     if (body_len < sizeof(can_bridge_reliable_send_hdr_t)) return;
@@ -124,6 +155,10 @@ static void handle_reliable_send(const can_bridge_app_header_t *hdr, const uint8
     bridge_esp_now_ensure_peer(hdr->mac);
 
     /* 응답 버퍼 — ESP-NOW 최대 프레임 크기, PSRAM, 태스크 수명 동안 재사용(매 호출 malloc 안 함) */
+    static SemaphoreHandle_t s_reliable_mutex = NULL;
+    static StaticSemaphore_t s_reliable_mutex_buf;
+    if (!s_reliable_mutex) s_reliable_mutex = xSemaphoreCreateMutexStatic(&s_reliable_mutex_buf);
+    xSemaphoreTake(s_reliable_mutex, portMAX_DELAY);
     static uint8_t *s_reply_buf = NULL;
     if (!s_reply_buf) {
         s_reply_buf = (uint8_t *)heap_caps_malloc(1470, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -146,7 +181,10 @@ static void handle_reliable_send(const can_bridge_app_header_t *hdr, const uint8
     uint8_t *result_msg = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + sizeof(can_bridge_reliable_result_hdr_t) + 1470,
                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!result_msg) result_msg = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + sizeof(can_bridge_reliable_result_hdr_t) + 1470, MALLOC_CAP_8BIT);
-    if (!result_msg) return;
+    if (!result_msg) {
+        xSemaphoreGive(s_reliable_mutex);
+        return;
+    }
 
     can_bridge_app_header_t result_app_hdr = { .msg_type = CAN_DATA_RELIABLE_RESULT, .flags = 0 };
     memcpy(result_app_hdr.mac, hdr->mac, 6);
@@ -158,20 +196,23 @@ static void handle_reliable_send(const can_bridge_app_header_t *hdr, const uint8
     if (result_hdr.ok && reply_len > 0) {
         memcpy(result_msg + off, s_reply_buf, reply_len); off += reply_len;
     }
+    xSemaphoreGive(s_reliable_mutex);  /* s_reply_buf 복사 끝 */
 
-    can_bridge_send(s_data_ctx, result_msg, off);
+    /* 2026-09-26 — 결과는 분류상 항상 CONTROL(can_link_send가 경로 선택) */
+    can_link_send(result_msg, off);
     free(result_msg);
 }
 
 /* 2026-09-25(사용자 지시 — 이벤트 방식) — 예전엔 큐가 비면 vTaskDelay(50ms) 후 다시 확인하는
  * 폴링이었음. 이제 큐를 비운 뒤 태스크 알림을 기다림 — 알림은 can_bridge_queue_push()가 완성된
  * 메시지를 넣을 때만 보냄(can_bridge_queue_set_notify_task) */
+/* 2026-09-26 — 경로마다 하나씩(arg = 그 경로의 완성 큐). 처리 내용은 같음(RELAY/RELIABLE_SEND) */
 static void can_consume_task(void *arg)
 {
-    (void)arg;
+    can_bridge_queue_t *q = (can_bridge_queue_t *)arg;
     for (;;) {
         uint8_t *data; size_t len;
-        while (can_bridge_queue_pop(&s_data_complete_q, &data, &len)) {
+        while (can_bridge_queue_pop(q, &data, &len)) {
             if (len > CAN_BRIDGE_APP_HEADER_LEN) {
                 can_bridge_app_header_t hdr;
                 memcpy(&hdr, data, sizeof(hdr));
@@ -206,11 +247,12 @@ static void can_status_task(void *arg)
         twai_node_status_t status;
         if (twai_node_get_info(s_node, &status, NULL) == ESP_OK) {
             static const char *names[] = {"error_active", "error_warning", "error_passive", "bus_off"};
-            uint32_t q_count, q_hwm;
+            uint32_t q_count, q_hwm, cq_count, cq_hwm;
             can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
-            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u DATA큐=%u(최대%u)",
+            can_bridge_queue_get_stats(&s_ctrl_complete_q, &cq_count, &cq_hwm);
+            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u)",
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
-                     (unsigned)q_count, (unsigned)q_hwm);
+                     (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -228,12 +270,16 @@ void can_link_init(void)
     s_rx_frame.buffer_len = sizeof(s_rx_buf);
 
     can_bridge_queue_init(&s_data_complete_q);
+    can_bridge_queue_init(&s_ctrl_complete_q);
 
     /* ESP-NOW v2 최대 프레임(1470B) + 앱헤더(8B) — bridge_esp_now.c와 맞춤 */
     #define CAN_LINK_DATA_BUF_LEN 1536
     uint8_t *data_buf = (uint8_t *)heap_caps_malloc(CAN_LINK_DATA_BUF_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!data_buf) data_buf = (uint8_t *)heap_caps_malloc(CAN_LINK_DATA_BUF_LEN, MALLOC_CAP_8BIT);
     can_bridge_reassembly_init(&s_data_reasm, data_buf, CAN_LINK_DATA_BUF_LEN);
+    uint8_t *ctrl_buf = (uint8_t *)heap_caps_malloc(CAN_LINK_DATA_BUF_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ctrl_buf) ctrl_buf = (uint8_t *)heap_caps_malloc(CAN_LINK_DATA_BUF_LEN, MALLOC_CAP_8BIT);
+    can_bridge_reassembly_init(&s_ctrl_reasm, ctrl_buf, CAN_LINK_DATA_BUF_LEN);
 
     twai_onchip_node_config_t node_cfg = {
         .io_cfg = {
@@ -263,19 +309,24 @@ void can_link_init(void)
     ESP_ERROR_CHECK(twai_node_enable(s_node));
 
     s_data_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA);
+    s_ctrl_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL);
 
-    static StaticTask_t s_can_rx_tcb, s_can_consume_tcb, s_can_status_tcb;
+    static StaticTask_t s_can_rx_tcb, s_can_consume_tcb, s_ctrl_consume_tcb, s_can_status_tcb;
     StackType_t *can_rx_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *can_consume_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    StackType_t *ctrl_consume_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *can_status_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
     /* 소비 태스크를 먼저 만들고 알림 대상으로 등록한 뒤에 수신 태스크를 띄움 — 첫 push부터
      * 알림이 가도록(등록 전에 들어온 게 있어도 소비 태스크의 첫 비우기에서 처리됨) */
     /* 2026-09-25(사용자 설계 — 코어 분리) — CAN은 코어 1(ESP-NOW/Wi-Fi/LVGL은 코어 0).
      * can_rx/can_consume는 통신 등급 17(콘과 동일), can_status는 상태 로그뿐이라 5 */
-    TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "can_consume", 4096 / sizeof(StackType_t), NULL, 17, can_consume_stack, &s_can_consume_tcb, 1);
+    /* 2026-09-26(설계 §3) — 경로별 소비 태스크: Control 17, Data(SR) 15 */
+    TaskHandle_t ctrl_task = xTaskCreateStaticPinnedToCore(can_consume_task, "ctrl_consume", 4096 / sizeof(StackType_t), &s_ctrl_complete_q, 17, ctrl_consume_stack, &s_ctrl_consume_tcb, 1);
+    can_bridge_queue_set_notify_task(&s_ctrl_complete_q, ctrl_task);
+    TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "data_consume", 4096 / sizeof(StackType_t), &s_data_complete_q, 15, can_consume_stack, &s_can_consume_tcb, 1);
     can_bridge_queue_set_notify_task(&s_data_complete_q, consume_task);
     xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
     xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
 
-    ESP_LOGI(TAG, "브 CAN 링크 시작됨(TX=%d RX=%d %dbps, DATA 전용)", CAN_LINK_TX_GPIO, CAN_LINK_RX_GPIO, CAN_LINK_BITRATE);
+    ESP_LOGI(TAG, "브 CAN 링크 시작됨(TX=%d RX=%d %dbps, CONTROL+DATA)", CAN_LINK_TX_GPIO, CAN_LINK_RX_GPIO, CAN_LINK_BITRATE);
 }
