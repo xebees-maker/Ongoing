@@ -1,6 +1,5 @@
+## 2026-09-26 — espressif/es8311은 레지스트리에 IDF 6 지원 버전이 없어 프로젝트 수정본
+## (CAM/components/es8311)을 씀. 여기서 레지스트리 의존성을 걸면 managed 원본이 다시 받아짐.
 dependencies:
   idf:
     version: ">=5.4"
-
-  espressif/es8311:
-    version: "*"

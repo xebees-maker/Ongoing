@@ -19,7 +19,7 @@ menu "CAM Node"
         prompt "촬영 주기"
         default CAM_CAPTURE_10S
         help
-            블랙박스처럼 이 주기마다 정지사진 1장을 찍어 SD에 저장한다. 10초는 개발/테스트
+            블랙박스처럼 이 주기마다 정지사진 1장을 찍어 CNTL로 전송한다. 10초는 개발/테스트
             전용(빠르게 확인용) — 실제 운영은 30분/1시간/3시간/10시간 중 선택.
 
         config CAM_CAPTURE_10S

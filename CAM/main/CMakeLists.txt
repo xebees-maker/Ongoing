@@ -3,7 +3,6 @@ idf_component_register(
         "cam_node.c"
         "rwdt_guard.c"
         "esp_now_cam.c"
-        "cam_storage.c"
         "dev_console.c"
     INCLUDE_DIRS
         "."
@@ -22,9 +21,6 @@ idf_component_register(
         esp32-camera
         bsp_esp32s3_cam
         io_expander_ch32v003
-        fatfs
-        sdmmc
-        esp_driver_sdmmc
         console
         mbedtls
         esp_rom

@@ -5,7 +5,13 @@
 #include <stddef.h>
 #include "driver/gpio.h"
 #include "esp_now_link.h"
-#include "cam_storage.h"  /* cam_capture_kind_t */
+
+/* 수동(M)/자동(T) 촬영 구분 — META의 kind로 CNTL에 전달돼 CNTL이 파일명 접두사를 정함.
+ * 2026-09-26 — SD 제거로 삭제된 cam_storage.h에서 옮겨옴(값은 그대로) */
+typedef enum {
+    CAM_CAPTURE_KIND_MANUAL = 'M',
+    CAM_CAPTURE_KIND_AUTO   = 'T',
+} cam_capture_kind_t;
 
 /**
  * CAM의 ESP-NOW 리프 노드 로직 — Sens/main/esp_now_node.c와 광고/채널스캔/페어링 부분은
@@ -30,7 +36,8 @@ bool esp_now_cam_is_busy(void);
  *         내부적으로 이 함수를 씀) */
 bool esp_now_cam_reconnect(void);
 
-/** @brief Green 상태 LED GPIO 등록 (esp_now_cam_init() 이전에 호출) */
+/** @brief 상태 LED 키 등록(esp_now_cam_init() 이전에 호출). 키는 status_led로 이미 초기화돼
+ *  있어야 함 — CAM은 BSP_CAM_PWR_LED_STATUS_ID(IO 익스팬더 EXIO6, status_led_init_custom) */
 void esp_now_cam_set_status_led(gpio_num_t pin);
 
 /**

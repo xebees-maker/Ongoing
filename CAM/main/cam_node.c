@@ -36,7 +36,6 @@
 #include "bsp_esp32s3_cam.h"
 #include "cam_speaker.h"
 #include "io_expander_ch32v003.h"
-#include "cam_storage.h"
 #include "esp_now_cam.h"
 #include "esp_now_channelsync.h"
 #include "status_led.h"
@@ -401,13 +400,8 @@ void cam_node_note_scan_restarted(void)
 
 static bool s_camera_ready = false;
 
-/* save_warmup_frames: 워밍업 프레임을 버리지 않고 kind 'A'+i로 SD에 저장(2026-08-21, 적정
- * CAM_WARMUP_FRAME_COUNT 값을 실기 화질로 판단하기 위한 임시 진단 — cam_storage.c의
- * s_valid_kinds 주석 참고). **수동 촬영 경로에서만 true로 넘김** — 2026-08-10에 같은 걸
- * 무조건 켜뒀다가 main 태스크 스택오버플로우로 되돌린 전례가 있어서(그땐 camera_init()이
- * app_main에서 무조건 호출되던 시절), 지금은 필요시 초기화라 그 경로 자체는 없어졌지만
- * 혹시 모를 작은 스택(esp_timer 태스크, 자동촬영 경로)에서까지 SD 쓰기를 태우지 않으려고
- * 여전히 수동(대용량 스택의 photo_tx 태스크/콘솔)에서만 켬 — camera_capture_one() 참고 */
+/* save_warmup_frames: 예전엔 워밍업 프레임을 SD에 저장하는 임시 진단 스위치였음(2026-08-21).
+ * SD 제거(2026-09-18/09-26)로 이 함수 안에서 쓰는 곳이 없음 — 아래 워밍업 루프 주석 참고 */
 static esp_err_t camera_init(bool save_warmup_frames)
 {
     camera_config_t config = {
@@ -456,7 +450,7 @@ static esp_err_t camera_init(bool save_warmup_frames)
     }
 
     /* 2026-09-18(SD 제거 재설계) — 워밍업 프레임 진단 SD 저장 제거(SD 자체가 없어짐, 원래도
-     * "정식 기능 아님" 진단용이었음 — cam_storage.h 주석 참고). 프레임을 실제로 소비하는
+     * "정식 기능 아님" 진단용이었음). 프레임을 실제로 소비하는
      * 루프 자체(노출 워밍업 목적)는 그대로 유지, save_warmup_frames 파라미터는 이제 이 함수
      * 안에서 쓸 데가 없어져 사실상 무의미해짐(시그니처는 호출부 다수라 그대로 둠) */
     int64_t warmup_start_us = esp_timer_get_time();
@@ -721,10 +715,6 @@ void app_main(void)
      * 전부 무관했음이 확인됨) */
     ESP_ERROR_CHECK(bsp_esp32s3_cam_init());
 
-    if (cam_storage_init() != ESP_OK) {
-        ESP_LOGW(TAG, "SD 초기화 실패 — 계속 재시도하지 않고 그대로 진행");
-    }
-
     /* 2026-08-23 — 스피커로 6가지 이벤트만 소리로 구분(CAML에서 검증, 기본 꺼짐 —
      * dev_console의 soundlog on/off로 켬). 실패해도 계속 진행 */
     if (cam_speaker_init() != ESP_OK) {
@@ -779,7 +769,13 @@ void app_main(void)
     esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     ESP_LOGI(TAG, "WiFi 모뎀슬립 설정: %s", esp_err_to_name(ps_err));
 
-    esp_now_cam_set_status_led(GPIO_NUM_NC);  /* TODO: 실기 LED GPIO 확정되면 채우기 */
+    /* 2026-09-26 — 상태 LED = PWR_LED(IO 익스팬더 EXIO6, 스키매틱 확인). GPIO가 아니라서
+     * status_led의 사용자 출력 함수 방식으로 등록(쓰기는 BSP 태스크가 비동기로 함) */
+    if (status_led_init_custom(BSP_CAM_PWR_LED_STATUS_ID, bsp_esp32s3_cam_pwr_led_set)) {
+        esp_now_cam_set_status_led(BSP_CAM_PWR_LED_STATUS_ID);
+    } else {
+        ESP_LOGW(TAG, "상태 LED 초기화 실패 — LED 표시 없이 계속 진행");
+    }
     esp_now_cam_init();  /* fast path 시도(성공하면 이미 PAIRED) 또는 폴백 스캔 시작 */
     /* esp_now_cam_init() 다음에 저장된(또는 기본) 응답성 설정을 반영(RWDT도 여기서
      * 실제값으로 재무장됨) */
@@ -906,6 +902,9 @@ void app_main(void)
      * 안 그러면 스윕완료 등 이벤트 즉시 잠들어서 notify()가 큐에 넣기만 한 채 하드웨어가
      * 꺼져 소리가 통째로 안 남(실기로 발견) — 꺼져있으면 즉시 리턴이라 평소엔 영향 없음 */
     cam_speaker_wait_idle(2000);
+    /* 2026-09-26 — IO 익스팬더 출력은 ESP32가 자는 동안에도 유지됨 — 상태 LED가 켜진 위상에서
+     * 잠들면 딥슬립 내내 켜져 있으므로 확실히 끄고 잠 */
+    bsp_esp32s3_cam_pwr_led_shutdown();
     /* 2026-08-26(사용자 지시) — "실제 esp_deep_sleep_start가 되는지, 이 함수 속에서 혹시
      * 그냥 리턴하는 건 아닌지도 의심스러워서" — esp_deep_sleep_start()는 noreturn이라 내부에
      * 로그를 넣을 순 없으니, 호출 바로 직전에 명확한 마커를 찍어 여기까지 실제로 도달하는지

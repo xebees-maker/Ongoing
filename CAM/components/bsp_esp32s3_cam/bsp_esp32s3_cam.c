@@ -3,10 +3,68 @@
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "bsp_esp32s3_cam";
 
 static i2c_master_bus_handle_t s_i2c_bus = NULL;
+
+/* 2026-09-26 — PWR_LED(EXIO6) 쓰기 전용 태스크. 상태 LED 패턴 변경이 WiFi 콜백(send_cb/recv_cb)
+ * 과 esp_timer 태스크에서 일어나는데, 거기서 I2C 트랜잭션을 직접 하면 그 태스크들이 버스 대기만큼
+ * 막힘 — 알림(eSetValueWithOverwrite)으로 최신 값만 넘기고 여기서 씀(이벤트 방식, 폴링 없음) */
+#define PWR_LED_TASK_STACK  3072
+#define PWR_LED_TASK_PRIO   3
+
+static TaskHandle_t       s_pwr_led_task = NULL;
+static StaticTask_t       s_pwr_led_tcb;
+static SemaphoreHandle_t  s_pwr_led_mutex = NULL;  /* s_pwr_led_disabled 확인+쓰기를 shutdown과 직렬화 */
+static StaticSemaphore_t  s_pwr_led_mutex_buf;
+static bool               s_pwr_led_disabled = false;
+
+static void pwr_led_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint32_t value = 0;
+        xTaskNotifyWait(0, 0, &value, portMAX_DELAY);
+        xSemaphoreTake(s_pwr_led_mutex, portMAX_DELAY);
+        if (!s_pwr_led_disabled) {
+            ch32v003_set_output(BSP_CAM_IO_EXPANDER_PWR_LED_PIN, value != 0);
+        }
+        xSemaphoreGive(s_pwr_led_mutex);
+    }
+}
+
+static esp_err_t pwr_led_start(void)
+{
+    s_pwr_led_mutex = xSemaphoreCreateMutexStatic(&s_pwr_led_mutex_buf);
+
+    StackType_t *stack = (StackType_t *)heap_caps_malloc(PWR_LED_TASK_STACK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!stack) stack = (StackType_t *)heap_caps_malloc(PWR_LED_TASK_STACK, MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(stack, ESP_ERR_NO_MEM, TAG, "PWR_LED 태스크 스택 할당 실패");
+
+    s_pwr_led_task = xTaskCreateStatic(pwr_led_task, "pwr_led", PWR_LED_TASK_STACK / sizeof(StackType_t),
+                                       NULL, PWR_LED_TASK_PRIO, stack, &s_pwr_led_tcb);
+    return ESP_OK;
+}
+
+void bsp_esp32s3_cam_pwr_led_set(bool on)
+{
+    if (!s_pwr_led_task) return;
+    xTaskNotify(s_pwr_led_task, on ? 1u : 0u, eSetValueWithOverwrite);
+}
+
+void bsp_esp32s3_cam_pwr_led_shutdown(void)
+{
+    if (!s_pwr_led_mutex) return;
+    xSemaphoreTake(s_pwr_led_mutex, portMAX_DELAY);
+    s_pwr_led_disabled = true;
+    ch32v003_set_output(BSP_CAM_IO_EXPANDER_PWR_LED_PIN, false);
+    xSemaphoreGive(s_pwr_led_mutex);
+}
 
 esp_err_t bsp_esp32s3_cam_init(void)
 {
@@ -27,12 +85,11 @@ esp_err_t bsp_esp32s3_cam_init(void)
      * 늦으면 그 사이에 버튼을 놓았을 때 전원이 나갈 수 있음 */
     ch32v003_set_output(BSP_CAM_IO_EXPANDER_BAT_EN_PIN, true);
 
-    /* Waveshare 예제(04_SDMMC_Test.ino)가 SD_MMC.begin() 전에 이 두 핀을 켜지 않으면
-     * SD카드가 안 잡힘 — 정확한 이유는 불확실하지만 그대로 재현 */
-    ch32v003_set_output(BSP_CAM_IO_EXPANDER_SD_ENABLE_PIN_A, true);
-    ch32v003_set_output(BSP_CAM_IO_EXPANDER_SD_ENABLE_PIN_B, true);
+    /* 2026-09-26 — 예전엔 여기서 IO2/IO6을 "SD 인에이블"로 켰음(Waveshare SD 예제 재현). 스키매틱
+     * 확인 결과 IO2=SD_CS, IO6=PWR_LED — SD는 제거됐고 IO6은 상태 LED로 씀(꺼진 채 시작) */
+    ESP_RETURN_ON_ERROR(pwr_led_start(), TAG, "PWR_LED 태스크 시작 실패");
 
-    ESP_LOGI(TAG, "보드 초기화 완료 (I2C SDA=%d SCL=%d, BAT_EN/SD 인에이블 핀 ON)",
+    ESP_LOGI(TAG, "보드 초기화 완료 (I2C SDA=%d SCL=%d, BAT_EN ON)",
              BSP_CAM_I2C_SDA, BSP_CAM_I2C_SCL);
     return ESP_OK;
 }

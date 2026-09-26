@@ -2,7 +2,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "cam_storage.h"  /* cam_capture_kind_t */
 
 /** @brief 캡처 타이머와 무관하게 즉시 1장 촬영 — 개발 콘솔(dev_console.c)의 shot 명령용 */
 bool cam_node_capture_now(void);

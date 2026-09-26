@@ -1,11 +1,18 @@
 #include "io_expander_ch32v003.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "ch32v003";
 
 static i2c_master_dev_handle_t s_dev = NULL;
 static uint8_t s_output_shadow = 0;  /* 레지스터는 write-only 느낌이라 마지막 출력값을 들고 있음 */
+/* 2026-09-26 — s_output_shadow 읽고-고치고-쓰기를 보호. 여러 태스크(BAT_EN/PA_CTRL/상태 LED)가
+ * 서로 다른 핀을 바꾸는데, 보호 없이 겹치면 한쪽이 옛 shadow로 덮어써 다른 핀 비트가 되돌아갈 수
+ * 있음(I2C 버스 자체의 잠금은 드라이버가 하지만 shadow는 여기 몫) */
+static SemaphoreHandle_t s_output_mutex = NULL;
+static StaticSemaphore_t s_output_mutex_buf;
 
 static esp_err_t write_reg(uint8_t reg, uint8_t data)
 {
@@ -19,6 +26,9 @@ esp_err_t ch32v003_init(i2c_master_bus_handle_t i2c_bus)
         .device_address = CH32V003_I2C_ADDR,
         .scl_speed_hz   = 100000,
     };
+    if (!s_output_mutex) {
+        s_output_mutex = xSemaphoreCreateMutexStatic(&s_output_mutex_buf);
+    }
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(i2c_bus, &dev_cfg, &s_dev),
                          TAG, "add I2C device failed");
 
@@ -34,12 +44,18 @@ void ch32v003_set_output(uint8_t pin, bool level)
         ESP_LOGE(TAG, "set_output: invalid pin %d", pin);
         return;
     }
+    if (!s_dev || !s_output_mutex) {
+        ESP_LOGE(TAG, "set_output(pin=%d): ch32v003_init() 전 호출", pin);
+        return;
+    }
+    xSemaphoreTake(s_output_mutex, portMAX_DELAY);
     if (level) {
         s_output_shadow |= (uint8_t)(1u << pin);
     } else {
         s_output_shadow &= (uint8_t)~(1u << pin);
     }
     esp_err_t err = write_reg(CH32V003_REG_OUTPUT, s_output_shadow);
+    xSemaphoreGive(s_output_mutex);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "set_output(pin=%d): %s", pin, esp_err_to_name(err));
     }

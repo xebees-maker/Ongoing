@@ -31,5 +31,17 @@ typedef enum {
  */
 bool status_led_init(gpio_num_t pin);
 
+/**
+ * @brief GPIO가 아닌 LED(예: I2C IO 익스팬더 핀)용 초기화 — 켜기/끄기를 write_fn으로 위임.
+ *        2026-09-26 추가(CAM 보드의 PWR_LED가 CH32V003 EXIO6에 달려 있음).
+ * @param id       status_led_set_pattern()에서 쓸 키. 실제 GPIO와 겹치면 안 되므로
+ *                 GPIO_NUM_MAX 이상이어야 함(아니면 false)
+ * @param write_fn LED 켜기(true)/끄기(false). esp_timer 태스크와 set_pattern 호출자(WiFi 콜백
+ *                 포함) 문맥에서 불리므로 블로킹하지 말 것 — 느린 버스면 호출측이 비동기로 처리
+ * @return 성공 시 true
+ */
+typedef void (*status_led_write_fn_t)(bool on);
+bool status_led_init_custom(gpio_num_t id, status_led_write_fn_t write_fn);
+
 /** @brief 이미 같은 패턴이면 아무 일도 하지 않음(타이머 재시작으로 인한 깜박임 튐 방지) */
 void status_led_set_pattern(gpio_num_t pin, led_pattern_t pattern);

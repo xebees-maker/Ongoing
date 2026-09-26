@@ -57,6 +57,7 @@ typedef struct {
     bool                   level;
     uint8_t                phase;
     const led_phase_seq_t *active_seq;   /* pattern이 BURST_TRIPLE/HEARTBEAT일 때만 사용 */
+    status_led_write_fn_t  write_fn;     /* NULL이면 GPIO, 아니면 status_led_init_custom()의 출력 함수 */
     esp_timer_handle_t     blink_timer;
 } status_led_slot_t;
 
@@ -70,11 +71,20 @@ static status_led_slot_t *find_slot(gpio_num_t pin)
     return NULL;
 }
 
+static void led_write(status_led_slot_t *slot, bool on)
+{
+    if (slot->write_fn) {
+        slot->write_fn(on);
+    } else {
+        gpio_set_level(slot->pin, on ? 1 : 0);
+    }
+}
+
 static void arm_next_phase(status_led_slot_t *slot)
 {
     const led_phase_seq_t *seq = slot->active_seq;
     slot->level = seq->level[slot->phase];
-    gpio_set_level(slot->pin, slot->level);
+    led_write(slot, slot->level);
     esp_timer_start_once(slot->blink_timer, (uint64_t)seq->ms[slot->phase] * 1000);
     slot->phase = (slot->phase + 1) % seq->count;
 }
@@ -87,32 +97,21 @@ static void blink_timer_cb(void *arg)
         return;
     }
     slot->level = !slot->level;
-    gpio_set_level(slot->pin, slot->level);
+    led_write(slot, slot->level);
 }
 
-bool status_led_init(gpio_num_t pin)
+static status_led_slot_t *alloc_slot(void)
 {
-    if (find_slot(pin)) return true;  /* 이미 초기화됨 */
-
-    status_led_slot_t *slot = NULL;
     for (int i = 0; i < STATUS_LED_MAX_COUNT; i++) {
-        if (!s_slots[i].in_use) { slot = &s_slots[i]; break; }
+        if (!s_slots[i].in_use) return &s_slots[i];
     }
-    if (!slot) {
-        ESP_LOGE(TAG, "슬롯 부족 (최대 %d개)", STATUS_LED_MAX_COUNT);
-        return false;
-    }
+    ESP_LOGE(TAG, "슬롯 부족 (최대 %d개)", STATUS_LED_MAX_COUNT);
+    return NULL;
+}
 
-    gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << pin,
-        .mode         = GPIO_MODE_OUTPUT,
-    };
-    if (gpio_config(&cfg) != ESP_OK) {
-        ESP_LOGE(TAG, "gpio_config 실패 (pin=%d)", pin);
-        return false;
-    }
-    gpio_set_level(pin, 0);
-
+/* 출력 쪽 준비(GPIO 설정 또는 write_fn 등록)가 끝난 슬롯에 타이머를 붙이고 사용 중으로 표시 */
+static bool finish_slot(status_led_slot_t *slot, gpio_num_t pin, status_led_write_fn_t write_fn)
+{
     const esp_timer_create_args_t timer_args = {
         .callback = blink_timer_cb,
         .arg      = slot,
@@ -123,12 +122,51 @@ bool status_led_init(gpio_num_t pin)
         return false;
     }
 
-    slot->in_use    = true;
-    slot->pin       = pin;
-    slot->pattern   = LED_PATTERN_OFF;
-    slot->level     = false;
+    slot->pin        = pin;
+    slot->write_fn   = write_fn;
+    slot->pattern    = LED_PATTERN_OFF;
+    slot->level      = false;
     slot->active_seq = NULL;
+    slot->in_use     = true;
     return true;
+}
+
+bool status_led_init(gpio_num_t pin)
+{
+    if (find_slot(pin)) return true;  /* 이미 초기화됨 */
+    if (pin < 0 || pin >= GPIO_NUM_MAX) {
+        ESP_LOGE(TAG, "잘못된 GPIO (pin=%d)", pin);
+        return false;
+    }
+
+    status_led_slot_t *slot = alloc_slot();
+    if (!slot) return false;
+
+    gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << pin,
+        .mode         = GPIO_MODE_OUTPUT,
+    };
+    if (gpio_config(&cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_config 실패 (pin=%d)", pin);
+        return false;
+    }
+    gpio_set_level(pin, 0);
+    return finish_slot(slot, pin, NULL);
+}
+
+bool status_led_init_custom(gpio_num_t id, status_led_write_fn_t write_fn)
+{
+    if (find_slot(id)) return true;  /* 이미 초기화됨 */
+    if (id < GPIO_NUM_MAX || !write_fn) {
+        ESP_LOGE(TAG, "init_custom: id=%d는 GPIO_NUM_MAX(%d) 이상이어야 하고 write_fn 필요", id, GPIO_NUM_MAX);
+        return false;
+    }
+
+    status_led_slot_t *slot = alloc_slot();
+    if (!slot) return false;
+
+    write_fn(false);
+    return finish_slot(slot, id, write_fn);
 }
 
 void status_led_set_pattern(gpio_num_t pin, led_pattern_t pattern)
@@ -147,20 +185,20 @@ void status_led_set_pattern(gpio_num_t pin, led_pattern_t pattern)
     switch (pattern) {
         case LED_PATTERN_OFF:
             slot->level = false;
-            gpio_set_level(pin, 0);
+            led_write(slot, false);
             break;
         case LED_PATTERN_ON:
             slot->level = true;
-            gpio_set_level(pin, 1);
+            led_write(slot, true);
             break;
         case LED_PATTERN_BLINK_SLOW:
             slot->level = true;
-            gpio_set_level(pin, 1);
+            led_write(slot, true);
             esp_timer_start_periodic(slot->blink_timer, BLINK_SLOW_PERIOD_MS * 1000);
             break;
         case LED_PATTERN_BLINK_FAST:
             slot->level = true;
-            gpio_set_level(pin, 1);
+            led_write(slot, true);
             esp_timer_start_periodic(slot->blink_timer, BLINK_FAST_PERIOD_MS * 1000);
             break;
         case LED_PATTERN_BURST_TRIPLE:
