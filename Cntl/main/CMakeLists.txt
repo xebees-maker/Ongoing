@@ -9,6 +9,7 @@ idf_component_register(
         "node_hub.c"
         "photo_rx.c"
         "node_request.c"
+        "wifi_sta.c"
         "rtc_sync.c"
         "device_config.c"
         "sd_storage.c"

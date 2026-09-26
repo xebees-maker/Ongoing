@@ -2,6 +2,7 @@
 #include "ui_strings.h"
 #include "ui_font.h"
 #include "node_hub.h"
+#include "wifi_sta.h"
 #include "device_config.h"
 #include "stats_store.h"
 #include "sd_storage.h"
@@ -1342,7 +1343,7 @@ static void cb_logo_title_tap(lv_event_t *e)
     lv_obj_t *box = create_modal();
     create_modal_title(box, STR_TITLE_WEB_QR, MODAL_KIND_NORMAL);
 
-    const char *ip = node_hub_get_own_ip_str();
+    const char *ip = wifi_sta_get_own_ip_str();
     if (ip[0] == '\0') {
         lv_obj_t *lbl = lv_label_create(box);
         lv_label_set_text(lbl, ui_str(STR_MSG_WEB_QR_NO_IP));
@@ -4434,7 +4435,7 @@ static void refresh_dashboard(lv_timer_t *t)
 
     /* 2026-08-21 — 웹 대시보드 URL(사용자 지시). IP는 WiFi 재연결 등으로 바뀔 수 있어서
      * 매 틱 다시 읽음(가벼운 문자열 비교라 비용 무시 가능) — 없으면(빈 문자열) 숨김 */
-    const char *ip = node_hub_get_own_ip_str();
+    const char *ip = wifi_sta_get_own_ip_str();
     if (ip[0] != '\0') {
         lv_label_set_text_fmt(s_web_url_label, "http://%s:80", ip);
         lv_obj_remove_flag(s_web_row, LV_OBJ_FLAG_HIDDEN);
@@ -5230,18 +5231,18 @@ static void refresh_clock(lv_timer_t *t)
         bool ap_mode = device_config_get_wifi_ap_mode();
         /* 2026-08-30(사용자 지시) — STA 모드에서 부팅 후 25초간 저장된 AP를 한 번도 못
          * 찾았으면, 계속 재시도 중임을 위장하지 말고 "AP 없음"을 명시. "찾기"로 수동
-         * 연결하면 node_hub_sta_boot_giveup()이 자동으로 false가 되어 원래 표시로 복귀 */
-        if (!ap_mode && node_hub_sta_boot_giveup()) {
+         * 연결하면 wifi_sta_boot_giveup()이 자동으로 false가 되어 원래 표시로 복귀 */
+        if (!ap_mode && wifi_sta_boot_giveup()) {
             snprintf(net_buf, sizeof(net_buf), "STA - %s", ui_str(STR_STATUS_NO_AP));
         } else if (ap_mode) {
             /* 2026-09-08(사용자 지시 — "AP라면 SSID가 뭔지도 표기") */
-            snprintf(net_buf, sizeof(net_buf), "AP - %s CH%u", node_hub_get_ap_ssid(),
-                     (unsigned)node_hub_get_wifi_channel());
+            snprintf(net_buf, sizeof(net_buf), "AP - %s CH%u", wifi_sta_get_ap_ssid(),
+                     (unsigned)wifi_sta_get_channel());
         } else {
             /* 2026-09-08(사용자 지시 — "자리가 충분하면 SSID도") — 채널도 계속 같이 표기
              * (2026-08-02 지시: 공유기 자동채널선택 변경을 알아채기 위함, 계속 유효) */
-            snprintf(net_buf, sizeof(net_buf), "STA - %s CH%u", node_hub_get_active_sta_ssid(),
-                     (unsigned)node_hub_get_wifi_channel());
+            snprintf(net_buf, sizeof(net_buf), "STA - %s CH%u", wifi_sta_get_active_ssid(),
+                     (unsigned)wifi_sta_get_channel());
         }
         lv_label_set_text(s_network_ctrl_label, net_buf);
     }
@@ -5468,10 +5469,10 @@ static char s_wifi_selected_ssid[33] = "";
 static void update_wifi_status_label(void)
 {
     if (!s_wifi_status_lbl) return;
-    const char *ip = node_hub_get_own_ip_str();
+    const char *ip = wifi_sta_get_own_ip_str();
     if (ip[0] != '\0') {
         lv_label_set_text_fmt(s_wifi_status_lbl, "%s: %s", ui_str(STR_STATUS_CONNECTED),
-                               node_hub_get_active_sta_ssid());
+                               wifi_sta_get_active_ssid());
     } else {
         lv_label_set_text(s_wifi_status_lbl, ui_str(STR_STATUS_NOT_CONNECTED));
     }
@@ -5480,7 +5481,7 @@ static void update_wifi_status_label(void)
 static void cb_wifi_scan_popup_close(lv_event_t *e)
 {
     (void)e;
-    node_hub_set_sta_reconnect_paused(false);
+    wifi_sta_set_reconnect_paused(false);
     s_wifi_status_lbl = NULL;
     s_wifi_list = NULL;
     lv_obj_delete(s_wifi_scan_popup);
@@ -5493,7 +5494,7 @@ static void cb_wifi_scan_popup_close(lv_event_t *e)
  * 오는데, 그땐 클릭 이벤트가 없어서 예전처럼 버튼에서 부모를 거슬러 올라갈 수 없었음) */
 static void close_wifi_popups(void)
 {
-    node_hub_set_sta_reconnect_paused(false);
+    wifi_sta_set_reconnect_paused(false);
     if (s_wifi_keyboard) { lv_obj_delete(s_wifi_keyboard); s_wifi_keyboard = NULL; }
     s_wifi_password_ta = NULL;
 
@@ -5521,7 +5522,7 @@ static void cb_wifi_pw_popup_close(lv_event_t *e)
 }
 
 /* 2026-08-29(사용자 설계: "AP 찾고 선택하고 접속하는 과정은 재시작 안 함") — node_hub.c의
- * node_hub_test_sta_connect() 결과 콜백. WiFi 이벤트 태스크에서 비동기로 불리므로
+ * wifi_sta_test_connect() 결과 콜백. WiFi 이벤트 태스크에서 비동기로 불리므로
  * LVGL 조작 전체를 esp_lv_adapter_lock()으로 감싸야 함(wifi_scan_event_handler와 같은
  * 이유로 겪었던 화면깨짐 버그를 여기서 처음부터 피함) */
 static void wifi_test_result_async_cb(void *user_data)
@@ -5553,7 +5554,7 @@ static void wifi_test_result_async_cb(void *user_data)
  * 단계 전환을 토스트로 보여줌. wifi_test_result_async_cb와 같은 이유로 lv_async_call() 필요 */
 static void wifi_test_stage_async_cb(void *user_data)
 {
-    node_hub_sta_test_stage_t stage = (node_hub_sta_test_stage_t)(uintptr_t)user_data;
+    wifi_sta_test_stage_t stage = (wifi_sta_test_stage_t)(uintptr_t)user_data;
     if (stage == STA_TEST_STAGE_DISCONNECTING) {
         show_toast(ui_str(STR_MSG_WIFI_STAGE_DISCONNECTING), lv_palette_main(LV_PALETTE_BLUE));
     } else {
@@ -5561,7 +5562,7 @@ static void wifi_test_stage_async_cb(void *user_data)
     }
 }
 
-static void cb_wifi_test_connect_stage(node_hub_sta_test_stage_t stage, void *ctx)
+static void cb_wifi_test_connect_stage(wifi_sta_test_stage_t stage, void *ctx)
 {
     (void)ctx;
     lv_async_call(wifi_test_stage_async_cb, (void *)(uintptr_t)stage);
@@ -5606,7 +5607,7 @@ static void cb_wifi_connect_btn(lv_event_t *e)
     lv_obj_add_state(s_wifi_connect_btn, LV_STATE_DISABLED);
     lv_label_set_text(lv_obj_get_child(s_wifi_connect_btn, 0), ui_str(STR_MSG_WIFI_CONNECTING));
 
-    node_hub_test_sta_connect(s_wifi_selected_ssid, s_wifi_test_password,
+    wifi_sta_test_connect(s_wifi_selected_ssid, s_wifi_test_password,
                                   cb_wifi_test_connect_result, cb_wifi_test_connect_stage, NULL);
 }
 
@@ -5753,7 +5754,7 @@ static void wifi_scan_event_handler(void *arg, esp_event_base_t base, int32_t id
          * 연결된 SSID를 리스트에서 구분 가능하게 표시. LV_SYMBOL_OK 같은 심볼은 이 프로젝트
          * 커스텀 TTF에 없는 글리프라(다른 곳에서 이미 겪은 문제) 일반 텍스트 표식으로 대체 */
         const char *active_ssid = device_config_get_sta_ssid();
-        const char *own_ip = node_hub_get_own_ip_str();
+        const char *own_ip = wifi_sta_get_own_ip_str();
         bool is_connected = (active_ssid[0] != '\0' && own_ip[0] != '\0' &&
                               strcmp(active_ssid, ssid) == 0);
         char label_buf[64];
@@ -5785,7 +5786,7 @@ static void trigger_wifi_scan(void)
     lv_obj_set_style_text_font(scanning_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 2026-08-29 버그수정(사용자 리포트: "팝업 뜨면서 찾는 기능은 안됨, 다시찾기 눌러야
-     * 시작") — node_hub_set_sta_reconnect_paused(true)는 향후 재연결만 막지, 팝업이
+     * 시작") — wifi_sta_set_reconnect_paused(true)는 향후 재연결만 막지, 팝업이
      * 뜨는 바로 그 순간 이미 진행 중이던 연결 시도까지 취소하진 않음. 그 시도가 아직 안
      * 끝난 채로 esp_wifi_scan_start()를 부르면 ESP_ERR_WIFI_STATE로 실패(IDF 특성:
      * 연결 시도 중엔 스캔 거부) — 그래서 최초 1회만 실패하고 "다시 찾기"(그땐 이미 그
@@ -5793,7 +5794,7 @@ static void trigger_wifi_scan(void)
     /* 2026-08-29 버그수정(사용자 지시: "찾기 팝업 열 때 먼저 끊지 마, 비번창에서 연결 누를
      * 때 끊어야 돼") — 여기서 미리 disconnect()하면 스캔만 열어봐도 실제 WiFi 연결이
      * 끊어져버리고, "이미 같은 AP" 단축 경로는 재연결을 안 시켜서 그대로 끊긴 채 남는 문제가
-     * 있었음. 실제 접속 전환은 node_hub_test_sta_connect()가 접속 시도 시점에 자체적으로
+     * 있었음. 실제 접속 전환은 wifi_sta_test_connect()가 접속 시도 시점에 자체적으로
      * disconnect-then-connect를 이미 처리하므로, 여기서는 더 이상 선제적으로 끊지 않음 */
     if (esp_wifi_scan_start(NULL, false) != ESP_OK) {
         lv_obj_clean(s_wifi_list);
@@ -5813,9 +5814,9 @@ static void cb_network_find_btn(lv_event_t *e)
 {
     (void)e;
     /* 2026-08-29 버그수정 — 스캔이 되려면 STA 재연결 루프가 잠깐 쉬어야 함(위
-     * node_hub_set_sta_reconnect_paused 주석 참고). 팝업 닫힐 때(cb_wifi_scan_popup_close/
+     * wifi_sta_set_reconnect_paused 주석 참고). 팝업 닫힐 때(cb_wifi_scan_popup_close/
      * close_wifi_popups) 반드시 해제됨 */
-    node_hub_set_sta_reconnect_paused(true);
+    wifi_sta_set_reconnect_paused(true);
 
     /* 2026-08-29(사용자 지시: "PSRAM도 몰아 넣어") — 최초 1회만 할당, 이후 재사용(찾기 팝업
      * 열 때마다 다시 만들 필요 없음) */
@@ -5872,7 +5873,7 @@ static void refresh_network_right_zone(void)
     if (!s_network_right_label || !s_network_find_btn) return;  /* 행이 아직 안 만들어짐 */
 
     bool ap_mode = device_config_get_wifi_ap_mode();
-    const char *ip = node_hub_get_own_ip_str();
+    const char *ip = wifi_sta_get_own_ip_str();
 
     if (ap_mode) {
         /* IP는 사용자가 바꿀 수 있는 값이 아니라 정보 표시일 뿐이라 평범한 라벨 */
@@ -5886,13 +5887,13 @@ static void refresh_network_right_zone(void)
          * 2026-09-09(사용자 지적 — "상단바에는 연결된 AP SSID가 이미 보이고 있으니까
          * 내가 지적한 2군데는 버그야") — 2026-08-29엔 "찾기로 저장한 SSID 없으면 하드코딩
          * 폴백이어도 무조건 찾기로 표시"가 의도적 설계였지만, 이 설계 자체가 실제 연결
-         * 정보가 있는데도 안 보여주는 버그로 재판정됨 — 상단바(node_hub_get_active_sta_ssid
+         * 정보가 있는데도 안 보여주는 버그로 재판정됨 — 상단바(wifi_sta_get_active_ssid
          * 그대로 사용)와 똑같이 "진짜 연결됐는지"(ip 유무)만으로 판단하도록 정정.
          * device_config_get_sta_ssid() 게이트 제거 */
         lv_obj_add_flag(s_network_right_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_network_find_btn, LV_OBJ_FLAG_HIDDEN);
         if (ip[0] != '\0') {
-            lv_label_set_text(s_network_find_lbl, node_hub_get_active_sta_ssid());
+            lv_label_set_text(s_network_find_lbl, wifi_sta_get_active_ssid());
         } else {
             lv_label_set_text(s_network_find_lbl, ui_str(STR_BTN_FIND));
         }

@@ -14,6 +14,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "node_hub.h"
+#include "wifi_sta.h"
 #include "photo_rx.h"
 #include "node_request.h"
 #include "esp_lv_decoder.h"
@@ -743,7 +744,11 @@ void app_main(void)
      * 초기화만 건너뛰는 건 이 코드베이스 구조상 안전하지 않음 — 그래서 초기화는 항상 정상
      * 진행하고, 대신 아래에서 recv_cb만 브릿지용으로 바꿔치기하는 방식으로 변경 */
     photo_rx_init();
-    node_hub_init();  /* 내부에서 esp_netif_init()+esp_event_loop_create_default() 호출 —
+    node_hub_init();
+    /* 2026-09-26 — node_hub_init() 안에 있던 Wi-Fi 초기화를 분리. 순서 유지: node_hub가 먼저(노드
+     * 뮤텍스 생성 — AP 모드에선 wifi_sta_init() 안에서 웹 대시보드가 바로 시작되고, 그 핸들러가
+     * node_hub를 부름) */
+    wifi_sta_init();  /* 내부에서 esp_netif_init()+esp_event_loop_create_default() 호출 —
                              아래 이벤트 등록은 반드시 그 다음이어야 함 */
     node_request_init();
 
@@ -756,5 +761,5 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                          &ip_event_handler, NULL, NULL));
 
-    ui_main_register_wifi_events();  /* 같은 이유로 여기서(node_hub_init() 이후) 등록 */
+    ui_main_register_wifi_events();  /* 같은 이유로 여기서(wifi_sta_init() 이후) 등록 */
 }
