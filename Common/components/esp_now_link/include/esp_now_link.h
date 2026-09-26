@@ -227,6 +227,11 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
     char name[ESP_NOW_LINK_NAME_LEN];
     uint8_t mac[6];
+    /* 2026-09-26 — 노드가 이 광고를 보낸 채널(1~13). 2.4GHz는 이웃 채널이 겹쳐서 브(CH1)가 노드의
+     * CH2 광고까지 받아 한 번의 스윕이 광고 2~3개로 릴레이되던 문제(실기) — 브가 자기 채널과 다른
+     * 광고는 버림(Bridge/main/bridge_esp_now.c). 끝에 붙인 필드라 이 필드 없는 옛 펌웨어의 광고는
+     * 길이 검사(sizeof)에서 걸러짐 — 노드는 모두 새 펌웨어로 올려야 함 */
+    uint8_t channel;
 } esp_now_advertise_t;
 
 /* Cntl이 ADVERTISE를 받으면 사람이 페어링 버튼을 누르기 전이라도 즉시 이걸 유니캐스트로

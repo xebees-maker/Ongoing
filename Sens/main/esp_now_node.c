@@ -257,6 +257,7 @@ static void advertise_timer_cb(void *arg)
     esp_now_advertise_t msg = {
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_ADVERTISE,
+        .channel  = s_scan_channel,  /* 2026-09-26 — 이웃 채널 수신 필터용(esp_now_link.h 참고) */
     };
     memcpy(msg.name, s_name, sizeof(msg.name));
     memcpy(msg.mac, s_mac, sizeof(msg.mac));

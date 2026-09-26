@@ -132,9 +132,21 @@ static void set_led(led_pattern_t pattern)
 
 /* 2026-08-23(사용자 지시) — 광고 전송 직전 게이트. PAIRED가 아닐 때만(ORPHAN/FOUND) 보냄 —
  * esp_now_channelsync_set_should_advertise_cb()로 등록됨(esp_now_cam_init() 참고) */
+/* 2026-09-26 — cam_node.c가 "스윕 끝났는데 못 찾음 → 잠들기"로 정한 뒤에는 광고 금지
+ * (esp_now_cam_stop_advertising()). 예전엔 잠들기 전 대기(스피커 최대 2초) 동안에도 스캔 타이머가
+ * 계속 광고해서, 이미 포기한 뒤에 페어링이 성립했다가 바로 잠드는 일이 있었음(실기). 딥슬립 후
+ * 재부팅되면 false로 초기화됨 */
+static volatile bool s_advertise_stopped = false;
+
 static bool should_advertise(void)
 {
+    if (s_advertise_stopped) return false;
     return s_conn_state == CAM_CONN_ORPHAN || s_conn_state == CAM_CONN_FOUND;
+}
+
+void esp_now_cam_stop_advertising(void)
+{
+    s_advertise_stopped = true;  /* 다음 scan_timer_cb 틱에서 게이트가 타이머를 스스로 멈춤 */
 }
 
 /* 2026-08-23(사용자 지시: "로그는 수행하는 함수 바로 밑에 있어야지") — 주기 폴링이 아니라

@@ -817,6 +817,9 @@ void app_main(void)
                 xSemaphoreTake(s_wake_recheck_sem, pdMS_TO_TICKS(1000));
             }
             if (!esp_now_cam_is_paired()) {
+                /* 2026-09-26 — 잠들기로 정했으니 광고부터 멈춤(잠들기 전 대기 동안 새 광고로
+                 * 페어링이 성립했다가 곧바로 자는 것 방지 — esp_now_cam_stop_advertising() 참고) */
+                esp_now_cam_stop_advertising();
                 /* 못 찾음 — 백오프 간격만큼 짧게 자고 처음부터(광고) 재시도 */
                 sleep_sec = next_unpaired_retry_sleep_sec();
                 s_unpaired_backoff_elapsed_sec += sleep_sec;

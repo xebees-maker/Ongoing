@@ -167,6 +167,7 @@ static void send_advertise_on_current_channel(void)
     esp_now_advertise_t msg = {
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_ADVERTISE,
+        .channel  = s_scan_channel,  /* 이웃 채널 수신 필터용(esp_now_link.h 참고) */
     };
     memcpy(msg.name, s_node_name, sizeof(msg.name));
     memcpy(msg.mac, s_node_mac, sizeof(msg.mac));
@@ -185,7 +186,8 @@ static void enter_unsynced(void)
     s_synced = false;
     if (s_rest_timer) esp_timer_stop(s_rest_timer);  /* 이전 검색의 휴식이 남아있으면 정리 */
     s_unsynced_start_us = esp_timer_get_time();       /* 스윕 백오프 기준시각 리셋 */
-    s_scan_visit_count = 0;  /* 2026-09-10(버그 수정) — 새 스윕 시작, 방문횟수 카운터 리셋 */
+    /* 2026-09-26(경계 수정) — 아래 시작채널 즉시광고를 방문 1회로 셈(scan_timer_cb 주석 참고) */
+    s_scan_visit_count = 1;
 
     /* 2026-08-10 — 마지막으로 성공했던 채널이 있으면 거기서 시작(위 s_last_synced_channel
      * 주석 참고). 증가/랩어라운드(scan_timer_cb)는 시작점과 무관하게 전체 1~13 범위를
@@ -243,47 +245,55 @@ static void scan_timer_cb(void *arg)
      * 10,11,12,13,(래핑)1 — 겨우 5개 채널만 보고 "완료"로 오판해서 나머지(2~9)를 아예 안
      * 살펴보고 포기하는 실제 버그였음. 이제 "채널 값"이 아니라 "주기타이머가 실제로 몇 번
      * 돌았는가"로 셈 — enter_unsynced()의 즉시광고(시작채널) 1회 + 이 타이머 13회 = 14회를
-     * 다 채워야 시작점과 무관하게 13개 채널을 전부(정확히 한 번씩) 방문한 게 보장됨 */
+     * 다 채워야 시작점과 무관하게 13개 채널을 전부(정확히 한 번씩) 방문한 게 보장됨
+     * 2026-09-26(경계 수정, 사용자 지적) — 위 방식은 13번째 틱에 "이동+광고"를 먼저 하고 나서
+     * 완료를 판정해서, 이미 다 본 시작채널로 한 칸 더 돌아가 14번째(중복) 광고를 쏘는 동시에
+     * "스윕 완료"를 알렸음 — 그 광고의 응답(PAIR_REQUEST)을 들을 틈도 없이 CAM이 "못 찾음"으로
+     * 잠드는 레이스가 실기로 나옴(COM15: 채널 스캔 CH1 → 같은 시각 폴백 스윕 완료 → PAIRED →
+     * 딥슬립). 이제 즉시광고를 방문 1회로 세고(enter_unsynced), 틱마다 "이미 13번 방문했나"를
+     * 이동 전에 먼저 봄 — 광고는 채널당 정확히 1번(13번), 마지막 채널도 300ms 응답 대기가 끝난
+     * 뒤에 완료 판정 */
+    const uint8_t channel_count = (uint8_t)(SCAN_CHANNEL_MAX - SCAN_CHANNEL_MIN + 1);
+    if (s_scan_visit_count >= channel_count) {
+        /* 2026-08-23 — 훅은 "쉬기로 정했을 때"가 아니라 "한 바퀴 다 돌았을 때" 무조건 불러야 함.
+         * CAM의 Deep Sleep 모델(cam_node.c의 s_sweep_completed)이 이 훅으로 "스윕 끝났으니
+         * 자도 됨"을 판정하는데, 아래 백오프(sweep_rest_us==0 구간, 연속 스윕 60초)에 가려
+         * 훅이 안 불리면 그 60초 동안 캠이 잠들 판단 자체를 못 해서 계속 깨있는 버그가 났었음(실기로
+         * 확인: 1분 깨있고 3초 자고 반복). 아래 백오프 로직 자체는 CAML의 계속 켜있는 채로 도는
+         * 모델에는 여전히 유효하므로 그대로 둠 — 훅 호출 위치만 분리 */
+        if (s_on_scan_sweep_done) s_on_scan_sweep_done();
+        s_scan_visit_count = 0;  /* 다음 스윕 — 첫 이동+광고가 방문 1회가 됨 */
+
+        /* 스윕 백오프: 계속 켜있을 경우(CAML)에만 쉴지 판단. 스윕 중간엔 원래대로 계속 300ms
+         * 주기 유지(사람이 기다릴 때 늦게 찾지 않도록) */
+        int64_t rest_us = sweep_rest_us();
+        if (rest_us != 0) {
+            ESP_LOGI(TAG, "SCAN 스윕 완료 — %lld us 휴식", (long long)rest_us);
+            esp_timer_stop(s_scan_timer);
+            if (s_rest_timer) esp_timer_start_once(s_rest_timer, rest_us);
+        }
+        /* 연속 스윕 구간(rest_us==0)이어도 이 틱에선 이동/광고 안 함 — 다음 틱(SCAN_DWELL_US 뒤)에
+         * 새 스윕의 첫 이동+광고. 같은 틱에 바로 광고하면 완료 훅을 받은 쪽(CAM: 잠들기 판정)과
+         * 새 광고가 또 겹침(2026-09-26 실기: 완료와 같은 시각에 CH1 광고) */
+        xSemaphoreGive(s_state_mutex);
+        return;
+    }
+
     s_scan_channel++;
     if (s_scan_channel > SCAN_CHANNEL_MAX) {
         s_scan_channel = SCAN_CHANNEL_MIN;
     }
     s_scan_visit_count++;
-    bool full_sweep_done = (s_scan_visit_count >= (SCAN_CHANNEL_MAX - SCAN_CHANNEL_MIN + 1));
     esp_wifi_set_channel(s_scan_channel, WIFI_SECOND_CHAN_NONE);
     /* 2026-08-23(사용자 지시) — 채널스캔 훅/로그는 send_advertise_on_current_channel() 안으로
      * 합쳐짐 — 여기선 그 함수를 부르기만 함(로그와 실제 수행이 어긋나지 않도록 한 곳에만 둠) */
     send_advertise_on_current_channel();
-
-    if (!full_sweep_done) {
-        xSemaphoreGive(s_state_mutex);
-        return;
-    }
-
-    /* 2026-08-23 — 훅은 "쉬기로 정했을 때"가 아니라 "한 바퀴 다 돌았을 때" 무조건 불러야 함.
-     * CAM의 Deep Sleep 모델(esp_now_cam.c의 s_sweep_completed)이 이 훅으로 "스윕 끝났으니
-     * 자도 됨"을 판정하는데, 아래 백오프(sweep_rest_us==0 구간, 연속 스윕 60초)에 가려
-     * 훅이 안 불리면 그 60초 동안 캠이 잠들 판단 자체를 못 해서 계속 깨있는 버그가 났었음(실기로
-     * 확인: 1분 깨있고 3초 자고 반복). 아래 백오프 로직 자체는 CAML의 계속 켜있는 채로 도는
-     * 모델에는 여전히 유효하므로 그대로 둠 — 훅 호출 위치만 분리 */
-    if (s_on_scan_sweep_done) s_on_scan_sweep_done();
-
-    /* 스윕 백오프: 랩어라운드 이후에도 계속 켜있을 경우(CAML)에만 쉴지 판단. 스윕 중간엔
-     * 원래대로 계속 300ms 주기 유지(사람이 기다릴 때 늦게 찾지 않도록) */
-    int64_t rest_us = sweep_rest_us();
-    if (rest_us == 0) {
-        xSemaphoreGive(s_state_mutex);
-        return;  /* 연속 스윕 구간 — 안 쉬고 계속 */
-    }
-    ESP_LOGI(TAG, "SCAN 스윕 완료 — %lld us 휴식", (long long)rest_us);
-    esp_timer_stop(s_scan_timer);
-    if (s_rest_timer) esp_timer_start_once(s_rest_timer, rest_us);
     xSemaphoreGive(s_state_mutex);
 }
 
-/* 스윕 사이 휴식 종료 시 호출(원샷). 채널/광고는 손 안 댐 — 방금 랩어라운드 시점에 이미
- * 시작채널(MIN)에서 광고를 보냈고 그 채널에 계속 머물러 있었으므로, 늦게 온 응답도 그대로
- * 들을 수 있음. 그냥 주기타이머만 재개하면 다음 틱부터 다음 채널로 스윕 이어감 */
+/* 스윕 사이 휴식 종료 시 호출(원샷). 채널/광고는 손 안 댐 — 휴식 동안 스윕의 마지막 채널에
+ * 그대로 머물러 있었음(2026-09-26 경계 수정 이후 완료 시점엔 광고를 추가로 안 보냄). 주기타이머만
+ * 재개하면 다음 틱부터 다음 채널로 이동+광고하며 새 스윕을 이어감(방문 카운터는 완료 때 0으로 리셋됨) */
 static void rest_timer_cb(void *arg)
 {
     (void)arg;

@@ -36,6 +36,10 @@ bool esp_now_cam_is_busy(void);
  *         내부적으로 이 함수를 씀) */
 bool esp_now_cam_reconnect(void);
 
+/** @brief 광고(채널 스캔) 중단 — 스윕 실패로 잠들기로 정한 직후 호출. 재부팅(딥슬립 복귀) 전까지
+ *  다시 광고 안 함 */
+void esp_now_cam_stop_advertising(void);
+
 /** @brief 상태 LED 키 등록(esp_now_cam_init() 이전에 호출). 키는 status_led로 이미 초기화돼
  *  있어야 함 — CAM은 BSP_CAM_PWR_LED_STATUS_ID(IO 익스팬더 EXIO6, status_led_init_custom) */
 void esp_now_cam_set_status_led(gpio_num_t pin);

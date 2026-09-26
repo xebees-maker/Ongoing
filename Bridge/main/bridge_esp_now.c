@@ -5,6 +5,7 @@
 
 #include "esp_now.h"
 #include "esp_now_reliable.h"
+#include "esp_now_link.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -32,10 +33,31 @@ static uint32_t s_incoming_hwm_logged = 0;
  * 복사하므로 1개면 충분(스택에 큰 버퍼를 두지 않음, feedback_never_put_large_data_on_stack) */
 static uint8_t *s_rx_buf;
 
+/* 2026-09-26 — 브 라디오의 현재 채널(wifi_bringup() 후 1회 읽음 — 브는 채널을 바꾸지 않음).
+ * 0이면 아직 모름 → 광고 채널 필터 안 함 */
+static uint8_t  s_own_channel = 0;
+static uint32_t s_adjacent_adv_dropped = 0;
+
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
     if (!info || len <= 0 || len > BRIDGE_ESPNOW_MAX_FRAME) return;
     if (!s_rx_buf) return;
+
+    /* 2026-09-26 — 이웃 채널 광고 버림. 2.4GHz 채널은 5MHz 간격인데 신호 폭이 ~20MHz라, 가까운
+     * 노드가 CH2에서 보낸 광고도 CH1의 브에 수신돼서 스윕 한 번이 광고 2~3개로 콘까지 릴레이됐음
+     * (실기, 캠 1대 기준). 노드가 광고에 실은 송신 채널(esp_now_advertise_t.channel)이 브 채널과
+     * 다르면 CAN으로 안 넘김 — 콘은 브 채널에서 보낸 광고에만 응답하게 되고, 그 응답이 노드가 다른
+     * 채널로 넘어간 뒤 도착해서 엉뚱한 채널에 동기화될 위험도 없어짐. 필드 없는 옛 펌웨어의
+     * 짧은 광고는 여기서 판단 안 하고 넘김(콘이 길이 검사로 거름) */
+    if (len >= (int)sizeof(esp_now_advertise_t) && data[1] == ESP_NOW_MSG_ADVERTISE && s_own_channel != 0) {
+        const esp_now_advertise_t *adv = (const esp_now_advertise_t *)data;
+        if (adv->channel != s_own_channel) {
+            s_adjacent_adv_dropped++;
+            ESP_LOGD(TAG, "이웃 채널 광고 버림(광고 CH%u, 브 CH%u, 누적 %u)",
+                     (unsigned)adv->channel, (unsigned)s_own_channel, (unsigned)s_adjacent_adv_dropped);
+            return;
+        }
+    }
 
     /* 2026-09-23(1단계) — 콘의 esp_now_reliable_request()를 브가 대행(can_link.c의
      * CAN_DATA_RELIABLE_SEND 처리 참고)하므로, 이 recv_cb가 그 대기 매칭도 콘 대신 해줘야 함
@@ -165,6 +187,15 @@ static void wifi_bringup(void)
 void bridge_esp_now_init(void)
 {
     wifi_bringup();
+
+    uint8_t primary = 0;
+    wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+    if (esp_wifi_get_channel(&primary, &second) == ESP_OK) {
+        s_own_channel = primary;
+        ESP_LOGI(TAG, "브 채널 CH%u — 다른 채널에서 보낸 광고는 버림(이웃 채널 수신 필터)", (unsigned)primary);
+    } else {
+        ESP_LOGW(TAG, "채널 조회 실패 — 이웃 채널 광고 필터 끔");
+    }
 
     s_rx_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + BRIDGE_ESPNOW_MAX_FRAME, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_rx_buf) s_rx_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + BRIDGE_ESPNOW_MAX_FRAME, MALLOC_CAP_8BIT);
