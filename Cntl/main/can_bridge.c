@@ -15,7 +15,10 @@
 
 /**
  * 2026-09-23 — 콘 쪽 CAN 링크. 브의 can_link.c와 방향만 반대(콘: CNTL_TO_BRIDGE로 송신,
- * BRIDGE_TO_CNTL로 수신). CONTROL 카테고리 없음(브와 동일 이유 — 1차 개발 범위엔 필요 없음).
+ * BRIDGE_TO_CNTL로 수신).
+ * 2026-09-26(설계 Docs/설계_CAN링크_2026-09-26.md §2~3, 2-②) — CONTROL/DATA 두 경로 수신.
+ * can_rx가 ID로 나눠 각자의 조립기·완성 큐에 넣고, 경로마다 소비 태스크가 따로 돔(Control 17 /
+ * Data 15) — 사진 청크 처리 중에도 WAKE_HELLO/결과가 기다리지 않게.
  */
 
 static const char *TAG = "can_bridge";
@@ -28,6 +31,9 @@ static twai_node_handle_t s_node = NULL;
 static can_bridge_ctx_t *s_data_ctx;
 static can_bridge_reassembly_t s_data_reasm;
 static can_bridge_queue_t s_data_complete_q;
+static can_bridge_ctx_t *s_ctrl_ctx;
+static can_bridge_reassembly_t s_ctrl_reasm;
+static can_bridge_queue_t s_ctrl_complete_q;
 static can_bridge_recv_cb_t s_recv_cb;
 
 /* 실제 CAN 송신(ISO-TP)은 세션 1개 원칙이라 동시 호출 금지 — reliable_request가 여러
@@ -101,18 +107,32 @@ static void can_rx_task(void *arg)
     raw_frame_t rf;
     for (;;) {
         if (xQueueReceive(s_raw_frame_q, &rf, portMAX_DELAY) != pdTRUE) continue;
-        if (rf.id != CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA) continue;
+
+        /* 2026-09-26 — ID로 경로 선택. 받는 쪽 FC는 자기 경로의 송신 ID로(현행 원칙) */
+        can_bridge_ctx_t *ctx;
+        can_bridge_reassembly_t *reasm;
+        can_bridge_queue_t *complete_q;
+        uint32_t fc_id;
+        if (rf.id == CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL) {
+            ctx = s_ctrl_ctx; reasm = &s_ctrl_reasm; complete_q = &s_ctrl_complete_q;
+            fc_id = CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL;
+        } else if (rf.id == CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA) {
+            ctx = s_data_ctx; reasm = &s_data_reasm; complete_q = &s_data_complete_q;
+            fc_id = CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA;
+        } else {
+            continue;  /* 콘→브 방향 ID(자기 송신 에코 없음)나 모르는 ID */
+        }
 
         uint8_t pci = (rf.len >= 1) ? ((rf.data[0] >> 4) & 0x0F) : 0xFF;
-        if (pci == ISO_TP_PCI_FC) { can_bridge_ctx_notify_fc(s_data_ctx, rf.data); continue; }
+        if (pci == ISO_TP_PCI_FC) { can_bridge_ctx_notify_fc(ctx, rf.data); continue; }
 
         uint8_t fc[8];
-        if (can_bridge_reassembly_feed(&s_data_reasm, rf.data, rf.len, fc, &s_data_complete_q)) {
+        if (can_bridge_reassembly_feed(reasm, rf.data, rf.len, fc, complete_q)) {
             /* 2026-09-25 — 지역 프레임을 드라이버에 넘기면 반환 뒤 ISR이 덮인 스택을 읽음(실기 크래시).
              * PSRAM 송신 풀 슬롯에 복사해서 보냄 */
-            esp_err_t fc_err = can_bridge_tx_frame(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA, fc, 8, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
+            esp_err_t fc_err = can_bridge_tx_frame(s_node, fc_id, fc, 8, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
             if (fc_err != ESP_OK) {
-                ESP_LOGW(TAG, "FC 송신 실패: %s", esp_err_to_name(fc_err));
+                ESP_LOGW(TAG, "FC 송신 실패(id=0x%x): %s", (unsigned)fc_id, esp_err_to_name(fc_err));
             }
         }
     }
@@ -122,14 +142,15 @@ static void deliver_relay(const can_bridge_app_header_t *hdr, const uint8_t *pay
 {
     if (!s_recv_cb) return;
     /* 예전 I2C 브릿지 설계에서 이미 확인된 사실 그대로: hub.c의 recv_cb는 info->src_addr와
-     * info->rx_ctrl->rssi 두 필드만 읽음. 나머지는 0으로 채워도 무방 */
-    static wifi_pkt_rx_ctrl_t rx_ctrl;
+     * info->rx_ctrl->rssi 두 필드만 읽음. 나머지는 0으로 채워도 무방.
+     * 2026-09-26 — 소비 태스크가 경로별 2개라 동시에 불릴 수 있음 → static 대신 지역 변수(작음) */
+    wifi_pkt_rx_ctrl_t rx_ctrl;
     memset(&rx_ctrl, 0, sizeof(rx_ctrl));
     rx_ctrl.rssi = (int8_t)hdr->flags;
 
-    static esp_now_recv_info_t info;
+    esp_now_recv_info_t info;
     memset(&info, 0, sizeof(info));
-    static uint8_t src_addr[6];
+    uint8_t src_addr[6];
     memcpy(src_addr, hdr->mac, 6);
     info.src_addr = src_addr;
     info.rx_ctrl = &rx_ctrl;
@@ -164,12 +185,13 @@ static void deliver_reliable_result(const can_bridge_app_header_t *hdr, const ui
 /* 2026-09-25(사용자 지시 — 이벤트 방식) — 예전엔 큐가 비면 vTaskDelay(20ms) 후 다시 확인하는
  * 폴링이었음(지시는 이벤트였는데 잘못 구현). 이제 큐를 비운 뒤 태스크 알림을 기다림 — 알림은
  * can_bridge_queue_push()가 완성된 메시지를 넣을 때만 보냄(can_bridge_queue_set_notify_task) */
+/* 2026-09-26 — 경로마다 하나씩(arg = 그 경로의 완성 큐). 처리 내용은 같음(RELAY/RESULT) */
 static void can_consume_task(void *arg)
 {
-    (void)arg;
+    can_bridge_queue_t *q = (can_bridge_queue_t *)arg;
     for (;;) {
         uint8_t *data; size_t len;
-        while (can_bridge_queue_pop(&s_data_complete_q, &data, &len)) {
+        while (can_bridge_queue_pop(q, &data, &len)) {
             if (len > CAN_BRIDGE_APP_HEADER_LEN) {
                 can_bridge_app_header_t hdr;
                 memcpy(&hdr, data, sizeof(hdr));
@@ -195,11 +217,12 @@ static void can_status_task(void *arg)
         twai_node_status_t status;
         if (twai_node_get_info(s_node, &status, NULL) == ESP_OK) {
             static const char *names[] = {"error_active", "error_warning", "error_passive", "bus_off"};
-            uint32_t q_count, q_hwm;
+            uint32_t q_count, q_hwm, cq_count, cq_hwm;
             can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
-            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u DATA큐=%u(최대%u)",
+            can_bridge_queue_get_stats(&s_ctrl_complete_q, &cq_count, &cq_hwm);
+            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u)",
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
-                     (unsigned)q_count, (unsigned)q_hwm);
+                     (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -323,11 +346,15 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     s_rx_frame.buffer_len = sizeof(s_rx_buf);
 
     can_bridge_queue_init(&s_data_complete_q);
+    can_bridge_queue_init(&s_ctrl_complete_q);
 
     #define CAN_BRIDGE_DATA_BUF_LEN 1536
     uint8_t *data_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!data_buf) data_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_8BIT);
     can_bridge_reassembly_init(&s_data_reasm, data_buf, CAN_BRIDGE_DATA_BUF_LEN);
+    uint8_t *ctrl_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ctrl_buf) ctrl_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_8BIT);
+    can_bridge_reassembly_init(&s_ctrl_reasm, ctrl_buf, CAN_BRIDGE_DATA_BUF_LEN);
 
     twai_onchip_node_config_t node_cfg = {
         .io_cfg = {
@@ -357,17 +384,22 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     ESP_ERROR_CHECK(twai_node_enable(s_node));
 
     s_data_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA);
+    s_ctrl_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL);
 
-    static StaticTask_t s_can_rx_tcb, s_can_consume_tcb, s_can_status_tcb;
+    static StaticTask_t s_can_rx_tcb, s_can_consume_tcb, s_ctrl_consume_tcb, s_can_status_tcb;
     StackType_t *can_rx_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *can_consume_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    StackType_t *ctrl_consume_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *can_status_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
     /* 2026-09-25(사용자 설계 — 통신/UI 코어 분리) — LVGL은 코어 0, CAN 통신은 코어 1에 고정.
      * 코어 1 안에서는 CAN(수신/소비)이 가장 높아야 함 — 통신 등급 17(project_cntl_task_priority_scheme),
      * power_relay(15)보다 위. can_status는 5초 주기 상태 로그뿐이라 낮은 5 유지 */
     /* 소비 태스크를 먼저 만들고 알림 대상으로 등록한 뒤에 수신 태스크를 띄움 — 첫 push부터
      * 알림이 가도록(등록 전에 들어온 게 있어도 소비 태스크의 첫 비우기에서 처리됨) */
-    TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "can_consume", 4096 / sizeof(StackType_t), NULL, 17, can_consume_stack, &s_can_consume_tcb, 1);
+    /* 2026-09-26(설계 §3) — 경로별 소비 태스크: Control 17, Data(SR) 15 */
+    TaskHandle_t ctrl_task = xTaskCreateStaticPinnedToCore(can_consume_task, "ctrl_consume", 4096 / sizeof(StackType_t), &s_ctrl_complete_q, 17, ctrl_consume_stack, &s_ctrl_consume_tcb, 1);
+    can_bridge_queue_set_notify_task(&s_ctrl_complete_q, ctrl_task);
+    TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "data_consume", 4096 / sizeof(StackType_t), &s_data_complete_q, 15, can_consume_stack, &s_can_consume_tcb, 1);
     can_bridge_queue_set_notify_task(&s_data_complete_q, consume_task);
     xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
     xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
