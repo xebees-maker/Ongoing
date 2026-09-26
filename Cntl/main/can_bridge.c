@@ -36,9 +36,6 @@ static can_bridge_reassembly_t s_ctrl_reasm;
 static can_bridge_queue_t s_ctrl_complete_q;
 static can_bridge_recv_cb_t s_recv_cb;
 
-/* 실제 CAN 송신(ISO-TP)은 세션 1개 원칙이라 동시 호출 금지 — reliable_request가 여러
- * 워커 태스크(기기별)에서 동시에 불릴 수 있으므로 송신 구간만 뮤텍스로 직렬화 */
-static SemaphoreHandle_t s_send_mutex;
 
 /* ---- 미결 reliable 요청 테이블 — MAC당 1개 원칙(esp_now_reliable과 동일 전제), 여러
  * 기기(다른 MAC)는 동시에 대기 가능 ---- */
@@ -229,6 +226,16 @@ static void can_status_task(void *arg)
     }
 }
 
+/* 2026-09-26(설계 §2, 2-④) — 콘→브 송신: 경로 분류(can_bridge_path_for_app_msg)로 Control/Data ctx
+ * 선택. ISO-TP 세션 1개 원칙은 ctx마다의 송신 뮤텍스(can_bridge_send 내부)가 지킴 — 예전의 별도
+ * s_send_mutex는 그 중복이라 제거(두 경로가 서로를 기다리지 않게) */
+static esp_err_t send_app_msg(const uint8_t *msg, size_t len)
+{
+    can_bridge_ctx_t *ctx = (can_bridge_path_for_app_msg(msg, len) == CAN_BRIDGE_CAT_CONTROL) ? s_ctrl_ctx : s_data_ctx;
+    if (!ctx) return ESP_ERR_INVALID_STATE;
+    return can_bridge_send(ctx, msg, len);
+}
+
 esp_err_t can_bridge_relay_send(const uint8_t *mac, const void *data, size_t len)
 {
     uint8_t *msg = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -240,9 +247,7 @@ esp_err_t can_bridge_relay_send(const uint8_t *mac, const void *data, size_t len
     memcpy(msg, &hdr, CAN_BRIDGE_APP_HEADER_LEN);
     memcpy(msg + CAN_BRIDGE_APP_HEADER_LEN, data, len);
 
-    xSemaphoreTake(s_send_mutex, portMAX_DELAY);
-    esp_err_t err = can_bridge_send(s_data_ctx, msg, CAN_BRIDGE_APP_HEADER_LEN + len);
-    xSemaphoreGive(s_send_mutex);
+    esp_err_t err = send_app_msg(msg, CAN_BRIDGE_APP_HEADER_LEN + len);
 
     free(msg);
     return err;
@@ -302,9 +307,7 @@ esp_err_t can_bridge_reliable_request(const uint8_t *peer_mac,
     memcpy(msg + off, &send_hdr, sizeof(send_hdr)); off += sizeof(send_hdr);
     memcpy(msg + off, req, req_len); off += req_len;
 
-    xSemaphoreTake(s_send_mutex, portMAX_DELAY);
-    esp_err_t send_err = can_bridge_send(s_data_ctx, msg, off);
-    xSemaphoreGive(s_send_mutex);
+    esp_err_t send_err = send_app_msg(msg, off);
     free(msg);
 
     if (send_err != ESP_OK) {
@@ -334,7 +337,6 @@ esp_err_t can_bridge_reliable_request(const uint8_t *peer_mac,
 void can_bridge_init(can_bridge_recv_cb_t recv_cb)
 {
     s_recv_cb = recv_cb;
-    s_send_mutex = xSemaphoreCreateMutex();
     s_pending_mutex = xSemaphoreCreateMutex();
     memset(s_pending, 0, sizeof(s_pending));
 
