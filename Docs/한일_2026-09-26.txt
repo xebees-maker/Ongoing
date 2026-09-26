@@ -10,7 +10,20 @@
 - 모델: 이번 세션은 Opus 5.5(effort medium). 원래 PC에서도 `/model`에서 같은 모델 선택.
 - **재시작 후 이어하기(09-26 오후 추가)**: VS Code에서 C:\Projects\Ongoing 폴더를 열고 시작할
   것(메모리는 ~/.claude/projects/C--Projects-Ongoing/memory/에서 읽힘 — C:\Users\xebee에서
-  시작하면 다른 폴더의 메모리가 읽힘). 먼저 할 일: 아래 [할 일] 0번(메모리 zip 커밋/푸시).
+  시작하면 다른 폴더의 메모리가 읽힘). (0번 메모리 zip 커밋/푸시는 완료 — 979ccaa)
+- **★ 지금 진행 중: 통신 설계 구현(09-26 저녁~)** — 기준 문서 `Docs/설계_CAN링크_2026-09-26.md`
+  (사용자 설계를 대화로 확정). 구현 단계(단계마다 빌드·플래시·실기 확인·커밋):
+    1. 이름 변경 + 죽은 코드 정리 — **완료**(359ad93 이름, 916d92c wifi_sta 분리, 40f6e8b 죽은 코드)
+    2. CAN Control 경로 — **다음**. 잘게 나눠 커밋: ①Common 분류 함수(msg_type→Control/Data)
+       ②콘 수신 분리(can_rx가 ID로 Control/Data 조립기·큐·consume 태스크 2벌, Control 17/Data 15)
+       ③브 수신 분리(동일 + 무선 수신 큐/릴레이 태스크 2벌) ④송신을 분류 함수로 Control/Data에 싣기
+    3. esp_now_reliable 비동기화(노드별 슬롯) + 브 RELIABLE_SEND 대행 캠별 동시 처리 ← 페어링 붕괴 해결 확인
+    4. SR을 브에서 처리(순서만 맞춰 콘에 흘려보냄, 흐름 제어), 콘 photo_rx는 이어 붙이기+CRC
+    5. CAPTURE_STATUS(RECEIVED) reliable로
+    6. 브 장애 대응(부팅 알림, PING/PONG+RESET, 브 워치독, 콘 화면 경고)
+    7. 타임아웃 구간별 측정 후 숫자 확정
+  이어서 할 때: `git status`로 커밋 안 된 변경부터 확인, `git log`의 마지막 커밋 메시지에 다음 할 일이 적혀 있음.
+  비트레이트는 1M(500k 실험은 되돌림). 버스 에러(bit_err/stuff_err)·fail_retry_cnt는 나중에(할 일).
 - 캠 사진 푸시 실기 확인 도구: scratchpad의 cap_cam.py(포트가 딥슬립으로 사라져도 다시 열며
   캡처) — 새 세션 scratchpad에는 없으니 필요하면 다시 작성.
 
