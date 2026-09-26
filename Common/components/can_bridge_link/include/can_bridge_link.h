@@ -116,7 +116,39 @@ typedef enum {
                                        + (성공 시)응답 페이로드가 이어붙음. mac으로 상관관계 매칭
                                        (한 MAC당 미결 요청 1개 원칙, 예전 I2C 설계와 동일 근거 —
                                        seq 필드 불필요) */
+    /* 2026-09-26(설계 §4 SR 수신, 4단계) — 브가 SR의 끝점이 되면 브→콘은 순서 맞춘 사진 스트림만 보냄.
+     * 셋 다 Data 경로, mac=캠 MAC. 캠당 사진 1장씩(file_id로 확인). 브는 사진 전체를 들고 있지 않음 */
+    CAN_DATA_SR_META  = 4,         /* 브->콘: 사진 시작 — can_bridge_sr_meta_t */
+    CAN_DATA_SR_CHUNK = 5,         /* 브->콘: 다음 청크(항상 chunk_idx 순서, 빠짐·중복 없음) — can_bridge_sr_chunk_hdr_t
+                                       + 데이터 len바이트 */
+    CAN_DATA_SR_DONE  = 6,         /* 브->콘: 사진 끝 — can_bridge_sr_done_t. 콘은 누적 CRC를 META의 crc32와 비교 */
 } can_bridge_data_type_t;
+
+/* SR 스트림 페이로드(app_header 바로 뒤). CRC는 캠과 같은 esp_rom_crc32_le — 이전 값을 넘겨 청크마다
+ * 누적 가능(crc = esp_rom_crc32_le(crc, data, len), 시작값 0) */
+typedef struct __attribute__((packed)) {
+    uint32_t file_id;
+    uint32_t total_size;
+    uint16_t total_chunks;
+    uint32_t crc32;
+    uint8_t  kind;          /* cam_capture_kind_t('M'/'T') — 콘 저장 파일명 접두사 */
+} can_bridge_sr_meta_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t file_id;
+    uint16_t chunk_idx;
+    uint16_t len;
+} can_bridge_sr_chunk_hdr_t;
+
+typedef enum {
+    CAN_BRIDGE_SR_DONE_COMPLETE = 0,  /* 모든 청크를 순서대로 보냄 */
+    CAN_BRIDGE_SR_DONE_ABORTED  = 1,  /* 캠 전송이 중간에 끊김(캠 무응답·새 META 등) — 콘은 받은 부분을 버림 */
+} can_bridge_sr_done_status_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t file_id;
+    uint8_t  status;        /* can_bridge_sr_done_status_t */
+} can_bridge_sr_done_t;
 
 /* ---- 경로 분류(설계 §2) — 판단은 이 두 함수에만 둠(콘/브가 각자 판단하면 언젠가 어긋남) ----
  * SR(사진 전송) 7종만 DATA, 나머지 전부 CONTROL:
@@ -124,7 +156,7 @@ typedef enum {
 can_bridge_category_t can_bridge_path_for_esp_now_msg(uint8_t esp_now_msg_type);
 
 /* CAN app 메시지(app_header + body) 전체 기준: RELAY는 안에 실린 ESP-NOW 프레임의 msg_type(body[1])으로,
- * RELIABLE_SEND/RELIABLE_RESULT·CTRL_*은 항상 CONTROL(신뢰 요청·결과·제어) */
+ * SR_META/SR_CHUNK/SR_DONE은 DATA, RELIABLE_SEND/RELIABLE_RESULT·CTRL_*은 항상 CONTROL(신뢰 요청·결과·제어) */
 can_bridge_category_t can_bridge_path_for_app_msg(const uint8_t *msg, size_t len);
 
 #define CAN_BRIDGE_RELIABLE_MAX_ACCEPT_TYPES 4

@@ -561,5 +561,9 @@ can_bridge_category_t can_bridge_path_for_app_msg(const uint8_t *msg, size_t len
     if (msg[0] == CAN_DATA_RELAY && len >= CAN_BRIDGE_APP_HEADER_LEN + 2) {
         return can_bridge_path_for_esp_now_msg(msg[CAN_BRIDGE_APP_HEADER_LEN + 1]);
     }
+    /* 2026-09-26(4단계) — 브→콘 SR 스트림은 Data */
+    if (msg[0] == CAN_DATA_SR_META || msg[0] == CAN_DATA_SR_CHUNK || msg[0] == CAN_DATA_SR_DONE) {
+        return CAN_BRIDGE_CAT_DATA;
+    }
     return CAN_BRIDGE_CAT_CONTROL;
 }
