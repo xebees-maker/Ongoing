@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 
 /**
  * 2026-09-22 — 브(브릿지)가 ESP-NOW 라디오를 직접 소유. 받은 건 뭐든 해석 없이 CAN DATA로
@@ -17,3 +18,7 @@ void bridge_esp_now_send_raw(const uint8_t mac[6], const uint8_t *data, uint16_t
  * ESP-NOW는 peer로 등록 안 된 MAC에는 esp_now_send() 자체가 즉시 실패(ESP_ERR_ESPNOW_NOT_FOUND)
  * 하므로 반드시 먼저 호출해야 함(bridge_esp_now_send_raw 내부의 add_peer_if_needed와 동일 로직) */
 void bridge_esp_now_ensure_peer(const uint8_t mac[6]);
+
+/* 2026-09-26 — 콘으로 보낼 app 메시지(app_header+body)를 경로별 송신 큐에 넣음(복사, 블로킹 없음).
+ * RELIABLE_SEND 대행 완료 콜백처럼 CAN 송신을 직접 하면 안 되는 문맥에서 씀 */
+void bridge_esp_now_queue_to_cntl(const uint8_t *msg, size_t len);

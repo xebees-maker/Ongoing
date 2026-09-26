@@ -94,6 +94,14 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     }
 }
 
+/* 2026-09-26(설계 3단계) — 무선 수신이 아닌 곳(RELIABLE_SEND 대행 완료 콜백)에서 콘으로 보낼 app 메시지를
+ * 경로 분류에 맞는 송신 큐에 넣음(복사). 호출 문맥에서 CAN 송신(블로킹)을 하지 않게 하려는 것 */
+void bridge_esp_now_queue_to_cntl(const uint8_t *msg, size_t len)
+{
+    incoming_path_t *path = (can_bridge_path_for_app_msg(msg, len) == CAN_BRIDGE_CAT_DATA) ? &s_data_in : &s_ctrl_in;
+    can_bridge_queue_push(&path->q, msg, len);
+}
+
 /* 2026-09-26 — 이벤트 방식: 큐에 항목이 들어오면(push) 알림으로 깨어나서 빌 때까지 CAN으로 보냄.
  * 경로마다 하나씩(arg = incoming_path_t). CAN 경로는 can_link_send()가 분류로 고름(같은 결과) */
 static void relay_task(void *arg)
@@ -108,9 +116,12 @@ static void relay_task(void *arg)
                 const uint8_t *frame = msg + CAN_BRIDGE_APP_HEADER_LEN;
                 size_t frame_len = len - CAN_BRIDGE_APP_HEADER_LEN;
 
-                char m6[7]; ui_screen_mac6(hdr.mac, m6);
-                const char *type_name = frame_len >= 2 ? ui_screen_msg_type_name(frame[1]) : "?";
-                ui_screen_log_wireless("RX(%d/%s/%u) %s", (int8_t)hdr.flags, m6, (unsigned)frame_len, type_name);
+                /* RX 로그는 캠에서 받은 무선 프레임(RELAY)만 — 대행 결과(RELIABLE_RESULT)는 RL 로그가 이미 찍힘 */
+                if (hdr.msg_type == CAN_DATA_RELAY) {
+                    char m6[7]; ui_screen_mac6(hdr.mac, m6);
+                    const char *type_name = frame_len >= 2 ? ui_screen_msg_type_name(frame[1]) : "?";
+                    ui_screen_log_wireless("RX(%d/%s/%u) %s", (int8_t)hdr.flags, m6, (unsigned)frame_len, type_name);
+                }
 
                 /* 2026-09-26 — can_link_send()가 경로 분류로 Control/Data ctx를 고름. CAN 링크가 아직
                  * 안 섰으면 ESP_ERR_INVALID_STATE(예전의 NULL ctx 크래시 방지와 같은 역할) */

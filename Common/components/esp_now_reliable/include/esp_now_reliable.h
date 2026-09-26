@@ -42,6 +42,21 @@ esp_err_t esp_now_reliable_request(const uint8_t *peer_mac,
                                     uint32_t timeout_ms, int max_attempts,
                                     void *reply_out, size_t reply_out_cap, size_t *reply_out_len);
 
+/* 2026-09-26(설계 Docs/설계_CAN링크_2026-09-26.md §4) — 비동기 요청. 노드(MAC)당 슬롯 1개, 서로 다른
+ * 노드는 동시에 진행. 요청을 복사하고 곧바로 반환하며, 결과는 나중에 cb로 옴:
+ *   cb(cb_ctx, ESP_OK, reply, reply_len)       — 응답 받음(reply는 콜백 동안만 유효)
+ *   cb(cb_ctx, ESP_ERR_TIMEOUT, NULL, 0)       — max_attempts번 모두 무응답
+ * cb는 내부 서비스 태스크에서 불림 — 블로킹 금지(결과를 큐에 넣고 알림만).
+ * 반환: ESP_OK(접수 — cb가 반드시 한 번 불림), ESP_ERR_INVALID_STATE(그 노드에 진행 중인 요청이 이미
+ * 있음 — 노드당 1개 원칙 위반), ESP_ERR_NO_MEM/INVALID_SIZE/INVALID_ARG(접수 안 됨 — cb 안 불림).
+ * req_len 최대 250바이트, accept 최대 8개 */
+typedef void (*esp_now_reliable_done_cb_t)(void *cb_ctx, esp_err_t result, const uint8_t *reply, size_t reply_len);
+esp_err_t esp_now_reliable_request_async(const uint8_t *peer_mac,
+                                          const void *req, size_t req_len,
+                                          const uint8_t *accept_reply_types, size_t accept_reply_types_count,
+                                          uint32_t timeout_ms, int max_attempts,
+                                          esp_now_reliable_done_cb_t cb, void *cb_ctx);
+
 /* recv_cb(ESP-NOW 드라이버 태스크)에서 매 수신마다 호출 — 지금 대기 중인 요청이 있고
  * src_mac+msg_type이 맞으면 페이로드를 복사해두고 대기 태스크를 깨움. 대기 중인 요청이
  * 없거나 안 맞으면 조용히 무시하고 리턴하므로, 기존 dispatch 로직 앞단에 한 줄만 추가하면 됨

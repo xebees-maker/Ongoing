@@ -6,4 +6,6 @@ idf_component_register(
     REQUIRES
         esp_now_link
         esp_wifi
+        esp_timer
+        heap
 )

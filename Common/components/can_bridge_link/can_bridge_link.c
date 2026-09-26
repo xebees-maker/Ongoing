@@ -237,6 +237,13 @@ typedef struct {
 
 static tx_slot_t *s_tx_slots;            /* PSRAM, CAN_BRIDGE_TX_POOL_SIZE개 */
 static SemaphoreHandle_t s_tx_free_sem;  /* 빈 슬롯 개수(카운팅) */
+/* 2026-09-26 — 드라이버에 동시에 넣는 프레임을 1개로 제한(이전 프레임의 on_tx_done이 줌). IDF v6.0.2 onchip
+ * 드라이버는 하드웨어가 바쁠 때 태스크가 프레임을 내부 큐에 넣은 직후, 그 사이 송신 완료 ISR이 그 프레임을
+ * 꺼내 보내고 끝내 버리면 태스크의 "second chance" 확인이 빈 큐를 보고 assert(esp_twai_onchip.c:607 "should
+ * always get frame at this moment")로 죽음(실기 크래시, 태스크 간 뮤텍스로도 재현 — 태스크↔ISR 경합).
+ * 한 번에 1개만 넣으면 드라이버는 항상 "하드웨어가 비어 있어 바로 보냄" 경로만 탐 */
+static SemaphoreHandle_t s_tx_inflight_sem;
+static StaticSemaphore_t s_tx_inflight_sem_buf;
 static portMUX_TYPE s_tx_lock = portMUX_INITIALIZER_UNLOCKED;
 
 void can_bridge_tx_pool_init(void)
@@ -244,6 +251,8 @@ void can_bridge_tx_pool_init(void)
     if (s_tx_slots) return;
     s_tx_slots = (tx_slot_t *)psram_or_internal_alloc(sizeof(tx_slot_t) * CAN_BRIDGE_TX_POOL_SIZE);
     s_tx_free_sem = xSemaphoreCreateCounting(CAN_BRIDGE_TX_POOL_SIZE, CAN_BRIDGE_TX_POOL_SIZE);
+    s_tx_inflight_sem = xSemaphoreCreateBinaryStatic(&s_tx_inflight_sem_buf);
+    xSemaphoreGive(s_tx_inflight_sem);  /* 처음엔 비어 있음(보낼 수 있음) */
     if (!s_tx_slots || !s_tx_free_sem) {
         /* 송신 불가 상태로 조용히 두지 않음(드롭 금지 정책과 같은 취지) */
         ESP_LOGE(TAG, "송신 프레임 풀 할당 실패(slots=%p sem=%p) — 중단", (void *)s_tx_slots, (void *)s_tx_free_sem);
@@ -304,9 +313,16 @@ esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_
         TickType_t left = (elapsed < total) ? (total - elapsed) : 0;
         remain_ms = (int)pdTICKS_TO_MS(left);
     }
-    esp_err_t err = twai_node_transmit(node, &slot->frame, remain_ms);
+    /* 이전 프레임의 송신 완료(on_tx_done)를 기다림 — 위 s_tx_inflight_sem 주석 참고 */
+    TickType_t inflight_wait = (remain_ms < 0) ? portMAX_DELAY : pdMS_TO_TICKS(remain_ms);
+    if (xSemaphoreTake(s_tx_inflight_sem, inflight_wait) != pdTRUE) {
+        tx_slot_release(slot);
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t err = twai_node_transmit(node, &slot->frame, 0);
     if (err != ESP_OK) {
-        /* 드라이버 큐에 못 들어감 — ISR이 이 슬롯을 볼 일이 없으니 바로 반납 */
+        /* 드라이버에 못 들어감 — ISR이 이 슬롯을 볼 일이 없으니 바로 반납, 송신 권한도 돌려줌 */
+        xSemaphoreGive(s_tx_inflight_sem);
         tx_slot_release(slot);
     }
     return err;
@@ -327,6 +343,7 @@ bool can_bridge_tx_pool_on_done_isr(const twai_tx_done_event_data_t *edata)
     portEXIT_CRITICAL_ISR(&s_tx_lock);
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(s_tx_free_sem, &woken);
+    xSemaphoreGiveFromISR(s_tx_inflight_sem, &woken);  /* 다음 프레임 넣어도 됨 */
     return woken == pdTRUE;
 }
 

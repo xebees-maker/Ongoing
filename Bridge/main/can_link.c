@@ -58,6 +58,7 @@ typedef struct {
     uint8_t  data[8];
 } raw_frame_t;
 static QueueHandle_t s_raw_frame_q;
+static volatile uint32_t s_raw_drop = 0;  /* ISR 원시 프레임 큐가 차서 버린 수 */
 
 static twai_frame_t s_rx_frame;
 static uint8_t       s_rx_buf[8];
@@ -71,7 +72,8 @@ static IRAM_ATTR bool on_rx_done(twai_node_handle_t handle, const twai_rx_done_e
         rf.len = (uint8_t)s_rx_frame.buffer_len;
         if (rf.len > 8) rf.len = 8;
         memcpy(rf.data, s_rx_frame.buffer, rf.len);
-        xQueueSendFromISR(s_raw_frame_q, &rf, &woken);
+        /* 2026-09-26 — 큐(16칸)가 차면 프레임이 조용히 버려져 CF 순번 어긋남으로 나타날 수 있음 → 셈 */
+        if (xQueueSendFromISR(s_raw_frame_q, &rf, &woken) != pdTRUE) s_raw_drop++;
     }
     return woken == pdTRUE;
 }
@@ -135,11 +137,50 @@ static void can_rx_task(void *arg)
 }
 
 /* 2026-09-23(1단계 — 콘의 esp_now_reliable_request()를 브가 대행) — 기존 esp_now_reliable
- * 컴포넌트를 그대로 호출(재구현 안 함, 사용자 지시). 여기서 블로킹(최대 timeout_ms*max_attempts)
- * 되는데, can_consume_task 하나가 DATA 전체를 순차 처리하는 기존 모델 그대로(이 링크는
- * 어차피 세션 1개 원칙) — 그 동안 다른 DATA 처리가 밀리는 건 의도된 동작.
- * 2026-09-26 — 설계 3단계에서 esp_now_reliable 비동기 API로 교체 예정(블로킹 없이 캠별 동시 대행).
- * 그 전까지는 소비 태스크가 경로별 2개라 static 응답 버퍼를 뮤텍스로 보호 */
+ * 컴포넌트를 그대로 호출(재구현 안 함, 사용자 지시).
+ * 2026-09-26(설계 Docs/설계_CAN링크_2026-09-26.md §4, 3단계) — 비동기 API로 교체. 예전엔 여기서
+ * timeout×시도만큼 블로킹해서, 소비 태스크 뒤의 모든 메시지(다른 캠 요청, WAKE_HELLO_ACK 전달)가
+ * 기다렸음(head-of-line — 캠 2대에서 페어링/CASK 붕괴의 원인). 이제 요청만 걸고 바로 다음으로 넘어가며,
+ * 캠별 슬롯이 각자 재시도하고 결과는 완료 콜백 → Control 송신 큐 → ctrl_relay가 콘에 보냄 */
+typedef struct {
+    uint8_t  mac[6];
+    uint8_t  req_type;
+    uint16_t req_len;
+} proxy_ctx_t;
+
+/* 완료 콜백 — esp_now_reliable 서비스 태스크 문맥. 블로킹 금지: 결과 메시지를 만들어 큐에 넣기만 함 */
+static void proxy_done_cb(void *cb_ctx, esp_err_t result, const uint8_t *reply, size_t reply_len)
+{
+    proxy_ctx_t *p = (proxy_ctx_t *)cb_ctx;
+
+    /* 2026-09-23(사용자 지적) — RL(구 RLBL)은 실제로 무선(ESP-NOW)으로 캠과 주고받은 결과라 무선 창 */
+    char m6[7]; ui_screen_mac6(p->mac, m6);
+    ui_screen_log_wireless("RL(%c/%s/%u/%s) %s", (result == ESP_OK) ? 'S' : 'F', m6,
+                            (unsigned)p->req_len, ui_screen_result_code(result),
+                            ui_screen_msg_type_name(p->req_type));
+
+    /* 결과를 콘에 CAN으로 돌려줌 — app_header + result_hdr + (성공시)응답 페이로드 */
+    size_t cap = CAN_BRIDGE_APP_HEADER_LEN + sizeof(can_bridge_reliable_result_hdr_t) + reply_len;
+    uint8_t *result_msg = (uint8_t *)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!result_msg) result_msg = (uint8_t *)heap_caps_malloc(cap, MALLOC_CAP_8BIT);
+    if (result_msg) {
+        can_bridge_app_header_t result_app_hdr = { .msg_type = CAN_DATA_RELIABLE_RESULT, .flags = 0 };
+        memcpy(result_app_hdr.mac, p->mac, 6);
+        can_bridge_reliable_result_hdr_t result_hdr = { .ok = (result == ESP_OK) ? (uint8_t)1 : (uint8_t)0 };
+        size_t off = 0;
+        memcpy(result_msg + off, &result_app_hdr, CAN_BRIDGE_APP_HEADER_LEN); off += CAN_BRIDGE_APP_HEADER_LEN;
+        memcpy(result_msg + off, &result_hdr, sizeof(result_hdr)); off += sizeof(result_hdr);
+        if (result_hdr.ok && reply && reply_len > 0) {
+            memcpy(result_msg + off, reply, reply_len); off += reply_len;
+        }
+        bridge_esp_now_queue_to_cntl(result_msg, off);  /* 복사해서 넣음 */
+        free(result_msg);
+    } else {
+        ESP_LOGE(TAG, "RELIABLE_RESULT 메시지 할당 실패 — 콘은 CAN 레벨 타임아웃으로 처리하게 됨");
+    }
+    free(p);
+}
+
 static void handle_reliable_send(const can_bridge_app_header_t *hdr, const uint8_t *body, size_t body_len)
 {
     if (body_len < sizeof(can_bridge_reliable_send_hdr_t)) return;
@@ -147,60 +188,28 @@ static void handle_reliable_send(const can_bridge_app_header_t *hdr, const uint8
     memcpy(&send_hdr, body, sizeof(send_hdr));
     const uint8_t *req = body + sizeof(send_hdr);
     size_t req_len = body_len - sizeof(send_hdr);
+    if (req_len < 2) return;
 
-    /* 2026-09-23(실기 디버깅 — PAIR_REQUEST 13회 전부 즉시 실패로 확인) — ESP-NOW는 peer로
-     * 등록 안 된 MAC에 esp_now_send()를 부르면 즉시 ESP_ERR_ESPNOW_NOT_FOUND라, 이걸 빠뜨리면
-     * esp_now_reliable_request()가 매 시도마다 즉시(무선 딜레이 없이) 실패함 — RF 타이밍/채널
-     * 문제가 아니라 이 한 줄이 빠진 것이었음 */
+    /* 2026-09-23(실기 디버깅) — peer 미등록 MAC에 esp_now_send()는 즉시 ESP_ERR_ESPNOW_NOT_FOUND */
     bridge_esp_now_ensure_peer(hdr->mac);
 
-    /* 응답 버퍼 — ESP-NOW 최대 프레임 크기, PSRAM, 태스크 수명 동안 재사용(매 호출 malloc 안 함) */
-    static SemaphoreHandle_t s_reliable_mutex = NULL;
-    static StaticSemaphore_t s_reliable_mutex_buf;
-    if (!s_reliable_mutex) s_reliable_mutex = xSemaphoreCreateMutexStatic(&s_reliable_mutex_buf);
-    xSemaphoreTake(s_reliable_mutex, portMAX_DELAY);
-    static uint8_t *s_reply_buf = NULL;
-    if (!s_reply_buf) {
-        s_reply_buf = (uint8_t *)heap_caps_malloc(1470, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s_reply_buf) s_reply_buf = (uint8_t *)heap_caps_malloc(1470, MALLOC_CAP_8BIT);
-    }
-    size_t reply_len = 0;
-    esp_err_t err = esp_now_reliable_request(hdr->mac, req, req_len,
-                                              send_hdr.accept_reply_types, send_hdr.accept_reply_types_count,
-                                              send_hdr.timeout_ms, send_hdr.max_attempts,
-                                              s_reply_buf, 1470, &reply_len);
-
-    /* 2026-09-23(사용자 지적) — RL(구 RLBL)은 CAN에서 받은 명령을 "처리하는 코드 위치" 기준이
-     * 아니라 실제로 무선(ESP-NOW)으로 캠과 주고받은 결과를 설명하는 내용이라 무선 창이 맞음 */
-    char m6[7]; ui_screen_mac6(hdr->mac, m6);
-    const char *type_name = req_len >= 2 ? ui_screen_msg_type_name(req[1]) : "?";
-    ui_screen_log_wireless("RL(%c/%s/%u/%s) %s", (err == ESP_OK) ? 'S' : 'F', m6,
-                            (unsigned)req_len, ui_screen_result_code(err), type_name);
-
-    /* 결과를 콘에 CAN으로 돌려줌 — app_header + result_hdr + (성공시)응답 페이로드 */
-    uint8_t *result_msg = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + sizeof(can_bridge_reliable_result_hdr_t) + 1470,
-                                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!result_msg) result_msg = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + sizeof(can_bridge_reliable_result_hdr_t) + 1470, MALLOC_CAP_8BIT);
-    if (!result_msg) {
-        xSemaphoreGive(s_reliable_mutex);
+    proxy_ctx_t *p = (proxy_ctx_t *)malloc(sizeof(proxy_ctx_t));
+    if (!p) {
+        ESP_LOGE(TAG, "대행 컨텍스트 할당 실패");
         return;
     }
+    memcpy(p->mac, hdr->mac, 6);
+    p->req_type = req[1];
+    p->req_len = (uint16_t)req_len;
 
-    can_bridge_app_header_t result_app_hdr = { .msg_type = CAN_DATA_RELIABLE_RESULT, .flags = 0 };
-    memcpy(result_app_hdr.mac, hdr->mac, 6);
-    can_bridge_reliable_result_hdr_t result_hdr = { .ok = (err == ESP_OK) ? (uint8_t)1 : (uint8_t)0 };
-
-    size_t off = 0;
-    memcpy(result_msg + off, &result_app_hdr, CAN_BRIDGE_APP_HEADER_LEN); off += CAN_BRIDGE_APP_HEADER_LEN;
-    memcpy(result_msg + off, &result_hdr, sizeof(result_hdr)); off += sizeof(result_hdr);
-    if (result_hdr.ok && reply_len > 0) {
-        memcpy(result_msg + off, s_reply_buf, reply_len); off += reply_len;
+    esp_err_t err = esp_now_reliable_request_async(hdr->mac, req, req_len,
+                                                    send_hdr.accept_reply_types, send_hdr.accept_reply_types_count,
+                                                    send_hdr.timeout_ms, send_hdr.max_attempts,
+                                                    proxy_done_cb, p);
+    if (err != ESP_OK) {
+        /* 접수 안 됨(노드당 1개 위반 등) — 콜백이 안 불리므로 여기서 실패 결과를 바로 돌려줌 */
+        proxy_done_cb(p, err, NULL, 0);
     }
-    xSemaphoreGive(s_reliable_mutex);  /* s_reply_buf 복사 끝 */
-
-    /* 2026-09-26 — 결과는 분류상 항상 CONTROL(can_link_send가 경로 선택) */
-    can_link_send(result_msg, off);
-    free(result_msg);
 }
 
 /* 2026-09-25(사용자 지시 — 이벤트 방식) — 예전엔 큐가 비면 vTaskDelay(50ms) 후 다시 확인하는
@@ -250,9 +259,9 @@ static void can_status_task(void *arg)
             uint32_t q_count, q_hwm, cq_count, cq_hwm;
             can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
             can_bridge_queue_get_stats(&s_ctrl_complete_q, &cq_count, &cq_hwm);
-            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u)",
+            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u) 수신버림=%u",
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
-                     (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm);
+                     (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm, (unsigned)s_raw_drop);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -263,8 +272,11 @@ void can_link_init(void)
 {
     {
         static StaticQueue_t s_raw_frame_q_struct;
-        uint8_t *raw_frame_q_storage = (uint8_t *)heap_caps_malloc(16 * sizeof(raw_frame_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        s_raw_frame_q = xQueueCreateStatic(16, sizeof(raw_frame_t), raw_frame_q_storage, &s_raw_frame_q_struct);
+        /* 2026-09-26 — 16칸은 두 경로가 동시에 흐를 때 모자라서 대량으로 버려짐(실기: 콘 2901개/90초 → CF 순번
+         * 어긋남). 256칸으로 늘리고, ISR이 쓰므로 PSRAM이 아닌 내부 RAM에(플래시 쓰기 중 PSRAM 접근 위험) */
+        #define RAW_FRAME_Q_LEN 256
+        uint8_t *raw_frame_q_storage = (uint8_t *)heap_caps_malloc(RAW_FRAME_Q_LEN * sizeof(raw_frame_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        s_raw_frame_q = xQueueCreateStatic(RAW_FRAME_Q_LEN, sizeof(raw_frame_t), raw_frame_q_storage, &s_raw_frame_q_struct);
     }
     s_rx_frame.buffer = s_rx_buf;
     s_rx_frame.buffer_len = sizeof(s_rx_buf);

@@ -59,6 +59,7 @@ typedef struct {
     uint8_t  data[8];
 } raw_frame_t;
 static QueueHandle_t s_raw_frame_q;
+static volatile uint32_t s_raw_drop = 0;  /* ISR 원시 프레임 큐가 차서 버린 수 */
 
 static twai_frame_t s_rx_frame;
 static uint8_t       s_rx_buf[8];
@@ -72,7 +73,8 @@ static IRAM_ATTR bool on_rx_done(twai_node_handle_t handle, const twai_rx_done_e
         rf.len = (uint8_t)s_rx_frame.buffer_len;
         if (rf.len > 8) rf.len = 8;
         memcpy(rf.data, s_rx_frame.buffer, rf.len);
-        xQueueSendFromISR(s_raw_frame_q, &rf, &woken);
+        /* 2026-09-26 — 큐(16칸)가 차면 프레임이 조용히 버려져 CF 순번 어긋남으로 나타날 수 있음 → 셈 */
+        if (xQueueSendFromISR(s_raw_frame_q, &rf, &woken) != pdTRUE) s_raw_drop++;
     }
     return woken == pdTRUE;
 }
@@ -217,9 +219,9 @@ static void can_status_task(void *arg)
             uint32_t q_count, q_hwm, cq_count, cq_hwm;
             can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
             can_bridge_queue_get_stats(&s_ctrl_complete_q, &cq_count, &cq_hwm);
-            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u)",
+            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u) 수신버림=%u",
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
-                     (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm);
+                     (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm, (unsigned)s_raw_drop);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -341,8 +343,11 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     memset(s_pending, 0, sizeof(s_pending));
 
     static StaticQueue_t s_raw_frame_q_struct;
-    uint8_t *raw_frame_q_storage = (uint8_t *)heap_caps_malloc(16 * sizeof(raw_frame_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    s_raw_frame_q = xQueueCreateStatic(16, sizeof(raw_frame_t), raw_frame_q_storage, &s_raw_frame_q_struct);
+    /* 2026-09-26 — 16칸은 두 경로가 동시에 흐를 때 모자라서 대량으로 버려짐(실기: 콘 2901개/90초 → CF 순번
+         * 어긋남). 256칸으로 늘리고, ISR이 쓰므로 PSRAM이 아닌 내부 RAM에(플래시 쓰기 중 PSRAM 접근 위험) */
+        #define RAW_FRAME_Q_LEN 256
+        uint8_t *raw_frame_q_storage = (uint8_t *)heap_caps_malloc(RAW_FRAME_Q_LEN * sizeof(raw_frame_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_raw_frame_q = xQueueCreateStatic(RAW_FRAME_Q_LEN, sizeof(raw_frame_t), raw_frame_q_storage, &s_raw_frame_q_struct);
 
     s_rx_frame.buffer = s_rx_buf;
     s_rx_frame.buffer_len = sizeof(s_rx_buf);
