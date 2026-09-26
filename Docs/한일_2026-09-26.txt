@@ -18,14 +18,15 @@
        ②콘 수신 분리(can_rx가 ID로 Control/Data 조립기·큐·consume 태스크 2벌, Control 17/Data 15)
        ③브 수신 분리(동일 + 무선 수신 큐/릴레이 태스크 2벌) ④송신을 분류 함수로 Control/Data에 싣기
     3. esp_now_reliable 비동기화 + 브 대행 비동기 — **완료**(마지막 커밋 참고). TWAI 송신 assert 우회, 수신 큐 256칸.
-       남은 실패는 주로 버스 에러(bit/stuff/ack)와 그로 인한 CF 순번 어긋남 → **다음 후보: 버스 에러 원인**
-       (+ 의심: CAN 수신 ISR 원시 프레임 큐 16칸이 가득 차면 조용히 버림 → CF 순번 어긋남 원인인지 카운트로 확인)
+       버스 에러 조사·CAN 코어 1·버스 오프·CASK 수정은 아래 "[ 한 일 — 09-26 밤 ]" 참고(2b6ae79, ad00ecd).
     4. SR을 브에서 처리(순서만 맞춰 콘에 흘려보냄, 흐름 제어), 콘 photo_rx는 이어 붙이기+CRC
     5. CAPTURE_STATUS(RECEIVED) reliable로
     6. 브 장애 대응(부팅 알림, PING/PONG+RESET, 브 워치독, 콘 화면 경고)
     7. 타임아웃 구간별 측정 후 숫자 확정
   이어서 할 때: `git status`로 커밋 안 된 변경부터 확인, `git log`의 마지막 커밋 메시지에 다음 할 일이 적혀 있음.
-  비트레이트는 1M(500k 실험은 되돌림). 버스 에러(bit_err/stuff_err)·fail_retry_cnt는 나중에(할 일).
+  비트레이트는 1M(500k 실험은 되돌림). fail_retry_cnt는 -1(하드웨어 재전송)로 바꿈(2b6ae79).
+  **콘은 반드시 앱만 플래시(`idf.py app-flash` 또는 0x10000만)** — `idf.py flash`는 LittleFS(assets.bin)까지
+  덮어써서 device_config.bin(자동연결·알던 장치·캠별 촬영주기·Wi-Fi 목록)이 지워짐(09-26 실제로 지움).
 - 캠 사진 푸시 실기 확인 도구: scratchpad의 cap_cam.py(포트가 딥슬립으로 사라져도 다시 열며
   캡처) — 새 세션 scratchpad에는 없으니 필요하면 다시 작성.
 
@@ -105,6 +106,26 @@
     dependencies.lock, managed_components가 생김(git 제외 파일, 원래 PC엔 영향 없음, 원래
     없던 파일로 판단) — 이 PC에서 센스 빌드 전에 지울 것.
 
+[ 한 일 — 09-26 밤: 버스 에러 조사 결론 + CAN 코어 1 + 버스 오프 + CASK (커밋 2b6ae79, ad00ecd) ]
+
+20. 버스 에러 조사 결론(사실만): 에러율은 전파 간섭이 아님 — 무선 환경은 그대로 두고 소프트웨어만 바꿔도
+    크게 달라짐(시험 트래픽 0.013~0.028%, 운용 0.304%/0.364%, 브 LCD 로그 끔 0.142%/0.255%, 콘 SD 저장 끔
+    0.048%/0.065%). 어떤 동작이 어떻게 에러로 이어지는지는 못 밝힘. CAN 에러는 버스 전체 사건이라 한쪽 원인에
+    양쪽 카운터가 같이 오름. 카운터는 '기타' 종류(플래그 0)를 못 셈(절대값은 과소). 브는 예전부터 error_passive를
+    수시로 오갔음(로그 확인, 처음엔 놓침). 코어 이동·IRAM은 에러율에 영향 없음(되돌려도 그대로) — IRAM은 안 씀.
+21. **S3에서 fail_retry_cnt는 -1이 아니면 single-shot(재전송 없음)** — twai_hal_v1.c:378. 예전 3은 "재전송 안 함"
+    이었고, 에러 난 프레임은 조용히 버려졌음(on_tx_done 실패를 안 봄). -1로 바꾼 뒤 캠 켠 운용에서 브가 0.5초 간격
+    bus_off 반복·콘 error_passive(에러 수는 재전송으로 부풀어 예전 수치와 비교 불가) — 다음 확인 대상(할 일 18).
+22. 버스 오프 영구 정지 수정: 드라이버가 버스 오프 때 송신 중 프레임을 on_tx_done 없이 버려서 송신 권한 세마포어가
+    안 돌아왔음(브 TX 고정 실기 확인). can_bridge_tx_pool_on_bus_off_isr()로 반납 + 상태 태스크 즉시 복구.
+23. 형상(사용자 설계): CAN 관련은 전부 코어 1(인터럽트는 can_bridge_node_start_on_core로 코어 1에서 생성, 브
+    릴레이 2개 코어 1, 콘은 ctrl_tx/data_tx가 코어 1 밖 호출을 대행). 가급적 PSRAM(ISR 콜백 IRAM 아님, 원시
+    수신 큐 PSRAM). 콘 lwIP tcpip는 코어 0. 콘솔은 USB-Serial-JTAG만(콘·브, 센스는 할 일 17).
+24. CASK: 중복 WAKE_HELLO(재전송 같은 바이트, 1초 안) 거름 → ACK만, CASK 생략(실기: 68회 중 11회 거름).
+    캠은 사진 전송 대기 중에도 1초마다 체크인(콘이 전송 중에도 명령 가능). 콘 CAM 설정 적용 버튼은 저장만 하고
+    라벨에 "(적용 대기)/(적용됨)" 표시(캠이 ACK한 CONFIG와 비교) — 진행팝업·4005 없앰. 캠 켠 상태에서 표시 동작은
+    아직 확인 안 함.
+
 [ 할 일 — 다음 ]
 
 0. 메모리 zip(Docs/claude_memory_2026-09-26.zip) 커밋+푸시 — Claude가 하면 자동 모드 검사기가
@@ -131,8 +152,34 @@
 9. 콘 can_bridge.c의 중복 s_send_mutex 제거(ctx 뮤텍스로 대체됨).
 10. 브 ui_mem의 LVGL 락 실패 로그 확인.
 11. 릴레이가 이상하면 power_relay 기아(starvation) 여부 확인.
-12. 캐스크/UNPAIR 전체 흐름 검증. 촬영 주기 변경 캐스크가 CAN 경로로 구현됐는지 확인.
+12. 캐스크/UNPAIR 전체 흐름 검증. 촬영 주기 CASK는 CAN 경로로 동작 확인(09-26, 캠 둘 다 30s 받아 적용).
+    남은 것: CAM config 무응답(중복 거른 뒤에도 120초에 11회, 원인 미확인), 캠 켜고 "(적용 대기)/(적용됨)" 표시
+    확인, 다른 명령(지금 촬영 등)도 캐스크 때까지 대기 중이라는 표시 추가.
 13. 브 로그 msg_type 표 확장(#10, #49, #34 등 캐스크 단계 메시지).
 14. 카메라 팝업 메모리 20K, 페어링 반복 시 메모리 감소 확인.
 15. 첫 페어링 때 PHOTO_LIST_REQUEST 타임아웃 재검증 — 캠 SD 제거로 목록 프로토콜 자체가 없어져 해당 없음(4번 콘 죽은 코드 정리와 함께 닫을 것).
 16. 9/18 팝업 터치 검증, 캠 MVD 리팩터.
+17. 센스 UART 콘솔 제거(원래 PC, 5번 리빌드 때 함께) — 콘/브는 09-26 적용(주 콘솔 UART0 → USB-Serial-JTAG,
+    보조 콘솔 없음), 캠은 원래부터 이렇게 돼 있음. UART0 출력은 아무도 안 받는데 115200bps로 보낼 때
+    CPU가 대기해서 없앰(로그는 원래도 보조 콘솔인 내장 USB로 받고 있었음).
+    준비된 것: Sens/sdkconfig.defaults(새로 만듦, 위 두 설정). 단 sdkconfig는 git 제외라 원래 PC의
+    기존 Sens/sdkconfig에는 자동 반영 안 됨 — sdkconfig를 지우면 defaults에 없는 기존 설정이 다 날아가므로
+    지우지 말고 아래처럼 바꿀 것.
+    ① idf.py menuconfig → Component config → ESP System Settings(ESP-STDIO) →
+       Channel for console output = USB Serial/JTAG Controller, Channel for console secondary output = No secondary
+       (또는 sdkconfig의 ESP-STDIO 블록을 Bridge/sdkconfig의 같은 블록처럼 수정).
+    ② 확인: sdkconfig에 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y, CONFIG_ESP_CONSOLE_SECONDARY_NONE=y,
+       CONFIG_ESP_CONSOLE_UART_NUM=-1.
+    ③ 대상 esp32c3로 빌드+플래시 후, 센스 USB 포트(COM)에서 로그가 나오는지 확인. 안 나오면(보드 USB가
+       칩 USB 핀이 아니면) 되돌릴 것. 딥슬립에서 깬 뒤에도 로그가 이어지는지 확인.
+    ④ 확인되면 bsp_c3_pico.h의 "콘솔 UART0가 이미 쓰고 있어서 제외(CONFIG_ESP_CONSOLE_UART_NUM=0)"
+       주석을 고칠 것(UART0 비게 됨). SC05 센서용 UART1(sensor_sc05)은 센서 통신이라 그대로 둠.
+18. CAN 재전송(-1) 이후 운용 악화 확인: 캠 켜고 측정 — 브 bus_off 반복, 콘 error_passive(할 일 21 참고). 무한 재시도
+    방어도 결정할 것: (가) 상대 노드가 없으면 error_passive에서 ACK 에러는 TEC가 안 올라 같은 프레임을 영원히 재전송
+    → 일정 시간 넘게 안 끝나면 노드 disable/enable로 끊고 슬롯 반납, (나) 버스 오프 반복 시 복구 백오프 또는 앱에
+    알림(설계 6단계 브 장애 처리와 연결). 앱은 송신 실패를 정해진 시간 안에 받음(버스 오프 중 즉시, 막힘 중 500ms).
+19. 코어별 우선순위 검토(사용자 의심: 코어가 다르면 우선순위가 기대와 다르게 동작). 콘 표: node_req_disp/
+    node_req_w(17)는 코어 미고정, 코어 1 안에서는 CAN 17 > Data·릴레이 15 > storage 10.
+20. 콘 SD 저장 회피는 보류 — 새 형상(코어 1, 재전송, 버스 오프 수정)에서 운용 결과를 보고 결정.
+21. 캠이 켜질 때마다 이 PC의 키보드가 멈춤 — 키보드(Logitech LIGHTSPEED)와 보드들은 서로 다른 USB 컨트롤러라
+    USB 루트 문제는 아닌 듯. 추측: 2.4GHz 수신기와 캠 무선이 가까움 → 수신기를 캠에서 멀리 옮겨 확인.
