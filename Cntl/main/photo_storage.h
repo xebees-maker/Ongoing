@@ -38,6 +38,15 @@ typedef struct {
 bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg, size_t len,
                          uint32_t *out_seq);
 
+/* 2026-09-26(설계 §4 — 받는 대로 이어 쓰기) — 한 장을 나눠 쓰는 저장기. begin(순번 잡고 .tmp 열기, 실패 시 NULL)
+ * → append(여러 번) → finish(fsync+rename, out_seq에 순번, 실패 시 false — 어느 쪽이든 w는 해제됨) 또는
+ * abort(임시파일 삭제, w 해제). 한 저장기는 한 태스크에서만 씀 */
+typedef struct photo_storage_writer photo_storage_writer_t;
+photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind);
+bool photo_storage_append(photo_storage_writer_t *w, const uint8_t *data, size_t len);
+bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq);
+void photo_storage_abort(photo_storage_writer_t *w);
+
 /* 모든 카메라 폴더를 합산한 총 사용 바이트 — 2026-09-26부터 폴더 스캔 없이 RAM 합계를 돌려줌
  * (저장/삭제/정리 때 더하고 뺌, photo_storage_rescan() 때 새로 계산). SD I/O 없음 */
 uint64_t photo_storage_get_used_bytes(void);

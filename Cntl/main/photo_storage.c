@@ -175,66 +175,116 @@ static uint32_t take_next_seq_locked(const uint8_t mac[6], const char *dir_path)
     return seq;
 }
 
-bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg, size_t len,
-                         uint32_t *out_seq)
+/* 2026-09-26(설계 §4 SR 수신 — 콘은 받는 대로 이어 씀) — 한 장을 여러 번에 나눠 쓰는 저장기.
+ * begin에서 순번을 잡고 <최종이름>.tmp를 열고, append로 이어 쓰고, finish에서 fsync+close 후 최종 이름으로
+ * rename(SD 안전정책 그대로 — 쓰다 리셋돼도 반쪽 사진이 .jpg로 안 보임). 실패/중단은 abort(임시파일 삭제).
+ * 잡은 순번은 중단돼도 되돌리지 않음(순번에 빈 칸이 생길 뿐) */
+struct photo_storage_writer {
+    FILE    *fp;
+    size_t   written;
+    uint32_t seq;
+    bool     failed;
+    char     file_path[96];
+    char     tmp_path[104];
+};
+
+photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
 {
     if (!sd_storage_is_mounted()) {
-        ESP_LOGW(TAG, "저장 실패 — SD 미마운트");
-        return false;
+        ESP_LOGW(TAG, "저장 시작 실패 — SD 미마운트");
+        return NULL;
     }
     if (!is_valid_kind(kind)) {
-        ESP_LOGW(TAG, "저장 실패 — 잘못된 kind=%c", (char)kind);
-        return false;
+        ESP_LOGW(TAG, "저장 시작 실패 — 잘못된 kind=%c", (char)kind);
+        return NULL;
     }
-    if (!jpeg || len == 0) {
-        ESP_LOGW(TAG, "저장 실패 — 빈 데이터(len=%u)", (unsigned)len);
-        return false;
-    }
-
     char dir_path[64];
     camera_dir_path(mac, dir_path, sizeof(dir_path));
     if (mkdir(dir_path, 0777) != 0 && errno != EEXIST) {
         ESP_LOGW(TAG, "카메라 폴더 생성 실패(%s, errno=%d)", dir_path, errno);
-        return false;
+        return NULL;
     }
+    photo_storage_writer_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!w) w = calloc(1, sizeof(*w));
+    if (!w) return NULL;
 
     lock();
-    uint32_t seq = take_next_seq_locked(mac, dir_path);
+    w->seq = take_next_seq_locked(mac, dir_path);
     unlock();
+    snprintf(w->file_path, sizeof(w->file_path), "%s/%c%0*u.jpg", dir_path, (char)kind, PHOTO_SEQ_DIGITS, (unsigned)w->seq);
+    snprintf(w->tmp_path, sizeof(w->tmp_path), "%s" PHOTO_TMP_SUFFIX, w->file_path);
+    w->fp = fopen(w->tmp_path, "wb");
+    if (!w->fp) {
+        ESP_LOGW(TAG, "파일 열기 실패: %s (errno=%d)", w->tmp_path, errno);
+        free(w);
+        return NULL;
+    }
+    return w;
+}
 
-    char file_path[96];
-    snprintf(file_path, sizeof(file_path), "%s/%c%0*u.jpg", dir_path, (char)kind, PHOTO_SEQ_DIGITS, (unsigned)seq);
-    char tmp_path[104];
-    snprintf(tmp_path, sizeof(tmp_path), "%s" PHOTO_TMP_SUFFIX, file_path);
+bool photo_storage_append(photo_storage_writer_t *w, const uint8_t *data, size_t len)
+{
+    if (!w || w->failed) return false;
+    if (len == 0) return true;
+    size_t n = fwrite(data, 1, len, w->fp);
+    w->written += n;
+    if (n != len) {
+        ESP_LOGW(TAG, "쓰기 실패(%u/%u bytes): %s", (unsigned)n, (unsigned)len, w->tmp_path);
+        w->failed = true;
+    }
+    return !w->failed;
+}
 
-    /* 2026-09-26(SD 안전정책) — .tmp에 전부 쓰고 fsync로 카드에 반영한 뒤 닫고, 그다음에야 최종
-     * 이름으로 바꿈. 이 사이 어디서 리셋되든 반쯤 쓴 내용이 .jpg로 보이는 일은 없음 */
-    FILE *fp = fopen(tmp_path, "wb");
-    if (!fp) {
-        ESP_LOGW(TAG, "파일 열기 실패: %s (errno=%d)", tmp_path, errno);
+bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
+{
+    if (!w) return false;
+    bool synced = (fflush(w->fp) == 0) && (fsync(fileno(w->fp)) == 0);
+    fclose(w->fp);
+    w->fp = NULL;
+    if (w->failed || !synced || w->written == 0) {
+        ESP_LOGW(TAG, "쓰기 불완전(%u bytes, sync=%d) — 임시파일 삭제: %s",
+                 (unsigned)w->written, synced ? 1 : 0, w->tmp_path);
+        unlink(w->tmp_path);
+        free(w);
         return false;
     }
-    size_t written = fwrite(jpeg, 1, len, fp);
-    bool synced = (fflush(fp) == 0) && (fsync(fileno(fp)) == 0);
-    fclose(fp);
-    if (written != len || !synced) {
-        ESP_LOGW(TAG, "쓰기 불완전(%u/%u bytes, sync=%d) — 임시파일 삭제: %s",
-                 (unsigned)written, (unsigned)len, synced ? 1 : 0, tmp_path);
-        unlink(tmp_path);
+    if (rename(w->tmp_path, w->file_path) != 0) {
+        ESP_LOGW(TAG, "임시파일 이름 바꾸기 실패(errno=%d): %s", errno, w->tmp_path);
+        unlink(w->tmp_path);
+        free(w);
         return false;
     }
-    if (rename(tmp_path, file_path) != 0) {
-        ESP_LOGW(TAG, "임시파일 이름 바꾸기 실패(errno=%d): %s", errno, tmp_path);
-        unlink(tmp_path);
-        return false;
-    }
-
-    used_add((int64_t)len);
+    used_add((int64_t)w->written);
     storage_mgr_notify_changed();
-
-    if (out_seq) *out_seq = seq;
-    ESP_LOGI(TAG, "사진 저장 완료: %s (%u bytes)", file_path, (unsigned)len);
+    if (out_seq) *out_seq = w->seq;
+    ESP_LOGI(TAG, "사진 저장 완료: %s (%u bytes)", w->file_path, (unsigned)w->written);
+    free(w);
     return true;
+}
+
+void photo_storage_abort(photo_storage_writer_t *w)
+{
+    if (!w) return;
+    if (w->fp) fclose(w->fp);
+    unlink(w->tmp_path);
+    ESP_LOGW(TAG, "저장 중단 — 임시파일 삭제: %s", w->tmp_path);
+    free(w);
+}
+
+bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg, size_t len,
+                         uint32_t *out_seq)
+{
+    if (!jpeg || len == 0) {
+        ESP_LOGW(TAG, "저장 실패 — 빈 데이터(len=%u)", (unsigned)len);
+        return false;
+    }
+    photo_storage_writer_t *w = photo_storage_begin(mac, kind);
+    if (!w) return false;
+    if (!photo_storage_append(w, jpeg, len)) {
+        photo_storage_abort(w);
+        return false;
+    }
+    return photo_storage_finish(w, out_seq);
 }
 
 uint64_t photo_storage_get_used_bytes(void)

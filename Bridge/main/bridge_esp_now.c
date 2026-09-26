@@ -1,4 +1,5 @@
 #include "bridge_esp_now.h"
+#include "bridge_sr.h"
 #include "can_link.h"
 #include "can_bridge_link.h"
 #include "ui_screen.h"
@@ -74,6 +75,9 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         esp_now_reliable_on_recv(data[1], info->src_addr, data, len);
     }
 
+    /* 2026-09-26(설계 §4, 4단계) — SR(사진 전송)은 브가 끝점 — 콘으로 RELAY하지 않고 여기서 처리(bridge_sr.c) */
+    if (bridge_sr_on_recv(info->src_addr, data, len)) return;
+
     /* recv_cb는 ESP-NOW 내부 태스크 컨텍스트 — can_bridge_send()처럼 블로킹 가능한 호출을
      * 여기서 직접 하면 안 됨. 큐에 복사만 하고 즉시 반환(push가 릴레이 태스크를 깨움) */
     int8_t rssi = info->rx_ctrl ? (int8_t)info->rx_ctrl->rssi : 0;
@@ -96,6 +100,13 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
 /* 2026-09-26(설계 3단계) — 무선 수신이 아닌 곳(RELIABLE_SEND 대행 완료 콜백)에서 콘으로 보낼 app 메시지를
  * 경로 분류에 맞는 송신 큐에 넣음(복사). 호출 문맥에서 CAN 송신(블로킹)을 하지 않게 하려는 것 */
+uint32_t bridge_esp_now_data_backlog(void)
+{
+    uint32_t count = 0, hwm = 0;
+    can_bridge_queue_get_stats(&s_data_in.q, &count, &hwm);
+    return count;
+}
+
 void bridge_esp_now_queue_to_cntl(const uint8_t *msg, size_t len)
 {
     incoming_path_t *path = (can_bridge_path_for_app_msg(msg, len) == CAN_BRIDGE_CAT_DATA) ? &s_data_in : &s_ctrl_in;
@@ -133,6 +144,7 @@ static void relay_task(void *arg)
                 }
             }
             can_bridge_queue_pop_free(msg);
+            if (path == &s_data_in) bridge_sr_on_tx_progress();  /* SR 흐름 제어 — 미룬 WINDOW_STATUS_ACK */
         }
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
@@ -225,6 +237,7 @@ void bridge_esp_now_init(void)
      * (초기화 전 큐에 push하면 드롭 금지 정책상 abort) */
     can_bridge_queue_init(&s_ctrl_in.q);
     can_bridge_queue_init(&s_data_in.q);
+    bridge_sr_init();
 
     static StaticTask_t s_ctrl_relay_tcb, s_data_relay_tcb;
     StackType_t *ctrl_relay_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);

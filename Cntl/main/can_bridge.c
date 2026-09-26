@@ -1,5 +1,6 @@
 #include "can_bridge.h"
 #include "can_bridge_link.h"
+#include "photo_rx.h"
 
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
@@ -215,6 +216,10 @@ static void can_consume_task(void *arg)
                     deliver_relay(&hdr, body, body_len);
                 } else if (hdr.msg_type == CAN_DATA_RELIABLE_RESULT) {
                     deliver_reliable_result(&hdr, body, body_len);
+                } else if (hdr.msg_type == CAN_DATA_SR_META || hdr.msg_type == CAN_DATA_SR_CHUNK ||
+                           hdr.msg_type == CAN_DATA_SR_DONE) {
+                    /* 2026-09-26(설계 §4, 4단계) — 브가 순서를 맞춘 사진 스트림(Data 경로 → data_consume) */
+                    photo_rx_on_sr_stream(hdr.msg_type, hdr.mac, body, body_len);
                 }
             }
             can_bridge_queue_pop_free(data);

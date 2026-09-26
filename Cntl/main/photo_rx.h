@@ -35,6 +35,10 @@ bool photo_rx_is_transacting_with(const uint8_t *mac);
  * 필요, photo_rx.c의 handle_capture_status() 참고) */
 void photo_rx_on_recv(uint8_t msg_type, const uint8_t *src_mac, const uint8_t *data, int len);
 
+/* 2026-09-26(설계 §4, 4단계) — 브가 보내는 순서 맞춘 사진 스트림(CAN_DATA_SR_META/CHUNK/DONE). can_bridge.c의
+ * Data 소비 태스크가 부름. 캠별 세션, 받는 대로 SD에 이어 쓰고 DONE에서 CRC 검증 후 저장 */
+void photo_rx_on_sr_stream(uint8_t app_type, const uint8_t *mac, const uint8_t *body, size_t len);
+
 /* ────────────────────────────────────────────────────────────
  * 1. 단일 사진 수신 — capture_now/fetch_by_id 공용
  * ──────────────────────────────────────────────────────────── */
@@ -48,7 +52,7 @@ typedef enum {
 photo_rx_state_t photo_rx_get_state(void);
 
 /* READY 상태일 때 방금 완료돼서 캐시에 들어간 file_id — 이걸로 photo_rx_cache_get() 조회 */
-uint32_t photo_rx_get_ready_file_id(void);
+
 
 /* READY 확인 후 IDLE로 되돌릴 때 사용(list_ack()와 동일 패턴) */
 void photo_rx_ready_ack(void);
@@ -58,11 +62,11 @@ void photo_rx_clear(void);
 
 /* 압축 JPEG 원본 캐시 조회 — 소유권은 안 넘어옴(내부 캐시가 계속 들고 있다가 꽉 차면
  * 오래된 것부터 교체), 호출부는 포인터로 그때그때 디코드만 해서 씀. 없으면 false */
-bool photo_rx_cache_get(uint32_t file_id, const uint8_t **out_data, size_t *out_len);
+
 
 /* RECEIVING 중 진행률(청크 수신/전체) — fetch 진행 팝업이 퍼센트/ETA 표시에 씀.
  * RECEIVING이 아닐 땐 의미 없는 값일 수 있으니 호출부가 state를 먼저 확인할 것 */
-void photo_rx_get_chunk_progress(uint16_t *received, uint16_t *total);
+
 
 /* 2026-09-04(사용자 설계: "이벤트로 처리해") — 사진 수신이 완료(성공/실패 둘 다)되는 바로 그
  * 지점에서 발생. 앱(UI)과 웹(httpd) 둘 다 폴링 대신 이 시점에 반응해야 함:
@@ -76,8 +80,7 @@ void photo_rx_set_ready_cb(photo_rx_event_cb_t cb);
 /* file_id가 캐시에 들어올 때까지(성공) 또는 이번 수신이 실패로 끝날 때까지 이벤트로
  * 블로킹 대기(폴링 아님, xSemaphoreTake) — timeout_ms 안에 못 받으면 false.
  * httpd 태스크에서 부르는 용도(main.c) */
-bool photo_rx_wait_cached(uint32_t file_id, uint32_t timeout_ms,
-                                const uint8_t **out_data, size_t *out_len);
+
 
 /* ────────────────────────────────────────────────────────────
  * 2. 지금촬영 — 진행 팝업 단계 추적(사진 전송은 안 함, 위 헤더 설명 참고)

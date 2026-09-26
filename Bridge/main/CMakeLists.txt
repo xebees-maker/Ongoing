@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "ui_screen.c"
         "bridge_esp_now.c"
+        "bridge_sr.c"
         "can_link.c"
 
         "../components/waveshare_rgb_lcd_port.c"

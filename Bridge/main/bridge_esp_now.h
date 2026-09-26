@@ -22,3 +22,6 @@ void bridge_esp_now_ensure_peer(const uint8_t mac[6]);
 /* 2026-09-26 — 콘으로 보낼 app 메시지(app_header+body)를 경로별 송신 큐에 넣음(복사, 블로킹 없음).
  * RELIABLE_SEND 대행 완료 콜백처럼 CAN 송신을 직접 하면 안 되는 문맥에서 씀 */
 void bridge_esp_now_queue_to_cntl(const uint8_t *msg, size_t len);
+
+/* 2026-09-26(4단계) — CAN Data 송신 큐에 쌓인 메시지 수(SR 흐름 제어용) */
+uint32_t bridge_esp_now_data_backlog(void);
