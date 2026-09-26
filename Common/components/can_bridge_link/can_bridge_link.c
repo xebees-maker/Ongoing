@@ -1,4 +1,5 @@
 #include "can_bridge_link.h"
+#include "esp_now_link.h"  /* 경로 분류용 ESP-NOW msg_type */
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
 #include "esp_heap_caps.h"
@@ -442,4 +443,30 @@ esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
     esp_err_t err = can_bridge_send_locked(ctx, msg, len);
     xSemaphoreGive(ctx->send_mutex);
     return err;
+}
+
+/* ---- 경로 분류(설계 Docs/설계_CAN링크_2026-09-26.md §2) ---- */
+can_bridge_category_t can_bridge_path_for_esp_now_msg(uint8_t esp_now_msg_type)
+{
+    switch (esp_now_msg_type) {
+        case ESP_NOW_MSG_PHOTO_META:
+        case ESP_NOW_MSG_PHOTO_META_ACK:
+        case ESP_NOW_MSG_PHOTO_CHUNK:
+        case ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST:
+        case ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK:
+        case ESP_NOW_MSG_PHOTO_DONE:
+        case ESP_NOW_MSG_PHOTO_DONE_ACK:
+            return CAN_BRIDGE_CAT_DATA;
+        default:
+            return CAN_BRIDGE_CAT_CONTROL;
+    }
+}
+
+can_bridge_category_t can_bridge_path_for_app_msg(const uint8_t *msg, size_t len)
+{
+    if (!msg || len < CAN_BRIDGE_APP_HEADER_LEN) return CAN_BRIDGE_CAT_CONTROL;
+    if (msg[0] == CAN_DATA_RELAY && len >= CAN_BRIDGE_APP_HEADER_LEN + 2) {
+        return can_bridge_path_for_esp_now_msg(msg[CAN_BRIDGE_APP_HEADER_LEN + 1]);
+    }
+    return CAN_BRIDGE_CAT_CONTROL;
 }

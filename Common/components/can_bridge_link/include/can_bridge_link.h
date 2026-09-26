@@ -82,16 +82,19 @@ typedef struct __attribute__((packed)) {
 #define CAN_BRIDGE_APP_HEADER_LEN 8  /* sizeof(can_bridge_app_header_t), packed */
 
 /* CONTROL 카테고리 메시지 타입 — 전부 "어쩔 수 없는 것"만 브릿지가 직접 판단, 나머지는
- * 원시 사실만 실어 나름(투명성 우선 원칙) */
+ * 원시 사실만 실어 나름(투명성 우선 원칙).
+ * 2026-09-26(설계 Docs/설계_CAN링크_2026-09-26.md §2) — app msg_type은 두 경로가 한 번호 공간을
+ * 공유(RELAY/RELIABLE_SEND/RELIABLE_RESULT는 분류에 따라 어느 경로로도 감) → CTRL 번호를 DATA
+ * 번호(1~3)와 안 겹치게 0x11~로 옮김(그때까지 어디서도 안 쓰였음) */
 typedef enum {
-    CAN_CTRL_PING = 1,             /* 콘->브릿지: 생존확인 */
-    CAN_CTRL_PONG = 2,             /* 브릿지->콘 */
-    CAN_CTRL_ADVERTISE_NOTIFY = 3, /* 브릿지->콘: mac이 광고중, flags=rssi(부호있는 값이지만 1B로 절단) */
-    CAN_CTRL_CONNECT_INSTRUCT = 4, /* 콘->브릿지: mac에 접속 시도해 */
-    CAN_CTRL_CONNECT_RESULT = 5,   /* 브릿지->콘: mac 접속 결과, flags=1(성공)/0(실패) */
-    CAN_CTRL_LIVENESS_EVENT = 6,   /* 브릿지->콘: mac에서 원시 수신 이벤트 발생(생존판단은 콘이) */
-    CAN_CTRL_SET_CHANNEL = 7,      /* 콘->브릿지: flags=채널번호(1~13) */
-    CAN_CTRL_RESET = 8,            /* 콘->브릿지: 브릿지 자체 재시작 요청 */
+    CAN_CTRL_PING = 0x11,          /* 콘->브릿지: 생존확인 */
+    CAN_CTRL_PONG = 0x12,           /* 브릿지->콘 */
+    CAN_CTRL_ADVERTISE_NOTIFY = 0x13, /* 브릿지->콘: mac이 광고중, flags=rssi(부호있는 값이지만 1B로 절단) */
+    CAN_CTRL_CONNECT_INSTRUCT = 0x14, /* 콘->브릿지: mac에 접속 시도해 */
+    CAN_CTRL_CONNECT_RESULT = 0x15, /* 브릿지->콘: mac 접속 결과, flags=1(성공)/0(실패) */
+    CAN_CTRL_LIVENESS_EVENT = 0x16, /* 브릿지->콘: mac에서 원시 수신 이벤트 발생(생존판단은 콘이) */
+    CAN_CTRL_SET_CHANNEL = 0x17, /* 콘->브릿지: flags=채널번호(1~13) */
+    CAN_CTRL_RESET = 0x18, /* 콘->브릿지: 브릿지 자체 재시작 요청 */
 } can_bridge_ctrl_type_t;
 
 /* DATA 카테고리 — 브릿지는 이 안의 CASK(esp_now_link.h) 내용을 해석하지 않는 투명 릴레이.
@@ -113,6 +116,15 @@ typedef enum {
                                        (한 MAC당 미결 요청 1개 원칙, 예전 I2C 설계와 동일 근거 —
                                        seq 필드 불필요) */
 } can_bridge_data_type_t;
+
+/* ---- 경로 분류(설계 §2) — 판단은 이 두 함수에만 둠(콘/브가 각자 판단하면 언젠가 어긋남) ----
+ * SR(사진 전송) 7종만 DATA, 나머지 전부 CONTROL:
+ *   PHOTO_META / META_ACK / PHOTO_CHUNK / WINDOW_STATUS_REQUEST / WINDOW_STATUS_ACK / PHOTO_DONE / DONE_ACK */
+can_bridge_category_t can_bridge_path_for_esp_now_msg(uint8_t esp_now_msg_type);
+
+/* CAN app 메시지(app_header + body) 전체 기준: RELAY는 안에 실린 ESP-NOW 프레임의 msg_type(body[1])으로,
+ * RELIABLE_SEND/RELIABLE_RESULT·CTRL_*은 항상 CONTROL(신뢰 요청·결과·제어) */
+can_bridge_category_t can_bridge_path_for_app_msg(const uint8_t *msg, size_t len);
 
 #define CAN_BRIDGE_RELIABLE_MAX_ACCEPT_TYPES 4
 

@@ -6,4 +6,5 @@ idf_component_register(
     REQUIRES
         esp_driver_twai
         heap
+        esp_now_link
 )
