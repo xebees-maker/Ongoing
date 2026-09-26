@@ -230,10 +230,12 @@ void bridge_esp_now_init(void)
     StackType_t *ctrl_relay_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *data_relay_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     /* 2026-09-25(사용자 설계 — 코어 분리) — ESP-NOW는 코어 0(Wi-Fi 태스크와 같은 쪽), CAN은
-     * 코어 1. 2026-09-26(설계 §3) — Control 17 / Data(SR) 15 */
-    TaskHandle_t ctrl_relay = xTaskCreateStaticPinnedToCore(relay_task, "ctrl_relay", 4096 / sizeof(StackType_t), &s_ctrl_in, 17, ctrl_relay_stack, &s_ctrl_relay_tcb, 0);
+     * 코어 1. 2026-09-26(설계 §3) — Control 17 / Data(SR) 15
+     * 2026-09-26(사용자 설계 — CAN 관련은 전부 코어 1) — 릴레이는 CAN 송신을 하므로 TWAI 인터럽트와 같은 코어 1
+     * (can_bridge_node_start_on_core 주석 참고 — 다른 코어에서 보내면 송신이 영구 정지할 수 있음) */
+    TaskHandle_t ctrl_relay = xTaskCreateStaticPinnedToCore(relay_task, "ctrl_relay", 4096 / sizeof(StackType_t), &s_ctrl_in, 17, ctrl_relay_stack, &s_ctrl_relay_tcb, 1);
     can_bridge_queue_set_notify_task(&s_ctrl_in.q, ctrl_relay);
-    TaskHandle_t data_relay = xTaskCreateStaticPinnedToCore(relay_task, "data_relay", 4096 / sizeof(StackType_t), &s_data_in, 15, data_relay_stack, &s_data_relay_tcb, 0);
+    TaskHandle_t data_relay = xTaskCreateStaticPinnedToCore(relay_task, "data_relay", 4096 / sizeof(StackType_t), &s_data_in, 15, data_relay_stack, &s_data_relay_tcb, 1);
     can_bridge_queue_set_notify_task(&s_data_in.q, data_relay);
 
     ESP_ERROR_CHECK(esp_now_init());

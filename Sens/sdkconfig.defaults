@@ -1,0 +1,4 @@
+# 2026-09-26 — 콘솔은 내장 USB(USB-Serial-JTAG)만, UART0 미사용(콘/브/캠과 동일)
+# 주의: 이미 있는 sdkconfig에는 반영되지 않음 — 적용 방법은 Docs/한일_2026-09-26.txt 할 일 17번
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y

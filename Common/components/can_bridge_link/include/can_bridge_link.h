@@ -32,6 +32,7 @@
 #include <stddef.h>
 #include "esp_err.h"
 #include "esp_twai.h"
+#include "esp_twai_onchip.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -217,14 +218,26 @@ typedef struct can_bridge_ctx can_bridge_ctx_t;
  * 빈 슬롯은 카운팅 세마포어로 기다림(이벤트 방식). 크기: 드라이버 송신 큐 깊이(8)+전송 중 1개 여유 */
 #define CAN_BRIDGE_TX_POOL_SIZE 16
 
-/* twai_node_enable() 전에 1회 호출 */
+/* twai_node_enable() 전에 1회 호출(can_bridge_node_start_on_core()가 대신 불러줌) */
 void can_bridge_tx_pool_init(void);
+/* 2026-09-26(사용자 설계 — CAN 관련은 전부 코어 1) — TWAI 인터럽트는 twai_new_node_onchip()을 부른 코어에
+ * 잡히므로, core에 고정된 임시 태스크에서 노드 생성 + 송신 풀 초기화 + 콜백 등록 + 시작을 하고 끝날 때까지
+ * 기다림. 이후 모든 CAN 송신(can_bridge_tx_frame/can_bridge_send)은 같은 core에 고정된 태스크에서 해야 함
+ * — 다른 코어에서 보내면 on_tx_done(송신 권한 반납) 직후~드라이버가 hw_busy를 내리기 전 사이에 끼어들어
+ * 프레임이 드라이버 큐에 갇히고 송신이 영구 정지함 */
+esp_err_t can_bridge_node_start_on_core(const twai_onchip_node_config_t *node_cfg, const twai_event_callbacks_t *cbs,
+                                        int core, twai_node_handle_t *out_node);
 /* data(len<=8)를 풀 슬롯에 복사해 id로 송신 큐에 넣음. timeout_ms는 빈 슬롯 대기+드라이버 큐 대기
  * 전체 상한(-1이면 무한). 실패 시 슬롯은 즉시 반납됨 */
 esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_t *data, uint8_t len, int timeout_ms);
 /* 앱의 twai on_tx_done 콜백(ISR)에서 호출 — 끝난 프레임의 슬롯을 반납. 반환값은 더 높은 우선순위
  * 태스크를 깨웠는지(콜백의 반환값으로 그대로 넘기면 됨) */
 bool can_bridge_tx_pool_on_done_isr(const twai_tx_done_event_data_t *edata);
+/* 2026-09-26 — 앱의 twai on_state_change 콜백(ISR)에서 new_sta==TWAI_ERROR_BUS_OFF일 때 호출. 버스 오프가
+ * 되면 드라이버는 하드웨어에 있던 프레임을 on_tx_done 없이 버림 → 그 슬롯과 송신 권한을 여기서 반납(그
+ * 프레임은 실패로 끝남). 안 하면 송신 권한이 영영 안 돌아와 이후 모든 송신이 타임아웃(실기: 브 bus_off 뒤
+ * TX 고정, Relay fail ERR-TIMEOUT 연속). 반환값은 on_tx_done과 같음 */
+bool can_bridge_tx_pool_on_bus_off_isr(void);
 
 can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id);
 /* CAN RX 콜백에서 PCI==FC인 프레임을 받으면, 그 프레임을 기다리고 있는 송신측 ctx에 대해

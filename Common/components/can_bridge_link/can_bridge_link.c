@@ -245,6 +245,12 @@ static SemaphoreHandle_t s_tx_free_sem;  /* 빈 슬롯 개수(카운팅) */
 static SemaphoreHandle_t s_tx_inflight_sem;
 static StaticSemaphore_t s_tx_inflight_sem_buf;
 static portMUX_TYPE s_tx_lock = portMUX_INITIALIZER_UNLOCKED;
+/* 2026-09-26 — 지금 드라이버에 들어가 있는 프레임(s_tx_inflight_sem을 쥔 프레임). on_tx_done이나 버스 오프
+ * 정리(can_bridge_tx_pool_on_bus_off_isr) 중 먼저 온 쪽만 반납 — 둘 다 오더라도 한 번만 반납되게 s_tx_lock
+ * 안에서 확인하고 비움 */
+static tx_slot_t *s_inflight_slot = NULL;
+/* CAN 노드(=TWAI 인터럽트)가 잡힌 코어 — can_bridge_node_start_on_core()가 기록. -1이면 미지정 */
+static int s_tx_core = -1;
 
 void can_bridge_tx_pool_init(void)
 {
@@ -276,6 +282,14 @@ esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_
         return ESP_ERR_INVALID_STATE;
     }
     if (!node || len > 8 || (len > 0 && !data)) return ESP_ERR_INVALID_ARG;
+    if (s_tx_core >= 0 && xTaskGetCoreID(xTaskGetCurrentTaskHandle()) != s_tx_core) {
+        /* 설계 위반(can_bridge_node_start_on_core 주석 참고) — 한 번만 알림 */
+        static bool s_warned = false;
+        if (!s_warned) {
+            s_warned = true;
+            ESP_LOGE(TAG, "CAN 송신이 코어 %d에 고정되지 않은 태스크(%s)에서 호출됨 — 송신 정지 위험", s_tx_core, pcTaskGetName(NULL));
+        }
+    }
 
     TickType_t start = xTaskGetTickCount();
     TickType_t total = (timeout_ms < 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
@@ -319,13 +333,41 @@ esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_
         tx_slot_release(slot);
         return ESP_ERR_TIMEOUT;
     }
+    taskENTER_CRITICAL(&s_tx_lock);
+    s_inflight_slot = slot;
+    taskEXIT_CRITICAL(&s_tx_lock);
     esp_err_t err = twai_node_transmit(node, &slot->frame, 0);
     if (err != ESP_OK) {
-        /* 드라이버에 못 들어감 — ISR이 이 슬롯을 볼 일이 없으니 바로 반납, 송신 권한도 돌려줌 */
-        xSemaphoreGive(s_tx_inflight_sem);
-        tx_slot_release(slot);
+        /* 드라이버에 못 들어감(버스 오프 중이면 INVALID_STATE) — ISR이 이 슬롯을 볼 일이 없으니 바로 반납,
+         * 송신 권한도 돌려줌 */
+        taskENTER_CRITICAL(&s_tx_lock);
+        bool mine = (s_inflight_slot == slot);
+        if (mine) s_inflight_slot = NULL;
+        taskEXIT_CRITICAL(&s_tx_lock);
+        if (mine) {  /* 아니면 그 사이 버스 오프 정리가 이미 반납함 */
+            xSemaphoreGive(s_tx_inflight_sem);
+            tx_slot_release(slot);
+        }
     }
     return err;
+}
+
+/* s_inflight_slot이 slot(NULL이면 무엇이든)이면 비우고 반납 — on_tx_done과 버스 오프 정리 공용 */
+static bool release_inflight_isr(tx_slot_t *slot)
+{
+    portENTER_CRITICAL_ISR(&s_tx_lock);
+    tx_slot_t *cur = s_inflight_slot;
+    bool mine = cur && (!slot || cur == slot);
+    if (mine) {
+        s_inflight_slot = NULL;
+        cur->in_use = 0;
+    }
+    portEXIT_CRITICAL_ISR(&s_tx_lock);
+    if (!mine) return false;  /* 이미 다른 쪽이 반납함 — 슬롯은 재사용 중일 수 있으니 건드리지 않음 */
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_tx_free_sem, &woken);
+    xSemaphoreGiveFromISR(s_tx_inflight_sem, &woken);  /* 다음 프레임 넣어도 됨 */
+    return woken == pdTRUE;
 }
 
 bool can_bridge_tx_pool_on_done_isr(const twai_tx_done_event_data_t *edata)
@@ -337,14 +379,48 @@ bool can_bridge_tx_pool_on_done_isr(const twai_tx_done_event_data_t *edata)
         if (&s_tx_slots[i].frame == f) { slot = &s_tx_slots[i]; break; }
     }
     if (!slot) return false;  /* 이 풀에서 나간 프레임이 아님 */
+    return release_inflight_isr(slot);
+}
 
-    portENTER_CRITICAL_ISR(&s_tx_lock);
-    slot->in_use = 0;
-    portEXIT_CRITICAL_ISR(&s_tx_lock);
-    BaseType_t woken = pdFALSE;
-    xSemaphoreGiveFromISR(s_tx_free_sem, &woken);
-    xSemaphoreGiveFromISR(s_tx_inflight_sem, &woken);  /* 다음 프레임 넣어도 됨 */
-    return woken == pdTRUE;
+bool can_bridge_tx_pool_on_bus_off_isr(void)
+{
+    if (!s_tx_slots || !s_tx_free_sem) return false;
+    return release_inflight_isr(NULL);
+}
+
+typedef struct {
+    const twai_onchip_node_config_t *cfg;
+    const twai_event_callbacks_t *cbs;
+    twai_node_handle_t node;
+    esp_err_t err;
+    TaskHandle_t waiter;
+} node_start_args_t;
+
+static void node_start_task(void *arg)
+{
+    node_start_args_t *a = (node_start_args_t *)arg;
+    a->err = twai_new_node_onchip(a->cfg, &a->node);
+    if (a->err == ESP_OK) {
+        can_bridge_tx_pool_init();
+        a->err = twai_node_register_event_callbacks(a->node, a->cbs, NULL);
+        if (a->err == ESP_OK) a->err = twai_node_enable(a->node);
+    }
+    xTaskNotifyGive(a->waiter);
+    vTaskDelete(NULL);
+}
+
+esp_err_t can_bridge_node_start_on_core(const twai_onchip_node_config_t *node_cfg, const twai_event_callbacks_t *cbs,
+                                        int core, twai_node_handle_t *out_node)
+{
+    if (!node_cfg || !cbs || !out_node) return ESP_ERR_INVALID_ARG;
+    node_start_args_t a = { .cfg = node_cfg, .cbs = cbs, .node = NULL, .err = ESP_FAIL, .waiter = xTaskGetCurrentTaskHandle() };
+    if (xTaskCreatePinnedToCore(node_start_task, "can_node_start", 3072, &a, 17, NULL, core) != pdPASS) return ESP_ERR_NO_MEM;
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (a.err != ESP_OK) return a.err;
+    s_tx_core = core;
+    *out_node = a.node;
+    ESP_LOGI(TAG, "TWAI 노드 시작(인터럽트 코어 %d)", core);
+    return ESP_OK;
 }
 
 /* ============================== 송신(ISO-TP 분할) ============================== */

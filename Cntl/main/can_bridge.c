@@ -61,12 +61,14 @@ typedef struct {
 static QueueHandle_t s_raw_frame_q;
 static volatile uint32_t s_raw_drop = 0;  /* ISR 원시 프레임 큐가 차서 버린 수 */
 /* 2026-09-26(버스 에러 조사) — 에러를 트래픽 양으로 나눠 비교하려고 셈 */
-static volatile uint32_t s_rx_frames = 0, s_tx_frames = 0, s_bus_errs = 0;
+static volatile uint32_t s_rx_frames = 0, s_tx_frames = 0, s_bus_errs = 0, s_state_changes = 0;
+
+static TaskHandle_t s_status_task = NULL;  /* 버스 오프 시 on_state_change가 깨움 */
 
 static twai_frame_t s_rx_frame;
 static uint8_t       s_rx_buf[8];
 
-static IRAM_ATTR bool on_rx_done(twai_node_handle_t handle, const twai_rx_done_event_data_t *edata, void *ctx)
+static bool on_rx_done(twai_node_handle_t handle, const twai_rx_done_event_data_t *edata, void *ctx)
 {
     BaseType_t woken = pdFALSE;
     if (twai_node_receive_from_isr(handle, &s_rx_frame) == ESP_OK) {
@@ -91,18 +93,25 @@ static bool on_tx_done(twai_node_handle_t handle, const twai_tx_done_event_data_
     return can_bridge_tx_pool_on_done_isr(edata);
 }
 
-static IRAM_ATTR bool on_error(twai_node_handle_t handle, const twai_error_event_data_t *edata, void *ctx)
+static bool on_error(twai_node_handle_t handle, const twai_error_event_data_t *edata, void *ctx)
 {
-    s_bus_errs++;
-    ESP_EARLY_LOGW(TAG, "버스 에러: 0x%x", (unsigned)edata->err_flags.val);
+    /* 0x1(arb_lost, 중재 패배)는 CAN 정상 동작(동시 송신 시 ID 높은 쪽이 양보) — 에러 수에서 제외 */
+    if (edata->err_flags.val & ~0x1u) s_bus_errs++;
     return false;
 }
 
-static IRAM_ATTR bool on_state_change(twai_node_handle_t handle, const twai_state_change_event_data_t *edata, void *ctx)
+static bool on_state_change(twai_node_handle_t handle, const twai_state_change_event_data_t *edata, void *ctx)
 {
-    static const char *names[] = {"error_active", "error_warning", "error_passive", "bus_off"};
-    ESP_EARLY_LOGW(TAG, "상태 전이: %s -> %s", names[edata->old_sta], names[edata->new_sta]);
-    return false;
+    /* 2026-09-26 — ISR 안에서 로그 안 찍음(콘솔 출력 대기로 ISR이 붙잡힘). 현재 상태는 can_status_task가 찍음 */
+    s_state_changes++;
+    BaseType_t woken = pdFALSE;
+    if (edata->new_sta == TWAI_ERROR_BUS_OFF) {
+        /* 드라이버가 버린 송신 중 프레임 정리(can_bridge_tx_pool_on_bus_off_isr 주석) + 복구를 5초 주기 확인에
+         * 맡기지 않고 상태 태스크를 바로 깨워 twai_node_recover() */
+        if (can_bridge_tx_pool_on_bus_off_isr()) woken = pdTRUE;
+        if (s_status_task) vTaskNotifyGiveFromISR(s_status_task, &woken);
+    }
+    return woken == pdTRUE;
 }
 
 static void can_rx_task(void *arg)
@@ -224,24 +233,59 @@ static void can_status_task(void *arg)
             uint32_t q_count, q_hwm, cq_count, cq_hwm;
             can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
             can_bridge_queue_get_stats(&s_ctrl_complete_q, &cq_count, &cq_hwm);
-            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u) 수신버림=%u RX=%u TX=%u 버스에러=%u",
+            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u) 수신버림=%u RX=%u TX=%u 버스에러=%u 상태전이=%u",
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
                      (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm, (unsigned)s_raw_drop,
-                     (unsigned)s_rx_frames, (unsigned)s_tx_frames, (unsigned)s_bus_errs);
+                     (unsigned)s_rx_frames, (unsigned)s_tx_frames, (unsigned)s_bus_errs, (unsigned)s_state_changes);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
         }
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));  /* 5초 주기, 버스 오프면 즉시 */
     }
 }
 
 /* 2026-09-26(설계 §2, 2-④) — 콘→브 송신: 경로 분류(can_bridge_path_for_app_msg)로 Control/Data ctx
  * 선택. ISO-TP 세션 1개 원칙은 ctx마다의 송신 뮤텍스(can_bridge_send 내부)가 지킴 — 예전의 별도
  * s_send_mutex는 그 중복이라 제거(두 경로가 서로를 기다리지 않게) */
+/* 2026-09-26(사용자 설계 — CAN 관련은 전부 코어 1) — CAN 송신은 TWAI 인터럽트와 같은 코어 1에 고정된 태스크에서만
+ * 해야 함(can_bridge_node_start_on_core 주석). 콘은 node_request 작업 태스크(코어 미고정), UI 등 여러 곳에서
+ * 보내므로, 코어 1에 고정되지 않은 호출은 경로별 코어 1 송신 태스크(Control 17 / Data 15)에 넘기고 결과를 기다림.
+ * 요청은 호출자 스택에 있고 완료 신호까지 호출자가 기다리므로 복사 없음 */
+typedef struct {
+    can_bridge_ctx_t *ctx;
+    const uint8_t *msg;
+    size_t len;
+    esp_err_t err;
+    SemaphoreHandle_t done;
+    StaticSemaphore_t done_buf;
+} tx_req_t;
+static QueueHandle_t s_ctrl_tx_q, s_data_tx_q;
+
+static void can_tx_task(void *arg)
+{
+    QueueHandle_t q = (QueueHandle_t)arg;
+    for (;;) {
+        tx_req_t *r;
+        if (xQueueReceive(q, &r, portMAX_DELAY) == pdTRUE) {
+            r->err = can_bridge_send(r->ctx, r->msg, r->len);
+            xSemaphoreGive(r->done);
+        }
+    }
+}
+
 static esp_err_t send_app_msg(const uint8_t *msg, size_t len)
 {
-    can_bridge_ctx_t *ctx = (can_bridge_path_for_app_msg(msg, len) == CAN_BRIDGE_CAT_CONTROL) ? s_ctrl_ctx : s_data_ctx;
+    bool control = (can_bridge_path_for_app_msg(msg, len) == CAN_BRIDGE_CAT_CONTROL);
+    can_bridge_ctx_t *ctx = control ? s_ctrl_ctx : s_data_ctx;
     if (!ctx) return ESP_ERR_INVALID_STATE;
-    return can_bridge_send(ctx, msg, len);
+    if (xTaskGetCoreID(xTaskGetCurrentTaskHandle()) == 1) return can_bridge_send(ctx, msg, len);
+
+    tx_req_t r = { .ctx = ctx, .msg = msg, .len = len, .err = ESP_FAIL };
+    r.done = xSemaphoreCreateBinaryStatic(&r.done_buf);
+    tx_req_t *rp = &r;
+    xQueueSend(control ? s_ctrl_tx_q : s_data_tx_q, &rp, portMAX_DELAY);
+    xSemaphoreTake(r.done, portMAX_DELAY);
+    vSemaphoreDelete(r.done);
+    return r.err;
 }
 
 esp_err_t can_bridge_relay_send(const uint8_t *mac, const void *data, size_t len)
@@ -350,9 +394,12 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
 
     static StaticQueue_t s_raw_frame_q_struct;
     /* 2026-09-26 — 16칸은 두 경로가 동시에 흐를 때 모자라서 대량으로 버려짐(실기: 콘 2901개/90초 → CF 순번
-         * 어긋남). 256칸으로 늘리고, ISR이 쓰므로 PSRAM이 아닌 내부 RAM에(플래시 쓰기 중 PSRAM 접근 위험) */
+         * 어긋남). 256칸으로 늘림.
+         * 2026-09-26(사용자 설계 — 가급적 PSRAM) — PSRAM에 둠. TWAI 인터럽트는 IRAM 플래그 없이 할당돼서
+         * 플래시 쓰기(캐시 꺼짐) 동안엔 IDF가 아예 막아두므로, 그 사이 PSRAM에 접근할 일이 없음 */
         #define RAW_FRAME_Q_LEN 256
-        uint8_t *raw_frame_q_storage = (uint8_t *)heap_caps_malloc(RAW_FRAME_Q_LEN * sizeof(raw_frame_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        uint8_t *raw_frame_q_storage = (uint8_t *)heap_caps_malloc(RAW_FRAME_Q_LEN * sizeof(raw_frame_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!raw_frame_q_storage) raw_frame_q_storage = (uint8_t *)heap_caps_malloc(RAW_FRAME_Q_LEN * sizeof(raw_frame_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     s_raw_frame_q = xQueueCreateStatic(RAW_FRAME_Q_LEN, sizeof(raw_frame_t), raw_frame_q_storage, &s_raw_frame_q_struct);
 
     s_rx_frame.buffer = s_rx_buf;
@@ -369,6 +416,8 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     if (!ctrl_buf) ctrl_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_8BIT);
     can_bridge_reassembly_init(&s_ctrl_reasm, ctrl_buf, CAN_BRIDGE_DATA_BUF_LEN);
 
+    /* 2026-09-26(사용자 설계 — CAN 관련은 전부 코어 1) — TWAI 인터럽트를 코어 1에 잡음(노드를 코어 1 태스크에서
+     * 생성). 이 함수는 node_hub_init()→app_main(코어 0)에서 불림 */
     twai_onchip_node_config_t node_cfg = {
         .io_cfg = {
             .tx = CAN_BRIDGE_TX_GPIO,
@@ -377,24 +426,29 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
             .bus_off_indicator = GPIO_NUM_NC,
         },
         .bit_timing.bitrate = CAN_BRIDGE_BITRATE,
-        .fail_retry_cnt = 3,
+        .fail_retry_cnt = -1,  /* 2026-09-26(사용자 지시) — CAN 표준 동작: 성공할 때까지 하드웨어가 재전송(버스 오프는 on_state_change에서 정리+즉시 복구) */
         .tx_queue_depth = 8,
     };
-    esp_err_t err = twai_new_node_onchip(&node_cfg, &s_node);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "twai_new_node_onchip 실패: %s", esp_err_to_name(err));
-        return;
-    }
-
-    can_bridge_tx_pool_init();
     twai_event_callbacks_t cbs = {
         .on_tx_done = on_tx_done,
         .on_rx_done = on_rx_done,
         .on_error = on_error,
         .on_state_change = on_state_change,
     };
-    ESP_ERROR_CHECK(twai_node_register_event_callbacks(s_node, &cbs, NULL));
-    ESP_ERROR_CHECK(twai_node_enable(s_node));
+    esp_err_t err = can_bridge_node_start_on_core(&node_cfg, &cbs, 1, &s_node);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "CAN 노드 시작 실패: %s", esp_err_to_name(err));
+        return;
+    }
+
+    /* 코어 1 송신 태스크(send_app_msg 주석) — ctx보다 먼저 만들어 둠(ctx가 생기는 순간부터 send_app_msg가 쓸 수 있음) */
+    s_ctrl_tx_q = xQueueCreate(8, sizeof(tx_req_t *));
+    s_data_tx_q = xQueueCreate(8, sizeof(tx_req_t *));
+    static StaticTask_t s_ctrl_tx_tcb, s_data_tx_tcb;
+    StackType_t *ctrl_tx_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
+    StackType_t *data_tx_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
+    xTaskCreateStaticPinnedToCore(can_tx_task, "ctrl_tx", 3072 / sizeof(StackType_t), s_ctrl_tx_q, 17, ctrl_tx_stack, &s_ctrl_tx_tcb, 1);
+    xTaskCreateStaticPinnedToCore(can_tx_task, "data_tx", 3072 / sizeof(StackType_t), s_data_tx_q, 15, data_tx_stack, &s_data_tx_tcb, 1);
 
     s_data_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA);
     s_ctrl_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL);
@@ -415,7 +469,7 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "data_consume", 4096 / sizeof(StackType_t), &s_data_complete_q, 15, can_consume_stack, &s_can_consume_tcb, 1);
     can_bridge_queue_set_notify_task(&s_data_complete_q, consume_task);
     xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
-    xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
+    s_status_task = xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
 
     ESP_LOGI(TAG, "콘 CAN 링크 시작됨(TX=%d RX=%d %dbps)", CAN_BRIDGE_TX_GPIO, CAN_BRIDGE_RX_GPIO, CAN_BRIDGE_BITRATE);
 }
