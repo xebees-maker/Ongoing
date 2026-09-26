@@ -45,34 +45,18 @@ typedef enum {
                                         * 하므로 reliable 스택으로 승격(node_hub.c 참고) */
     ESP_NOW_MSG_CAPTURE_STATUS = 12,       /* CAM -> Cntl: 지금촬영 진행상태(접수/성공/실패) —
                                              * Cntl UI가 진행 팝업에 단계별로 표시하려고 추가 */
-    ESP_NOW_MSG_PHOTO_LIST_REQUEST = 13,   /* Cntl -> CAM: 저장된 사진 "목록"만 요청(내용 전송 없음) */
-    ESP_NOW_MSG_PHOTO_LIST_ENTRY = 14,     /* CAM -> Cntl: 목록 항목 1개(파일당 1개씩 반복 전송) */
-    ESP_NOW_MSG_PHOTO_LIST_DONE = 15,      /* CAM -> Cntl: 목록 전송 끝 */
-    ESP_NOW_MSG_PHOTO_DELETE_REQUEST = 16, /* Cntl -> CAM: 특정 사진 삭제 요청 */
-    ESP_NOW_MSG_PHOTO_DELETE_ACK = 17,     /* CAM -> Cntl: 삭제 결과 */
+    /* 13~17: 예전 ESP_NOW_MSG_PHOTO_LIST_REQUEST/LIST_ENTRY/LIST_DONE/DELETE_REQUEST/DELETE_ACK —
+     * 2026-09-26 캠 SD 제거로 삭제(캠에 저장된 사진이 없음). 번호는 재사용하지 않음 */
     /* 18: 예전 ESP_NOW_MSG_SET_TIME — 2026-08-25 CASK 재설계에서 제거. unix_time을
      * CAM_CONFIG_SET에 실어 매 사이클 같이 보내는 걸로 대체(별도 왕복 자체가 불필요해짐 —
      * 아래 esp_now_cam_config_t 참고). 번호는 재사용하지 않고 비워둠 */
-    ESP_NOW_MSG_PHOTO_DELETE_ALL_REQUEST = 19,  /* Cntl -> CAM: 저장된 사진 전체 삭제 요청 */
-    ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK = 20,      /* CAM -> Cntl: 삭제 결과(삭제된 개수) */
+    /* 19/20: 예전 ESP_NOW_MSG_PHOTO_DELETE_ALL_REQUEST/_ACK — 2026-09-26 캠 SD 제거로 삭제(재사용 안 함) */
     /* 21: 예전 ESP_NOW_MSG_HUB_RESET — 2026-08-25 CASK 재설계에서 제거. 이제 모든 재연결이
      * 캠 주도(WAKE_HELLO+재시도+폴백)라 Cntl이 능동적으로 "나 리셋됐다"고 알릴 필요 자체가
      * 없어짐 — 재부팅한 Cntl은 그냥 "이 캠을 모르는 Cntl"이 되어 같은 폴백 경로를 탐 */
-    ESP_NOW_MSG_PHOTO_CHUNK_NACK = 22,      /* Cntl -> CAM: 청크 일련번호(chunk_idx) 기준으로
-                                              * 못 받은 것만 콕 집어 재전송 요청(2026-08-03 —
-                                              * 아래 esp_now_photo_chunk_nack_t 주석 참고).
-                                              * 이름은 PHOTO_로 남겨뒀지만 구조(일련번호 기반
-                                              * 스트리밍+선택적 재전송)는 사진 전용이 아니라
-                                              * 나중에 다른 대용량 전송(Sens 등)에도 그대로
-                                              * 재사용 가능한 일반적인 패턴 */
-    ESP_NOW_MSG_BENCH_BLAST = 23,           /* CAM -> Cntl: 처리량 벤치마크용 더미 바이트(내용
-                                              * 무의미) — Cntl은 받는 즉시 버리고 바이트 수만
-                                              * 카운트. 프로토콜 오버헤드 없는 순수 채널 처리량
-                                              * 실측용(2026-08-04, esp_now_reliable 설계 착수
-                                              * 전 기준치 측정) */
-    ESP_NOW_MSG_BENCH_START = 24,           /* Cntl -> CAM: 벤치마크 트리거(N초간 BLAST 최대
-                                              * 속도 전송 시작). Cntl 설정화면의 임시 버튼에서
-                                              * 보냄 */
+    /* 22: 예전 ESP_NOW_MSG_PHOTO_CHUNK_NACK(2026-08-05 DONE_ACK로 대체된 뒤 안 쓰임),
+     * 23/24: 예전 ESP_NOW_MSG_BENCH_BLAST/_START(처리량 벤치마크) — 2026-09-26 삭제(재사용 안 함).
+     * 누락 목록 구조체 esp_now_photo_chunk_nack_t는 DONE_ACK/WINDOW_STATUS_ACK가 계속 씀 */
     /* 25/26: 예전 ESP_NOW_MSG_CHANNEL_PING/_PONG — 2026-08-04/05 설계, CAM Deep Sleep 전환
      * (2026-08-10)보다도 먼저 만들어진 상시 하트비트였음. 2026-08-25 CASK 재설계로 완전
      * 제거 — 근본 이유는 (1) CAM이 리부팅마다 사실상 처음부터 재연결하는 구조라 "세션 도중
@@ -85,8 +69,7 @@ typedef enum {
                                               * CAM이 구분할 방법이 없었음). missing_count=0이면
                                               * 완료, 아니면 기존 esp_now_photo_chunk_nack_t
                                               * 구조체 그대로 재사용해 누락분을 실어보냄 */
-    ESP_NOW_MSG_PHOTO_LIST_DONE_ACK = 28,   /* Cntl -> CAM: PHOTO_LIST_DONE에 대한 응답, 개수
-                                              * 일치 여부와 무관하게 "항상" 보냄(위와 동일 원칙) */
+    /* 28: 예전 ESP_NOW_MSG_PHOTO_LIST_DONE_ACK — 2026-09-26 캠 SD 제거로 삭제(재사용 안 함) */
     ESP_NOW_MSG_CAPTURE_STATUS_ACK = 29,    /* Cntl -> CAM: CAPTURE_STATUS(최종 SUCCESS/FAILED)
                                               * 에 대한 최소 확인 응답 — CAM이
                                               * esp_now_reliable_request()로 감쌀 수 있게 함 */
@@ -134,31 +117,8 @@ typedef enum {
      * 다음 메시지가 그 메시지 자체의 reliable 스택 예산(timeout×attempts, 양쪽이 이미 아는
      * 고정값)만큼 지나도 안 오면 그 시점에 확정적으로 포기하고 WAKE_HELLO부터 재시도함 */
 
-    /* 2026-08-11 재설계 — 목록 프로토콜 전체를 reliable 기반으로 교체(사용자 지시).
-     * 예전 ESP_NOW_MSG_PHOTO_LIST_ENTRY(파일당 1개, unreliable)와 missing_count/missing_idx
-     * 기반 SR 사후복구는 폐기 — "chunk는 SR, 나머지는 reliable"라는 대원칙에 따르면 목록도
-     * (청크처럼 대량이지만) 매 항목이 작아서 여러 개를 한 배치로 묶어 reliable_request 하나로
-     * 보내는 게 더 맞다고 판단(사용자: "reliable이므로 누락 확인이나 재전송은 필요 없어") */
-    ESP_NOW_MSG_PHOTO_LIST_COUNT = 37,       /* CAM -> Cntl: 스캔 완료, 스트리밍 시작 전에
-                                              * 전체 개수/SD 용량 먼저 알림(reliable) */
-    ESP_NOW_MSG_PHOTO_LIST_COUNT_ACK = 38,   /* Cntl -> CAM */
-    ESP_NOW_MSG_PHOTO_LIST_BATCH = 39,       /* CAM -> Cntl: 항목 여러 개를 한 패킷에 묶어서
-                                              * reliable로 전송(esp_now_photo_list_batch_t 참고) */
-    ESP_NOW_MSG_PHOTO_LIST_BATCH_ACK = 40,   /* Cntl -> CAM */
-    ESP_NOW_MSG_PHOTO_LIST_ERROR = 41,       /* Cntl -> CAM: 개수 불일치(조기 DONE 또는
-                                              * 전부 받았는데 DONE 무응답) — CAM은 받으면 이번
-                                              * 목록 전송 관련 상태/메모리를 정리하고 대기로 복귀 */
-    ESP_NOW_MSG_PHOTO_LIST_ERROR_ACK = 42,   /* CAM -> Cntl */
-
-    /* 2026-08-21 — "CAM/Sens는 지능 없음, Cntl이 상태관리 전담" 원칙 재확인 후 정리.
-     * 전체삭제가 파일 개수에 따라 오래 걸릴 수 있는데(수백 개면 수십 초), 예전엔 Cntl이
-     * "접수됐는지"와 "다 지웠는지"를 하나의 응답(DELETE_ALL_ACK)/하나의 고정 타임아웃으로
-     * 뭉뚱그려 판단해서, 실제로는 CAM이 정상 작업 중인데 Cntl이 먼저 포기하고 다음 단계로
-     * 넘어가는 오탐이 있었음(진짜 ACK는 늦게 도착). 지금촬영의 RECEIVED/SUCCESS 2단계
-     * 패턴과 동일하게 분리 — CAM은 접수 즉시(삭제 시작 전) 지울 개수를 먼저 알리고, Cntl은
-     * 그 개수 기준으로 완료 대기 예산을 계산해서 진짜 완료 ACK만 완료로 인정함 */
-    ESP_NOW_MSG_PHOTO_DELETE_ALL_RECEIVED = 43,  /* CAM -> Cntl: DELETE_ALL_REQUEST 접수,
-                                              * 삭제 시작 전 지울 파일개수를 먼저 알림 */
+    /* 37~43: 예전 사진 목록(PHOTO_LIST_COUNT/_ACK/BATCH/_ACK/ERROR/_ACK)과 전체삭제 접수
+     * (PHOTO_DELETE_ALL_RECEIVED) — 2026-09-26 캠 SD 제거로 삭제. 번호는 재사용하지 않음 */
 
     /* 44: 예전 ESP_NOW_MSG_SET_TIME_ACK — SET_TIME 메시지 자체가 없어졌으니(CAM_CONFIG_SET에
      * unix_time으로 흡수, 2026-08-25) 이 확인 응답도 함께 제거. CAM_CONFIG_ACK가 그 자리를
@@ -339,11 +299,9 @@ typedef struct __attribute__((packed)) {
  * CAM이 그 청크만 로컬 재시도하는 정도로 시작(과설계 방지, 실기 테스트 후 부족하면
  * Cntl 쪽 NACK/누락감지를 추가). */
 typedef enum {
-    PHOTO_REQUEST_MODE_ALL = 0,           /* SD에 있는 사진 전부 */
-    PHOTO_REQUEST_MODE_RECENT_HOURS = 1,  /* 최근 N시간 이내 것 전부 (param=시간 수) */
-    PHOTO_REQUEST_MODE_LATEST = 2,        /* 가장 최근 1장만 */
-    PHOTO_REQUEST_MODE_CAPTURE_NOW = 3,   /* 기존 파일 무시하고 즉시 새로 촬영한 뒤 그 1장만 전송 */
-    PHOTO_REQUEST_MODE_BY_ID = 4,         /* param=file_id — 목록에서 고른 특정 사진 1장만 전송 */
+    /* 0/1/2/4: 예전 ALL/RECENT_HOURS/LATEST/BY_ID(캠 SD에 저장된 사진 요청) — 2026-09-26 캠 SD
+     * 제거로 삭제. 값은 재사용하지 않음 */
+    PHOTO_REQUEST_MODE_CAPTURE_NOW = 3,   /* 즉시 촬영(사진은 촬영 직후 캠이 푸시) */
 } photo_request_mode_t;
 
 typedef struct __attribute__((packed)) {
@@ -465,112 +423,9 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
 } esp_now_capture_status_ack_t;
 
-/* 사진 "목록"만 요청 — META/CHUNK로 실제 JPEG 내용을 보내는 것과 무관하게, 저장된 파일들의
- * file_id/kind/촬영시각/크기만 가볍게 나열해서 알려줌. 목록에서 하나를 고르면 그때
- * PHOTO_REQUEST(mode=BY_ID, param=file_id)로 실제 내용을 따로 요청.
- *
- * file_id는 더 이상 타임스탬프가 아님(2026-08-01 재설계 — 사용자 지적: "정석대로 가자,
- * 파일명에서 날짜/시간을 뽑지 말고 파일정보(파일명/날짜시간/크기)를 따로 받아야지"). CAM
- * 파일명은 <kind><4자리 base36 순번>.jpg(예: "M002A.jpg") — 순번은 수동(M)/자동(T)
- * 촬영이 공유하는 전역 카운터(0~36^4-1=1,679,615, 별도 카운터 파일 없이 SD에서 가장
- * 최근(mtime) 파일의 seq+1부터 이어감, CAM_STORAGE_MAX_FILES=500개 순환삭제 한도 대비
- * 충분히 여유). file_id는 이 순번 그 자체이고, kind는 이 순번이 M/T 파일 어느 쪽인지
- * 별도 필드로 알려줌(같은 순번이 두 kind에 동시에 존재할 수 없어서 file_id+kind면 항상
- * 유일하게 식별됨). 촬영시각은 파일의 FAT 수정시각을 그대로 읽어서 capture_time으로
- * 별도 전달함 — file_id를 파싱해서 시각을 뽑아내지 않음. */
-typedef struct __attribute__((packed)) {
-    uint8_t version;
-    uint8_t msg_type;
-} esp_now_photo_list_request_t;
-
-/* 2026-08-11 재설계(사용자 지시) — 예전엔 파일당 1메시지 unreliable 스트리밍 +
- * missing_idx 기반 SR 사후복구였는데(2026-08-10 도입, 실사용 중 3005/3007 동시발생으로
- * 발견된 문제의 임시 봉합), 이번엔 아예 "reliable로 보내면 사후 누락복구 자체가 필요
- * 없다"는 방향으로 다시 설계. 순서:
- *   1) CAM -> Cntl: PHOTO_LIST_COUNT (전체 개수를 스트리밍 전에 미리 알림)
- *   2) CAM -> Cntl: PHOTO_LIST_BATCH ×M (항목 여러 개를 한 배치로 묶어 reliable 전송)
- *   3) CAM -> Cntl: PHOTO_LIST_DONE (단순 완료 신호)
- * Cntl은 받은 개수 vs count를 비교해서 어긋나면(DONE이 조기 도착 / 다 받았는데 DONE
- * 무응답) PHOTO_LIST_ERROR로 CAM에 알리고, CAM은 관련 상태/메모리를 정리 후 대기로 복귀 */
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-    uint16_t count;
-    uint32_t sd_total_kb;  /* CAM SD카드 전체 용량(KB) — 목록 옆에 사용량 %로 보여주려고
-                             * 추가(2026-08-01). 0이면 CAM이 조회 실패했다는 뜻(구버전 CAM과도
-                             * 호환 — 안 채워진 필드는 그냥 0으로 옴) */
-    uint32_t sd_used_kb;   /* 사용 중인 용량(KB) */
-} esp_now_photo_list_count_t;
-/* ESP_NOW_MSG_PHOTO_LIST_COUNT_ACK도 이 구조체를 msg_type만 바꿔 재사용(기존 관례) */
-
-typedef struct __attribute__((packed)) {
-    uint16_t index;           /* 전체 목록에서 이 항목의 위치(0..count-1) — 화면 정렬/디버깅용,
-                                * 유실 추적 목적 아님(배치 자체가 reliable이라 불필요) */
-    uint32_t file_id;        /* CAM의 M/T 공용 순번 — 위 설명 참고 */
-    uint8_t  kind;            /* cam_capture_kind_t: 'M' 또는 'T' */
-    uint32_t capture_time;   /* 파일의 FAT 수정시각(유닉스 타임스탬프) — 촬영시각 표시용 */
-    uint32_t file_size;
-} esp_now_photo_list_item_t;  /* 15바이트 */
-
-/* ESP-NOW V2 페이로드 한도 1470바이트(다른 곳과 동일 근거, 위 esp_now_photo_chunk_t 주석
- * 참고) 안에서 안전하게 — 헤더 3바이트 + 64*15바이트 = 963바이트 */
-#define ESP_NOW_PHOTO_LIST_BATCH_MAX 64
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-    uint8_t  entry_count;    /* 이 배치에 실제로 채워진 개수(<= ESP_NOW_PHOTO_LIST_BATCH_MAX) */
-    esp_now_photo_list_item_t entries[ESP_NOW_PHOTO_LIST_BATCH_MAX];
-} esp_now_photo_list_batch_t;
-/* ESP_NOW_MSG_PHOTO_LIST_BATCH_ACK도 이 구조체를 msg_type만 바꿔 재사용(entries는 안 봄,
- * 매칭 확인용으로만 씀 — 기존 관례) */
-
-typedef struct __attribute__((packed)) {
-    uint8_t version;
-    uint8_t msg_type;
-} esp_now_photo_list_done_t;
-/* ESP_NOW_MSG_PHOTO_LIST_DONE_ACK도 이 구조체 재사용.
- * ESP_NOW_MSG_PHOTO_LIST_ERROR/_ERROR_ACK도 이 구조체 재사용(신호 자체가 전부, 페이로드 불필요) */
-/* ESP_NOW_MSG_PHOTO_LIST_DONE_ACK(2026-08-05, Layer 1)도 이 구조체를 msg_type만 바꿔서
- * 그대로 재사용 — 필드 의미가 이미 동일함(count 등), "항상 보낸다"만 새로운 규칙.
- * missing_idx 추가(2026-08-10)로 청크의 PHOTO_DONE_ACK와 완전히 같은 패턴이 됨 */
-
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-    uint32_t file_id;
-} esp_now_photo_delete_request_t;
-
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-    uint32_t file_id;
-    uint8_t  success;
-} esp_now_photo_delete_ack_t;
-
-/* esp_now_set_time_t/esp_now_set_time_ack_t — 2026-08-25 CASK 재설계로 제거, unix_time을
- * esp_now_cam_config_t에 흡수(아래 참고) */
-
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-} esp_now_photo_delete_all_request_t;
-
-/* ESP_NOW_MSG_PHOTO_DELETE_ALL_RECEIVED(2026-08-21) — CAM이 삭제 시작 "전"에 보냄. count는
- * 지금부터 지울 파일 개수(cam_storage_count_files()) — Cntl이 이 값으로 완료 대기 예산을
- * 계산함(esp_now_photo_delete_all_ack_t의 deleted_count는 "실제로 지운 개수"라 의미가 다름,
- * 필드명도 구분해둠) */
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-    uint16_t count;
-} esp_now_photo_delete_all_received_t;
-
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-    uint8_t  success;        /* SD/디렉터리 접근 자체가 실패했으면 0(이 경우 deleted_count 무의미) */
-    uint16_t deleted_count;
-} esp_now_photo_delete_all_ack_t;
+/* 2026-09-26 — 사진 목록(esp_now_photo_list_*)/삭제(esp_now_photo_delete_*) 구조체는 캠 SD 제거로
+ * 삭제(캠에 저장된 사진이 없음, 사진은 촬영 즉시 푸시). esp_now_set_time_t/_ack_t도 예전
+ * 2026-08-25 CASK 재설계에서 제거됨(unix_time은 CAM_CONFIG_SET에 실림) */
 
 /* CAM 원격 설정 — 화이트밸런스는 esp32-camera sensor_t::set_wb_mode()의 모드값(0~4)과
  * 그대로 일치시킴(0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home). 촬영 주기는 초 단위,
@@ -631,37 +486,6 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
     uint8_t success;
 } esp_now_cam_config_ack_t;
-
-/* PHOTO_CHUNK와 동일 크기로 맞춰야 실사용 전송과 같은 조건에서 처리량을 잴 수 있음.
- * seq는 순서 확인용이 아니라 Cntl 로그에서 유실 유무를 눈으로 보기 위한 참고값(벤치마크는
- * 유실을 감지/보정하지 않음 — 순수 최대 처리량 측정이 목적). */
-#define ESP_NOW_BENCH_BLAST_DATA_LEN ESP_NOW_PHOTO_CHUNK_DATA_LEN
-
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-    uint32_t seq;
-    uint8_t  data[ESP_NOW_BENCH_BLAST_DATA_LEN];
-} esp_now_bench_blast_t;
-
-/* mode(2026-08-05 추가, Selective Repeat 실험용) — 0: 기존 BENCH_BLAST 순수 채널 처리량 측정
- * (프로토콜 오버헤드 없음, 원래 이 메시지의 유일한 용도였음). 1: 현재 사진전송 방식(블라스트+
- * 끝에 NACK라운드)을 CAM의 최근 촬영 사진으로 duration_sec 동안 반복 전송. 2: 같은 걸
- * Selective Repeat(윈도우+주기적 상태확인)으로 반복 전송. 1/2는 실제 프로토콜 오버헤드까지
- * 포함해서 두 방식의 실제 소요시간/왕복횟수를 비교하는 게 목적 — 순수 채널 속도(mode 0)와는
- * 잴 대상 자체가 다름 */
-typedef enum {
-    ESP_NOW_BENCH_MODE_RAW_BLAST   = 0,
-    ESP_NOW_BENCH_MODE_XFER_CURRENT = 1,
-    ESP_NOW_BENCH_MODE_XFER_SR      = 2,
-} esp_now_bench_mode_t;
-
-typedef struct __attribute__((packed)) {
-    uint8_t  version;
-    uint8_t  msg_type;
-    uint16_t duration_sec;
-    uint8_t  mode;  /* esp_now_bench_mode_t */
-} esp_now_bench_start_t;
 
 /* CAM의 Deep Sleep 웨이크 원인 — RWDT는 소프트웨어가 esp_deep_sleep_start()를 못
  * 부르고(버그/행) RTC 워치독 안전망이 강제로 리셋시킨 경우(rwdt_guard 모듈 참고). */

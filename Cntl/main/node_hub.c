@@ -49,7 +49,7 @@ static void fire_connect_event(void)
 
 /* 적응형 반응시간(2026-08-10) — 마지막 사용자 조작 시각(photo_rx.c의 5개 액션 함수가
  * node_hub_note_user_action()으로 갱신). 전역 하나로 충분 — 지금은 CAM이 보통 1대라
- * node_hub_bench_start()/apply_response_interval_sec()이 이미 쓰는 단순화와 동일 원칙.
+ * apply_response_interval_sec()이 이미 쓰는 단순화와 동일 원칙.
  * 2026-08-25(CASK 재설계) — 예전엔 이 값을 별도 원샷 타이머(adaptive_deadline_timer)가
  * 소비해서 "타이머가 다 되면 모든 노드에 SLEEP_NOW를 먼저 보내러 가는" 능동적(push) 구조
  * 였음. 이제 그 판단은 CASK를 만드는 바로 그 순간(WAKE_HELLO 수신, send_cask_sleep_now()
@@ -699,93 +699,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         send_cask_sleep_now(n);
         xSemaphoreGive(s_nodes_mutex);
 
-    } else if (msg_type == ESP_NOW_MSG_BENCH_BLAST) {
-        /* 처리량+유실률 벤치마크 수신(2026-08-04, 1시간 연속 실행 지원으로 재설계) — CAM이
-         * seq를 0부터 순서대로 붙여 보내므로(esp_now_cam.c의 run_bench_blast), 여기서
-         * "다음에 와야 할 seq"와 실제 도착한 seq를 비교하면 로컬 큐 상태와 무관한 진짜
-         * 종단간(무선 구간) 패킷 유실을 셀 수 있음 — CAM 쪽 NO_MEM 재시도 집계와는 별개로,
-         * 이게 esp_now_reliable 설계에 실제로 필요한 "물리 ACK로 못 잡아내는 유실률" 숫자.
-         * 1초마다 로그를 남기면 1시간에 3600줄이라 너무 많아서(사용자 지적) 30초 구간
-         * 집계로 줄임 — 구간 통계 리셋, 세션 전체 누적은 별도로 유지해서 seq==0(새 세션
-         * 시작)이 다시 오면 그때 세션 총계를 한 번 찍고 리셋 */
-        if (len < (int)sizeof(esp_now_bench_blast_t)) return;
-        const esp_now_bench_blast_t *msg = (const esp_now_bench_blast_t *)data;
-
-        static bool     s_bench_active = false;
-        static uint32_t s_bench_expected_seq = 0;
-        static int64_t  s_bench_session_start_us = 0;
-        static uint64_t s_bench_session_bytes = 0;
-        static uint32_t s_bench_session_pkts  = 0;
-        static uint32_t s_bench_session_lost  = 0;
-        /* 30초 구간 집계용 */
-        static uint64_t s_bench_win_bytes = 0;
-        static uint32_t s_bench_win_pkts  = 0;
-        static uint32_t s_bench_win_lost  = 0;
-        static int64_t  s_bench_win_start_us = 0;
-
-        int64_t now_us = esp_timer_get_time();
-
-        if (msg->seq == 0 && s_bench_active && s_bench_expected_seq > 1) {
-            /* 새 세션 시작(진짜 재시작 — ESP-NOW 물리계층 중복수신으로 seq=0이 또 온
-             * 것과 구분하려고 expected_seq>1일 때만 "이전 세션 종료"로 인정) */
-            uint32_t total = s_bench_session_pkts + s_bench_session_lost;
-            double loss_pct = total > 0 ? (100.0 * s_bench_session_lost / total) : 0.0;
-            double sec = (now_us - s_bench_session_start_us) / 1e6;
-            ESP_LOGI(TAG, "BENCH 세션 종료: %.1fs간 수신%u개/유실%u개(유실율%.2f%%), 평균%.1fKB/s",
-                     sec, (unsigned)s_bench_session_pkts, (unsigned)s_bench_session_lost, loss_pct,
-                     sec > 0 ? (s_bench_session_bytes / 1024.0) / sec : 0.0);
-            s_bench_active = false;
-        }
-        if (!s_bench_active) {
-            s_bench_active = true;
-            s_bench_expected_seq = 0;
-            s_bench_session_start_us = now_us;
-            s_bench_session_bytes = 0;
-            s_bench_session_pkts  = 0;
-            s_bench_session_lost  = 0;
-            s_bench_win_bytes = 0;
-            s_bench_win_pkts  = 0;
-            s_bench_win_lost  = 0;
-            s_bench_win_start_us = now_us;
-        }
-
-        if (msg->seq > s_bench_expected_seq) {
-            uint32_t gap = msg->seq - s_bench_expected_seq;
-            s_bench_session_lost += gap;
-            s_bench_win_lost += gap;
-        }
-        if (msg->seq >= s_bench_expected_seq) {
-            s_bench_expected_seq = msg->seq + 1;
-        }
-
-        s_bench_session_bytes += (uint32_t)len;
-        s_bench_session_pkts++;
-        s_bench_win_bytes += (uint32_t)len;
-        s_bench_win_pkts++;
-
-        int64_t win_elapsed_us = now_us - s_bench_win_start_us;
-        if (win_elapsed_us >= 30 * 1000 * 1000) {
-            double sec = win_elapsed_us / 1e6;
-            uint32_t win_total = s_bench_win_pkts + s_bench_win_lost;
-            double loss_pct = win_total > 0 ? (100.0 * s_bench_win_lost / win_total) : 0.0;
-            ESP_LOGI(TAG, "BENCH 수신 중간집계(%.0fs 경과): %.1fKB/s, 수신%u개/유실%u개(유실율%.2f%%)",
-                     (now_us - s_bench_session_start_us) / 1e6,
-                     (s_bench_win_bytes / 1024.0) / sec,
-                     (unsigned)s_bench_win_pkts, (unsigned)s_bench_win_lost, loss_pct);
-            s_bench_win_bytes = 0;
-            s_bench_win_pkts  = 0;
-            s_bench_win_lost  = 0;
-            s_bench_win_start_us = now_us;
-        }
-
     } else if (msg_type == ESP_NOW_MSG_PHOTO_META || msg_type == ESP_NOW_MSG_PHOTO_CHUNK ||
                msg_type == ESP_NOW_MSG_PHOTO_DONE || msg_type == ESP_NOW_MSG_CAPTURE_STATUS ||
-               msg_type == ESP_NOW_MSG_PHOTO_LIST_COUNT || msg_type == ESP_NOW_MSG_PHOTO_LIST_BATCH ||
-               msg_type == ESP_NOW_MSG_PHOTO_LIST_DONE ||
-               msg_type == ESP_NOW_MSG_PHOTO_DELETE_ACK || msg_type == ESP_NOW_MSG_PHOTO_DELETE_ALL_ACK ||
                msg_type == ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST) {
-        /* ESP-NOW는 recv_cb를 하나만 등록할 수 있어서, 사진 관련 프로토콜(전송/목록/삭제/
-         * 지금촬영 진행상태) 처리는 전부 photo_rx.c로 넘김 */
+        /* 수신 콜백이 하나라서, 사진 관련 프로토콜(사진 수신/지금촬영 진행상태) 처리는 전부
+         * photo_rx.c로 넘김(2026-09-26 — 캠 SD 제거로 목록/삭제 메시지는 삭제) */
         photo_rx_on_recv(msg_type, info ? info->src_addr : NULL, data, len);
 
     } else if (msg_type == ESP_NOW_MSG_CAM_CONFIG_ACK) {
@@ -994,38 +912,6 @@ void node_hub_request_pair(const uint8_t *mac)
     }
 }
 
-void node_hub_bench_start(uint16_t duration_sec, uint8_t mode)
-{
-    uint8_t target_mac[6] = { 0 };
-    bool found = false;
-    char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
-
-    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
-    for (int i = 0; i < s_node_count; i++) {
-        if (s_nodes[i].kind == HUB_NODE_KIND_CAM && s_nodes[i].conn_state == NODE_CONN_PAIRED) {
-            memcpy(target_mac, s_nodes[i].mac, sizeof(target_mac));
-            strncpy(name_copy, s_nodes[i].name, sizeof(name_copy) - 1);
-            found = true;
-            break;
-        }
-    }
-    xSemaphoreGive(s_nodes_mutex);
-
-    if (!found) {
-        ESP_LOGW(TAG, "벤치마크: 페어링된 CAM 없음");
-        return;
-    }
-
-    esp_now_bench_start_t msg = {
-        .version      = ESP_NOW_LINK_VERSION,
-        .msg_type     = ESP_NOW_MSG_BENCH_START,
-        .duration_sec = duration_sec,
-        .mode         = mode,
-    };
-    esp_err_t err = can_bridge_relay_send(target_mac, (const uint8_t *)&msg, sizeof(msg));
-    ESP_LOGI(TAG, "BENCH_START(mode=%u, %u초) -> %s: %s", mode, duration_sec, name_copy, esp_err_to_name(err));
-}
-
 void node_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
 {
     device_config_set_cam_capture_interval_sec(mac, sec);
@@ -1064,7 +950,7 @@ bool node_hub_apply_response_interval_sec(uint32_t sec)
 {
     device_config_set_response_interval_sec(sec);
 
-    /* 시스템 공통 설정이므로 지금 페어링된 CAM 전부에게 다시 보냄(node_hub_bench_start의
+    /* 시스템 공통 설정이므로 지금 페어링된 CAM 전부에게 다시 보냄(
      * "페어링된 노드 순회" 패턴과 동일) — SENS는 아직 CAM_CONFIG_SET을 이해 못 하므로 CAM만 */
     uint8_t targets[NODE_HUB_MAX_NODES][6];
     int target_count = 0;

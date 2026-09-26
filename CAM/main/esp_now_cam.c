@@ -63,7 +63,6 @@ static gpio_num_t s_led_pin = GPIO_NUM_NC;
  * 2026-09-26 — SD 제거로 LIST/DELETE_ALL 요청 종류 삭제(CAM엔 저장된 사진이 없음) */
 typedef enum {
     CAM_TASK_REQ_PHOTO         = 0,
-    CAM_TASK_REQ_BENCH         = 3,
     CAM_TASK_REQ_AUTO_CAPTURE  = 4,  /* 2026-09-18(SD 제거 재설계) — 주기촬영 타이머가
                                         capture_timer_cb(작은 스택)에서 직접 촬영하지 않고
                                         여기로 큐잉, 이 태스크(24KB 스택)가 촬영+푸시를 함 */
@@ -73,9 +72,6 @@ typedef struct {
     cam_task_req_kind_t      kind;
     esp_now_photo_request_t  photo_req;  /* kind==CAM_TASK_REQ_PHOTO일 때만 유효 */
     uint32_t                 generation; /* kind==CAM_TASK_REQ_PHOTO일 때만 유효 — 아래 참고 */
-    uint16_t                 bench_duration_sec; /* kind==CAM_TASK_REQ_BENCH일 때만 유효 */
-    uint8_t                  bench_mode;         /* kind==CAM_TASK_REQ_BENCH일 때만 유효 —
-                                                     esp_now_bench_mode_t(2026-08-05, SR 실험) */
 } cam_task_request_t;
 
 static QueueHandle_t s_photo_request_queue = NULL;
@@ -393,84 +389,6 @@ bool esp_now_cam_is_transfer_busy(void)
     return s_transfer_busy;
 }
 
-/* 처리량 벤치마크(2026-08-04) — 프로토콜 신뢰성 레이어를 만들기 전에, 지금 이 채널
- * (STA-공유채널이든 격리-AP든)에서 순수하게 뽑을 수 있는 최대 처리량이 얼마인지 기준치를
- * 먼저 재둠. 청크와 같은 크기의 더미 바이트를 큐가 허용하는 한 최대 속도로 계속 쏘고,
- * ESP_ERR_ESPNOW_NO_MEM(로컬 송신큐 포화)만 잠깐 기다렸다 재시도 — 그 외 실패는 실패로
- * 세고 다음 것으로 넘어감(재전송 안 함, 신뢰성 측정이 아니라 처리량 측정이 목적).
- *
- * 1시간 연속 실행 지원(2026-08-04, 사용자 요청: 에러율/대역폭 추이를 오래 관찰하고 싶다) —
- * 매초 로그를 남기면 1시간에 3600줄이라 너무 많음. BENCH_LOG_INTERVAL_US마다 그 구간만의
- * 집계(구간 처리량 + 구간 오류율)를 찍고 리셋 — 전체 누적치는 함수 끝의 최종 요약 한 줄로.
- * NO_MEM 재시도는 "진짜 실패"가 아니라 로컬 큐가 잠깐 찬 것뿐이라 fail_count와 분리 집계 —
- * 섞으면 오류율이 실제보다 훨씬 나빠 보임(로컬 큐 포화는 무선 유실이 아님, 위 함수 설명 참고) */
-#define BENCH_LOG_INTERVAL_US (30 * 1000 * 1000)
-
-static void run_bench_blast(uint16_t duration_sec)
-{
-    ESP_LOGI(TAG, "BENCH: %u초간 최대 속도 전송 시작", duration_sec);
-
-    static esp_now_bench_blast_t blast;  /* static — 1200+바이트를 태스크 스택에 두지 않음 */
-    blast.version  = ESP_NOW_LINK_VERSION;
-    blast.msg_type = ESP_NOW_MSG_BENCH_BLAST;
-    blast.seq      = 0;
-    memset(blast.data, 0xAA, sizeof(blast.data));
-
-    int64_t start_us = esp_timer_get_time();
-    int64_t end_us   = start_us + (int64_t)duration_sec * 1000000LL;
-
-    uint32_t ok_count = 0, fail_count = 0, nomem_retry_count = 0;
-    uint64_t bytes_sent = 0;
-    uint32_t win_ok = 0, win_fail = 0, win_nomem = 0;
-    uint64_t win_bytes = 0;
-    int64_t  win_start_us = start_us;
-    int64_t  next_log_us  = start_us + BENCH_LOG_INTERVAL_US;
-
-    while (esp_timer_get_time() < end_us) {
-        esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&blast, sizeof(blast));
-        if (err == ESP_ERR_ESPNOW_NO_MEM) {
-            nomem_retry_count++;
-            win_nomem++;
-            /* pdMS_TO_TICKS(5)는 CONFIG_FREERTOS_HZ=100(틱당 10ms)에서 정수 나눗셈으로
-             * 0틱이 됨 — vTaskDelay(0)은 사실상 지연 없이 즉시 재시도라 큐가 계속 찬 상태에서
-             * photo_tx가 IDLE 태스크를 굶겨 task watchdog가 반복 트리거됨(2026-08-04, 1시간
-             * 실기 로그로 확인, 26회 발생). 최소 1틱(10ms)을 보장하도록 수정 */
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;  /* 큐 포화 — 같은 seq로 재시도(측정 왜곡 방지, 성공한 것만 카운트) */
-        }
-        if (err == ESP_OK) {
-            ok_count++;
-            win_ok++;
-            bytes_sent += sizeof(blast);
-            win_bytes += sizeof(blast);
-        } else {
-            fail_count++;
-            win_fail++;
-        }
-        blast.seq++;
-
-        int64_t now_us = esp_timer_get_time();
-        if (now_us >= next_log_us) {
-            double win_sec = (now_us - win_start_us) / 1e6;
-            uint32_t win_total = win_ok + win_fail;
-            double win_err_rate = win_total > 0 ? (100.0 * win_fail / win_total) : 0.0;
-            ESP_LOGI(TAG, "BENCH 중간집계(%.0fs 경과): %.1fKB/s, 성공%u/실패%u(오류율%.2f%%), NO_MEM재시도%u회",
-                     (now_us - start_us) / 1e6,
-                     win_sec > 0 ? (win_bytes / 1024.0) / win_sec : 0.0,
-                     (unsigned)win_ok, (unsigned)win_fail, win_err_rate, (unsigned)win_nomem);
-            win_ok = 0; win_fail = 0; win_nomem = 0; win_bytes = 0;
-            win_start_us = now_us;
-            next_log_us  = now_us + BENCH_LOG_INTERVAL_US;
-        }
-    }
-    double sec = (double)duration_sec;
-    uint32_t total = ok_count + fail_count;
-    double err_rate = total > 0 ? (100.0 * fail_count / total) : 0.0;
-    ESP_LOGI(TAG, "BENCH 완료: 성공 %u개(평균 %.1fKB/s), 실패 %u개(오류율 %.2f%%), NO_MEM재시도 %u회, 총 %llu바이트",
-             (unsigned)ok_count, sec > 0 ? (bytes_sent / 1024.0) / sec : 0.0,
-             (unsigned)fail_count, err_rate, (unsigned)nomem_retry_count, (unsigned long long)bytes_sent);
-}
-
 /* 2026-08-10 도입, 처리 종류가 여럿이라 매 return/continue 지점마다 짝을 맞추는 대신 이번
  * 반복 시작에 세우고 끝에 내림. 2026-08-26 — 이걸 밖으로 노출하던 esp_now_cam_is_busy()는
  * 삭제됐다가, 2026-09-19(주기촬영 재설계)에 esp_now_cam_is_transfer_busy()로 다시 노출됨 —
@@ -514,18 +432,6 @@ static void photo_transfer_task(void *arg)
         if (xQueueReceive(s_photo_request_queue, &item, portMAX_DELAY) != pdTRUE) continue;
         s_transfer_busy = true;
 
-        if (item.kind == CAM_TASK_REQ_BENCH) {
-            if ((s_conn_state == CAM_CONN_PAIRED)) {
-                if (item.bench_mode == ESP_NOW_BENCH_MODE_RAW_BLAST) {
-                    run_bench_blast(item.bench_duration_sec);
-                } else {
-                    /* 2026-09-26 — XFER 벤치(SD에 저장된 최근 사진을 반복 전송)는 SD 제거로 삭제 */
-                    ESP_LOGW(TAG, "BENCH mode=%u 지원 안 함(SD 제거로 XFER 벤치 삭제) — 무시", (unsigned)item.bench_mode);
-                }
-            }
-            mark_transfer_idle();
-            continue;
-        }
 
         /* 2026-09-18(SD 제거 재설계) — 주기촬영. capture_timer_cb()가 여기로 큐잉만 하고,
          * 실제 촬영+CNTL 푸시는 이 태스크(24KB 스택)에서 함 — cam_node_run_auto_capture()가
@@ -669,17 +575,6 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         return;
     }
 
-    if (msg_type == ESP_NOW_MSG_BENCH_START) {
-        if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_bench_start_t)) return;
-        esp_now_bench_start_t req;
-        memcpy(&req, data, sizeof(req));
-        cam_task_request_t item = { .kind = CAM_TASK_REQ_BENCH, .bench_duration_sec = req.duration_sec,
-                                     .bench_mode = req.mode };
-        if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
-            ESP_LOGW(TAG, "BENCH_START 큐 가득 — 무시");
-        }
-        return;
-    }
 
     if (msg_type == ESP_NOW_MSG_CAM_CONFIG_SET) {
         /* 2026-08-08 — 촬영주기+응답성(연결성/절전) 원격 설정. recv_cb(ESP-NOW 드라이버
