@@ -6,8 +6,13 @@
   `~/.claude/projects/C--Projects-Ongoing/memory/`에 풀 것(09-23 zip보다 최신).
   덮어쓰기 전에 원래 PC의 기존 메모리 폴더가 비었는지부터 확인할 것(임시 PC에서 복원할 때
   확인 없이 덮어쓴 사고가 있었음).
-- 임시 PC 포트: 콘 COM12, 브 COM13, 캠 COM14 (원래 PC에서는 다름).
+- 임시 PC 포트: 콘 COM12, 브 COM13, 캠 COM14(OV3660), 캠 COM15(OV5640) (원래 PC에서는 다름).
 - 모델: 이번 세션은 Opus 5.5(effort medium). 원래 PC에서도 `/model`에서 같은 모델 선택.
+- **재시작 후 이어하기(09-26 오후 추가)**: VS Code에서 C:\Projects\Ongoing 폴더를 열고 시작할
+  것(메모리는 ~/.claude/projects/C--Projects-Ongoing/memory/에서 읽힘 — C:\Users\xebee에서
+  시작하면 다른 폴더의 메모리가 읽힘). 먼저 할 일: 아래 [할 일] 0번(메모리 zip 커밋/푸시).
+- 캠 사진 푸시 실기 확인 도구: scratchpad의 cap_cam.py(포트가 딥슬립으로 사라져도 다시 열며
+  캡처) — 새 세션 scratchpad에는 없으니 필요하면 다시 작성.
 
 [ 한 일 — 코어 분리 (커밋 c459a84, fada620) ]
 
@@ -62,22 +67,54 @@
     3단계: 브 수신 큐 드롭 금지(위 7번).
 14. 실기 확인: 사진 전송 73/73 첫 시도 성공, 드롭 0.
 
+[ 한 일 — 캠: ES8311 / SD 제거 / 상태 LED (09-26 오후, 커밋 ddc2a1c) ]
+
+15. ES8311: 레지스트리 espressif/es8311엔 IDF 6 지원 버전이 없음(1.0.0은 옛 driver/i2c.h,
+    1.0.0~1은 <6.0 제한). 1.0.0을 CAM/components/es8311에 복사해 새 i2c_master API로 수정
+    (es8311_create(버스 핸들, 주소)), cam_speaker의 레지스트리 의존성 삭제 — git에 들어가 원래
+    PC에서도 같은 코드로 빌드됨. 실기: 두 캠 모두 코덱 초기화 정상, 소리 잘 들림(사용자 확인).
+    send_cb 훅(esp_now_reliable_on_send_done)도 이제 빌드/플래시됨.
+16. 캠 SD 코드 전부 삭제(사용자 지시): cam_storage.c/.h, SD 마운트, 파일 기반 전송/재전송,
+    사진 목록 전송, 개별/전체 삭제 핸들러, XFER 벤치, 콘솔 ls/get/clear, fatfs/sdmmc 의존성,
+    BSP SD 핀 정의. 촬영 즉시 SR 푸시 경로만 남음. CAPTURE_NOW 외 PHOTO_REQUEST 모드/XFER
+    벤치 모드는 로그만 남기고 무시. 바이너리 여유 19%→26%.
+17. 스키매틱(References/ESP32-S3-CAM-XXXX-schematic.pdf, 커밋 안 됨 — 사용자 판단 대기)로
+    IO 익스팬더 배정 확인: EXIO0=TP_RST 1=LCD_RST 2=SD_CS 3=CAM_PWDN 4=PA_CTRL 5=BAT_EN
+    6=PWR_LED 7=CHG_DET. 예전 "SD 인에이블" IO2/IO6은 실제로 SD_CS/전원 LED였음.
+    → IO2 구동 삭제, IO6(PWR_LED)을 상태 LED로 사용 — 센스 그린 LED와 같은 패턴(광고/재스캔
+    BLINK_FAST, 페어링·WAKE_HELLO 성공 HEARTBEAT, WAKE_HELLO 실패 시 BLINK_FAST). I2C 쓰기는
+    BSP 전용 태스크(태스크 알림, WiFi 콜백 블로킹 방지), 딥슬립 직전 LED 강제 끔.
+18. 공통: status_led에 status_led_init_custom()(GPIO 아닌 LED용) 추가, io_expander_ch32v003
+    출력 shadow 읽고-고치고-쓰기에 뮤텍스 추가(핀 비트 되돌아감 경합 방지).
+19. 이 PC에서 센스 빌드를 잘못된 대상(esp32 기본값)으로 시도해 Sens/에 build, sdkconfig,
+    dependencies.lock, managed_components가 생김(git 제외 파일, 원래 PC엔 영향 없음, 원래
+    없던 파일로 판단) — 이 PC에서 센스 빌드 전에 지울 것.
+
 [ 할 일 — 다음 ]
 
-1. 캠(원래 PC에서): 제조사 예제에서 가져온 es8311 컴포넌트가 IDF v6.0.2에서 빌드 안 됨
-   (driver/gpio.h, es8311_create 타입 불일치) → 수정본을 CAM/components에 넣고 빌드.
-   그 다음 send_cb 훅 포함 빌드/플래시, 코어 분리(ESP-NOW 0, 센서 1), NO_MEM 폴링 루프
-   이벤트화(esp_now_cam.c 224/265/368/837 부근).
-2. 센스 이벤트 방식 전환(C3 단일 코어라 코어 분리는 해당 없음). 센스 레거시 빌드
-   변수형(esp_now_node.c) 컴파일 검증.
-3. 센스 연결 후 측정값 주 단위 파일 저장 실기 검증.
-4. OV5640(사진 1MB)에서 브 수신 큐가 얼마나 커지는지 확인.
-5. 사진 목록 팝업이 아직 LVGL 태스크에서 폴더 스캔함 → storage 쪽으로 이동.
-6. 콘 can_bridge.c의 중복 s_send_mutex 제거(ctx 뮤텍스로 대체됨).
-7. 브 ui_mem의 LVGL 락 실패 로그 확인.
-8. 릴레이가 이상하면 power_relay 기아(starvation) 여부 확인.
-9. 캐스크/UNPAIR 전체 흐름 검증. 촬영 주기 변경 캐스크가 CAN 경로로 구현됐는지 확인.
-10. 브 로그 msg_type 표 확장(#10, #49, #34 등 캐스크 단계 메시지).
-11. 카메라 팝업 메모리 20K, 페어링 반복 시 메모리 감소 확인.
-12. 첫 페어링 때 PHOTO_LIST_REQUEST 타임아웃 재검증.
-13. 9/18 팝업 터치 검증, 캠 MVD 리팩터.
+0. 메모리 zip(Docs/claude_memory_2026-09-26.zip) 커밋+푸시 — Claude가 하면 자동 모드 검사기가
+   막음(사유 Sensitive-Source Provenance / Out-of-Place Publication). 사용자가
+   ~/.claude/settings.json에 autoMode.allow 규칙 추가함(재시작 후 반영 여부 미확인). 캠 커밋
+   ddc2a1c와 이 문서 커밋도 아직 푸시 안 됨 — 같이 푸시.
+1. 캠 페어링 불안정(원인 미조사): COM14는 페어링 직후 WAKE_HELLO 무응답(wake_hello_fail) 반복,
+   COM15는 FOUND에서 멈추거나 페어링 즉시 딥슬립(같은 시각에 "폴백 스윕 완료 — CNTL 못 찾음"과
+   PAIRED가 겹침 — 스윕 종료 판정/페어링 완료 레이스로 보임). SD 제거 전 로그에서도 사진 푸시
+   0건이라 SD 제거와 무관해 보임. 푸시 경로 실기 확인은 이 문제 해결 후.
+2. 캠 코어 분리(ESP-NOW 0, 센서 1), NO_MEM 폴링 루프 이벤트화(send_one_photo 등 삭제로 남은
+   곳은 resend_chunks_from_buffer의 6×20ms 재시도 등 — 다시 확인).
+3. 캠 CAM_PWDN(EXIO3)이 실제 배선돼 있음(코드는 "미사용 -1") — 촬영 안 할 때 센서 전원 차단에
+   쓸 수 있는지 검토.
+4. 콘 esp_now_photo.c의 목록/가져오기/삭제/전체삭제 함수가 호출처 없는 죽은 코드 — 정리 검토.
+5. 센스: 이벤트 방식 전환(C3 단일 코어라 코어 분리 해당 없음), 원래 PC에서 올바른 대상으로
+   빌드해 status_led 변경 확인, 레거시 빌드 변수형(esp_now_node.c) 컴파일 검증.
+6. 센스 연결 후 측정값 주 단위 파일 저장 실기 검증.
+7. OV5640(사진 1MB)에서 브 수신 큐가 얼마나 커지는지 확인.
+8. 사진 목록 팝업이 아직 LVGL 태스크에서 폴더 스캔함 → storage 쪽으로 이동.
+9. 콘 can_bridge.c의 중복 s_send_mutex 제거(ctx 뮤텍스로 대체됨).
+10. 브 ui_mem의 LVGL 락 실패 로그 확인.
+11. 릴레이가 이상하면 power_relay 기아(starvation) 여부 확인.
+12. 캐스크/UNPAIR 전체 흐름 검증. 촬영 주기 변경 캐스크가 CAN 경로로 구현됐는지 확인.
+13. 브 로그 msg_type 표 확장(#10, #49, #34 등 캐스크 단계 메시지).
+14. 카메라 팝업 메모리 20K, 페어링 반복 시 메모리 감소 확인.
+15. 첫 페어링 때 PHOTO_LIST_REQUEST 타임아웃 재검증 — 캠 SD 제거로 목록 프로토콜 자체가 없어져 해당 없음(4번 콘 죽은 코드 정리와 함께 닫을 것).
+16. 9/18 팝업 터치 검증, 캠 MVD 리팩터.
