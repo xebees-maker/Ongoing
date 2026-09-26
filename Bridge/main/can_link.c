@@ -59,6 +59,8 @@ typedef struct {
 } raw_frame_t;
 static QueueHandle_t s_raw_frame_q;
 static volatile uint32_t s_raw_drop = 0;  /* ISR 원시 프레임 큐가 차서 버린 수 */
+/* 2026-09-26(버스 에러 조사) — 에러를 트래픽 양으로 나눠 비교하려고 셈 */
+static volatile uint32_t s_rx_frames = 0, s_tx_frames = 0, s_bus_errs = 0;
 
 static twai_frame_t s_rx_frame;
 static uint8_t       s_rx_buf[8];
@@ -67,6 +69,7 @@ static IRAM_ATTR bool on_rx_done(twai_node_handle_t handle, const twai_rx_done_e
 {
     BaseType_t woken = pdFALSE;
     if (twai_node_receive_from_isr(handle, &s_rx_frame) == ESP_OK) {
+        s_rx_frames++;
         raw_frame_t rf;
         rf.id = s_rx_frame.header.id;
         rf.len = (uint8_t)s_rx_frame.buffer_len;
@@ -83,11 +86,13 @@ static bool on_tx_done(twai_node_handle_t handle, const twai_tx_done_event_data_
 {
     (void)handle;
     (void)ctx;
+    s_tx_frames++;
     return can_bridge_tx_pool_on_done_isr(edata);
 }
 
 static IRAM_ATTR bool on_error(twai_node_handle_t handle, const twai_error_event_data_t *edata, void *ctx)
 {
+    s_bus_errs++;
     ESP_EARLY_LOGW(TAG, "버스 에러: 0x%x", (unsigned)edata->err_flags.val);
     return false;
 }
@@ -259,9 +264,10 @@ static void can_status_task(void *arg)
             uint32_t q_count, q_hwm, cq_count, cq_hwm;
             can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
             can_bridge_queue_get_stats(&s_ctrl_complete_q, &cq_count, &cq_hwm);
-            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u) 수신버림=%u",
+            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u) 수신버림=%u RX=%u TX=%u 버스에러=%u",
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
-                     (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm, (unsigned)s_raw_drop);
+                     (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm, (unsigned)s_raw_drop,
+                     (unsigned)s_rx_frames, (unsigned)s_tx_frames, (unsigned)s_bus_errs);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
