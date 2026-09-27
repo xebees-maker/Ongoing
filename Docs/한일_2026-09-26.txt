@@ -230,3 +230,7 @@
     제안(미확정): ① WAKE_HELLO에 설정 번호를 싣고 바뀐 때만 CONFIG, 할 일이 없으면 "없음+sleep_sec"를 WAKE_HELLO_ACK에
     담아 왕복 1번으로(캠·콘 프로토콜 변경, 캠 USB 필요) ② "사용자 조작"은 실제 터치·요청 시작만 셈(수동 사진 청크 제외)
     ③ 체크인은 사이클로 안 셈.
+24. **[나중에 반드시 제거 — 09-27 사용자 지시]** 콘 테스트용 웹 API(2602be3): /api/capture_now?mac=(카메라 선택+"지금
+    촬영" 합성, ui_main_inject_capture_now), /api/devlog?save=(개발 로그 저장 문턱). 제거할 것: main.c 두 핸들러와 등록,
+    ui_main.c inject_fn_capture_now/ui_main_inject_capture_now와 ui_main.h 선언, max_uri_handlers 20→16 되돌리기.
+    지금은 Claude 단독 재현·검증용으로 남겨 둠.
