@@ -2,6 +2,7 @@
 #include "esp_now_link.h"  /* 경로 분류용 ESP-NOW msg_type */
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
+#include "hal/twai_ll.h"   /* 송신 중단 명령(드라이버 API에 없음) — abort_if_stuck */
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -260,6 +261,9 @@ static portMUX_TYPE s_tx_lock = portMUX_INITIALIZER_UNLOCKED;
 static tx_slot_t *s_inflight_slot = NULL;
 /* CAN 노드(=TWAI 인터럽트)가 잡힌 코어 — can_bridge_node_start_on_core()가 기록. -1이면 미지정 */
 static int s_tx_core = -1;
+/* 2026-09-26(할 일 18-가) — s_inflight_slot을 드라이버에 넣은 시각. 너무 오래 안 끝나면(상대 노드 없음) 중단 */
+static volatile TickType_t s_inflight_since = 0;
+static void abort_if_stuck(void);
 
 void can_bridge_tx_pool_init(void)
 {
@@ -339,11 +343,13 @@ esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_
     /* 이전 프레임의 송신 완료(on_tx_done)를 기다림 — 위 s_tx_inflight_sem 주석 참고 */
     TickType_t inflight_wait = (remain_ms < 0) ? portMAX_DELAY : pdMS_TO_TICKS(remain_ms);
     if (xSemaphoreTake(s_tx_inflight_sem, inflight_wait) != pdTRUE) {
+        abort_if_stuck();   /* 앞 프레임이 끝없이 재전송 중이면 끊음 — 다음 호출부터 다시 보낼 수 있게 */
         tx_slot_release(slot);
         return ESP_ERR_TIMEOUT;
     }
     taskENTER_CRITICAL(&s_tx_lock);
     s_inflight_slot = slot;
+    s_inflight_since = xTaskGetTickCount();
     taskEXIT_CRITICAL(&s_tx_lock);
     esp_err_t err = twai_node_transmit(node, &slot->frame, 0);
     if (err != ESP_OK) {
@@ -377,6 +383,31 @@ static void note_drop_isr(uint32_t id)
     for (int i = 0; i < DROP_ID_SLOTS; i++) {
         if (!s_drop[i].count) { s_drop[i].id = id; s_drop[i].count = 1; return; }
     }
+}
+
+/* 2026-09-26(할 일 18-가) — 상대 노드가 없으면(재부팅·다운로드 모드·멈춤) ACK를 못 받아 하드웨어가 같은 프레임을 끝없이
+ * 재전송함(error_passive에선 ACK 에러로 TEC도 안 올라 버스 오프도 안 됨). 드라이버에 넣은 프레임이 TX_STUCK_MS 넘게
+ * 안 끝나면 송신 중단 명령 — 이번 시도가 끝나면 재전송을 멈추고 송신 완료 인터럽트가 와서 슬롯·송신 권한이 정상 반납됨.
+ * 중단한 프레임은 버려진 것으로 셈(can_bridge_send가 메시지 전체를 실패로 돌림). 정상 프레임은 1ms도 안 걸림.
+ * (실기: 브가 버스 오프 반복·백오프로 빠져 있는 동안 콘 에러가 수십만 회로 쌓였음) */
+#define TX_STUCK_MS 300
+static void abort_if_stuck(void)
+{
+    taskENTER_CRITICAL(&s_tx_lock);
+    tx_slot_t *cur = s_inflight_slot;
+    TickType_t since = s_inflight_since;
+    uint32_t id = cur ? cur->frame.header.id : 0;
+    bool stuck = cur && (xTaskGetTickCount() - since) >= pdMS_TO_TICKS(TX_STUCK_MS);
+    if (stuck) note_drop_isr(id);
+    taskEXIT_CRITICAL(&s_tx_lock);
+    if (!stuck) return;
+    static TickType_t s_last_log = 0;
+    TickType_t now = xTaskGetTickCount();
+    if (now - s_last_log > pdMS_TO_TICKS(1000)) {
+        s_last_log = now;
+        ESP_LOGW(TAG, "송신 프레임(id=0x%x)이 %ums 넘게 안 끝남(상대 노드 응답 없음?) — 중단", (unsigned)id, (unsigned)TX_STUCK_MS);
+    }
+    twai_ll_set_cmd_abort_tx(TWAI_LL_GET_HW(0));
 }
 
 static uint32_t drop_count(uint32_t id)
@@ -576,6 +607,7 @@ esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
         if (xSemaphoreTake(s_tx_inflight_sem, pdMS_TO_TICKS(CAN_BRIDGE_DEFAULT_TIMEOUT_MS)) == pdTRUE) {
             xSemaphoreGive(s_tx_inflight_sem);
         } else {
+            abort_if_stuck();
             err = ESP_ERR_TIMEOUT;
         }
         if (err == ESP_OK && drop_count(ctx->tx_id) != drops_before) {

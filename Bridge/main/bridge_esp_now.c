@@ -44,6 +44,10 @@ static uint8_t *s_rx_buf;
 /* 2026-09-26 — 브 라디오의 현재 채널(wifi_bringup() 후 1회 읽음 — 브는 채널을 바꾸지 않음).
  * 0이면 아직 모름 → 광고 채널 필터 안 함 */
 static uint8_t  s_own_channel = 0;
+/* 2026-09-26(실기 크래시 — 브 재부팅 루프) — main.c는 can_link_init()을 먼저 불러 CAN 수신이 먼저 시작됨. 그 사이 콘의
+ * RELAY/RELIABLE_SEND가 오면 초기화 전 ESP-NOW를 건드려 크래시(esp_now_is_peer_exist). 준비 전엔 can_link가 버림 */
+static volatile bool s_ready = false;
+bool bridge_esp_now_is_ready(void) { return s_ready; }
 static uint32_t s_adjacent_adv_dropped = 0;
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
@@ -263,5 +267,6 @@ void bridge_esp_now_init(void)
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
     ESP_ERROR_CHECK(esp_now_register_send_cb(send_cb));
 
+    s_ready = true;
     ESP_LOGI(TAG, "브 ESP-NOW 라디오 소유 시작됨");
 }

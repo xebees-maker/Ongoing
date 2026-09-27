@@ -247,7 +247,10 @@ static void can_consume_task(void *arg)
                 uint8_t *body = data + CAN_BRIDGE_APP_HEADER_LEN;
                 size_t body_len = len - CAN_BRIDGE_APP_HEADER_LEN;
 
-                if (hdr.msg_type == CAN_DATA_RELAY) {
+                if ((hdr.msg_type == CAN_DATA_RELAY || hdr.msg_type == CAN_DATA_RELIABLE_SEND) && !bridge_esp_now_is_ready()) {
+                    /* 부팅 직후 ESP-NOW 초기화 전 — 버림(콘은 타임아웃 뒤 다시 시도, bridge_esp_now_is_ready 주석) */
+                    ESP_LOGW(TAG, "ESP-NOW 준비 전 콘 요청(type=%u) — 버림", hdr.msg_type);
+                } else if (hdr.msg_type == CAN_DATA_RELAY) {
                     /* 2026-09-23(사용자 확인 — "DATA rx가 무선에 찍혔다") — 다시 보니 이 줄
                      * 자체는 코드상 CAN 창에 정상적으로 찍히는 게 맞고, 실제로는 그 직후
                      * bridge_esp_now_send_raw()가 무선 창에 "TX(...)"를 바로 이어서 찍어서

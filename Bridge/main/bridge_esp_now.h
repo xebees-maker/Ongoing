@@ -11,6 +11,9 @@
 
 void bridge_esp_now_init(void);
 
+/* 2026-09-26 — ESP-NOW 초기화가 끝났으면 true(그 전에 온 콘의 무선 송신 요청은 버림) */
+bool bridge_esp_now_is_ready(void);
+
 /* can_link.c가 콘에서 받은 DATA 완성 메시지를 실제 ESP-NOW로 내보낼 때 씀 */
 void bridge_esp_now_send_raw(const uint8_t mac[6], const uint8_t *data, uint16_t len);
 
