@@ -85,7 +85,7 @@ static void note_failure(void)
 {
     if (s_reinit_in_progress) return;
     if (++s_fail_count < REINIT_FAIL_THRESHOLD) return;
-    force_reinit("연속 통신 실패");
+    force_reinit("repeated I2C failures");
 }
 
 static void note_success(void)
@@ -102,7 +102,7 @@ static void check_stale(void)
     if (s_reinit_in_progress) return;
     if (s_last_success_tick == 0) return;  /* 아직 기준 시각 없음 (초기화 직후) */
     if ((xTaskGetTickCount() - s_last_success_tick) < pdMS_TO_TICKS(STALE_TIMEOUT_MS)) return;
-    force_reinit("측정 결과 정체(16초 이상 ready 없음)");
+    force_reinit("measurement stalled (no data ready for 16s+)");
 }
 
 /* Sensirion CRC8: poly 0x31, init 0xFF */
