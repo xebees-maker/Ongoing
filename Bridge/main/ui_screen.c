@@ -36,17 +36,37 @@ const char *ui_screen_err_short(esp_err_t err)
 
 const char *ui_screen_msg_type_name(uint8_t msg_type)
 {
-    /* 지금 페어링 흐름(광고->ACK->연결)에서 실제로 보이는 것부터 — 나머지(캐스크/사진전송
-     * 등)는 필요해지면 추가 */
+    /* esp_now_link.h의 메시지 종류 전체 — 로그 한 줄이 워드랩되지 않게 짧게 */
     switch (msg_type) {
         case ESP_NOW_MSG_ADVERTISE:        return "ADVERTISE";
         case ESP_NOW_MSG_PAIR_REQUEST:     return "PAIR_REQ";
         case ESP_NOW_MSG_PAIR_ACK:         return "PAIR_ACK";
+        case ESP_NOW_MSG_SENSOR_DATA:      return "SENS_DATA";
         case ESP_NOW_MSG_ADVERTISE_ACK:    return "ADV_ACK";
+        case ESP_NOW_MSG_PHOTO_REQUEST:    return "PH_REQ";
+        case ESP_NOW_MSG_PHOTO_META:       return "PH_META";
+        case ESP_NOW_MSG_PHOTO_CHUNK:      return "PH_CHUNK";
+        case ESP_NOW_MSG_PHOTO_DONE:       return "PH_DONE";
+        case ESP_NOW_MSG_CAM_CONFIG_SET:   return "CAM_CFG";
+        case ESP_NOW_MSG_UNPAIR:           return "UNPAIR";
+        case ESP_NOW_MSG_CAPTURE_STATUS:   return "CAP_STAT";
+        case ESP_NOW_MSG_PHOTO_DONE_ACK:   return "PH_DONE_ACK";
+        case ESP_NOW_MSG_CAPTURE_STATUS_ACK: return "CAP_STAT_ACK";
+        case ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST: return "WIN_REQ";
+        case ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK:     return "WIN_ACK";
+        case ESP_NOW_MSG_CAM_CONFIG_ACK:   return "CAM_CFG_ACK";
+        case ESP_NOW_MSG_SLEEP_NOW:        return "SLEEP";
+        case ESP_NOW_MSG_SLEEP_NOW_ACK:    return "SLEEP_ACK";
+        case ESP_NOW_MSG_PHOTO_META_ACK:   return "PH_META_ACK";
         case ESP_NOW_MSG_WAKE_HELLO:       return "WAKE_HELLO";
         case ESP_NOW_MSG_WAKE_HELLO_ACK:   return "WAKE_ACK";
-        case ESP_NOW_MSG_UNPAIR:           return "UNPAIR";
         case ESP_NOW_MSG_UNPAIR_ACK:       return "UNPAIR_ACK";
+        case ESP_NOW_MSG_CASK_WORK_NONE:   return "WORK_NONE";
+        case ESP_NOW_MSG_CASK_WORK_NONE_ACK: return "WORK_NONE_ACK";
+        case ESP_NOW_MSG_WAKE_HELLO_SENS:  return "WAKE_SENS";
+        case ESP_NOW_MSG_WAKE_HELLO_SENS_ACK: return "WAKE_SENS_ACK";
+        case ESP_NOW_MSG_SENS_CONFIG_SET:  return "SENS_CFG";
+        case ESP_NOW_MSG_SENS_CONFIG_ACK:  return "SENS_CFG_ACK";
         default: {
             static char buf[12];
             snprintf(buf, sizeof(buf), "#%u", msg_type);
