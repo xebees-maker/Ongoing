@@ -222,7 +222,14 @@ static void on_window_status(const uint8_t *mac, const uint8_t *data, int len)
     esp_now_photo_window_status_req_t req;
     memcpy(&req, data, sizeof(req));
     sr_cam_t *c = find_cam(mac);
-    if (!c || !c->active || req.file_id != c->file_id) return;  /* 모르는 전송 — 무응답(캠이 다음으로 넘어감) */
+    if (!c || !c->active || req.file_id != c->file_id) {
+        /* 모르는 전송 — 무응답(캠이 다음으로 넘어감). 캠의 "WINDOW_STATUS_ACK no response" 원인 확인용 */
+        ESP_LOGD(TAG, MACSTR " WINDOW_STATUS ignored [%u,+%u) file_id=%u: %s (session file_id=%u completed=%d)",
+                 MAC2STR(mac), req.range_start, req.range_count, (unsigned)req.file_id,
+                 !c ? "no session" : (!c->active ? "session inactive" : "file_id mismatch"),
+                 c ? (unsigned)c->file_id : 0, c ? (int)c->completed : 0);
+        return;
+    }
     c->last_us = esp_timer_get_time();
     ESP_LOGD(TAG, MACSTR " WINDOW_STATUS [%u,+%u) next=%u backlog=%u", MAC2STR(mac), req.range_start, req.range_count,
              c->next_idx, (unsigned)bridge_esp_now_data_backlog());

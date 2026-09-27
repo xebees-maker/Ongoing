@@ -24,6 +24,11 @@ static const char *TAG = "SYS";
 
 void app_main(void)
 {
+    /* 브 자체 통신 태그만 D(빌드 상한 D, IDF 내부 태그는 기본 I 유지) — 브엔 실행 중 로그 레벨을 바꿀 UI가 없음 */
+    esp_log_level_set("PHOTO", ESP_LOG_DEBUG);
+    esp_log_level_set("LINK", ESP_LOG_DEBUG);
+    esp_log_level_set("CAN", ESP_LOG_DEBUG);
+
     esp_err_t nvs_ret = nvs_flash_init();
     if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

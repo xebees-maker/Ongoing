@@ -40,3 +40,6 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # 2026-09-26(설계 6단계 — 브 워치독) — 태스크 워치독(IDLE 태스크 5초 굶음)에 걸리면 재부팅. 콘은 부팅 ID로 재부팅을 알아챔
 CONFIG_ESP_TASK_WDT_PANIC=y
+
+# 2026-09-28 — 브 자체 태그(PHOTO/LINK/CAN)의 D 로그를 켤 수 있게(main.c에서 태그별로 켬). IDF 내부는 기본 I 그대로
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
