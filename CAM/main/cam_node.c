@@ -631,8 +631,11 @@ void cam_node_set_xclk_target_mhz(uint8_t mhz)
         ESP_LOGW(TAG, "XCLK target out of range (1~40MHz), ignored: %u", (unsigned)mhz);
         return;
     }
+    /* CNTL은 CASK마다 같은 값을 다시 보냄 — 켜진 카메라는 이미 이 값으로 초기화됐으니
+     * 값이 바뀐 때만 PLL을 다시 계산함(매번 하면 4시간에 4천 번 넘게 재계산했음) */
+    bool changed = (mhz != s_xclk_target_mhz);
     s_xclk_target_mhz = mhz;
-    if (s_camera_ready) {
+    if (s_camera_ready && changed) {
         cam_node_set_xclk((int)mhz);
     }
 }
