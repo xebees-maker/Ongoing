@@ -203,29 +203,14 @@ static bool               s_has_selected_sensor = false;
 static lv_obj_t *s_capture_interval_dd    = NULL;
 static lv_obj_t *s_capture_interval_label = NULL;
 
-/* 2026-09-27(사용자 지시 — 캠 MVD 리팩터, feedback_model_view_dirty_pattern) — 카메라 설정 팝업(촬영주기/XCLK/AGC/AEC)의
- * 모델. 팝업을 열 때 device_config(전역 모델, 이 캠 mac)에서 원본을 읽고 편집 사본으로 깊은 복사 → 위젯은 사본만 읽고 씀
- * → dirty = 사본≠원본(필드 전체 비교) → 적용 버튼 하나가 dirty의 뷰 → 적용하면 바뀐 필드를 전부 저장하고 팝업 닫음.
- * 예전엔 줄마다 [드롭다운][적용]이 따로 있고 dirty를 "선택 인덱스≠적용 인덱스"로 위젯마다 봤으며, AGC/AEC 스위치는
- * 토글 즉시 저장이었음 */
-typedef struct {
-    uint32_t capture_interval_sec;
-    uint32_t xclk_mhz;
-    bool     agc;
-    bool     aec;
-} cam_popup_model_t;
-static cam_popup_model_t s_cam_model_orig;
-static cam_popup_model_t s_cam_model_edit;
-static lv_obj_t *s_cam_apply_btn = NULL;
-static lv_obj_t *s_cam_apply_lbl = NULL;
+/* 2026-09-27(사용자 지시 — 전체화면 팝업 규칙) — 촬영주기/AGC/AEC/XCLK는 콘에 저장했다가 캠이 깨어날 때 CASK CONFIG로
+ * 전달되는 값이라 적용 버튼 없이 바꾸는 즉시 저장(적용 버튼은 즉시 통신으로 실행되는 조작과 텍스트 입력에만). 팝업은 X로만
+ * 닫음. 라벨의 "적용 대기/적용됨" 표시도 없앰(전체 노드용·대상 노드용 설정이 섞여 뜻이 모호) */
 
 static lv_obj_t *s_response_interval_dd    = NULL;
-static lv_obj_t *s_response_apply_btn      = NULL;
 static lv_obj_t *s_response_interval_label = NULL;
-static lv_obj_t *s_response_apply_lbl      = NULL;
 static lv_obj_t *s_response_help_label     = NULL;  /* 2026-08-10 — 드롭다운 선택값의 풀이
                                                         (즉시/빠름/균형/절전/최대절전 의미) */
-static int       s_response_interval_applied_idx = -1;
 
 /* 자동연결 스위치 2개(2026-09-08, 사용자 설계) — "신규 장치도 자동연결"이 켜지면 "이전 연결
  * 장치 자동연결"을 사실상 포함하므로(사용자 지적), UI로 그 종속관계를 표현: new가 켜지면
@@ -235,15 +220,13 @@ static lv_obj_t *s_auto_connect_known_label  = NULL;
 static lv_obj_t *s_auto_connect_new_switch   = NULL;
 static lv_obj_t *s_auto_connect_new_label    = NULL;
 
-/* AGC/AEC On/Off(2026-08-21, 세로줄 노이즈 진단용) — 카메라별 설정. 2026-09-27(캠 MVD) — 토글은 편집 사본만 바꾸고
- * 저장은 카메라 팝업의 적용 버튼 하나로(s_cam_model_edit 참고) */
+/* AGC/AEC On/Off(2026-08-21, 세로줄 노이즈 진단용) — 카메라별 설정, 토글 즉시 저장 */
 static lv_obj_t *s_agc_switch = NULL;
 static lv_obj_t *s_agc_label  = NULL;
 static lv_obj_t *s_aec_switch = NULL;
 static lv_obj_t *s_aec_label  = NULL;
 
-/* XCLK 프리셋 행(2026-08-21, 화질/노이즈 진단용) — 4단계 프리셋 드롭다운, 카메라별 설정. 2026-09-27(캠 MVD) — 저장은
- * 카메라 팝업의 적용 버튼 하나로(s_cam_model_edit 참고) */
+/* XCLK 프리셋 행(2026-08-21, 화질/노이즈 진단용) — 4단계 프리셋 드롭다운, 카메라별 설정, 선택 즉시 저장 */
 static const uint32_t s_xclk_values[] = { 5, 10, 20, 24 };
 static lv_obj_t *s_xclk_dd          = NULL;
 static lv_obj_t *s_xclk_label       = NULL;
@@ -258,10 +241,7 @@ static lv_obj_t *s_xclk_label       = NULL;
  * 재발하므로, 디폴트는 항상 이 목록의 멤버여야 함 */
 static const uint32_t s_sens_measure_interval_values[] = { 10, 15, 30, 60, 300, 1800 };
 static lv_obj_t *s_sens_measure_dd          = NULL;
-static lv_obj_t *s_sens_measure_apply_btn   = NULL;
 static lv_obj_t *s_sens_measure_label       = NULL;
-static lv_obj_t *s_sens_measure_apply_lbl   = NULL;
-static int       s_sens_measure_applied_idx = -1;
 
 /* 네트워크 행(2026-08-29) — [라벨][독립/종속 드롭다운][우측: IP 또는 SSID 또는 찾기버튼].
  * 우측 내용은 부팅 시점이 아니라 실제 연결상태(STA는 IP를 받아야 "연결됨")에 따라 바뀔 수
@@ -330,11 +310,8 @@ static void cb_sensor_dash_row_clicked(lv_event_t *e);
  * CAM에는 전송 안 되는 Cntl 내부 판단값이라(node_hub.c 참고), Apply해도 네트워크 왕복이
  * 없어서 진행팝업 없이 즉시 반영됨(다른 두 Apply 버튼과 다른 점) */
 static lv_obj_t *s_adaptive_response_dd    = NULL;
-static lv_obj_t *s_adaptive_apply_btn      = NULL;
 static lv_obj_t *s_adaptive_response_label = NULL;
-static lv_obj_t *s_adaptive_apply_lbl      = NULL;
 static lv_obj_t *s_adaptive_help_label     = NULL;
-static int       s_adaptive_response_applied_idx = -1;
 
 static lv_obj_t *s_restart_label     = NULL;
 static lv_obj_t *s_restart_btn_lbl   = NULL;
@@ -845,13 +822,9 @@ static void update_lang_buttons(void)
 static void force_camera_list_redraw(void);
 /* 측정기 리스트(설정탭)의 동일 용도 — 정의는 s_sensor_count_prev 선언부 근처(아래) */
 static void force_sensor_list_redraw(void);
-/* 측정 주기 Apply 버튼의 활성/비활성 판정 — 정의는 촬영주기의 동일 함수 근처(아래).
- * select_sensor()(측정기 리스트 근처, 여기보다 앞)가 선택이 바뀔 때마다 이걸 불러
- * 새 대상 기준으로 다시 판정해야 해서 전방선언만 둠 */
-static void update_sens_measure_apply_enabled(void);
 /* 목록 개수 라벨("N개"/"N Pic.") 갱신 — 정의는 refresh_photo_list_ui 근처(아래) */
 static void update_list_info_label(void);
-/* 응답성 드롭다운 선택값의 도움말 텍스트 갱신 — 정의는 update_response_apply_enabled
+/* 응답성 드롭다운 선택값의 도움말 텍스트 갱신 — 정의는 cb_response_interval_changed
  * 근처(아래) */
 static void update_response_help_text(void);
 
@@ -905,9 +878,7 @@ static void refresh_lang_texts(void)
      * 밀릴 일은 없음) */
     if (s_option_tab_built) {
         lv_label_set_text(s_response_interval_label, ui_str(STR_LABEL_RESPONSE_INTERVAL));
-        lv_label_set_text(s_response_apply_lbl, ui_str(STR_BTN_APPLY));
         lv_label_set_text(s_adaptive_response_label, ui_str(STR_LABEL_ADAPTIVE_RESPONSE));
-        lv_label_set_text(s_adaptive_apply_lbl, ui_str(STR_BTN_APPLY));
         lv_label_set_text(s_adaptive_help_label, ui_str(STR_HELP_ADAPTIVE_RESPONSE));
         lv_label_set_text(s_restart_label, ui_str(STR_LABEL_RESTART_DEVICE));
         lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
@@ -955,7 +926,6 @@ static void refresh_lang_texts(void)
         lv_dropdown_set_options(s_sens_measure_dd, ui_str(STR_OPT_SENS_MEASURE_INTERVAL_LIST));
         lv_dropdown_set_selected(s_sens_measure_dd, sens_measure_sel);
         lv_label_set_text(s_sens_measure_label, ui_str(STR_LABEL_SENS_MEASURE_INTERVAL));
-        lv_label_set_text(s_sens_measure_apply_lbl, ui_str(STR_BTN_APPLY));
     }
 
     if (s_log_tab_built) {
@@ -1904,12 +1874,10 @@ static void select_sensor(const uint8_t *mac)
         /* 2026-09-18(모델 라이프사이클 원칙 리팩토링) — getter가 이제 미설정이어도 항상
          * 유효한 값(프리셋 목록에 실재하는 디폴트)을 반환하므로, 여기서 0-체크/별도 폴백
          * 없이 그대로 신뢰. find_value_index가 -1을 반환할 일이 구조적으로 없어짐 */
-        s_sens_measure_applied_idx = find_value_index(s_sens_measure_interval_values,
+        int idx = find_value_index(s_sens_measure_interval_values,
             sizeof(s_sens_measure_interval_values) / sizeof(s_sens_measure_interval_values[0]),
             device_config_get_sens_sample_interval_sec(mac));
-        lv_dropdown_set_selected(s_sens_measure_dd,
-            (uint16_t)(s_sens_measure_applied_idx >= 0 ? s_sens_measure_applied_idx : 0));
-        update_sens_measure_apply_enabled();
+        lv_dropdown_set_selected(s_sens_measure_dd, (uint16_t)(idx >= 0 ? idx : 0));
     }
 }
 
@@ -4844,11 +4812,6 @@ static void refresh_dashboard(lv_timer_t *t)
             if (device_config_get_aec_enable(s_camera_dash_row_macs[i]) && n > 0 && (size_t)n < sizeof(buf)) {
                 n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", ui_str(STR_LABEL_AEC_TINY));
             }
-            /* 2026-09-26(사용자 설계) — CASK 큐에서 다음 접속을 기다리는 명령 수(지금 촬영 등) */
-            if (cam_nodes[j].action_queue_count > 0 && n > 0 && (size_t)n < sizeof(buf)) {
-                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %d",
-                              ui_str(STR_LABEL_PENDING_TINY), cam_nodes[j].action_queue_count);
-            }
             /* 2026-09-18(사용자 지적 — is_active를 true로 하드코딩해서 실제 상태와 무관하게
              * 표시되던 버그) — 센스의 near_orphan 계산과 동일 패턴으로 실제 상태 반영 */
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
@@ -5922,70 +5885,52 @@ static void refresh_network_right_zone(void)
     }
 }
 
-static bool cam_model_equal(const cam_popup_model_t *a, const cam_popup_model_t *b)
-{
-    return a->capture_interval_sec == b->capture_interval_sec && a->xclk_mhz == b->xclk_mhz &&
-           a->agc == b->agc && a->aec == b->aec;
-}
-
-/* Dirty 모델의 뷰 — 사본≠원본이면 적용 버튼 활성 */
-static void update_cam_apply_enabled(void)
-{
-    if (!s_cam_apply_btn) return;
-    if (!cam_model_equal(&s_cam_model_edit, &s_cam_model_orig)) lv_obj_clear_state(s_cam_apply_btn, LV_STATE_DISABLED);
-    else lv_obj_add_state(s_cam_apply_btn, LV_STATE_DISABLED);
-}
-
+/* 2026-09-27(사용자 지시 — 전체화면 팝업 규칙) — 캠 설정은 적용 버튼 없이 바꾸는 즉시 저장, 전달은 캠이 깨어날 때
+ * CASK CONFIG(2026-09-26 사용자 설계). 대상은 항상 이 팝업의 카메라(s_device_popup_node) */
 static void cb_cam_capture_changed(lv_event_t *e)
 {
     (void)e;
     uint16_t idx = lv_dropdown_get_selected(s_capture_interval_dd);
-    if (idx < (sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]))) {
-        s_cam_model_edit.capture_interval_sec = s_capture_interval_values[idx];
-    }
-    update_cam_apply_enabled();
+    if (idx >= (sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]))) return;
+    node_hub_apply_cam_capture_interval_sec(s_device_popup_node.mac, s_capture_interval_values[idx]);
+    ui_log_add("Capture interval saved - applied on next CAM wake");
 }
 
 static void cb_cam_xclk_changed(lv_event_t *e)
 {
     (void)e;
     uint16_t idx = lv_dropdown_get_selected(s_xclk_dd);
-    if (idx < (sizeof(s_xclk_values) / sizeof(s_xclk_values[0]))) s_cam_model_edit.xclk_mhz = s_xclk_values[idx];
-    update_cam_apply_enabled();
+    if (idx >= (sizeof(s_xclk_values) / sizeof(s_xclk_values[0]))) return;
+    node_hub_apply_cam_xclk_mhz(s_device_popup_node.mac, (uint8_t)s_xclk_values[idx]);
+    ui_log_add("XCLK saved - applied on next CAM wake");
 }
 
 static void cb_cam_agc_changed(lv_event_t *e)
 {
     (void)e;
-    s_cam_model_edit.agc = lv_obj_has_state(s_agc_switch, LV_STATE_CHECKED);
-    update_cam_apply_enabled();
+    node_hub_apply_cam_agc_enable(s_device_popup_node.mac, lv_obj_has_state(s_agc_switch, LV_STATE_CHECKED));
+    ui_log_add("AGC saved - applied on next CAM wake");
 }
 
 static void cb_cam_aec_changed(lv_event_t *e)
 {
     (void)e;
-    s_cam_model_edit.aec = lv_obj_has_state(s_aec_switch, LV_STATE_CHECKED);
-    update_cam_apply_enabled();
+    node_hub_apply_cam_aec_enable(s_device_popup_node.mac, lv_obj_has_state(s_aec_switch, LV_STATE_CHECKED));
+    ui_log_add("AEC saved - applied on next CAM wake");
 }
 
-static void update_response_apply_enabled(void)
+/* 측정 주기(2026-09-05) — 센스는 매 웨이크 SENS_CONFIG_SET을 다시 받아가므로 저장만 하면 다음 웨이크에 반영.
+ * 2026-09-27(전체화면 팝업 규칙) — 적용 버튼 없이 선택 즉시 저장 */
+static void cb_sens_measure_interval_changed(lv_event_t *e)
 {
-    bool changed = (lv_dropdown_get_selected(s_response_interval_dd) != (uint16_t)s_response_interval_applied_idx);
-    if (changed) lv_obj_clear_state(s_response_apply_btn, LV_STATE_DISABLED);
-    else lv_obj_add_state(s_response_apply_btn, LV_STATE_DISABLED);
+    (void)e;
+    if (!s_has_selected_sensor) return;
+    uint16_t idx = lv_dropdown_get_selected(s_sens_measure_dd);
+    uint32_t sec = (idx < (sizeof(s_sens_measure_interval_values) / sizeof(s_sens_measure_interval_values[0])))
+                   ? s_sens_measure_interval_values[idx] : s_sens_measure_interval_values[0];
+    node_hub_apply_sens_sample_interval_sec(s_selected_sensor_mac, sec);
+    ui_log_add("Measure period saved - applied on next Sens wake");
 }
-
-
-/* 측정 주기 Apply 버튼 활성화 판정(2026-09-05) — 촬영주기와 동일 패턴. select_sensor()가
- * 선택이 바뀔 때마다 이것도 다시 불러서, 새로 선택된 센서 기준으로 판정을 갱신함 */
-static void update_sens_measure_apply_enabled(void)
-{
-    bool changed = s_has_selected_sensor &&
-                   (lv_dropdown_get_selected(s_sens_measure_dd) != (uint16_t)s_sens_measure_applied_idx);
-    if (changed) lv_obj_clear_state(s_sens_measure_apply_btn, LV_STATE_DISABLED);
-    else lv_obj_add_state(s_sens_measure_apply_btn, LV_STATE_DISABLED);
-}
-static void cb_sens_measure_interval_changed(lv_event_t *e) { (void)e; update_sens_measure_apply_enabled(); }
 
 /* 응답성 드롭다운 선택값의 풀이를 별도 도움말 텍스트로 표시(2026-08-10) — 드롭다운 자체엔
  * 짧은 라벨(1초/3초/...)만 있어서, 그 값이 실제로 뭘 뜻하는지(즉시/빠름/균형/절전/최대절전)
@@ -6002,50 +5947,28 @@ static void update_response_help_text(void)
     }
 }
 
+/* 2026-09-27(전체화면 팝업 규칙) — 적용 버튼 없이 선택 즉시 저장, 각 캠이 다음 웨이크에 CASK CONFIG로 받아감 */
 static void cb_response_interval_changed(lv_event_t *e)
 {
     (void)e;
-    update_response_apply_enabled();
+    uint16_t idx = lv_dropdown_get_selected(s_response_interval_dd);
+    uint32_t sec = (idx < (sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0])))
+                   ? s_response_interval_values[idx] : s_response_interval_values[0];
+    node_hub_apply_response_interval_sec(sec);
     update_response_help_text();
+    ui_log_add("Response interval saved - applied on next CAM wake");
 }
 
-static void update_adaptive_apply_enabled(void)
-{
-    bool changed = (lv_dropdown_get_selected(s_adaptive_response_dd) != (uint16_t)s_adaptive_response_applied_idx);
-    if (changed) lv_obj_clear_state(s_adaptive_apply_btn, LV_STATE_DISABLED);
-    else lv_obj_add_state(s_adaptive_apply_btn, LV_STATE_DISABLED);
-}
-
-static void cb_adaptive_response_changed(lv_event_t *e) { (void)e; update_adaptive_apply_enabled(); }
-
-/* CAM에 안 보내는 Cntl 내부값이라(node_hub.c 참고) 네트워크 왕복이 없음 — 다른 두
- * Apply(촬영주기/응답성)처럼 진행팝업을 띄울 이유가 없어서 즉시 저장하고 버튼만 도로 끔 */
-static void cb_apply_adaptive_response(lv_event_t *e)
+/* 적응형 반응시간 — CAM에 안 보내는 Cntl 내부값(node_hub.c 참고). 2026-09-27(전체화면 팝업 규칙) — 선택 즉시 저장 */
+static void cb_adaptive_response_changed(lv_event_t *e)
 {
     (void)e;
     uint16_t idx = lv_dropdown_get_selected(s_adaptive_response_dd);
     uint32_t sec = (idx < (sizeof(s_adaptive_response_values) / sizeof(s_adaptive_response_values[0])))
                    ? s_adaptive_response_values[idx] : 0;
     device_config_set_adaptive_response_sec(sec);
-    s_adaptive_response_applied_idx = idx;
-    update_adaptive_apply_enabled();
 }
 
-/* 2026-09-26(사용자 설계) — CAM 설정은 적용 버튼에서 저장만 하고(자고 있는 캠에 명령을 줄 수 없으니 기다리지
- * 않음), 캠이 깨어나 CASK CONFIG를 받고 ACK하면 그 값이 적용된 값. 라벨 뒤에 "적용 대기/적용됨"을 붙여 보여줌
- * — 저장값(device_config)과 캠이 마지막으로 ACK한 CONFIG(node_hub_get_cam_applied_config) 비교, 1초 주기 */
-static void set_cfg_state_label(lv_obj_t *label, ui_str_id_t base_id, int state /* -1: 표시 없음, 0: 대기, 1: 적용됨 */)
-{
-    if (!label) return;
-    if (state < 0) {
-        lv_label_set_text(label, ui_str(base_id));
-        lv_obj_remove_local_style_prop(label, LV_STYLE_TEXT_COLOR, 0);
-        return;
-    }
-    lv_label_set_text_fmt(label, "%s%s", ui_str(base_id), ui_str(state ? STR_CFG_APPLIED_SUFFIX : STR_CFG_PENDING_SUFFIX));
-    if (state) lv_obj_remove_local_style_prop(label, LV_STYLE_TEXT_COLOR, 0);
-    else       lv_obj_set_style_text_color(label, lv_palette_main(LV_PALETTE_ORANGE), 0);
-}
 
 /* 2026-09-26(설계 6단계) — 브릿지 PONG이 끊기면 한 번 경고(에러 이력·아이콘), 다시 오면 정보 로그 */
 static void refresh_bridge_health(lv_timer_t *t)
@@ -6062,84 +5985,6 @@ static void refresh_bridge_health(lv_timer_t *t)
     }
 }
 
-static void refresh_cam_config_state(lv_timer_t *t)
-{
-    (void)t;
-    if (s_capture_interval_label || s_xclk_label) {
-        esp_now_cam_config_t applied;
-        bool have = node_hub_get_cam_applied_config(s_device_popup_node.mac, &applied);
-        set_cfg_state_label(s_capture_interval_label, STR_LABEL_CAPTURE_INTERVAL,
-            (have && applied.capture_interval_sec == device_config_get_cam_capture_interval_sec(s_device_popup_node.mac)) ? 1 : 0);
-        set_cfg_state_label(s_xclk_label, STR_LABEL_XCLK,
-            (have && applied.xclk_mhz == device_config_get_xclk_mhz(s_device_popup_node.mac)) ? 1 : 0);
-    }
-    if (s_response_interval_label) {
-        /* 시스템 공통값 — 페어링된 캠 전부가 받았으면 적용됨, 캠이 없으면 표시 안 함 */
-        static node_hub_node_t cams[NODE_HUB_MAX_NODES];  /* 스택 대신(구조체가 큼) */
-        int count = node_hub_get_nodes(HUB_NODE_KIND_CAM, cams, NODE_HUB_MAX_NODES);
-        uint32_t saved = device_config_get_response_interval_sec();
-        int state = -1;
-        for (int i = 0; i < count; i++) {
-            if (cams[i].conn_state != NODE_CONN_PAIRED) continue;
-            bool ok = cams[i].cfg_applied_valid && cams[i].cfg_applied.response_interval_sec == saved;
-            state = (state == 0 || !ok) ? 0 : 1;
-        }
-        set_cfg_state_label(s_response_interval_label, STR_LABEL_RESPONSE_INTERVAL, state);
-    }
-}
-
-/* 2026-09-05 — 센스는 콘 개입 없이 자기 주기대로 자율적으로 깨어(사용자 설계) 매 웨이크
- * SENS_CONFIG_SET을 다시 받아가므로, 촬영주기처럼 진행팝업으로 "적용 중" 대기를 보여줄
- * 이유가 약함(다음 깨어날 때 반영될 뿐, 그 시점을 콘이 능동적으로 기다릴 필요가 없음) —
- * AGC/AEC 스위치의 "즉시 저장" 패턴과 같은 이유로 팝업 없이 로그만 남김(단순화) */
-static void cb_apply_sens_measure_interval(lv_event_t *e)
-{
-    (void)e;
-    if (!s_has_selected_sensor) {
-        ui_log_add("Measure period apply: no sensor selected");
-        return;
-    }
-    uint16_t idx = lv_dropdown_get_selected(s_sens_measure_dd);
-    /* idx는 LVGL 드랍다운 자체 옵션 개수로 이미 제한되므로 이 배열 범위를 벗어날 일이
-     * 실질적으로 없음 — 그래도 방어코드는 별도 숫자가 아니라 배열 자체를 참조 */
-    uint32_t sec = (idx < (sizeof(s_sens_measure_interval_values) / sizeof(s_sens_measure_interval_values[0])))
-                   ? s_sens_measure_interval_values[idx] : s_sens_measure_interval_values[0];
-    node_hub_apply_sens_sample_interval_sec(s_selected_sensor_mac, sec);
-    s_sens_measure_applied_idx = idx;
-    update_sens_measure_apply_enabled();
-    ui_log_add("Measure period saved - applied on next Sens wake");
-}
-
-static void cb_apply_response_interval(lv_event_t *e)
-{
-    (void)e;
-    /* 2026-09-26(사용자 설계) — 저장만, 각 캠이 다음 웨이크에 CASK CONFIG로 받아감 */
-    uint16_t idx = lv_dropdown_get_selected(s_response_interval_dd);
-    uint32_t sec = (idx < (sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0])))
-                   ? s_response_interval_values[idx] : s_response_interval_values[0];
-    node_hub_apply_response_interval_sec(sec);
-    s_response_interval_applied_idx = idx;
-    update_response_apply_enabled();
-    refresh_cam_config_state(NULL);
-    ui_log_add("Response interval saved - applied on next CAM wake");
-}
-
-/* 2026-09-27(캠 MVD) — 적용: 사본을 전역 모델(device_config)에 커밋(바뀐 필드만 저장 — 저장만 하고 전달은 캠이 깰 때 CASK
- * CONFIG, 2026-09-26 사용자 설계) → 원본 = 사본 → 팝업 닫음 */
-static void cb_cam_apply(lv_event_t *e)
-{
-    (void)e;
-    const uint8_t *mac = s_device_popup_node.mac;
-    if (s_cam_model_edit.capture_interval_sec != s_cam_model_orig.capture_interval_sec)
-        node_hub_apply_cam_capture_interval_sec(mac, s_cam_model_edit.capture_interval_sec);
-    if (s_cam_model_edit.xclk_mhz != s_cam_model_orig.xclk_mhz)
-        node_hub_apply_cam_xclk_mhz(mac, (uint8_t)s_cam_model_edit.xclk_mhz);
-    if (s_cam_model_edit.agc != s_cam_model_orig.agc) node_hub_apply_cam_agc_enable(mac, s_cam_model_edit.agc);
-    if (s_cam_model_edit.aec != s_cam_model_orig.aec) node_hub_apply_cam_aec_enable(mac, s_cam_model_edit.aec);
-    s_cam_model_orig = s_cam_model_edit;
-    ui_log_add("Camera settings saved - applied on next CAM wake");
-    teardown_device_popup();
-}
 
 static void cb_auto_connect_known_changed(lv_event_t *e)
 {
@@ -6305,10 +6150,9 @@ static bool inject_fn_set_response_interval(void *arg)
     uint32_t sec = *(uint32_t *)arg;
     int idx = find_value_index(s_response_interval_values,
         sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0]), sec);
-    if (idx < 0 || !s_response_interval_dd || !s_response_apply_btn) return false;
+    if (idx < 0 || !s_response_interval_dd) return false;
     lv_dropdown_set_selected(s_response_interval_dd, (uint16_t)idx);
-    lv_obj_send_event(s_response_interval_dd, LV_EVENT_VALUE_CHANGED, NULL);  /* -> cb_response_interval_changed */
-    lv_obj_send_event(s_response_apply_btn, LV_EVENT_CLICKED, NULL);          /* -> cb_apply_response_interval */
+    lv_obj_send_event(s_response_interval_dd, LV_EVENT_VALUE_CHANGED, NULL);  /* -> cb_response_interval_changed(즉시 저장) */
     return true;
 }
 
@@ -6578,7 +6422,6 @@ void ui_init(void)
 
     refresh_clock(NULL);  /* 첫 타이머 tick 전까지 빈 채로 안 보이게 즉시 한 번 채움 */
     lv_timer_create(refresh_clock, 1000, NULL);
-    lv_timer_create(refresh_cam_config_state, 1000, NULL);  /* CAM 설정 적용 대기/적용됨 표시 */
     lv_timer_create(refresh_bridge_health, 1000, NULL);     /* 2026-09-26(설계 6단계) — 브 응답 없음 경고 */
 
     /* 2026-09-08(사용자 지시 — "상단바 통계 버튼을 없애고, 센서 판넬 Sensor 역상을 누르면
@@ -7894,7 +7737,7 @@ static void teardown_camera_tab(void)
 /* ════════════════════════════════════════════════════════════
  * 개별설정 팝업(2026-09-08, 사용자 설계 — 연결 기능 주화면 이관) — 연결된 장치 행 탭.
  * Alias 편집 + [센서만]측정주기 편집 + 연결끊기. 측정주기 위젯/로직(select_sensor,
- * s_sens_measure_dd, cb_apply_sens_measure_interval 등)은 예전 설정탭 것을 그대로 재사용 —
+ * s_sens_measure_dd, cb_sens_measure_interval_changed 등)은 예전 설정탭 것을 그대로 재사용 —
  * 여기로 옮겨 지어질 뿐 아무 로직도 안 바뀜.
  * ════════════════════════════════════════════════════════════ */
 static void cb_device_keyboard_hide(lv_event_t *e)
@@ -8011,15 +7854,10 @@ static void teardown_device_popup(void)
     /* 2026-09-08 — 측정주기 위젯도 이 팝업 자식이라 팝업과 함께 사라짐, 핸들 NULL로
      * 정리(build_option_tab 등 다른 곳의 기존 teardown 패턴과 동일) */
     s_sens_measure_dd = NULL;
-    s_sens_measure_apply_btn = NULL;
     s_sens_measure_label = NULL;
-    s_sens_measure_apply_lbl = NULL;
-    s_sens_measure_applied_idx = -1;
     /* 2026-09-18 — 촬영주기/AGC/AEC/XCLK 위젯도 이 팝업 자식(카메라일 때만 생성됨) */
     s_capture_interval_dd = NULL;
     s_capture_interval_label = NULL;
-    s_cam_apply_btn = NULL;
-    s_cam_apply_lbl = NULL;
     s_agc_switch = NULL;
     s_agc_label = NULL;
     s_aec_switch = NULL;
@@ -8126,35 +7964,19 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_label_set_text(s_sens_measure_label, ui_str(STR_LABEL_SENS_MEASURE_INTERVAL));
         lv_obj_set_style_text_font(s_sens_measure_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-        lv_obj_t *sens_measure_right = create_row_right_cluster(sens_measure_row);
-
-        s_sens_measure_dd = lv_dropdown_create(sens_measure_right);
+        s_sens_measure_dd = lv_dropdown_create(sens_measure_row);  /* 2026-09-27 — 적용 버튼 없음, 선택 즉시 저장 */
         lv_obj_set_style_pad_ver(s_sens_measure_dd, 7, 0);
         lv_dropdown_set_options(s_sens_measure_dd, ui_str(STR_OPT_SENS_MEASURE_INTERVAL_LIST));
         lv_obj_set_style_text_font(s_sens_measure_dd, ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_set_style_text_font(lv_dropdown_get_list(s_sens_measure_dd), ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_add_event_cb(s_sens_measure_dd, cb_sens_measure_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-        s_sens_measure_apply_btn = lv_button_create(sens_measure_right);
-        lv_obj_add_event_cb(s_sens_measure_apply_btn, cb_apply_sens_measure_interval, LV_EVENT_CLICKED, NULL);
-        lv_obj_add_state(s_sens_measure_apply_btn, LV_STATE_DISABLED);
-        s_sens_measure_apply_lbl = lv_label_create(s_sens_measure_apply_btn);
-        lv_label_set_text(s_sens_measure_apply_lbl, ui_str(STR_BTN_APPLY));
-        lv_obj_set_style_text_font(s_sens_measure_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-
         select_sensor(mac);  /* s_has_selected_sensor가 teardown에서 false로 리셋돼있어 항상 재동기화 */
     } else {
         /* 2026-09-18(사용자 지시 — "카메라 관련 설정들을... 캠마다 다르게 설정할 수 있도록")
          * — 촬영주기/AGC/AEC/XCLK, 예전 설정탭 "영상" 그룹박스와 동일한 위젯 구성/이벤트,
          * mac별 device_config getter로 이 카메라만의 값을 읽음 */
-        /* 2026-09-27(캠 MVD) — 모델: 원본을 전역(device_config)에서 읽고 편집 사본으로 깊은 복사 */
-        s_cam_model_orig = (cam_popup_model_t){
-            .capture_interval_sec = device_config_get_cam_capture_interval_sec(mac),
-            .xclk_mhz             = device_config_get_xclk_mhz(mac),
-            .agc                  = device_config_get_agc_enable(mac),
-            .aec                  = device_config_get_aec_enable(mac),
-        };
-        s_cam_model_edit = s_cam_model_orig;
+        /* 2026-09-27(전체화면 팝업 규칙) — 적용 버튼 없음, 바꾸는 즉시 저장(cb_cam_*_changed) */
 
         lv_obj_t *capture_row = lv_obj_create(popup);
         lv_obj_set_size(capture_row, LV_PCT(100), LV_SIZE_CONTENT);
@@ -8171,7 +7993,7 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_obj_set_style_pad_ver(s_capture_interval_dd, 7, 0);
         lv_dropdown_set_options(s_capture_interval_dd, ui_str(STR_OPT_CAPTURE_INTERVAL_LIST));
         int cap_idx = find_value_index(s_capture_interval_values,
-            sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]), s_cam_model_edit.capture_interval_sec);
+            sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]), device_config_get_cam_capture_interval_sec(mac));
         lv_dropdown_set_selected(s_capture_interval_dd, (uint16_t)(cap_idx >= 0 ? cap_idx : 0));
         lv_obj_set_style_text_font(s_capture_interval_dd, ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_set_style_text_font(lv_dropdown_get_list(s_capture_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
@@ -8189,7 +8011,7 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_obj_set_style_text_font(s_agc_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
         s_agc_switch = lv_switch_create(agc_row);
-        if (s_cam_model_edit.agc) lv_obj_add_state(s_agc_switch, LV_STATE_CHECKED);
+        if (device_config_get_agc_enable(mac)) lv_obj_add_state(s_agc_switch, LV_STATE_CHECKED);
         lv_obj_add_event_cb(s_agc_switch, cb_cam_agc_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
         lv_obj_t *aec_row = lv_obj_create(popup);
@@ -8204,7 +8026,7 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_obj_set_style_text_font(s_aec_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
         s_aec_switch = lv_switch_create(aec_row);
-        if (s_cam_model_edit.aec) lv_obj_add_state(s_aec_switch, LV_STATE_CHECKED);
+        if (device_config_get_aec_enable(mac)) lv_obj_add_state(s_aec_switch, LV_STATE_CHECKED);
         lv_obj_add_event_cb(s_aec_switch, cb_cam_aec_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
         lv_obj_t *xclk_row = lv_obj_create(popup);
@@ -8222,25 +8044,12 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_obj_set_style_pad_ver(s_xclk_dd, 7, 0);
         lv_dropdown_set_options(s_xclk_dd, ui_str(STR_OPT_XCLK_LIST));
         int xclk_idx = find_value_index(s_xclk_values, sizeof(s_xclk_values) / sizeof(s_xclk_values[0]),
-                                        s_cam_model_edit.xclk_mhz);
+                                        device_config_get_xclk_mhz(mac));
         lv_dropdown_set_selected(s_xclk_dd, (uint16_t)(xclk_idx >= 0 ? xclk_idx : 0));
         lv_obj_set_style_text_font(s_xclk_dd, ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_set_style_text_font(lv_dropdown_get_list(s_xclk_dd), ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_add_event_cb(s_xclk_dd, cb_cam_xclk_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-        /* 적용 버튼 하나 — Dirty(사본≠원본)의 뷰 */
-        lv_obj_t *apply_row = lv_obj_create(popup);
-        lv_obj_set_size(apply_row, LV_PCT(100), LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(apply_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(apply_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_border_width(apply_row, 0, 0);
-        lv_obj_set_style_pad_all(apply_row, 0, 0);
-        s_cam_apply_btn = lv_button_create(apply_row);
-        lv_obj_add_event_cb(s_cam_apply_btn, cb_cam_apply, LV_EVENT_CLICKED, NULL);
-        s_cam_apply_lbl = lv_label_create(s_cam_apply_btn);
-        lv_label_set_text(s_cam_apply_lbl, ui_str(STR_BTN_APPLY));
-        lv_obj_set_style_text_font(s_cam_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-        update_cam_apply_enabled();
     }
 
     /* 연결끊기 버튼 — 맨 아래, 위험한 조작이라 확인팝업 거침(cb_device_disconnect_clicked) */
@@ -9453,13 +9262,9 @@ static void teardown_option_tab(void)
      * 만들어짐(cb_close_device_popup()이 정리함) */
     s_response_interval_label = NULL;
     s_response_interval_dd = NULL;
-    s_response_apply_btn = NULL;
-    s_response_apply_lbl = NULL;
     s_response_help_label = NULL;
     s_adaptive_response_label = NULL;
     s_adaptive_response_dd = NULL;
-    s_adaptive_apply_btn = NULL;
-    s_adaptive_apply_lbl = NULL;
     s_adaptive_help_label = NULL;
     s_restart_label = NULL;
     s_restart_btn_lbl = NULL;
@@ -9696,26 +9501,16 @@ static void build_option_tab(void)
     lv_label_set_text(s_response_interval_label, ui_str(STR_LABEL_RESPONSE_INTERVAL));
     lv_obj_set_style_text_font(s_response_interval_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    lv_obj_t *response_right = create_row_right_cluster(response_row);
-
-    s_response_interval_dd = lv_dropdown_create(response_right);
+    s_response_interval_dd = lv_dropdown_create(response_row);  /* 2026-09-27 — 적용 버튼 없음, 선택 즉시 저장 */
     lv_obj_set_style_pad_ver(s_response_interval_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
     lv_dropdown_set_options(s_response_interval_dd, ui_str(STR_OPT_RESPONSE_INTERVAL_LIST));
-    s_response_interval_applied_idx = find_value_index(s_response_interval_values,
+    int response_idx = find_value_index(s_response_interval_values,
         sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0]),
         device_config_get_response_interval_sec());
-    lv_dropdown_set_selected(s_response_interval_dd,
-        (uint16_t)(s_response_interval_applied_idx >= 0 ? s_response_interval_applied_idx : 0));
+    lv_dropdown_set_selected(s_response_interval_dd, (uint16_t)(response_idx >= 0 ? response_idx : 0));
     lv_obj_set_style_text_font(s_response_interval_dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_response_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_response_interval_dd, cb_response_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-    s_response_apply_btn = lv_button_create(response_right);
-    lv_obj_add_event_cb(s_response_apply_btn, cb_apply_response_interval, LV_EVENT_CLICKED, NULL);
-    update_response_apply_enabled();  /* 2026-08-11 버그수정 — capture_interval과 동일 이유 */
-    s_response_apply_lbl = lv_label_create(s_response_apply_btn);
-    lv_label_set_text(s_response_apply_lbl, ui_str(STR_BTN_APPLY));
-    lv_obj_set_style_text_font(s_response_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 응답성 도움말 행(2026-08-10) — 드롭다운/버튼 없이 라벨 하나만, response_row 바로
      * 아래 형제 행(time_row와 같은 방식으로 system_group_box에 얹음) */
@@ -9746,26 +9541,16 @@ static void build_option_tab(void)
     lv_label_set_text(s_adaptive_response_label, ui_str(STR_LABEL_ADAPTIVE_RESPONSE));
     lv_obj_set_style_text_font(s_adaptive_response_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    lv_obj_t *adaptive_right = create_row_right_cluster(adaptive_row);
-
-    s_adaptive_response_dd = lv_dropdown_create(adaptive_right);
+    s_adaptive_response_dd = lv_dropdown_create(adaptive_row);  /* 2026-09-27 — 적용 버튼 없음, 선택 즉시 저장 */
     lv_obj_set_style_pad_ver(s_adaptive_response_dd, 7, 0);  /* 2026-09-07 — 위아래 패딩 절반 */
     lv_dropdown_set_options(s_adaptive_response_dd, ui_str(STR_OPT_ADAPTIVE_RESPONSE_LIST));
-    s_adaptive_response_applied_idx = find_value_index(s_adaptive_response_values,
+    int adaptive_idx = find_value_index(s_adaptive_response_values,
         sizeof(s_adaptive_response_values) / sizeof(s_adaptive_response_values[0]),
         device_config_get_adaptive_response_sec());
-    lv_dropdown_set_selected(s_adaptive_response_dd,
-        (uint16_t)(s_adaptive_response_applied_idx >= 0 ? s_adaptive_response_applied_idx : 0));
+    lv_dropdown_set_selected(s_adaptive_response_dd, (uint16_t)(adaptive_idx >= 0 ? adaptive_idx : 0));
     lv_obj_set_style_text_font(s_adaptive_response_dd, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_adaptive_response_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_adaptive_response_dd, cb_adaptive_response_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-    s_adaptive_apply_btn = lv_button_create(adaptive_right);
-    lv_obj_add_event_cb(s_adaptive_apply_btn, cb_apply_adaptive_response, LV_EVENT_CLICKED, NULL);
-    update_adaptive_apply_enabled();  /* 2026-08-11 버그수정 — capture_interval과 동일 이유 */
-    s_adaptive_apply_lbl = lv_label_create(s_adaptive_apply_btn);
-    lv_label_set_text(s_adaptive_apply_lbl, ui_str(STR_BTN_APPLY));
-    lv_obj_set_style_text_font(s_adaptive_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 적응형 반응시간 도움말 행 — response_help_row와 같은 구조(고정 문구 하나뿐, 값별로 안 바뀜) */
     lv_obj_t *adaptive_help_row = lv_obj_create(system_group_box);
@@ -9839,8 +9624,7 @@ static void build_option_tab(void)
      * 버튼도 같은 이유로 개별설정 팝업(카메라)으로 옮겨가면서 여기선 항상 NULL이 됨. 위와
      * 동일하게 배열에서 제거 — 두 버튼도 이제 개별설정 팝업 안에서 자연폭으로 그려짐 */
     lv_obj_t *option_action_buttons[] = {
-        restart_btn, s_response_apply_btn, s_adaptive_apply_btn,
-        time_set_btn, log_view_btn,
+        restart_btn, time_set_btn, log_view_btn,
     };
     lv_obj_update_layout(lv_screen_active());
     for (size_t i = 0; i < sizeof(option_action_buttons) / sizeof(option_action_buttons[0]); i++) {
