@@ -44,3 +44,6 @@ CONFIG_CAM_CAPTURE_30M=y   # 운영 주기(30분) — 개발 중엔 CAM_CAPTURE_
 # 되돌아가는 kconfgen 이슈가 있었음, 그래서 그 Kconfig 파일도 예외적으로 git에 강제 추적함)
 CONFIG_CAMERA_JPEG_MODE_FRAME_SIZE_CUSTOM=y
 CONFIG_CAMERA_JPEG_MODE_FRAME_SIZE=2097152
+
+# 2026-09-26(사용자 설계 — 캠 코어 분리: ESP-NOW 0, 센서 1) — 카메라 드라이버 인터럽트/태스크는 코어 1
+CONFIG_CAMERA_CORE1=y

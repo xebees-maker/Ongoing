@@ -76,6 +76,10 @@ extern "C" {
  * 후 실기 검증 완료(project_caml_bat_en_latch_missing_resolved 메모리 참고) */
 #define BSP_CAM_IO_EXPANDER_BAT_EN_PIN        5  /* CH32V003_IO_5 */
 
+/* 2026-09-26 — EXIO3 = CAM_PWDN(센서 PWDN, High=대기). 스키매틱: 센서 전원(2.8V/1.5V LDO RT9166A, 인에이블 핀 없음)은
+ * 3.3V 레일에 바로 붙어 ESP32 딥슬립 중에도 켜져 있음 → 촬영할 때만 PWDN을 풀고 나머지는 대기로 둠 */
+#define BSP_CAM_IO_EXPANDER_CAM_PWDN_PIN      3  /* CH32V003_IO_3 */
+
 /**
  * @brief 보드 레벨 초기화 — 공유 I2C 버스 생성 + IO 익스팬더 초기화 + BAT_EN(전원 유지)
  *        켜기 + PWR_LED 쓰기 태스크 생성. 카메라 초기화는 별도 호출.
@@ -94,6 +98,12 @@ void bsp_esp32s3_cam_pwr_led_set(bool on);
  *        무시. IO 익스팬더 출력은 ESP32가 자는 동안에도 유지되므로 켜진 채 자면 계속 켜져 있음.
  */
 void bsp_esp32s3_cam_pwr_led_shutdown(void);
+
+/**
+ * @brief 카메라 센서 전원 상태(EXIO3=CAM_PWDN). on=true면 PWDN 해제(동작), false면 PWDN(대기).
+ *        IO 익스팬더 출력은 ESP32 딥슬립 중에도 유지됨. 블로킹(I2C 쓰기) — 태스크 문맥에서만.
+ */
+void bsp_esp32s3_cam_sensor_power(bool on);
 
 /**
  * @brief bsp_esp32s3_cam_init()이 만든 공유 I2C 버스 핸들 반환 — 카메라 SCCB 초기화 시

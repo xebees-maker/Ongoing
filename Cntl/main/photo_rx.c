@@ -335,11 +335,9 @@ static void handle_capture_status(const uint8_t *src_mac, const uint8_t *data, i
     const esp_now_capture_status_t *msg = (const esp_now_capture_status_t *)data;
     ESP_LOGI(TAG, "CAPTURE_STATUS 수신: status=%d", msg->status);
 
-    /* 2026-08-21 — RECEIVED만 recv_cb 컨텍스트의 fire-and-forget 예외, 나머지(INIT_NEEDED/
-     * INIT_DONE/CAPTURING/SUCCESS/FAILED)는 전부 CAM이 esp_now_reliable_request()로 감싸서
-     * 기다리는 reliable이라 다 ACK 필요(feedback_default_to_reliable_messaging 메모리 참고,
-     * 예전엔 SUCCESS/FAILED만 ACK했음) */
-    if (src_mac && msg->status != CAM_CAPTURE_STATUS_RECEIVED) {
+    /* 2026-08-21 — 캠이 캡처 상태를 esp_now_reliable_request()로 감싸 보내므로 ACK 필요(예전엔 SUCCESS/FAILED만 ACK).
+     * 2026-09-26(5단계) — RECEIVED도 reliable로 바뀌어 예외 없음 */
+    if (src_mac) {
         esp_now_capture_status_ack_t ack = {
             .version  = ESP_NOW_LINK_VERSION,
             .msg_type = ESP_NOW_MSG_CAPTURE_STATUS_ACK,

@@ -75,6 +75,7 @@ typedef struct {
 } cam_task_request_t;
 
 static QueueHandle_t s_photo_request_queue = NULL;
+static QueueHandle_t s_status_q = NULL;  /* 2026-09-26(5단계) — capture_status_task로 넘길 상태 */
 /* 2026-08-10 도입 — photo_transfer_task가 뭔가 처리 중인지(2026-09-19: esp_now_cam_enqueue_
  * auto_capture()도 큐잉 시점에 앞당겨 세팅함 — mark_transfer_idle() 주석 참고) */
 static volatile bool s_transfer_busy = false;
@@ -408,7 +409,7 @@ static void mark_transfer_idle(void)
 
 /* 2026-08-21 — 지금촬영 핸드셰이크 재설계용 공용 헬퍼. cam_capture_status_t의 어떤 값이든
  * CAPTURE_STATUS_ACK을 기다리는 reliable로 보냄(feedback_default_to_reliable_messaging
- * 메모리 참고) — RECEIVED만 recv_cb 컨텍스트라 예외(그쪽은 여전히 fire-and-forget) */
+ * 메모리 참고) — 2026-09-26(5단계)부터 RECEIVED도 capture_status_task가 이 함수로 보냄 */
 static void send_capture_status(uint8_t status)
 {
     esp_now_capture_status_t msg = {
@@ -422,6 +423,16 @@ static void send_capture_status(uint8_t status)
                                               800, 3,
                                               NULL, 0, NULL);
     ESP_LOGI(TAG, "CAPTURE_STATUS(%u) 전송: %s", (unsigned)status, esp_err_to_name(err));
+}
+
+/* 2026-09-26(설계 5단계) — recv_cb에서 reliable로 보낼 수 없는 캡처 상태(RECEIVED)를 대신 보내는 작은 태스크 */
+static void capture_status_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        uint8_t st;
+        if (xQueueReceive(s_status_q, &st, portMAX_DELAY) == pdTRUE) send_capture_status(st);
+    }
 }
 
 static void photo_transfer_task(void *arg)
@@ -534,14 +545,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
         /* 지금촬영은 접수 확인을 여기서 바로 보냄(전용 태스크가 큐에서 뽑아 처리하기까지의
          * 지연과 별개로, Cntl UI 진행 팝업의 "1단계: 명령 전달" 즉시 반영용) */
-        if (req.mode == PHOTO_REQUEST_MODE_CAPTURE_NOW) {
-            esp_now_capture_status_t status = {
-                .version  = ESP_NOW_LINK_VERSION,
-                .msg_type = ESP_NOW_MSG_CAPTURE_STATUS,
-                .status   = CAM_CAPTURE_STATUS_RECEIVED,
-            };
-            esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&status, sizeof(status));
-            ESP_LOGI(TAG, "CAPTURE_STATUS(RECEIVED) 전송: %s", esp_err_to_name(err));
+        /* 2026-09-26(설계 5단계) — 예전엔 여기(recv_cb)서 esp_now_send로 한 번만 보냄(유실되면 끝). 이제 상태 송신
+         * 태스크에 넘겨 reliable(CAPTURE_STATUS_ACK 대기)로 보냄 — recv_cb에선 기다릴 수 없으므로. 이 RECEIVED는
+         * 콘 PHOTO_REQUEST(브 대행 reliable)의 응답이기도 함 */
+        if (req.mode == PHOTO_REQUEST_MODE_CAPTURE_NOW && s_status_q) {
+            uint8_t st = CAM_CAPTURE_STATUS_RECEIVED;
+            if (xQueueSend(s_status_q, &st, 0) != pdTRUE) ESP_LOGW(TAG, "CAPTURE_STATUS(RECEIVED) 큐 가득 — 버림");
         }
 
         /* 새 PHOTO_REQUEST 자체가 "이전 요청은 이제 필요없다"는 신호 — 세대번호를 먼저
@@ -553,13 +562,19 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 안 하면 방금 시작한 자기 자신의 전송이 "새 요청이 왔다"고 스스로 오판해서
          * 첫 청크도 못 보내고 중단해버림(2026-08-02, 실기에서 "가져오기 매번 처음부터
          * 실패"로 확인) */
+        /* 2026-09-26 — 예전엔 모드·인자만 비교해서, 같은 부팅 안의 두 번째 "지금 촬영"(항상 같은 모드·인자)까지
+         * 중복으로 무시했음. 중복은 재전송(브 대행 reliable 500ms×3 등)이 만드는 것이라 3초 안의 같은 요청만 중복 */
         static esp_now_photo_request_t s_last_req = { 0 };
         static bool s_has_last_req = false;
-        bool is_duplicate = s_has_last_req && s_last_req.mode == req.mode && s_last_req.param == req.param;
+        static int64_t s_last_req_us = 0;
+        int64_t now_us = esp_timer_get_time();
+        bool is_duplicate = s_has_last_req && s_last_req.mode == req.mode && s_last_req.param == req.param &&
+                            (now_us - s_last_req_us) < 3000000LL;
         if (!is_duplicate) {
             s_request_generation++;
             s_last_req = req;
             s_has_last_req = true;
+            s_last_req_us = now_us;
             cam_task_request_t item = { .kind = CAM_TASK_REQ_PHOTO, .photo_req = req, .generation = s_request_generation };
             if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
                 ESP_LOGW(TAG, "PHOTO_REQUEST 큐 가득 — 이전 전송 아직 진행중, 무시");
@@ -861,6 +876,8 @@ void esp_now_cam_init(void)
     ESP_LOGI(TAG, "노드 이름: %s (MAC " MACSTR ")", s_name, MAC2STR(s_mac));
 
     s_photo_request_queue = xQueueCreate(4, sizeof(cam_task_request_t));
+    s_status_q = xQueueCreate(4, sizeof(uint8_t));
+    xTaskCreatePinnedToCore(capture_status_task, "cap_status", 3072, NULL, 5, NULL, 0);
     /* 4096으로는 촬영(esp_camera_fb_get)+SD 저장(FATFS) 경로에서 스택 오버플로우 실기 확인
      * (2026-08-01) — 여유있게 증설했었으나, 목록조회(LIST) 경로에서 또 다른 스택 오버플로우가
      * 실기에서 확인됨(2026-08-03) — CAM 크래시 후 재부팅되면서 Cntl 쪽엔 그냥 "무응답
@@ -872,7 +889,10 @@ void esp_now_cam_init(void)
      * 중첩 호출로 스택에 동시에 쌓여서 12KB를 넘겼던 것으로 추정 — 24KB로 증설.
      * 2026-09-26 — SD/LIST 경로는 삭제됐지만 촬영+푸시가 이 태스크에서 돌므로 크기는 그대로 둠
      * (줄이려면 실측 스택 최고치 확인 후) */
-    xTaskCreate(photo_transfer_task, "photo_tx", 24576, NULL, 5, NULL);
+    /* 2026-09-26(사용자 설계 — 캠 코어 분리: ESP-NOW 0, 센서 1) — 촬영(카메라 초기화·프레임)과 SR 송신을 하는 태스크는
+     * 코어 1. 카메라 드라이버의 인터럽트·태스크도 코어 1(sdkconfig CONFIG_CAMERA_CORE1). Wi-Fi/ESP-NOW와
+     * reliable 서비스는 코어 0 */
+    xTaskCreatePinnedToCore(photo_transfer_task, "photo_tx", 24576, NULL, 5, NULL, 1);
 
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));

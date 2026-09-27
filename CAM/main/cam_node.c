@@ -440,7 +440,16 @@ static esp_err_t camera_init(bool save_warmup_frames)
         .grab_mode    = CAMERA_GRAB_WHEN_EMPTY,
     };
 
-    ESP_RETURN_ON_ERROR(esp_camera_init(&config), TAG, "esp_camera_init 실패");
+    /* 2026-09-26 — 센서 PWDN 해제 후 초기화(부팅 때 대기로 둠, bsp_esp32s3_cam_sensor_power). OV3660/OV5640은
+     * PWDN 해제 후 수 ms 안에 SCCB 응답 — 여유 있게 10ms */
+    bsp_esp32s3_cam_sensor_power(true);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    esp_err_t init_err = esp_camera_init(&config);
+    if (init_err != ESP_OK) {
+        bsp_esp32s3_cam_sensor_power(false);
+        ESP_LOGE(TAG, "esp_camera_init 실패: %s", esp_err_to_name(init_err));
+        return init_err;
+    }
 
     sensor_t *s = esp_camera_sensor_get();
     if (s->id.PID == OV3660_PID) {
@@ -917,6 +926,13 @@ void app_main(void)
     /* 2026-09-26 — IO 익스팬더 출력은 ESP32가 자는 동안에도 유지됨 — 상태 LED가 켜진 위상에서
      * 잠들면 딥슬립 내내 켜져 있으므로 확실히 끄고 잠 */
     bsp_esp32s3_cam_pwr_led_shutdown();
+    /* 2026-09-26 — 센서 전원은 딥슬립 중에도 살아 있으므로(스키매틱: LDO 인에이블 없음) 카메라를 정리하고 PWDN으로
+     * 대기시킨 뒤 잠. 이번 사이클에 카메라를 안 썼으면 이미 대기 상태 */
+    if (s_camera_ready) {
+        esp_camera_deinit();
+        s_camera_ready = false;
+    }
+    bsp_esp32s3_cam_sensor_power(false);
     /* 2026-08-26(사용자 지시) — "실제 esp_deep_sleep_start가 되는지, 이 함수 속에서 혹시
      * 그냥 리턴하는 건 아닌지도 의심스러워서" — esp_deep_sleep_start()는 noreturn이라 내부에
      * 로그를 넣을 순 없으니, 호출 바로 직전에 명확한 마커를 찍어 여기까지 실제로 도달하는지

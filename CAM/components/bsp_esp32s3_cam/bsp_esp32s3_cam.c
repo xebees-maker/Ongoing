@@ -57,6 +57,11 @@ void bsp_esp32s3_cam_pwr_led_set(bool on)
     xTaskNotify(s_pwr_led_task, on ? 1u : 0u, eSetValueWithOverwrite);
 }
 
+void bsp_esp32s3_cam_sensor_power(bool on)
+{
+    ch32v003_set_output(BSP_CAM_IO_EXPANDER_CAM_PWDN_PIN, !on);  /* PWDN은 High가 대기 */
+}
+
 void bsp_esp32s3_cam_pwr_led_shutdown(void)
 {
     if (!s_pwr_led_mutex) return;
@@ -84,6 +89,10 @@ esp_err_t bsp_esp32s3_cam_init(void)
      * 연결만 해주고, 이 핀을 소프트웨어가 켜야 버튼을 놔도 계속 켜져 있음. 가장 먼저 켬 —
      * 늦으면 그 사이에 버튼을 놓았을 때 전원이 나갈 수 있음 */
     ch32v003_set_output(BSP_CAM_IO_EXPANDER_BAT_EN_PIN, true);
+    /* 2026-09-26 — 센서는 촬영할 때만 켬(bsp_esp32s3_cam_sensor_power 주석). 부팅 때 익스팬더 출력 그림자가 0에서
+     * 시작해 위 BAT_EN 쓰기에서 PWDN 비트도 0(동작)이 되므로 곧바로 대기로 돌림. BAT_EN을 먼저 쓰는 순서는 유지 —
+     * 반대로 하면 전원 유지 핀이 잠깐 꺼짐 */
+    bsp_esp32s3_cam_sensor_power(false);
 
     /* 2026-09-26 — 예전엔 여기서 IO2/IO6을 "SD 인에이블"로 켰음(Waveshare SD 예제 재현). 스키매틱
      * 확인 결과 IO2=SD_CS, IO6=PWR_LED — SD는 제거됐고 IO6은 상태 LED로 씀(꺼진 채 시작) */
