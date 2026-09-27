@@ -6111,6 +6111,24 @@ static bool inject_fn_connect(void *arg)
     return true;
 }
 
+/* 2026-09-27(3002 조사 — 사용자 지시 "네가 직접 수동촬영해") — 카메라 선택 + "지금 촬영" 버튼 탭 합성. 실제 버튼과
+ * 같은 cb_capture_now 경로(연결 확인 → 진행 팝업 → PHOTO_REQUEST)를 그대로 탐. 연결 안 된 캠이면 false */
+static bool inject_fn_capture_now(void *arg)
+{
+    const uint8_t *mac = (const uint8_t *)arg;
+    if (node_hub_get_conn_state(mac) == HUB_CONN_STATE_WAITING) return false;
+    select_camera(mac);
+    cb_capture_now(NULL);
+    return true;
+}
+
+bool ui_main_inject_capture_now(const uint8_t *mac)
+{
+    static uint8_t mac_copy[6];
+    memcpy(mac_copy, mac, 6);
+    return run_on_lvgl_task(inject_fn_capture_now, mac_copy, 1000);
+}
+
 bool ui_main_inject_connect(const uint8_t *mac)
 {
     static uint8_t mac_copy[6];

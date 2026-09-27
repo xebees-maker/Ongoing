@@ -150,7 +150,10 @@ typedef struct __attribute__((packed)) {
 
 typedef enum {
     CAN_BRIDGE_SR_DONE_COMPLETE = 0,  /* 모든 청크를 순서대로 보냄 */
-    CAN_BRIDGE_SR_DONE_ABORTED  = 1,  /* 캠 전송이 중간에 끊김(캠 무응답·새 META 등) — 콘은 받은 부분을 버림 */
+    CAN_BRIDGE_SR_DONE_ABORTED  = 1,  /* 캠 전송이 중간에 끊김(캠 무응답) — 실패, 콘은 받은 부분을 버리고 3002 */
+    /* 2026-09-27(사용자 정의 — "에러가 아니고 정상적인 소거") — 새 촬영(수동 촬영 등)이 보내던 사진을 대체함. 캠이 보내던
+     * 전송을 멈추고 새 META를 보냄 → 브가 이전 세션을 이걸로 닫음. 콘은 받은 부분만 조용히 버림(에러·이벤트 없음) */
+    CAN_BRIDGE_SR_DONE_SUPERSEDED = 2,
 } can_bridge_sr_done_status_t;
 
 typedef struct __attribute__((packed)) {

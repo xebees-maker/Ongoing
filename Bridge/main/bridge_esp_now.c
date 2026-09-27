@@ -154,6 +154,18 @@ static void relay_task(void *arg)
                 } else if (err != ESP_OK) {
                     ui_screen_log_can("Relay fail: %s", ui_screen_err_short(err));
                 }
+                if (err != ESP_OK) {
+                    /* 2026-09-27(3002 조사) — 버린 메시지를 시리얼에도 남김(예전엔 브 화면에만 있어 원격 확인 불가).
+                     * 사진 청크면 순번까지 — 콘의 3002(순서 어긋남/불완전)와 시각 대조용 */
+                    int chunk_idx = -1;
+                    if (hdr.msg_type == CAN_DATA_SR_CHUNK && frame_len >= sizeof(can_bridge_sr_chunk_hdr_t)) {
+                        can_bridge_sr_chunk_hdr_t ch;
+                        memcpy(&ch, frame, sizeof(ch));
+                        chunk_idx = ch.chunk_idx;
+                    }
+                    ESP_LOGW(TAG, "Relay to Cntl dropped after retries (app=%u len=%u chunk=%d): %s",
+                             (unsigned)hdr.msg_type, (unsigned)len, chunk_idx, esp_err_to_name(err));
+                }
             }
             can_bridge_queue_pop_free(msg);
             if (path == &s_data_in) bridge_sr_on_tx_progress();  /* SR 흐름 제어 — 미룬 WINDOW_STATUS_ACK */

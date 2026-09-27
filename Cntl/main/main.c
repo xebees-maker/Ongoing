@@ -222,6 +222,49 @@ static esp_err_t api_connect_sensor_get_handler(httpd_req_t *req)
 /* ?sec=0|3|10|30|60 — 응답성 드롭다운+Apply 합성. 실제 적용 완료(CAM/SENS 응답 대기)까지는
  * 기다리지 않고 "합성 자체가 성공했는지"만 반환 — 야간 자동 테스트 스크립트가 그 다음
  * 단계(재연결 등) 전에 device_config 값이 실제로 바뀌었는지는 별도로 확인하면 됨 */
+/* 2026-09-27(3002 조사 — 사용자 지시) — 수동 촬영 합성. 결과는 합성 성공 여부만(촬영/수신 결과는 로그로 봄) */
+static esp_err_t api_capture_now_get_handler(httpd_req_t *req)
+{
+    char query[32] = { 0 };
+    char mac_hex[16] = { 0 };
+    uint8_t mac[6];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "mac", mac_hex, sizeof(mac_hex)) != ESP_OK ||
+        !decode_mac_hex(mac_hex, mac)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid mac");
+        return ESP_FAIL;
+    }
+    bool ok = ui_main_inject_capture_now(mac);
+    char body[32];
+    int len = snprintf(body, sizeof(body), "{\"ok\":%s}", ok ? "true" : "false");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    return httpd_resp_send(req, body, len);
+}
+
+/* 2026-09-27(3002 조사 — 사용자 지시 "네가 직접 바꾸고") — 개발 로그 저장 문턱. 화면 드롭다운과 같은 값
+ * (dev_log_set_save_level — 파일에도 저장됨). 로그 창이 열려 있으면 드롭다운 표시는 다음에 열 때 맞춰짐 */
+static esp_err_t api_devlog_get_handler(httpd_req_t *req)
+{
+    char query[16] = { 0 };
+    char v[4] = { 0 };
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "save", v, sizeof(v)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing save");
+        return ESP_FAIL;
+    }
+    const char *lv = "EWID";
+    const char *pos = strchr(lv, v[0]);
+    if (!pos || v[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "save must be E/W/I/D");
+        return ESP_FAIL;
+    }
+    dev_log_set_save_level((uint8_t)(DEV_LOG_LVL_E + (pos - lv)));
+    char body[32];
+    int len = snprintf(body, sizeof(body), "{\"save\":\"%c\"}", v[0]);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    return httpd_resp_send(req, body, len);
+}
+
 static esp_err_t api_set_response_interval_get_handler(httpd_req_t *req)
 {
     char query[32] = { 0 };
@@ -514,7 +557,7 @@ void web_dashboard_start(void)
     config.stack_size = 8192;
     /* 2026-08-30 — URI 핸들러가 계속 늘어나서(root/photo/admin 2개 + API) 기본
      * max_uri_handlers(8)를 넘을 수 있어 여유있게 확대 */
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 20;  /* 2026-09-27 — capture_now/devlog 추가로 16을 채움, 여유 */
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -559,6 +602,12 @@ void web_dashboard_start(void)
                                                                   .method = HTTP_GET,
                                                                   .handler = api_set_response_interval_get_handler };
     httpd_register_uri_handler(server, &api_set_response_interval_uri);
+    static const httpd_uri_t api_capture_now_uri = { .uri = "/api/capture_now", .method = HTTP_GET,
+                                                     .handler = api_capture_now_get_handler };
+    httpd_register_uri_handler(server, &api_capture_now_uri);
+    static const httpd_uri_t api_devlog_uri = { .uri = "/api/devlog", .method = HTTP_GET,
+                                                .handler = api_devlog_get_handler };
+    httpd_register_uri_handler(server, &api_devlog_uri);
     static const httpd_uri_t api_delete_stats_uri = { .uri = "/api/delete_stats", .method = HTTP_GET,
                                                         .handler = api_delete_stats_get_handler };
     httpd_register_uri_handler(server, &api_delete_stats_uri);

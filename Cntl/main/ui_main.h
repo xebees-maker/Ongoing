@@ -31,6 +31,8 @@ void ui_main_register_wifi_events(void);
  * 전부 LVGL 태스크에서 동기적으로 실행되고(httpd 태스크는 완료까지 블로킹), 대상 위젯을
  * 못 찾으면(지금 화면/목록에 없음) false — main.c가 이걸로 "합성 자체의 실패"를 즉시 판정 */
 bool ui_main_inject_connect(const uint8_t *mac);
+/* 2026-09-27(3002 조사) — 카메라 선택 + "지금 촬영" 탭 합성 */
+bool ui_main_inject_capture_now(const uint8_t *mac);
 bool ui_main_inject_disconnect(const uint8_t *mac);
 /* 2026-09-06(야간 자동 테스트용) — 센스 행은 카메라 행과 별도 리스트라 연결 합성도 별도 */
 bool ui_main_inject_connect_sensor(const uint8_t *mac);

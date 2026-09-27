@@ -171,7 +171,9 @@ static void handle_sr_meta(const uint8_t *mac, const uint8_t *body, size_t len)
         return;
     }
     if (s) {
-        ESP_LOGW(TAG, "SR_META: previous photo (file_id=%u) incomplete - dropped", (unsigned)s->file_id);
+        /* 새 META = 새 사진이 이전 사진을 대체(정상 소거, 2026-09-27 사용자 정의) — 보통은 브의 SUPERSEDED DONE이 먼저
+         * 와서 여기 올 일이 없음 */
+        ESP_LOGD(TAG, "SR_META: previous photo (file_id=%u) superseded - dropped", (unsigned)s->file_id);
         drop_session_locked(s);
     } else {
         for (int i = 0; i < SR_SESSIONS && !s; i++) {
@@ -249,6 +251,17 @@ static void handle_sr_done(const uint8_t *mac, const uint8_t *body, size_t len)
     sr_session_t *s = find_session_locked(mac);
     xSemaphoreGive(s_mutex);
     if (!s || d.file_id != s->file_id) return;
+
+    if (d.status == CAN_BRIDGE_SR_DONE_SUPERSEDED) {
+        /* 2026-09-27(사용자 정의 — "에러가 아니고 정상적인 소거") — 새 촬영이 이 사진을 대체함. 받은 부분만 버리고 에러도
+         * 사진 이벤트도 안 냄(이벤트를 내면 진행 중인 수동 촬영 팝업이 실패로 오판했음) */
+        ESP_LOGD(TAG, "Photo superseded by newer photo file_id=%u (%u/%u chunks) - discarded", (unsigned)s->file_id,
+                 (unsigned)s->next_idx, (unsigned)s->total_chunks);
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        drop_session_locked(s);
+        xSemaphoreGive(s_mutex);
+        return;
+    }
 
     bool complete = (d.status == CAN_BRIDGE_SR_DONE_COMPLETE && s->next_idx == s->total_chunks &&
                      s->received == s->total_size);

@@ -164,8 +164,9 @@ static void on_meta(const uint8_t *mac, const uint8_t *data, int len)
         return;
     }
     if (c->active) {
-        ESP_LOGW(TAG, MACSTR " previous photo (file_id=%u) incomplete - abort notice", MAC2STR(mac), (unsigned)c->file_id);
-        push_done(c, CAN_BRIDGE_SR_DONE_ABORTED);
+        /* 2026-09-27(사용자 정의) — 새 사진이 보내던 사진을 대체 = 정상 소거(실패 아님) */
+        ESP_LOGD(TAG, MACSTR " previous photo (file_id=%u) superseded by new photo", MAC2STR(mac), (unsigned)c->file_id);
+        push_done(c, CAN_BRIDGE_SR_DONE_SUPERSEDED);
     }
     c->active = true;
     c->completed = false;
