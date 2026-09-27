@@ -201,10 +201,23 @@ static bool               s_has_selected_sensor = false;
  * 이 라벨들을 참조하므로 그 함수보다 앞에 선언돼야 함(사용자 지시: "앞으로 모든 label은 그
  * 구조체에 넣어야해" — ui_str_id_t뿐 아니라 이 선언 순서 규칙도 같이 지킬 것). */
 static lv_obj_t *s_capture_interval_dd    = NULL;
-static lv_obj_t *s_capture_apply_btn      = NULL;
 static lv_obj_t *s_capture_interval_label = NULL;
-static lv_obj_t *s_capture_apply_lbl      = NULL;
-static int       s_capture_interval_applied_idx = -1;  /* -1: 아직 모름(부팅 직후) */
+
+/* 2026-09-27(사용자 지시 — 캠 MVD 리팩터, feedback_model_view_dirty_pattern) — 카메라 설정 팝업(촬영주기/XCLK/AGC/AEC)의
+ * 모델. 팝업을 열 때 device_config(전역 모델, 이 캠 mac)에서 원본을 읽고 편집 사본으로 깊은 복사 → 위젯은 사본만 읽고 씀
+ * → dirty = 사본≠원본(필드 전체 비교) → 적용 버튼 하나가 dirty의 뷰 → 적용하면 바뀐 필드를 전부 저장하고 팝업 닫음.
+ * 예전엔 줄마다 [드롭다운][적용]이 따로 있고 dirty를 "선택 인덱스≠적용 인덱스"로 위젯마다 봤으며, AGC/AEC 스위치는
+ * 토글 즉시 저장이었음 */
+typedef struct {
+    uint32_t capture_interval_sec;
+    uint32_t xclk_mhz;
+    bool     agc;
+    bool     aec;
+} cam_popup_model_t;
+static cam_popup_model_t s_cam_model_orig;
+static cam_popup_model_t s_cam_model_edit;
+static lv_obj_t *s_cam_apply_btn = NULL;
+static lv_obj_t *s_cam_apply_lbl = NULL;
 
 static lv_obj_t *s_response_interval_dd    = NULL;
 static lv_obj_t *s_response_apply_btn      = NULL;
@@ -222,24 +235,18 @@ static lv_obj_t *s_auto_connect_known_label  = NULL;
 static lv_obj_t *s_auto_connect_new_switch   = NULL;
 static lv_obj_t *s_auto_connect_new_label    = NULL;
 
-/* AGC/AEC On/Off(2026-08-21, 세로줄 노이즈 진단용) — 촬영주기와 같은 카메라별 설정이라
- * 같은 그룹박스(영상). 드롭다운+Apply 대신 스위치로 토글 즉시 반영(값이 불리언 하나뿐이라
- * 별도 확인 팝업 없이 — adaptive_response와 같은 "즉시 저장" 원칙, 다만 이건 CAM에도
- * 전송됨) */
+/* AGC/AEC On/Off(2026-08-21, 세로줄 노이즈 진단용) — 카메라별 설정. 2026-09-27(캠 MVD) — 토글은 편집 사본만 바꾸고
+ * 저장은 카메라 팝업의 적용 버튼 하나로(s_cam_model_edit 참고) */
 static lv_obj_t *s_agc_switch = NULL;
 static lv_obj_t *s_agc_label  = NULL;
 static lv_obj_t *s_aec_switch = NULL;
 static lv_obj_t *s_aec_label  = NULL;
 
-/* XCLK 프리셋 행(2026-08-21, 화질/노이즈 진단용) — 촬영주기와 같은 [라벨][드롭다운][Apply]
- * 패턴(값이 4단계 프리셋이라 스위치 대신 드롭다운, PLL 재계산이 있어서 토글 즉시적용 대신
- * 명시적 Apply). 카메라별 설정이라 같은 그룹박스(영상) */
+/* XCLK 프리셋 행(2026-08-21, 화질/노이즈 진단용) — 4단계 프리셋 드롭다운, 카메라별 설정. 2026-09-27(캠 MVD) — 저장은
+ * 카메라 팝업의 적용 버튼 하나로(s_cam_model_edit 참고) */
 static const uint32_t s_xclk_values[] = { 5, 10, 20, 24 };
 static lv_obj_t *s_xclk_dd          = NULL;
-static lv_obj_t *s_xclk_apply_btn   = NULL;
 static lv_obj_t *s_xclk_label       = NULL;
-static lv_obj_t *s_xclk_apply_lbl   = NULL;
-static int       s_xclk_applied_idx = -1;
 
 /* 측정 주기 행(2026-09-05, 사용자 설계) — [라벨][드롭다운][Apply], 촬영주기와 동일 패턴.
  * 센서별 설정이라 값은 device_config의 mac 키 슬롯에 저장(device_config_get/set_sens_
@@ -5915,11 +5922,50 @@ static void refresh_network_right_zone(void)
     }
 }
 
-static void update_capture_apply_enabled(void)
+static bool cam_model_equal(const cam_popup_model_t *a, const cam_popup_model_t *b)
 {
-    bool changed = (lv_dropdown_get_selected(s_capture_interval_dd) != (uint16_t)s_capture_interval_applied_idx);
-    if (changed) lv_obj_clear_state(s_capture_apply_btn, LV_STATE_DISABLED);
-    else lv_obj_add_state(s_capture_apply_btn, LV_STATE_DISABLED);
+    return a->capture_interval_sec == b->capture_interval_sec && a->xclk_mhz == b->xclk_mhz &&
+           a->agc == b->agc && a->aec == b->aec;
+}
+
+/* Dirty 모델의 뷰 — 사본≠원본이면 적용 버튼 활성 */
+static void update_cam_apply_enabled(void)
+{
+    if (!s_cam_apply_btn) return;
+    if (!cam_model_equal(&s_cam_model_edit, &s_cam_model_orig)) lv_obj_clear_state(s_cam_apply_btn, LV_STATE_DISABLED);
+    else lv_obj_add_state(s_cam_apply_btn, LV_STATE_DISABLED);
+}
+
+static void cb_cam_capture_changed(lv_event_t *e)
+{
+    (void)e;
+    uint16_t idx = lv_dropdown_get_selected(s_capture_interval_dd);
+    if (idx < (sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]))) {
+        s_cam_model_edit.capture_interval_sec = s_capture_interval_values[idx];
+    }
+    update_cam_apply_enabled();
+}
+
+static void cb_cam_xclk_changed(lv_event_t *e)
+{
+    (void)e;
+    uint16_t idx = lv_dropdown_get_selected(s_xclk_dd);
+    if (idx < (sizeof(s_xclk_values) / sizeof(s_xclk_values[0]))) s_cam_model_edit.xclk_mhz = s_xclk_values[idx];
+    update_cam_apply_enabled();
+}
+
+static void cb_cam_agc_changed(lv_event_t *e)
+{
+    (void)e;
+    s_cam_model_edit.agc = lv_obj_has_state(s_agc_switch, LV_STATE_CHECKED);
+    update_cam_apply_enabled();
+}
+
+static void cb_cam_aec_changed(lv_event_t *e)
+{
+    (void)e;
+    s_cam_model_edit.aec = lv_obj_has_state(s_aec_switch, LV_STATE_CHECKED);
+    update_cam_apply_enabled();
 }
 
 static void update_response_apply_enabled(void)
@@ -5929,14 +5975,6 @@ static void update_response_apply_enabled(void)
     else lv_obj_add_state(s_response_apply_btn, LV_STATE_DISABLED);
 }
 
-static void update_xclk_apply_enabled(void)
-{
-    bool changed = (lv_dropdown_get_selected(s_xclk_dd) != (uint16_t)s_xclk_applied_idx);
-    if (changed) lv_obj_clear_state(s_xclk_apply_btn, LV_STATE_DISABLED);
-    else lv_obj_add_state(s_xclk_apply_btn, LV_STATE_DISABLED);
-}
-
-static void cb_xclk_changed(lv_event_t *e) { (void)e; update_xclk_apply_enabled(); }
 
 /* 측정 주기 Apply 버튼 활성화 판정(2026-09-05) — 촬영주기와 동일 패턴. select_sensor()가
  * 선택이 바뀔 때마다 이것도 다시 불러서, 새로 선택된 센서 기준으로 판정을 갱신함 */
@@ -5964,7 +6002,6 @@ static void update_response_help_text(void)
     }
 }
 
-static void cb_capture_interval_changed(lv_event_t *e) { (void)e; update_capture_apply_enabled(); }
 static void cb_response_interval_changed(lv_event_t *e)
 {
     (void)e;
@@ -6051,21 +6088,6 @@ static void refresh_cam_config_state(lv_timer_t *t)
     }
 }
 
-static void cb_apply_capture_interval(lv_event_t *e)
-{
-    (void)e;
-    /* 2026-09-18(카메라별 설정 팝업으로 이관) — 대상은 항상 그 팝업의 카메라(s_device_popup_node).
-     * 2026-09-26(사용자 설계) — 저장만, 캠이 깨어날 때 전달(refresh_cam_config_state 주석) */
-    uint16_t idx = lv_dropdown_get_selected(s_capture_interval_dd);
-    uint32_t sec = (idx < (sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0])))
-                   ? s_capture_interval_values[idx] : 0;
-    node_hub_apply_cam_capture_interval_sec(s_device_popup_node.mac, sec);
-    s_capture_interval_applied_idx = idx;
-    update_capture_apply_enabled();
-    refresh_cam_config_state(NULL);
-    ui_log_add("Capture interval saved - applied on next CAM wake");
-}
-
 /* 2026-09-05 — 센스는 콘 개입 없이 자기 주기대로 자율적으로 깨어(사용자 설계) 매 웨이크
  * SENS_CONFIG_SET을 다시 받아가므로, 촬영주기처럼 진행팝업으로 "적용 중" 대기를 보여줄
  * 이유가 약함(다음 깨어날 때 반영될 뿐, 그 시점을 콘이 능동적으로 기다릴 필요가 없음) —
@@ -6088,20 +6110,6 @@ static void cb_apply_sens_measure_interval(lv_event_t *e)
     ui_log_add("Measure period saved - applied on next Sens wake");
 }
 
-static void cb_apply_xclk(lv_event_t *e)
-{
-    (void)e;
-    /* 2026-09-26(사용자 설계) — 저장만, 캠이 깨어날 때 전달 */
-    uint16_t idx = lv_dropdown_get_selected(s_xclk_dd);
-    uint8_t mhz = (idx < (sizeof(s_xclk_values) / sizeof(s_xclk_values[0])))
-                  ? s_xclk_values[idx] : s_xclk_values[0];
-    node_hub_apply_cam_xclk_mhz(s_device_popup_node.mac, mhz);
-    s_xclk_applied_idx = idx;
-    update_xclk_apply_enabled();
-    refresh_cam_config_state(NULL);
-    ui_log_add("XCLK saved - applied on next CAM wake");
-}
-
 static void cb_apply_response_interval(lv_event_t *e)
 {
     (void)e;
@@ -6116,28 +6124,21 @@ static void cb_apply_response_interval(lv_event_t *e)
     ui_log_add("Response interval saved - applied on next CAM wake");
 }
 
-/* 2026-08-21 — AGC/AEC 스위치. 값이 불리언 하나뿐이고 진단용이라, 촬영주기/응답성의
- * 5단계 팝업(드롭다운+Apply+ACK대기) 대신 토글 즉시 반영 — 스위치의 통상적인 UX와도
- * 맞음. 그래도 실제 전송은 reliable stack(node_request) 그대로라 유실 걱정은 없음, 화면에
- * 진행상태만 안 보여줄 뿐 */
-static void cb_agc_switch_changed(lv_event_t *e)
+/* 2026-09-27(캠 MVD) — 적용: 사본을 전역 모델(device_config)에 커밋(바뀐 필드만 저장 — 저장만 하고 전달은 캠이 깰 때 CASK
+ * CONFIG, 2026-09-26 사용자 설계) → 원본 = 사본 → 팝업 닫음 */
+static void cb_cam_apply(lv_event_t *e)
 {
     (void)e;
-    bool enable = lv_obj_has_state(s_agc_switch, LV_STATE_CHECKED);
-    node_hub_apply_cam_agc_enable(s_device_popup_node.mac, enable);
-    if (node_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
-        ui_log_add("AGC saved - applied automatically on CAM reconnect");
-    }
-}
-
-static void cb_aec_switch_changed(lv_event_t *e)
-{
-    (void)e;
-    bool enable = lv_obj_has_state(s_aec_switch, LV_STATE_CHECKED);
-    node_hub_apply_cam_aec_enable(s_device_popup_node.mac, enable);
-    if (node_hub_get_conn_state(s_device_popup_node.mac) == HUB_CONN_STATE_WAITING) {
-        ui_log_add("AEC saved - applied automatically on CAM reconnect");
-    }
+    const uint8_t *mac = s_device_popup_node.mac;
+    if (s_cam_model_edit.capture_interval_sec != s_cam_model_orig.capture_interval_sec)
+        node_hub_apply_cam_capture_interval_sec(mac, s_cam_model_edit.capture_interval_sec);
+    if (s_cam_model_edit.xclk_mhz != s_cam_model_orig.xclk_mhz)
+        node_hub_apply_cam_xclk_mhz(mac, (uint8_t)s_cam_model_edit.xclk_mhz);
+    if (s_cam_model_edit.agc != s_cam_model_orig.agc) node_hub_apply_cam_agc_enable(mac, s_cam_model_edit.agc);
+    if (s_cam_model_edit.aec != s_cam_model_orig.aec) node_hub_apply_cam_aec_enable(mac, s_cam_model_edit.aec);
+    s_cam_model_orig = s_cam_model_edit;
+    ui_log_add("Camera settings saved - applied on next CAM wake");
+    teardown_device_popup();
 }
 
 static void cb_auto_connect_known_changed(lv_event_t *e)
@@ -8016,19 +8017,15 @@ static void teardown_device_popup(void)
     s_sens_measure_applied_idx = -1;
     /* 2026-09-18 — 촬영주기/AGC/AEC/XCLK 위젯도 이 팝업 자식(카메라일 때만 생성됨) */
     s_capture_interval_dd = NULL;
-    s_capture_apply_btn = NULL;
     s_capture_interval_label = NULL;
-    s_capture_apply_lbl = NULL;
-    s_capture_interval_applied_idx = -1;
+    s_cam_apply_btn = NULL;
+    s_cam_apply_lbl = NULL;
     s_agc_switch = NULL;
     s_agc_label = NULL;
     s_aec_switch = NULL;
     s_aec_label = NULL;
     s_xclk_dd = NULL;
-    s_xclk_apply_btn = NULL;
     s_xclk_label = NULL;
-    s_xclk_apply_lbl = NULL;
-    s_xclk_applied_idx = -1;
     s_device_disconnect_btn = NULL;
     /* 다음에 팝업이 다시 열릴 때(같은 mac이라도) select_sensor()가 무조건 새 위젯을
      * 다시 동기화하도록 강제 — 아래 build_device_popup() 참고 */
@@ -8150,6 +8147,15 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         /* 2026-09-18(사용자 지시 — "카메라 관련 설정들을... 캠마다 다르게 설정할 수 있도록")
          * — 촬영주기/AGC/AEC/XCLK, 예전 설정탭 "영상" 그룹박스와 동일한 위젯 구성/이벤트,
          * mac별 device_config getter로 이 카메라만의 값을 읽음 */
+        /* 2026-09-27(캠 MVD) — 모델: 원본을 전역(device_config)에서 읽고 편집 사본으로 깊은 복사 */
+        s_cam_model_orig = (cam_popup_model_t){
+            .capture_interval_sec = device_config_get_cam_capture_interval_sec(mac),
+            .xclk_mhz             = device_config_get_xclk_mhz(mac),
+            .agc                  = device_config_get_agc_enable(mac),
+            .aec                  = device_config_get_aec_enable(mac),
+        };
+        s_cam_model_edit = s_cam_model_orig;
+
         lv_obj_t *capture_row = lv_obj_create(popup);
         lv_obj_set_size(capture_row, LV_PCT(100), LV_SIZE_CONTENT);
         lv_obj_set_flex_flow(capture_row, LV_FLEX_FLOW_ROW);
@@ -8161,26 +8167,15 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_label_set_text(s_capture_interval_label, ui_str(STR_LABEL_CAPTURE_INTERVAL));
         lv_obj_set_style_text_font(s_capture_interval_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-        lv_obj_t *capture_right = create_row_right_cluster(capture_row);
-
-        s_capture_interval_dd = lv_dropdown_create(capture_right);
+        s_capture_interval_dd = lv_dropdown_create(capture_row);
         lv_obj_set_style_pad_ver(s_capture_interval_dd, 7, 0);
         lv_dropdown_set_options(s_capture_interval_dd, ui_str(STR_OPT_CAPTURE_INTERVAL_LIST));
-        s_capture_interval_applied_idx = find_value_index(s_capture_interval_values,
-            sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]),
-            device_config_get_cam_capture_interval_sec(mac));
-        lv_dropdown_set_selected(s_capture_interval_dd,
-            (uint16_t)(s_capture_interval_applied_idx >= 0 ? s_capture_interval_applied_idx : 0));
+        int cap_idx = find_value_index(s_capture_interval_values,
+            sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]), s_cam_model_edit.capture_interval_sec);
+        lv_dropdown_set_selected(s_capture_interval_dd, (uint16_t)(cap_idx >= 0 ? cap_idx : 0));
         lv_obj_set_style_text_font(s_capture_interval_dd, ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_set_style_text_font(lv_dropdown_get_list(s_capture_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
-        lv_obj_add_event_cb(s_capture_interval_dd, cb_capture_interval_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-        s_capture_apply_btn = lv_button_create(capture_right);
-        lv_obj_add_event_cb(s_capture_apply_btn, cb_apply_capture_interval, LV_EVENT_CLICKED, NULL);
-        update_capture_apply_enabled();
-        s_capture_apply_lbl = lv_label_create(s_capture_apply_btn);
-        lv_label_set_text(s_capture_apply_lbl, ui_str(STR_BTN_APPLY));
-        lv_obj_set_style_text_font(s_capture_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_add_event_cb(s_capture_interval_dd, cb_cam_capture_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
         lv_obj_t *agc_row = lv_obj_create(popup);
         lv_obj_set_size(agc_row, LV_PCT(100), LV_SIZE_CONTENT);
@@ -8194,8 +8189,8 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_obj_set_style_text_font(s_agc_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
         s_agc_switch = lv_switch_create(agc_row);
-        if (device_config_get_agc_enable(mac)) lv_obj_add_state(s_agc_switch, LV_STATE_CHECKED);
-        lv_obj_add_event_cb(s_agc_switch, cb_agc_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
+        if (s_cam_model_edit.agc) lv_obj_add_state(s_agc_switch, LV_STATE_CHECKED);
+        lv_obj_add_event_cb(s_agc_switch, cb_cam_agc_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
         lv_obj_t *aec_row = lv_obj_create(popup);
         lv_obj_set_size(aec_row, LV_PCT(100), LV_SIZE_CONTENT);
@@ -8209,8 +8204,8 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_obj_set_style_text_font(s_aec_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
         s_aec_switch = lv_switch_create(aec_row);
-        if (device_config_get_aec_enable(mac)) lv_obj_add_state(s_aec_switch, LV_STATE_CHECKED);
-        lv_obj_add_event_cb(s_aec_switch, cb_aec_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
+        if (s_cam_model_edit.aec) lv_obj_add_state(s_aec_switch, LV_STATE_CHECKED);
+        lv_obj_add_event_cb(s_aec_switch, cb_cam_aec_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
         lv_obj_t *xclk_row = lv_obj_create(popup);
         lv_obj_set_size(xclk_row, LV_PCT(100), LV_SIZE_CONTENT);
@@ -8223,26 +8218,29 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_label_set_text(s_xclk_label, ui_str(STR_LABEL_XCLK));
         lv_obj_set_style_text_font(s_xclk_label, ui_font_get(UI_FONT_SIZE_18), 0);
 
-        lv_obj_t *xclk_right = create_row_right_cluster(xclk_row);
-
-        s_xclk_dd = lv_dropdown_create(xclk_right);
+        s_xclk_dd = lv_dropdown_create(xclk_row);
         lv_obj_set_style_pad_ver(s_xclk_dd, 7, 0);
         lv_dropdown_set_options(s_xclk_dd, ui_str(STR_OPT_XCLK_LIST));
-        s_xclk_applied_idx = find_value_index(s_xclk_values,
-            sizeof(s_xclk_values) / sizeof(s_xclk_values[0]),
-            device_config_get_xclk_mhz(mac));
-        lv_dropdown_set_selected(s_xclk_dd,
-            (uint16_t)(s_xclk_applied_idx >= 0 ? s_xclk_applied_idx : 0));
+        int xclk_idx = find_value_index(s_xclk_values, sizeof(s_xclk_values) / sizeof(s_xclk_values[0]),
+                                        s_cam_model_edit.xclk_mhz);
+        lv_dropdown_set_selected(s_xclk_dd, (uint16_t)(xclk_idx >= 0 ? xclk_idx : 0));
         lv_obj_set_style_text_font(s_xclk_dd, ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_set_style_text_font(lv_dropdown_get_list(s_xclk_dd), ui_font_get(UI_FONT_SIZE_18), 0);
-        lv_obj_add_event_cb(s_xclk_dd, cb_xclk_changed, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_add_event_cb(s_xclk_dd, cb_cam_xclk_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-        s_xclk_apply_btn = lv_button_create(xclk_right);
-        lv_obj_add_event_cb(s_xclk_apply_btn, cb_apply_xclk, LV_EVENT_CLICKED, NULL);
-        update_xclk_apply_enabled();
-        s_xclk_apply_lbl = lv_label_create(s_xclk_apply_btn);
-        lv_label_set_text(s_xclk_apply_lbl, ui_str(STR_BTN_APPLY));
-        lv_obj_set_style_text_font(s_xclk_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+        /* 적용 버튼 하나 — Dirty(사본≠원본)의 뷰 */
+        lv_obj_t *apply_row = lv_obj_create(popup);
+        lv_obj_set_size(apply_row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(apply_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(apply_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(apply_row, 0, 0);
+        lv_obj_set_style_pad_all(apply_row, 0, 0);
+        s_cam_apply_btn = lv_button_create(apply_row);
+        lv_obj_add_event_cb(s_cam_apply_btn, cb_cam_apply, LV_EVENT_CLICKED, NULL);
+        s_cam_apply_lbl = lv_label_create(s_cam_apply_btn);
+        lv_label_set_text(s_cam_apply_lbl, ui_str(STR_BTN_APPLY));
+        lv_obj_set_style_text_font(s_cam_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+        update_cam_apply_enabled();
     }
 
     /* 연결끊기 버튼 — 맨 아래, 위험한 조작이라 확인팝업 거침(cb_device_disconnect_clicked) */
