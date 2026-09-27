@@ -109,20 +109,23 @@ static void service_slot(slot_t *s)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s->state == SLOT_FREE) { xSemaphoreGive(s_lock); return; }
 
-    /* 1) 응답 도착 → 성공 완료 */
+    /* 1) 응답 도착 → 성공 완료
+     * 2026-09-26(실기 버그 — 캠 "이 노드에 진행 중인 요청이 이미 있음"으로 DONE이 즉시 실패) — 예전엔 콜백을 먼저
+     * 부르고 슬롯을 나중에 비웠음. 동기 API는 콜백에서 대기를 풀므로, 호출자가 곧바로 다음 요청(윈도 상태 다음
+     * DONE 등)을 걸면 아직 안 비운 슬롯에 막혀 INVALID_STATE로 즉시 실패했음. 이제 응답을 서비스 태스크 버퍼에
+     * 복사하고 슬롯을 먼저 비운 뒤 콜백(콜백은 이 태스크에서만 불리므로 버퍼 하나로 충분) */
     if (s->matched) {
         esp_timer_stop(s->timer);
         esp_now_reliable_done_cb_t cb = s->cb;
         void *cb_ctx = s->cb_ctx;
+        static uint8_t s_reply_copy[REPLY_BUF_CAP];
+        size_t reply_len = s->reply_len > REPLY_BUF_CAP ? REPLY_BUF_CAP : s->reply_len;
+        memcpy(s_reply_copy, s->reply, reply_len);
         s->timer_fired = false;
-        xSemaphoreGive(s_lock);
-        /* 슬롯을 비우기 전에 콜백 — reply 포인터는 콜백 동안만 유효. 콜백 중엔 state가 아직 FREE가
-         * 아니라서 같은 노드에 새 요청이 끼어들 수 없음 */
-        if (cb) cb(cb_ctx, ESP_OK, s->reply, s->reply_len);
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        s->state = SLOT_FREE;
         s->matched = false;
+        s->state = SLOT_FREE;
         xSemaphoreGive(s_lock);
+        if (cb) cb(cb_ctx, ESP_OK, s_reply_copy, reply_len);
         return;
     }
 
@@ -135,12 +138,10 @@ static void service_slot(slot_t *s)
                 esp_now_reliable_done_cb_t cb = s->cb;
                 void *cb_ctx = s->cb_ctx;
                 int total = s->attempts_total;
+                s->state = SLOT_FREE;   /* 콜백 전에 비움 — 위 성공 경로와 같은 이유 */
                 xSemaphoreGive(s_lock);
                 ESP_LOGW(TAG, "요청 타임아웃(%d회 시도 모두 무응답)", total);
                 if (cb) cb(cb_ctx, ESP_ERR_TIMEOUT, NULL, 0);
-                xSemaphoreTake(s_lock, portMAX_DELAY);
-                s->state = SLOT_FREE;
-                xSemaphoreGive(s_lock);
                 return;
             }
             s->state = SLOT_NEED_SEND;

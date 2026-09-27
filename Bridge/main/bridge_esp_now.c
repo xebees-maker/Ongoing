@@ -137,6 +137,14 @@ static void relay_task(void *arg)
                 /* 2026-09-26 — can_link_send()가 경로 분류로 Control/Data ctx를 고름. CAN 링크가 아직
                  * 안 섰으면 ESP_ERR_INVALID_STATE(예전의 NULL ctx 크래시 방지와 같은 역할) */
                 esp_err_t err = can_link_send(msg, len);
+                /* 2026-09-26 — 못 보낸 메시지는 같은 메시지를 다시 보냄(순서 유지 — 이 태스크가 다음 메시지로 안 넘어감).
+                 * 사진 청크 하나만 빠져도 콘이 그 사진을 버리므로. 버스 오프 중엔 드라이버가 INVALID_STATE로 바로 거절하는데
+                 * 예전엔 이걸 "링크 안 섰음"으로 보고 버렸음(실기: 버스 오프마다 청크 474개가 사라짐) — 복구는 즉시 걸리므로
+                 * 에러 종류와 상관없이 10ms 간격으로 최대 약 200ms 재시도 */
+                for (int retry = 0; err != ESP_OK && retry < 20; retry++) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    err = can_link_send(msg, len);
+                }
                 if (err == ESP_ERR_INVALID_STATE) {
                     ui_screen_log_can("Relay dropped: not ready");
                 } else if (err != ESP_OK) {

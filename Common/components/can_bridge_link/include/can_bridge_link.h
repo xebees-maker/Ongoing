@@ -185,6 +185,7 @@ typedef struct {
     size_t   received_len;   /* 지금까지 CF로 채운 길이(SF면 즉시 total_len과 같아짐) */
     uint8_t  next_seq;       /* 다음에 기대하는 CF 순번(0~15 순환) */
     uint8_t  in_progress;    /* 1이면 FF 받고 CF 기다리는 중 */
+    uint8_t  last_cf_len;    /* 직전 CF로 채운 바이트 수(0이면 아직 CF 없음) — 중복 CF 판별용 */
 } can_bridge_reassembly_t;
 
 /* ---- FIFO 큐 — 드롭 금지, 꽉 차면 재할당으로 키움(PSRAM). 완성된 메시지(app_header+payload)

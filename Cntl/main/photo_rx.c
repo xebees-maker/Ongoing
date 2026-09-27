@@ -164,6 +164,12 @@ static void handle_sr_meta(const uint8_t *mac, const uint8_t *body, size_t len)
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     sr_session_t *s = find_session_locked(mac);
+    if (s && s->file_id == meta.file_id && s->next_idx == 0 && s->total_size == meta.total_size &&
+        s->expected_crc == meta.crc32) {
+        /* 브의 재전송으로 같은 META가 다시 옴(아직 청크 전) — 무시 */
+        xSemaphoreGive(s_mutex);
+        return;
+    }
     if (s) {
         ESP_LOGW(TAG, "SR_META: 이전 사진(file_id=%u) 미완료 — 버림", (unsigned)s->file_id);
         drop_session_locked(s);
@@ -209,6 +215,9 @@ static void handle_sr_chunk(const uint8_t *mac, const uint8_t *body, size_t len)
     sr_session_t *s = find_session_locked(mac);
     xSemaphoreGive(s_mutex);
     if (!s || h.file_id != s->file_id) return;
+    /* 2026-09-26 — 브는 메시지 프레임이 버려지면 메시지 전체를 다시 보냄(can_bridge_send) → 이미 받은 청크가 다시 올 수
+     * 있음. 중복은 무시 */
+    if (h.chunk_idx < s->next_idx) return;
     if (h.chunk_idx != s->next_idx || s->received + h.len > s->total_size || h.len > SR_WRITE_BLOCK) {
         /* 브가 순서를 보장하므로 여기 오면 스트림이 깨진 것 — 이 사진은 버림 */
         ESP_LOGW(TAG, "SR_CHUNK 순서/크기 어긋남(받은 %u, 기대 %u) — 사진 버림", h.chunk_idx, s->next_idx);

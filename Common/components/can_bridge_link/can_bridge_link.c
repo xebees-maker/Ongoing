@@ -182,6 +182,7 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
         r->received_len = first_chunk;
         r->next_seq = 1;
         r->in_progress = 1;
+        r->last_cf_len = 0;
 
         /* BS=0("남은 거 다 보내"), STmin=0 — 사용자 지시 없는 세부는 최소구현(단순 P2P 링크라
          * 별도 페이싱 협상 불필요) */
@@ -198,6 +199,13 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
             return 0;
         }
         uint8_t seq = frame_data[0] & 0x0F;
+        /* 2026-09-26 — 하드웨어 재전송(fail_retry_cnt=-1) 이후, 수신 측은 이미 받은 프레임을 송신 측이 에러로 보고 다시
+         * 보내는 CAN의 이중 수신이 생김(실기: "기대=4 수신=3"). 직전 CF와 순번·내용이 같으면 중복이므로 무시하고 계속 */
+        if (r->last_cf_len > 0 && seq == (uint8_t)((r->next_seq + 15) & 0x0F) &&
+            (size_t)(frame_len - 1) >= r->last_cf_len &&
+            memcmp(r->buf + r->received_len - r->last_cf_len, &frame_data[1], r->last_cf_len) == 0) {
+            return 0;
+        }
         if (seq != r->next_seq) {
             ESP_LOGW(TAG, "CF 순번 어긋남(기대=%u 수신=%u) — 이 메시지 폐기(발신측 재시도 기대)",
                      r->next_seq, seq);
@@ -214,6 +222,7 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
         }
         memcpy(r->buf + r->received_len, &frame_data[1], chunk);
         r->received_len += chunk;
+        r->last_cf_len = (uint8_t)chunk;
         r->next_seq = (uint8_t)((r->next_seq + 1) & 0x0F);
 
         if (r->received_len >= r->total_len) {
@@ -353,12 +362,38 @@ esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_
 }
 
 /* s_inflight_slot이 slot(NULL이면 무엇이든)이면 비우고 반납 — on_tx_done과 버스 오프 정리 공용 */
-static bool release_inflight_isr(tx_slot_t *slot)
+/* 2026-09-26 — 버려진 프레임(버스 오프로 드라이버가 버림, 또는 송신 실패로 끝남)을 CAN ID별로 셈. can_bridge_send()가
+ * 메시지 앞뒤로 자기 ID의 수를 비교해 "이 메시지의 프레임이 버려졌는지" 판단(실기: 브 버스 오프로 CF 하나가 버려져도
+ * 송신 측은 성공으로 알고, 수신 측은 다음 FF에서 조용히 새 메시지로 넘어가 사진 청크가 경고 없이 사라졌음).
+ * ID별로 세는 건 Control/Data가 한 송신 경로를 번갈아 쓰기 때문(다른 경로 프레임 때문에 멀쩡한 메시지를 다시 안 보내게) */
+#define DROP_ID_SLOTS 4
+static struct { uint32_t id; volatile uint32_t count; } s_drop[DROP_ID_SLOTS];
+
+static void note_drop_isr(uint32_t id)
+{
+    for (int i = 0; i < DROP_ID_SLOTS; i++) {
+        if (s_drop[i].count && s_drop[i].id == id) { s_drop[i].count++; return; }
+    }
+    for (int i = 0; i < DROP_ID_SLOTS; i++) {
+        if (!s_drop[i].count) { s_drop[i].id = id; s_drop[i].count = 1; return; }
+    }
+}
+
+static uint32_t drop_count(uint32_t id)
+{
+    for (int i = 0; i < DROP_ID_SLOTS; i++) {
+        if (s_drop[i].count && s_drop[i].id == id) return s_drop[i].count;
+    }
+    return 0;
+}
+
+static bool release_inflight_isr(tx_slot_t *slot, bool dropped)
 {
     portENTER_CRITICAL_ISR(&s_tx_lock);
     tx_slot_t *cur = s_inflight_slot;
     bool mine = cur && (!slot || cur == slot);
     if (mine) {
+        if (dropped) note_drop_isr(cur->frame.header.id);
         s_inflight_slot = NULL;
         cur->in_use = 0;
     }
@@ -379,13 +414,13 @@ bool can_bridge_tx_pool_on_done_isr(const twai_tx_done_event_data_t *edata)
         if (&s_tx_slots[i].frame == f) { slot = &s_tx_slots[i]; break; }
     }
     if (!slot) return false;  /* 이 풀에서 나간 프레임이 아님 */
-    return release_inflight_isr(slot);
+    return release_inflight_isr(slot, !edata->is_tx_success);
 }
 
 bool can_bridge_tx_pool_on_bus_off_isr(void)
 {
     if (!s_tx_slots || !s_tx_free_sem) return false;
-    return release_inflight_isr(NULL);
+    return release_inflight_isr(NULL, true);
 }
 
 typedef struct {
@@ -533,7 +568,21 @@ esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
     /* ctx당 세션 1개 — 다른 태스크가 같은 ctx로 보내는 중이면 끝날 때까지 대기(메시지 드롭 금지
      * 정책이라 타임아웃 없이 기다림, 한 세션은 FC 타임아웃 500ms + CF 전송으로 유한시간 안에 끝남) */
     xSemaphoreTake(ctx->send_mutex, portMAX_DELAY);
+    uint32_t drops_before = drop_count(ctx->tx_id);
     esp_err_t err = can_bridge_send_locked(ctx, msg, len);
+    if (err == ESP_OK) {
+        /* 마지막 프레임까지 실제로 끝났는지 기다린 뒤(송신 권한이 돌아오면 끝난 것), 그사이 이 ID의 프레임이 버려졌으면
+         * 실패 — 호출부(브 릴레이)가 메시지 전체를 다시 보냄. 받는 쪽은 새 FF로 다시 조립하고, 중복은 앱이 거름 */
+        if (xSemaphoreTake(s_tx_inflight_sem, pdMS_TO_TICKS(CAN_BRIDGE_DEFAULT_TIMEOUT_MS)) == pdTRUE) {
+            xSemaphoreGive(s_tx_inflight_sem);
+        } else {
+            err = ESP_ERR_TIMEOUT;
+        }
+        if (err == ESP_OK && drop_count(ctx->tx_id) != drops_before) {
+            ESP_LOGW(TAG, "메시지 프레임이 버스 오프 등으로 버려짐(id=0x%x) — 실패로 반환(재전송 기대)", (unsigned)ctx->tx_id);
+            err = ESP_FAIL;
+        }
+    }
     xSemaphoreGive(ctx->send_mutex);
     return err;
 }
