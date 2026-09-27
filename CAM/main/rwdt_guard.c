@@ -4,7 +4,7 @@
 #include "esp_clk_tree.h"
 #include "esp_log.h"
 
-static const char *TAG = "rwdt_guard";
+static const char *TAG = "SYS";
 
 void rwdt_guard_arm(uint32_t total_budget_sec)
 {
@@ -27,5 +27,5 @@ void rwdt_guard_arm(uint32_t total_budget_sec)
     wdt_hal_enable(&rwdt);
     wdt_hal_write_protect_enable(&rwdt);
 
-    ESP_LOGI(TAG, "RWDT 무장: %us 예산 (slow_clk=%uHz)", (unsigned)total_budget_sec, (unsigned)slow_clk_hz);
+    ESP_LOGI(TAG, "RWDT armed: %us budget (slow_clk=%uHz)", (unsigned)total_budget_sec, (unsigned)slow_clk_hz);
 }

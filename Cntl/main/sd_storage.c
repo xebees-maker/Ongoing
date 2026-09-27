@@ -18,7 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static const char *TAG = "sd_storage";
+static const char *TAG = "SYS";
 
 #define SD_SPI_HOST     SPI2_HOST
 #define SD_PIN_MOSI     11
@@ -41,7 +41,7 @@ esp_err_t sd_storage_init(void)
      * 안정화, ESP32-S3 커뮤니티에도 보고된 완화책) -> LOW(선택) 순서로 만듦 */
     esp_err_t err = ch422g_set_io(CH422G_IO_SD_CS, true);  /* HIGH = deselect, 먼저 확실히 비선택 */
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SD_CS deassert 실패: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "SD_CS deassert failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -55,7 +55,7 @@ esp_err_t sd_storage_init(void)
     };
     err = spi_bus_initialize(SD_SPI_HOST, &bus_cfg, SDSPI_DEFAULT_DMA);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SPI 버스 초기화 실패: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -63,7 +63,7 @@ esp_err_t sd_storage_init(void)
 
     err = ch422g_set_io(CH422G_IO_SD_CS, false);  /* LOW = select, 이제 명확한 엣지로 선택 */
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SD_CS assert 실패: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "SD_CS assert failed: %s", esp_err_to_name(err));
         spi_bus_free(SD_SPI_HOST);
         return err;
     }
@@ -92,7 +92,7 @@ esp_err_t sd_storage_init(void)
 
     err = esp_vfs_fat_sdspi_mount(SD_STORAGE_MOUNT_POINT, &host, &slot_cfg, &mount_cfg, &s_card);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SD카드 마운트 실패: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "SD mount failed: %s", esp_err_to_name(err));
         spi_bus_free(SD_SPI_HOST);
         return err;
     }
@@ -102,13 +102,13 @@ esp_err_t sd_storage_init(void)
     /* 2026-09-06(사용자 설계) — 통계/사진 폴더 구조 미리 마련. mkdir이 이미 있으면
      * EEXIST로 실패하는 게 정상이라 반환값은 로그만(치명적 아님) */
     if (mkdir(SD_STORAGE_MOUNT_POINT "/stats", 0777) != 0 && errno != EEXIST) {
-        ESP_LOGW(TAG, "stats 폴더 생성 실패(errno=%d)", errno);
+        ESP_LOGW(TAG, "stats folder create failed (errno=%d)", errno);
     }
     if (mkdir(SD_STORAGE_MOUNT_POINT "/photos", 0777) != 0 && errno != EEXIST) {
-        ESP_LOGW(TAG, "photos 폴더 생성 실패(errno=%d)", errno);
+        ESP_LOGW(TAG, "photos folder create failed (errno=%d)", errno);
     }
 
-    ESP_LOGI(TAG, "SD카드 마운트 완료: %s", SD_STORAGE_MOUNT_POINT);
+    ESP_LOGI(TAG, "SD mounted: %s", SD_STORAGE_MOUNT_POINT);
     /* 2026-09-26 — 재연결로 다시 마운트된 경우 사용량 합계를 새로 만들게 함(부팅 때는 파일처리
      * 태스크가 아직 없어서 무시되고, 태스크가 시작하면서 어차피 재스캔함) */
     storage_mgr_request_rescan();
@@ -120,7 +120,7 @@ bool sd_storage_get_capacity(uint64_t *out_total_bytes, uint64_t *out_free_bytes
     if (!s_card) return false;  /* 미마운트 */
     esp_err_t err = esp_vfs_fat_info(SD_STORAGE_MOUNT_POINT, out_total_bytes, out_free_bytes);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "esp_vfs_fat_info 실패: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "esp_vfs_fat_info failed: %s", esp_err_to_name(err));
         return false;
     }
     return true;
@@ -133,7 +133,7 @@ bool sd_storage_get_capacity(uint64_t *out_total_bytes, uint64_t *out_free_bytes
  * 완전히 새 카드로 바꿨든 둘 다 이걸로 커버됨 */
 esp_err_t sd_storage_reconnect(void)
 {
-    ESP_LOGW(TAG, "SD 재연결 시도");
+    ESP_LOGW(TAG, "SD reconnect attempt");
     if (s_card) {
         esp_vfs_fat_sdcard_unmount(SD_STORAGE_MOUNT_POINT, s_card);
         s_card = NULL;
@@ -148,7 +148,7 @@ esp_err_t sd_storage_reconnect(void)
 esp_err_t sd_storage_format(void)
 {
     if (!s_card) {
-        ESP_LOGW(TAG, "포맷 실패 — SD 미마운트, 먼저 재연결 필요");
+        ESP_LOGW(TAG, "Format failed - SD not mounted, reconnect first");
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -165,23 +165,23 @@ esp_err_t sd_storage_format(void)
      * 시도하게 함 */
     esp_err_t reconnect_err = sd_storage_reconnect();
     if (reconnect_err != ESP_OK) {
-        ESP_LOGE(TAG, "포맷 실패 — 포맷 전 재연결 자체가 실패: %s", esp_err_to_name(reconnect_err));
+        ESP_LOGE(TAG, "Format failed - reconnect before format failed: %s", esp_err_to_name(reconnect_err));
         return reconnect_err;
     }
 
-    ESP_LOGW(TAG, "SD 포맷 시작");
+    ESP_LOGW(TAG, "SD format start");
     esp_err_t err = esp_vfs_fat_sdcard_format(SD_STORAGE_MOUNT_POINT, s_card);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SD 포맷 실패: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "SD format failed: %s", esp_err_to_name(err));
         return err;
     }
     if (mkdir(SD_STORAGE_MOUNT_POINT "/stats", 0777) != 0 && errno != EEXIST) {
-        ESP_LOGW(TAG, "stats 폴더 생성 실패(errno=%d)", errno);
+        ESP_LOGW(TAG, "stats folder create failed (errno=%d)", errno);
     }
     if (mkdir(SD_STORAGE_MOUNT_POINT "/photos", 0777) != 0 && errno != EEXIST) {
-        ESP_LOGW(TAG, "photos 폴더 생성 실패(errno=%d)", errno);
+        ESP_LOGW(TAG, "photos folder create failed (errno=%d)", errno);
     }
-    ESP_LOGI(TAG, "SD 포맷 완료");
+    ESP_LOGI(TAG, "SD format done");
     storage_mgr_request_rescan();  /* 포맷으로 전부 비었음 — 합계 새로 */
     return ESP_OK;
 }

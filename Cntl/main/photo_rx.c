@@ -17,7 +17,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-static const char *TAG = "photo_rx";
+static const char *TAG = "PHOTO";
 
 /* 모듈 전체 상태를 하나의 뮤텍스로 보호 — ESP-NOW 태스크(recv_cb 경유)와 LVGL 워커
  * 태스크(UI) 양쪽에서 건드리는데, 호출 빈도가 낮아서(초당 몇 번 수준) 필드별로 락을
@@ -84,7 +84,7 @@ void photo_rx_init(void)
     for (int i = 0; i < SR_SESSIONS; i++) {
         s_sessions[i].wbuf = heap_caps_malloc(SR_WRITE_BLOCK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s_sessions[i].wbuf) {
-            ESP_LOGE(TAG, "SR 쓰기 버퍼[%d] 할당 실패(%u bytes)", i, (unsigned)SR_WRITE_BLOCK);
+            ESP_LOGE(TAG, "SR write buffer[%d] alloc failed (%u bytes)", i, (unsigned)SR_WRITE_BLOCK);
             ui_log_add_err(UI_ERR_RECV_BUF_ALLOC, "Recv buffer alloc failed - cannot receive photos");
         }
     }
@@ -115,7 +115,7 @@ void photo_rx_capture_now(const uint8_t *cam_mac)
      * recv_cb -> handle_capture_status()가 처리(여기서 안 기다림) */
     static const uint8_t s_capture_status_types[] = { ESP_NOW_MSG_CAPTURE_STATUS };
     node_hub_queue_action(cam_mac, &req, sizeof(req), s_capture_status_types, 1, 500, 3, "Capture now");
-    ESP_LOGI(TAG, "PHOTO_REQUEST(mode=CAPTURE_NOW) 큐잉됨");
+    ESP_LOGD(TAG, "PHOTO_REQUEST(mode=CAPTURE_NOW) queued");
 }
 
 /* 호출부가 s_mutex를 쥔 상태 */
@@ -159,7 +159,7 @@ static void handle_sr_meta(const uint8_t *mac, const uint8_t *body, size_t len)
     if (len < sizeof(can_bridge_sr_meta_t)) return;
     can_bridge_sr_meta_t meta;
     memcpy(&meta, body, sizeof(meta));
-    ESP_LOGI(TAG, "SR_META " MACSTR ": file_id=%u size=%u chunks=%u kind=%c", MAC2STR(mac),
+    ESP_LOGD(TAG, "SR_META " MACSTR ": file_id=%u size=%u chunks=%u kind=%c", MAC2STR(mac),
              (unsigned)meta.file_id, (unsigned)meta.total_size, (unsigned)meta.total_chunks, (char)meta.kind);
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -171,7 +171,7 @@ static void handle_sr_meta(const uint8_t *mac, const uint8_t *body, size_t len)
         return;
     }
     if (s) {
-        ESP_LOGW(TAG, "SR_META: 이전 사진(file_id=%u) 미완료 — 버림", (unsigned)s->file_id);
+        ESP_LOGW(TAG, "SR_META: previous photo (file_id=%u) incomplete - dropped", (unsigned)s->file_id);
         drop_session_locked(s);
     } else {
         for (int i = 0; i < SR_SESSIONS && !s; i++) {
@@ -180,7 +180,7 @@ static void handle_sr_meta(const uint8_t *mac, const uint8_t *body, size_t len)
     }
     if (!s || !s->wbuf) {
         xSemaphoreGive(s_mutex);
-        ESP_LOGE(TAG, "SR_META: 수신 세션 없음(동시 %d개 초과 또는 버퍼 없음) — 버림", SR_SESSIONS);
+        ESP_LOGE(TAG, "SR_META: no receive session (>%d concurrent or no buffer) - dropped", SR_SESSIONS);
         return;
     }
     s->active       = true;
@@ -200,7 +200,6 @@ static void handle_sr_meta(const uint8_t *mac, const uint8_t *body, size_t len)
     /* SD 열기는 잠금 밖에서(수 ms~) */
     s->writer = photo_storage_begin(mac, meta.kind);
     if (!s->writer) ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)meta.file_id);
-    ui_log_add("META file_id=%u size=%u chunks=%u", (unsigned)meta.file_id, (unsigned)meta.total_size, (unsigned)meta.total_chunks);
 }
 
 static void handle_sr_chunk(const uint8_t *mac, const uint8_t *body, size_t len)
@@ -220,7 +219,7 @@ static void handle_sr_chunk(const uint8_t *mac, const uint8_t *body, size_t len)
     if (h.chunk_idx < s->next_idx) return;
     if (h.chunk_idx != s->next_idx || s->received + h.len > s->total_size || h.len > SR_WRITE_BLOCK) {
         /* 브가 순서를 보장하므로 여기 오면 스트림이 깨진 것 — 이 사진은 버림 */
-        ESP_LOGW(TAG, "SR_CHUNK 순서/크기 어긋남(받은 %u, 기대 %u) — 사진 버림", h.chunk_idx, s->next_idx);
+        ESP_LOGW(TAG, "SR_CHUNK order/size mismatch (got %u, expected %u) - photo dropped", h.chunk_idx, s->next_idx);
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         drop_session_locked(s);
         xSemaphoreGive(s_mutex);
@@ -268,20 +267,19 @@ static void handle_sr_done(const uint8_t *mac, const uint8_t *body, size_t len)
     xSemaphoreGive(s_mutex);
 
     if (saved) {
-        ESP_LOGI(TAG, "사진 수신 완료: " MACSTR " file_id=%u, %u bytes -> seq=%u", MAC2STR(mac),
+        ESP_LOGI(TAG, "Photo received: " MACSTR " file_id=%u, %u bytes -> seq=%u", MAC2STR(mac),
                  (unsigned)file_id, (unsigned)size, (unsigned)seq);
-        ui_log_add("READY file_id=%u %u bytes seq=%u", (unsigned)file_id, (unsigned)size, (unsigned)seq);
         finish_event(PHOTO_RX_STATE_READY);
         return;
     }
     if (d.status != CAN_BRIDGE_SR_DONE_COMPLETE) {
-        ESP_LOGW(TAG, "사진 전송 중단(브 통지) file_id=%u", (unsigned)file_id);
+        ESP_LOGW(TAG, "Photo transfer aborted (Bridge notice) file_id=%u", (unsigned)file_id);
         ui_log_add_err(UI_ERR_CHUNK_MISSING, "Photo receive failed (transfer aborted) file_id=%u", (unsigned)file_id);
     } else if (!complete) {
-        ESP_LOGW(TAG, "사진 불완전(%u/%u 청크) file_id=%u", (unsigned)got, (unsigned)total, (unsigned)file_id);
+        ESP_LOGW(TAG, "Photo incomplete (%u/%u chunks) file_id=%u", (unsigned)got, (unsigned)total, (unsigned)file_id);
         ui_log_add_err(UI_ERR_CHUNK_MISSING, "Photo receive failed (incomplete) file_id=%u", (unsigned)file_id);
     } else if (!crc_ok) {
-        ESP_LOGW(TAG, "CRC 불일치 — 사진 버림 file_id=%u", (unsigned)file_id);
+        ESP_LOGW(TAG, "CRC mismatch - photo dropped file_id=%u", (unsigned)file_id);
         ui_log_add_err(UI_ERR_CRC_MISMATCH, "Photo receive failed (CRC mismatch) file_id=%u", (unsigned)file_id);
     } else {
         ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)file_id);
@@ -333,7 +331,7 @@ static void handle_capture_status(const uint8_t *src_mac, const uint8_t *data, i
 {
     if (len < (int)sizeof(esp_now_capture_status_t)) return;
     const esp_now_capture_status_t *msg = (const esp_now_capture_status_t *)data;
-    ESP_LOGI(TAG, "CAPTURE_STATUS 수신: status=%d", msg->status);
+    ESP_LOGD(TAG, "CAPTURE_STATUS received: status=%d", msg->status);
 
     /* 2026-08-21 — 캠이 캡처 상태를 esp_now_reliable_request()로 감싸 보내므로 ACK 필요(예전엔 SUCCESS/FAILED만 ACK).
      * 2026-09-26(5단계) — RECEIVED도 reliable로 바뀌어 예외 없음 */

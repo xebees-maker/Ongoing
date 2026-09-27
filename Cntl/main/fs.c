@@ -7,7 +7,7 @@
 #include "esp_littlefs.h"
 #include "esp_log.h"
 
-static const char *TAG = "fs";
+static const char *TAG = "SYS";
 
 esp_err_t fs_init(void)
 {

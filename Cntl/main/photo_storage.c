@@ -14,7 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-static const char *TAG = "photo_storage";
+static const char *TAG = "PHOTO";
 
 /* 파일명: <kind 1글자><8자리 십진수 순번>.jpg — 카메라 폴더 하나당 최대 99,999,999장
  * (콘은 CAM의 예전 500장 링버퍼와 달리 영구 저장소라 base36 4자리보다 훨씬 넉넉하게 잡음,
@@ -191,17 +191,17 @@ struct photo_storage_writer {
 photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
 {
     if (!sd_storage_is_mounted()) {
-        ESP_LOGW(TAG, "저장 시작 실패 — SD 미마운트");
+        ESP_LOGW(TAG, "Save start failed - SD not mounted");
         return NULL;
     }
     if (!is_valid_kind(kind)) {
-        ESP_LOGW(TAG, "저장 시작 실패 — 잘못된 kind=%c", (char)kind);
+        ESP_LOGW(TAG, "Save start failed - bad kind=%c", (char)kind);
         return NULL;
     }
     char dir_path[64];
     camera_dir_path(mac, dir_path, sizeof(dir_path));
     if (mkdir(dir_path, 0777) != 0 && errno != EEXIST) {
-        ESP_LOGW(TAG, "카메라 폴더 생성 실패(%s, errno=%d)", dir_path, errno);
+        ESP_LOGW(TAG, "Camera folder create failed (%s, errno=%d)", dir_path, errno);
         return NULL;
     }
     photo_storage_writer_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -215,7 +215,7 @@ photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
     snprintf(w->tmp_path, sizeof(w->tmp_path), "%s" PHOTO_TMP_SUFFIX, w->file_path);
     w->fp = fopen(w->tmp_path, "wb");
     if (!w->fp) {
-        ESP_LOGW(TAG, "파일 열기 실패: %s (errno=%d)", w->tmp_path, errno);
+        ESP_LOGW(TAG, "File open failed: %s (errno=%d)", w->tmp_path, errno);
         free(w);
         return NULL;
     }
@@ -229,7 +229,7 @@ bool photo_storage_append(photo_storage_writer_t *w, const uint8_t *data, size_t
     size_t n = fwrite(data, 1, len, w->fp);
     w->written += n;
     if (n != len) {
-        ESP_LOGW(TAG, "쓰기 실패(%u/%u bytes): %s", (unsigned)n, (unsigned)len, w->tmp_path);
+        ESP_LOGW(TAG, "Write failed (%u/%u bytes): %s", (unsigned)n, (unsigned)len, w->tmp_path);
         w->failed = true;
     }
     return !w->failed;
@@ -242,14 +242,14 @@ bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
     fclose(w->fp);
     w->fp = NULL;
     if (w->failed || !synced || w->written == 0) {
-        ESP_LOGW(TAG, "쓰기 불완전(%u bytes, sync=%d) — 임시파일 삭제: %s",
+        ESP_LOGW(TAG, "Write incomplete (%u bytes, sync=%d) - temp file deleted: %s",
                  (unsigned)w->written, synced ? 1 : 0, w->tmp_path);
         unlink(w->tmp_path);
         free(w);
         return false;
     }
     if (rename(w->tmp_path, w->file_path) != 0) {
-        ESP_LOGW(TAG, "임시파일 이름 바꾸기 실패(errno=%d): %s", errno, w->tmp_path);
+        ESP_LOGW(TAG, "Temp file rename failed (errno=%d): %s", errno, w->tmp_path);
         unlink(w->tmp_path);
         free(w);
         return false;
@@ -257,7 +257,7 @@ bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
     used_add((int64_t)w->written);
     storage_mgr_notify_changed();
     if (out_seq) *out_seq = w->seq;
-    ESP_LOGI(TAG, "사진 저장 완료: %s (%u bytes)", w->file_path, (unsigned)w->written);
+    ESP_LOGD(TAG, "Photo saved: %s (%u bytes)", w->file_path, (unsigned)w->written);
     free(w);
     return true;
 }
@@ -267,7 +267,7 @@ void photo_storage_abort(photo_storage_writer_t *w)
     if (!w) return;
     if (w->fp) fclose(w->fp);
     unlink(w->tmp_path);
-    ESP_LOGW(TAG, "저장 중단 — 임시파일 삭제: %s", w->tmp_path);
+    ESP_LOGW(TAG, "Save aborted - temp file deleted: %s", w->tmp_path);
     free(w);
 }
 
@@ -275,7 +275,7 @@ bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg,
                          uint32_t *out_seq)
 {
     if (!jpeg || len == 0) {
-        ESP_LOGW(TAG, "저장 실패 — 빈 데이터(len=%u)", (unsigned)len);
+        ESP_LOGW(TAG, "Save failed - empty data (len=%u)", (unsigned)len);
         return false;
     }
     photo_storage_writer_t *w = photo_storage_begin(mac, kind);
@@ -322,7 +322,7 @@ void photo_storage_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
             if (cam_ent->d_name[0] == '.') continue;  /* "."/".." 건너뜀 */
             uint8_t cam_mac[6];
             if (!hex_to_mac(cam_ent->d_name, cam_mac)) {
-                ESP_LOGW(TAG, "재스캔: 알 수 없는 항목(카메라 폴더 아님) 제외: %.40s", cam_ent->d_name);
+                ESP_LOGW(TAG, "Rescan: unknown entry (not a camera folder) skipped: %.40s", cam_ent->d_name);
                 bad++;
                 continue;
             }
@@ -339,19 +339,19 @@ void photo_storage_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
                 if (ends_with(ent->d_name, PHOTO_TMP_SUFFIX) && strlen(ent->d_name) < 32) {
                     /* 저장 도중 리셋으로 남은 반쯤 쓴 임시파일 — 지움 */
                     snprintf(path, sizeof(path), "%s/%.31s", cam_dir, ent->d_name);
-                    if (unlink(path) == 0) ESP_LOGW(TAG, "재스캔: 남은 임시파일 삭제: %s", path);
+                    if (unlink(path) == 0) ESP_LOGW(TAG, "Rescan: leftover temp file deleted: %s", path);
                     continue;
                 }
                 uint8_t kind; uint32_t seq;
                 if (!parse_fname(ent->d_name, &kind, &seq)) {
-                    ESP_LOGW(TAG, "재스캔: 이름이 형식에 안 맞는 항목 제외(손상 의심): %.40s", ent->d_name);
+                    ESP_LOGW(TAG, "Rescan: malformed name skipped (possibly corrupt): %.40s", ent->d_name);
                     bad++;
                     continue;
                 }
                 file_path_for(cam_mac, kind, seq, path, sizeof(path));  /* parse_fname 통과 = 고정 길이 이름 */
                 struct stat st;
                 if (stat(path, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size > sane_limit) {
-                    ESP_LOGW(TAG, "재스캔: 크기가 비정상인 항목 제외(손상 의심): %s", path);
+                    ESP_LOGW(TAG, "Rescan: bad size skipped (possibly corrupt): %s", path);
                     bad++;
                     continue;
                 }
@@ -443,7 +443,7 @@ uint32_t photo_storage_trim_to(uint64_t target_bytes)
     static trim_cand_t *s_cands = NULL;  /* 파일처리 태스크 전용, PSRAM 한 번만 */
     if (!s_cands) {
         s_cands = heap_caps_malloc(sizeof(trim_cand_t) * TRIM_BATCH, MALLOC_CAP_SPIRAM);
-        if (!s_cands) { ESP_LOGE(TAG, "정리 후보 버퍼 할당 실패 — 정리 안 함"); return 0; }
+        if (!s_cands) { ESP_LOGE(TAG, "Trim candidate buffer alloc failed - not trimming"); return 0; }
     }
 
     uint32_t deleted = 0;
@@ -455,7 +455,7 @@ uint32_t photo_storage_trim_to(uint64_t target_bytes)
             char path[96];
             file_path_for(s_cands[i].mac, s_cands[i].kind, s_cands[i].seq, path, sizeof(path));
             if (unlink(path) != 0) {
-                ESP_LOGW(TAG, "정리 중 삭제 실패(errno=%d): %s", errno, path);
+                ESP_LOGW(TAG, "Trim delete failed (errno=%d): %s", errno, path);
                 continue;
             }
             used_add(-(int64_t)s_cands[i].size);
@@ -464,7 +464,7 @@ uint32_t photo_storage_trim_to(uint64_t target_bytes)
         }
         if (!progress) break;  /* 이번 묶음을 하나도 못 지움 — 무한루프 방지 */
     }
-    if (deleted > 0) ESP_LOGI(TAG, "정리: %u장 삭제(오래된 것부터)", (unsigned)deleted);
+    if (deleted > 0) ESP_LOGI(TAG, "Trim: %u photos deleted (oldest first)", (unsigned)deleted);
     return deleted;
 }
 
@@ -515,7 +515,7 @@ uint32_t photo_storage_read_page(const uint8_t mac[6], uint32_t page_index, uint
     /* {seq, kind} 쌍을 uint32_t 2개로 — seq가 정렬 키, kind는 나란히 들고만 감(인코딩 아님,
      * 정렬 후 짝을 잃지 않기 위한 내부 스크래치 구조일 뿐) */
     uint32_t *scratch = heap_caps_malloc((size_t)total * 2 * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
-    if (!scratch) { closedir(dir); ESP_LOGW(TAG, "read_page: 스크래치 할당 실패(total=%u)", (unsigned)total); return 0; }
+    if (!scratch) { closedir(dir); ESP_LOGW(TAG, "read_page: scratch alloc failed (total=%u)", (unsigned)total); return 0; }
 
     rewinddir(dir);
     uint32_t filled = 0;
@@ -559,24 +559,24 @@ bool photo_storage_read_file(const uint8_t mac[6], uint8_t kind, uint32_t seq,
 
     struct stat st;
     if (stat(file_path, &st) != 0) {
-        ESP_LOGW(TAG, "read_file: 파일 없음: %s", file_path);
+        ESP_LOGW(TAG, "read_file: not found: %s", file_path);
         return false;
     }
     if ((size_t)st.st_size > buf_cap) {
-        ESP_LOGW(TAG, "read_file: 버퍼 부족(파일 %u > 버퍼 %u): %s",
+        ESP_LOGW(TAG, "read_file: buffer too small (file %u > buf %u): %s",
                  (unsigned)st.st_size, (unsigned)buf_cap, file_path);
         return false;
     }
 
     FILE *fp = fopen(file_path, "rb");
     if (!fp) {
-        ESP_LOGW(TAG, "read_file: 열기 실패: %s", file_path);
+        ESP_LOGW(TAG, "read_file: open failed: %s", file_path);
         return false;
     }
     size_t read_len = fread(out_buf, 1, (size_t)st.st_size, fp);
     fclose(fp);
     if (read_len != (size_t)st.st_size) {
-        ESP_LOGW(TAG, "read_file: 읽기 불완전(%u/%u): %s", (unsigned)read_len, (unsigned)st.st_size, file_path);
+        ESP_LOGW(TAG, "read_file: short read (%u/%u): %s", (unsigned)read_len, (unsigned)st.st_size, file_path);
         return false;
     }
 
@@ -591,7 +591,7 @@ bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq)
     struct stat st;
     int64_t size = (stat(file_path, &st) == 0 && st.st_size > 0) ? (int64_t)st.st_size : 0;
     if (unlink(file_path) != 0) {
-        ESP_LOGW(TAG, "delete: 실패(errno=%d): %s", errno, file_path);
+        ESP_LOGW(TAG, "delete: failed (errno=%d): %s", errno, file_path);
         return false;
     }
     used_add(-size);  /* 삭제가 성공했을 때만 뺌 */
@@ -620,12 +620,12 @@ uint32_t photo_storage_delete_all(const uint8_t mac[6])
         struct stat st;
         int64_t size = (stat(file_path, &st) == 0 && st.st_size > 0) ? (int64_t)st.st_size : 0;
         if (unlink(file_path) == 0) { deleted++; freed += size; }
-        else ESP_LOGW(TAG, "delete_all: 실패(errno=%d): %s", errno, file_path);
+        else ESP_LOGW(TAG, "delete_all: failed (errno=%d): %s", errno, file_path);
     }
     closedir(dir);
     used_add(-freed);
     storage_mgr_notify_changed();
-    ESP_LOGI(TAG, "delete_all: %u개 삭제 (%s)", (unsigned)deleted, dir_path);
+    ESP_LOGI(TAG, "delete_all: %u deleted (%s)", (unsigned)deleted, dir_path);
     return deleted;
 }
 

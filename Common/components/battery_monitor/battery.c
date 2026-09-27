@@ -9,7 +9,7 @@
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
 
-static const char *TAG = "battery";
+static const char *TAG = "SYS";
 
 static adc_oneshot_unit_handle_t s_adc  = NULL;
 static adc_cali_handle_t         s_cali = NULL;
@@ -29,7 +29,7 @@ bool battery_init(const battery_config_t *cfg)
         };
         gpio_config(&gcfg);
         gpio_set_level(s_cfg.ctrl_gpio, 0);  /* LOW: P-MOSFET ON → 분압기 활성화 */
-        ESP_LOGI(TAG, "분압기 게이트 GPIO%d=LOW", s_cfg.ctrl_gpio);
+        ESP_LOGI(TAG, "Divider gate GPIO%d=LOW", s_cfg.ctrl_gpio);
     }
 
     adc_oneshot_unit_init_cfg_t unit_cfg = { .unit_id = s_cfg.adc_unit };
@@ -50,7 +50,7 @@ bool battery_init(const battery_config_t *cfg)
         .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
     if (adc_cali_create_scheme_curve_fitting(&cali_cfg, &s_cali) != ESP_OK) {
-        ESP_LOGW(TAG, "battery ADC calibration unavailable — raw fallback");
+        ESP_LOGW(TAG, "battery ADC calibration unavailable - raw fallback");
         s_cali = NULL;
     }
 

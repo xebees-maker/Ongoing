@@ -27,7 +27,13 @@
  * 원인이라 아예 제거.
  */
 
-static const char *TAG = "can_link";
+static const char *TAG = "CAN";
+/* 2026-09-27(로그 정리) — 반복될 수 있는 경고는 1초에 1번만(그 사이 건너뛴 횟수를 붙임) */
+#define LOG_W_RL(tag, fmt, ...) do { \
+    static TickType_t _rl_last; static uint32_t _rl_skip; TickType_t _rl_now = xTaskGetTickCount(); \
+    if (_rl_last == 0 || (_rl_now - _rl_last) >= pdMS_TO_TICKS(1000)) { \
+        ESP_LOGW(tag, fmt " (+%u skipped)", ##__VA_ARGS__, (unsigned)_rl_skip); _rl_last = _rl_now; _rl_skip = 0; \
+    } else { _rl_skip++; } } while (0)
 
 #define CAN_LINK_TX_GPIO GPIO_NUM_15
 #define CAN_LINK_RX_GPIO GPIO_NUM_16
@@ -149,7 +155,7 @@ static void can_rx_task(void *arg)
              * 크래시로 확인). PSRAM 송신 풀 슬롯에 복사해서 보냄 */
             esp_err_t fc_err = can_bridge_tx_frame(s_node, fc_id, fc, 8, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
             if (fc_err != ESP_OK) {
-                ESP_LOGW(TAG, "FC 송신 실패(id=0x%x): %s", (unsigned)fc_id, esp_err_to_name(fc_err));
+                LOG_W_RL(TAG, "FC send failed (id=0x%x): %s", (unsigned)fc_id, esp_err_to_name(fc_err));
             }
         }
     }
@@ -195,7 +201,7 @@ static void proxy_done_cb(void *cb_ctx, esp_err_t result, const uint8_t *reply, 
         bridge_esp_now_queue_to_cntl(result_msg, off);  /* 복사해서 넣음 */
         free(result_msg);
     } else {
-        ESP_LOGE(TAG, "RELIABLE_RESULT 메시지 할당 실패 — 콘은 CAN 레벨 타임아웃으로 처리하게 됨");
+        ESP_LOGE(TAG, "RELIABLE_RESULT message alloc failed - Cntl will treat it as CAN-level timeout");
     }
     free(p);
 }
@@ -214,7 +220,7 @@ static void handle_reliable_send(const can_bridge_app_header_t *hdr, const uint8
 
     proxy_ctx_t *p = (proxy_ctx_t *)malloc(sizeof(proxy_ctx_t));
     if (!p) {
-        ESP_LOGE(TAG, "대행 컨텍스트 할당 실패");
+        ESP_LOGE(TAG, "Proxy context alloc failed");
         return;
     }
     memcpy(p->mac, hdr->mac, 6);
@@ -249,7 +255,7 @@ static void can_consume_task(void *arg)
 
                 if ((hdr.msg_type == CAN_DATA_RELAY || hdr.msg_type == CAN_DATA_RELIABLE_SEND) && !bridge_esp_now_is_ready()) {
                     /* 부팅 직후 ESP-NOW 초기화 전 — 버림(콘은 타임아웃 뒤 다시 시도, bridge_esp_now_is_ready 주석) */
-                    ESP_LOGW(TAG, "ESP-NOW 준비 전 콘 요청(type=%u) — 버림", hdr.msg_type);
+                    ESP_LOGW(TAG, "Cntl request before ESP-NOW ready (type=%u) - dropped", hdr.msg_type);
                 } else if (hdr.msg_type == CAN_DATA_RELAY) {
                     /* 2026-09-23(사용자 확인 — "DATA rx가 무선에 찍혔다") — 다시 보니 이 줄
                      * 자체는 코드상 CAN 창에 정상적으로 찍히는 게 맞고, 실제로는 그 직후
@@ -268,7 +274,7 @@ static void can_consume_task(void *arg)
                     can_bridge_ctrl_boot_t pong = { .boot_id = s_boot_id };
                     send_ctrl_to_cntl(CAN_CTRL_PONG, &pong, sizeof(pong));
                 } else if (hdr.msg_type == CAN_CTRL_RESET) {
-                    ESP_LOGW(TAG, "콘의 RESET 요청 — 재시작");
+                    ESP_LOGW(TAG, "RESET requested by Cntl - restarting");
                     ui_screen_log_can("RESET by Cntl - restarting");
                     vTaskDelay(pdMS_TO_TICKS(200));
                     esp_restart();
@@ -294,7 +300,7 @@ static void send_ctrl_to_cntl(uint8_t type, const void *body, size_t len)
         vTaskDelay(pdMS_TO_TICKS(10));
         err = can_link_send(msg, CAN_BRIDGE_APP_HEADER_LEN + len);
     }
-    if (err != ESP_OK) ESP_LOGW(TAG, "CTRL 0x%02x 송신 실패: %s", type, esp_err_to_name(err));
+    if (err != ESP_OK) ESP_LOGW(TAG, "CTRL 0x%02x send failed: %s", type, esp_err_to_name(err));
 }
 
 static void can_status_task(void *arg)
@@ -310,7 +316,14 @@ static void can_status_task(void *arg)
             uint32_t q_count, q_hwm, cq_count, cq_hwm;
             can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
             can_bridge_queue_get_stats(&s_ctrl_complete_q, &cq_count, &cq_hwm);
-            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u) 수신버림=%u RX=%u TX=%u 버스에러=%u 상태전이=%u",
+            /* 2026-09-27(로그 정리) — 주기 상태 줄은 D, 버스 상태가 바뀐 때만 W로 */
+            static int s_last_state = -1;
+            if (s_last_state >= 0 && s_last_state != (int)status.state) {
+                ESP_LOGW(TAG, "CAN state %s -> %s (TEC=%u REC=%u)", names[s_last_state], names[status.state],
+                         (unsigned)status.tx_error_count, (unsigned)status.rx_error_count);
+            }
+            s_last_state = (int)status.state;
+            ESP_LOGD(TAG, "state=%s TEC=%u REC=%u ctrlQ=%u(max%u) dataQ=%u(max%u) rxDrop=%u RX=%u TX=%u busErr=%u stateChg=%u",
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
                      (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm, (unsigned)s_raw_drop,
                      (unsigned)s_rx_frames, (unsigned)s_tx_frames, (unsigned)s_bus_errs, (unsigned)s_state_changes);
@@ -371,7 +384,7 @@ void can_link_init(void)
     };
     esp_err_t err = can_bridge_node_start_on_core(&node_cfg, &cbs, 1, &s_node);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "CAN 노드 시작 실패: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "CAN node start failed: %s", esp_err_to_name(err));
         return;
     }
 
@@ -395,5 +408,5 @@ void can_link_init(void)
     xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
     s_status_task = xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
 
-    ESP_LOGI(TAG, "브 CAN 링크 시작됨(TX=%d RX=%d %dbps, CONTROL+DATA)", CAN_LINK_TX_GPIO, CAN_LINK_RX_GPIO, CAN_LINK_BITRATE);
+    ESP_LOGI(TAG, "Bridge CAN link started (TX=%d RX=%d %dbps, CONTROL+DATA)", CAN_LINK_TX_GPIO, CAN_LINK_RX_GPIO, CAN_LINK_BITRATE);
 }

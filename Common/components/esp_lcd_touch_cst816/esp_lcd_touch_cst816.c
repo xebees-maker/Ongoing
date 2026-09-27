@@ -12,7 +12,7 @@
 #define CHIP_ID_REG    (0xA7)
 #define AutoSleep_REG  (0xFE)
 
-static const char *TAG = "esp_lcd_touch_cst816";
+static const char *TAG = "UI";
 
 static esp_err_t read_data(esp_lcd_touch_handle_t tp);
 static bool get_xy(esp_lcd_touch_handle_t tp, uint16_t *x, uint16_t *y, uint16_t *strength, uint8_t *point_num, uint8_t max_point_num);

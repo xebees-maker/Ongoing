@@ -3,7 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static const char *TAG = "sc05";
+static const char *TAG = "SENS";
 
 static uart_port_t s_port      = UART_NUM_1;
 static bool         s_installed = false;
@@ -19,12 +19,12 @@ bool sc05_init(uart_port_t uart_port, gpio_num_t rx_gpio, gpio_num_t tx_gpio, in
         .source_clk = UART_SCLK_DEFAULT,
     };
     if (uart_driver_install(uart_port, 256, 0, 0, NULL, 0) != ESP_OK) {
-        ESP_LOGW(TAG, "uart_driver_install 실패");
+        ESP_LOGW(TAG, "uart_driver_install failed");
         return false;
     }
     if (uart_param_config(uart_port, &cfg) != ESP_OK ||
         uart_set_pin(uart_port, tx_gpio, rx_gpio, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) {
-        ESP_LOGW(TAG, "uart_param_config/set_pin 실패");
+        ESP_LOGW(TAG, "uart_param_config/set_pin failed");
         uart_driver_delete(uart_port);
         return false;
     }
@@ -57,11 +57,11 @@ bool sc05_read(float *ppm, uint32_t timeout_ms)
         uint8_t frame[9] = { 0xFF };
         int got = uart_read_bytes(s_port, &frame[1], 8, pdMS_TO_TICKS(200));
         if (got != 8) {
-            ESP_LOGW(TAG, "프레임 미완성(시작바이트 이후 %dB만 수신)", got < 0 ? 0 : got);
+            ESP_LOGW(TAG, "Frame incomplete (only %dB after start byte)", got < 0 ? 0 : got);
             continue;                  /* 프레임 깨짐 — 처음부터 다시 동기화 */
         }
         if (frame_checksum(frame) != frame[8]) {
-            ESP_LOGW(TAG, "체크섬 불일치 — 프레임 버림");
+            ESP_LOGW(TAG, "Checksum mismatch - frame dropped");
             continue;
         }
 

@@ -67,3 +67,5 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # 2026-09-26(사용자 지시) — lwIP tcpip 태스크(우선순위 18)는 코어 0(코어 1의 CAN 태스크 17보다 우선하지 않게)
 CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+# 2026-09-27(로그 정리) — D 로그까지 빌드에 포함(기본 출력은 I, 개발 로그 창의 저장 문턱으로 런타임에 D까지 켬)
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y

@@ -19,7 +19,7 @@
 #include "esp_log.h"
 #include "esp_check.h"
 
-static const char *TAG = "JD9853";
+static const char *TAG = "UI";
 
 static esp_err_t panel_jd9853_del(esp_lcd_panel_t *panel);
 static esp_err_t panel_jd9853_reset(esp_lcd_panel_t *panel);

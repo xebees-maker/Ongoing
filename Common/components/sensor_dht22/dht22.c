@@ -12,7 +12,7 @@
 
 #define DHT22_TIMEOUT_US   100
 
-static const char *TAG = "dht22";
+static const char *TAG = "SENS";
 static gpio_num_t s_pin = GPIO_NUM_NC;
 
 /* level이 될 때까지 대기, timeout_us 안에 안 되면 false */
@@ -76,7 +76,7 @@ bool dht22_read(float *temperature, float *humidity)
 
     uint8_t checksum = (uint8_t)(data[0] + data[1] + data[2] + data[3]);
     if (checksum != data[4]) {
-        ESP_LOGW(TAG, "checksum 불일치: data=%02X %02X %02X %02X chk=%02X (계산값 %02X)",
+        ESP_LOGW(TAG, "checksum mismatch: data=%02X %02X %02X %02X chk=%02X (calc %02X)",
                  data[0], data[1], data[2], data[3], data[4], checksum);
         return false;
     }
@@ -94,9 +94,9 @@ bool dht22_read(float *temperature, float *humidity)
 fail:
     portENABLE_INTERRUPTS();
     if (fail_step <= 2) {
-        ESP_LOGW(TAG, "응답 신호 단계 %d에서 타임아웃 (0=초기LOW못봄,1=HIGH못봄,2=시작비트못봄) — 센서 응답 자체가 없음", fail_step);
+        ESP_LOGW(TAG, "Response timeout at stage %d (0=no initial LOW,1=no HIGH,2=no start bit) - no sensor response", fail_step);
     } else {
-        ESP_LOGW(TAG, "비트 %d 읽다가 타임아웃 (총 40비트 중)", fail_step - 3);
+        ESP_LOGW(TAG, "Timeout reading bit %d (of 40)", fail_step - 3);
     }
     return false;
 }

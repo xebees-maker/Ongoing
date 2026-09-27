@@ -115,12 +115,7 @@ typedef enum {
     STR_LABEL_TIME,
     STR_BTN_SET_TIME,
     STR_TITLE_SET_TIME,
-    STR_PANEL_DEEPSLEEP,
-    STR_DEEPSLEEP_LINE_FMT,
-    STR_WAKE_REASON_TIMER,
-    STR_WAKE_REASON_RWDT,
-    STR_WAKE_REASON_POWERON,
-    STR_WAKE_REASON_OTHER,
+    STR_PANEL_DEV_LOG,   /* 2026-09-27 — 개발 로그 판넬 제목(예전 전력 로그) */
     /* 응답성 드롭다운 도움말(2026-08-10) — s_response_interval_values 순서와 반드시 같이
      * 맞출 것(ui_main.c) */
     STR_RESPONSE_HELP_0,  /* 1초=즉시 */

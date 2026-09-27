@@ -4,7 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-static const char *TAG = "ch32v003";
+static const char *TAG = "SYS";
 
 static i2c_master_dev_handle_t s_dev = NULL;
 static uint8_t s_output_shadow = 0;  /* 레지스터는 write-only 느낌이라 마지막 출력값을 들고 있음 */
@@ -45,7 +45,7 @@ void ch32v003_set_output(uint8_t pin, bool level)
         return;
     }
     if (!s_dev || !s_output_mutex) {
-        ESP_LOGE(TAG, "set_output(pin=%d): ch32v003_init() 전 호출", pin);
+        ESP_LOGE(TAG, "set_output(pin=%d): called before ch32v003_init()", pin);
         return;
     }
     xSemaphoreTake(s_output_mutex, portMAX_DELAY);

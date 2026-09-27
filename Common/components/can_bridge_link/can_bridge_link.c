@@ -11,7 +11,13 @@
 #include <string.h>
 #include <stdlib.h>
 
-static const char *TAG = "can_bridge_link";
+static const char *TAG = "CAN";
+/* 2026-09-27(로그 정리) — 반복될 수 있는 경고는 1초에 1번만(그 사이 건너뛴 횟수를 붙임) */
+#define LOG_W_RL(tag, fmt, ...) do { \
+    static TickType_t _rl_last; static uint32_t _rl_skip; TickType_t _rl_now = xTaskGetTickCount(); \
+    if (_rl_last == 0 || (_rl_now - _rl_last) >= pdMS_TO_TICKS(1000)) { \
+        ESP_LOGW(tag, fmt " (+%u skipped)", ##__VA_ARGS__, (unsigned)_rl_skip); _rl_last = _rl_now; _rl_skip = 0; \
+    } else { _rl_skip++; } } while (0)
 
 /* PSRAM 우선, 없으면 내부 RAM 폴백(사용자 지시 — feedback_prefer_psram_for_buffers 정책을
  * 브릿지에도 동일 적용, PSRAM 없는 후보 보드 대비 폴백 필수) */
@@ -40,7 +46,7 @@ void can_bridge_queue_init(can_bridge_queue_t *q)
 void can_bridge_queue_set_notify_task(can_bridge_queue_t *q, TaskHandle_t task)
 {
     if (!q || !q->inited) {
-        ESP_LOGE(TAG, "queue_set_notify_task: 미초기화 큐(q=%p)", (void *)q);
+        ESP_LOGE(TAG, "queue_set_notify_task: uninitialized queue (q=%p)", (void *)q);
         return;
     }
     taskENTER_CRITICAL(&q->lock);
@@ -52,12 +58,12 @@ void can_bridge_queue_push(can_bridge_queue_t *q, const uint8_t *data, size_t le
 {
     if (!q || !q->inited) {
         /* 코드 버그(미초기화 큐에 push) — 드롭 금지 정책상 조용히 버리지 않고 즉시 드러나게 중단 */
-        ESP_LOGE(TAG, "queue_push: 미초기화 큐(q=%p) — 메시지 드롭 금지 정책상 중단", (void *)q);
+        ESP_LOGE(TAG, "queue_push: uninitialized queue (q=%p) - aborting (no-drop policy)", (void *)q);
         abort();
     }
     if (len == 0 || !data) {
         /* 길이 0짜리는 메시지가 아님(재조립기는 len>=1만 넘김) — 넣을 게 없으니 무시 */
-        ESP_LOGE(TAG, "queue_push: 잘못된 인자(data=%p len=%u) — 무시", (const void *)data, (unsigned)len);
+        ESP_LOGE(TAG, "queue_push: bad args (data=%p len=%u) - ignored", (const void *)data, (unsigned)len);
         return;
     }
 
@@ -66,7 +72,7 @@ void can_bridge_queue_push(can_bridge_queue_t *q, const uint8_t *data, size_t le
     if (!e) {
         /* 사용자 지시: 이 링크에서 메시지 유실은 절대 허용 안 함 — 드롭 대신 즉시 드러나게 abort.
          * (PSRAM+내부RAM 둘 다 실패할 정도면 이미 메모리 설계 자체가 잘못된 상태) */
-        ESP_LOGE(TAG, "큐 항목 할당 실패(len=%u) — 메시지 드롭 금지 정책상 중단", (unsigned)len);
+        ESP_LOGE(TAG, "Queue item alloc failed (len=%u) - aborting (no-drop policy)", (unsigned)len);
         abort();
     }
     e->next = NULL;
@@ -96,7 +102,7 @@ void can_bridge_queue_push(can_bridge_queue_t *q, const uint8_t *data, size_t le
 int can_bridge_queue_pop(can_bridge_queue_t *q, uint8_t **out_data, size_t *out_len)
 {
     if (!q || !q->inited || !out_data || !out_len) {
-        ESP_LOGE(TAG, "queue_pop: 잘못된 인자(q=%p inited=%u out_data=%p out_len=%p)",
+        ESP_LOGE(TAG, "queue_pop: bad args (q=%p inited=%u out_data=%p out_len=%p)",
                  (void *)q, q ? (unsigned)q->inited : 0u, (void *)out_data, (void *)out_len);
         return 0;
     }
@@ -159,7 +165,7 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
     if (pci == ISO_TP_PCI_SF) {
         uint8_t len = frame_data[0] & 0x0F;
         if (len == 0 || len > ISO_TP_SF_MAX_LEN || (size_t)len > r->buf_cap) {
-            ESP_LOGW(TAG, "SF 길이 이상(%u) — 폐기", len);
+            ESP_LOGW(TAG, "SF length invalid (%u) - discarded", len);
             return 0;
         }
         memcpy(r->buf, &frame_data[1], len);
@@ -172,7 +178,7 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
         if (frame_len < 2) return 0;
         size_t total_len = (((size_t)(frame_data[0] & 0x0F)) << 8) | frame_data[1];
         if (total_len > r->buf_cap) {
-            ESP_LOGE(TAG, "FF total_len(%u) > 버퍼(%u) — 폐기(발신측 재시도 기대)",
+            ESP_LOGE(TAG, "FF total_len(%u) > buffer(%u) - discarded (sender retry expected)",
                      (unsigned)total_len, (unsigned)r->buf_cap);
             r->in_progress = 0;
             return 0;
@@ -196,7 +202,7 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
 
     if (pci == ISO_TP_PCI_CF) {
         if (!r->in_progress) {
-            ESP_LOGW(TAG, "진행 중인 FF 없이 CF 도착 — 폐기");
+            LOG_W_RL(TAG, "CF without FF in progress - discarded");
             return 0;
         }
         uint8_t seq = frame_data[0] & 0x0F;
@@ -208,7 +214,7 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
             return 0;
         }
         if (seq != r->next_seq) {
-            ESP_LOGW(TAG, "CF 순번 어긋남(기대=%u 수신=%u) — 이 메시지 폐기(발신측 재시도 기대)",
+            LOG_W_RL(TAG, "CF sequence mismatch (expected=%u got=%u) - message discarded (sender retry expected)",
                      r->next_seq, seq);
             r->in_progress = 0;
             return 0;
@@ -217,7 +223,7 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
         size_t chunk = (size_t)(frame_len - 1);
         if (chunk > remain) chunk = remain;
         if (r->received_len + chunk > r->buf_cap) {
-            ESP_LOGE(TAG, "CF로 버퍼 한도 초과 — 폐기");
+            ESP_LOGE(TAG, "CF exceeds buffer limit - discarded");
             r->in_progress = 0;
             return 0;
         }
@@ -274,7 +280,7 @@ void can_bridge_tx_pool_init(void)
     xSemaphoreGive(s_tx_inflight_sem);  /* 처음엔 비어 있음(보낼 수 있음) */
     if (!s_tx_slots || !s_tx_free_sem) {
         /* 송신 불가 상태로 조용히 두지 않음(드롭 금지 정책과 같은 취지) */
-        ESP_LOGE(TAG, "송신 프레임 풀 할당 실패(slots=%p sem=%p) — 중단", (void *)s_tx_slots, (void *)s_tx_free_sem);
+        ESP_LOGE(TAG, "TX frame pool alloc failed (slots=%p sem=%p) - aborting", (void *)s_tx_slots, (void *)s_tx_free_sem);
         abort();
     }
     memset(s_tx_slots, 0, sizeof(tx_slot_t) * CAN_BRIDGE_TX_POOL_SIZE);
@@ -291,7 +297,7 @@ static void tx_slot_release(tx_slot_t *slot)
 esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_t *data, uint8_t len, int timeout_ms)
 {
     if (!s_tx_slots || !s_tx_free_sem) {
-        ESP_LOGE(TAG, "tx_frame: 풀 미초기화(can_bridge_tx_pool_init 누락)");
+        ESP_LOGE(TAG, "tx_frame: pool not initialized (can_bridge_tx_pool_init missing)");
         return ESP_ERR_INVALID_STATE;
     }
     if (!node || len > 8 || (len > 0 && !data)) return ESP_ERR_INVALID_ARG;
@@ -300,14 +306,14 @@ esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_
         static bool s_warned = false;
         if (!s_warned) {
             s_warned = true;
-            ESP_LOGE(TAG, "CAN 송신이 코어 %d에 고정되지 않은 태스크(%s)에서 호출됨 — 송신 정지 위험", s_tx_core, pcTaskGetName(NULL));
+            ESP_LOGE(TAG, "CAN send from task not pinned to core %d (%s) - TX stall risk", s_tx_core, pcTaskGetName(NULL));
         }
     }
 
     TickType_t start = xTaskGetTickCount();
     TickType_t total = (timeout_ms < 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
     if (xSemaphoreTake(s_tx_free_sem, total) != pdTRUE) {
-        ESP_LOGW(TAG, "송신 프레임 풀 빈 슬롯 없음(%dms) — 송신 실패", timeout_ms);
+        ESP_LOGW(TAG, "TX frame pool has no free slot (%dms) - send failed", timeout_ms);
         return ESP_ERR_TIMEOUT;
     }
 
@@ -323,7 +329,7 @@ esp_err_t can_bridge_tx_frame(twai_node_handle_t node, uint32_t id, const uint8_
     taskEXIT_CRITICAL(&s_tx_lock);
     if (!slot) {
         /* 세마포어 개수와 in_use가 어긋난 경우(논리 버그) — 개수는 되돌려 둠 */
-        ESP_LOGE(TAG, "tx_frame: 세마포어는 얻었는데 빈 슬롯 없음(논리 버그)");
+        ESP_LOGE(TAG, "tx_frame: semaphore taken but no free slot (logic bug)");
         xSemaphoreGive(s_tx_free_sem);
         return ESP_FAIL;
     }
@@ -405,7 +411,7 @@ static void abort_if_stuck(void)
     TickType_t now = xTaskGetTickCount();
     if (now - s_last_log > pdMS_TO_TICKS(1000)) {
         s_last_log = now;
-        ESP_LOGW(TAG, "송신 프레임(id=0x%x)이 %ums 넘게 안 끝남(상대 노드 응답 없음?) — 중단", (unsigned)id, (unsigned)TX_STUCK_MS);
+        ESP_LOGW(TAG, "TX frame (id=0x%x) not done after %ums (peer not responding?) - aborted", (unsigned)id, (unsigned)TX_STUCK_MS);
     }
     twai_ll_set_cmd_abort_tx(TWAI_LL_GET_HW(0));
 }
@@ -485,7 +491,7 @@ esp_err_t can_bridge_node_start_on_core(const twai_onchip_node_config_t *node_cf
     if (a.err != ESP_OK) return a.err;
     s_tx_core = core;
     *out_node = a.node;
-    ESP_LOGI(TAG, "TWAI 노드 시작(인터럽트 코어 %d)", core);
+    ESP_LOGI(TAG, "TWAI node start (ISR core %d)", core);
     return ESP_OK;
 }
 
@@ -507,7 +513,7 @@ can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id)
 {
     can_bridge_ctx_t *ctx = (can_bridge_ctx_t *)psram_or_internal_alloc(sizeof(can_bridge_ctx_t));
     if (!ctx) {
-        ESP_LOGE(TAG, "ctx 할당 실패");
+        ESP_LOGE(TAG, "ctx alloc failed");
         abort();
     }
     ctx->node = node;
@@ -515,7 +521,7 @@ can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id)
     ctx->fc_sem = xSemaphoreCreateBinary();
     ctx->send_mutex = xSemaphoreCreateMutex();
     if (!ctx->fc_sem || !ctx->send_mutex) {
-        ESP_LOGE(TAG, "ctx 세마포어/뮤텍스 생성 실패");
+        ESP_LOGE(TAG, "ctx semaphore/mutex create failed");
         abort();
     }
     ctx->fc_status = ISO_TP_FC_STATUS_CTS;
@@ -563,12 +569,12 @@ static esp_err_t can_bridge_send_locked(can_bridge_ctx_t *ctx, const uint8_t *ms
     if (err != ESP_OK) { ctx->fc_pending = 0; return err; }
 
     if (xSemaphoreTake(ctx->fc_sem, pdMS_TO_TICKS(CAN_BRIDGE_DEFAULT_TIMEOUT_MS)) != pdTRUE) {
-        ESP_LOGW(TAG, "FC 타임아웃 — 전송 중단");
+        ESP_LOGW(TAG, "FC timeout - send aborted");
         ctx->fc_pending = 0;
         return ESP_ERR_TIMEOUT;
     }
     if (ctx->fc_status != ISO_TP_FC_STATUS_CTS) {
-        ESP_LOGW(TAG, "FC status=%u(CTS 아님) — 전송 중단", ctx->fc_status);
+        ESP_LOGW(TAG, "FC status=%u (not CTS) - send aborted", ctx->fc_status);
         return ESP_FAIL;
     }
 
@@ -611,7 +617,7 @@ esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
             err = ESP_ERR_TIMEOUT;
         }
         if (err == ESP_OK && drop_count(ctx->tx_id) != drops_before) {
-            ESP_LOGW(TAG, "메시지 프레임이 버스 오프 등으로 버려짐(id=0x%x) — 실패로 반환(재전송 기대)", (unsigned)ctx->tx_id);
+            LOG_W_RL(TAG, "Message frame dropped by bus-off etc (id=0x%x) - returning failure (resend expected)", (unsigned)ctx->tx_id);
             err = ESP_FAIL;
         }
     }

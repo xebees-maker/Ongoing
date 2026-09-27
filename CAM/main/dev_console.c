@@ -12,7 +12,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
-static const char *TAG = "dev_console";
+static const char *TAG = "SYS";
 
 /* shot을 쓰면 이 시각까지 자동 촬영 타이머를 건너뛴다(cam_node.c의 capture_timer_cb가
  * dev_console_auto_capture_paused()로 확인). 2026-09-26 — SD 제거로 ls/get/clear 명령은
@@ -44,7 +44,7 @@ static int cmd_shot(int argc, char **argv)
 static int cmd_soundlog(int argc, char **argv)
 {
     if (argc < 2) {
-        printf("사용법: soundlog <on|off|solo <1-%d[,1-%d...]>|solo off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
+        printf("Usage: soundlog <on|off|solo <1-%d[,1-%d...]>|solo off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
         return 1;
     }
     if (strcmp(argv[1], "off") == 0) {
@@ -56,7 +56,7 @@ static int cmd_soundlog(int argc, char **argv)
     } else if (strcmp(argv[1], "solo") == 0) {
         /* 이벤트 번호 1..SPK_EVT_COUNT — 정확한 목록은 cam_speaker.h 참고(2026-08-26 기준 13개) */
         if (argc < 3) {
-            printf("사용법: soundlog solo <1-%d[,1-%d...]|off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
+            printf("Usage: soundlog solo <1-%d[,1-%d...]|off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
             return 1;
         }
         if (strcmp(argv[2], "off") == 0) {
@@ -83,14 +83,14 @@ static int cmd_soundlog(int argc, char **argv)
                 mask |= (1u << (uint32_t)(n - 1));
             }
             if (bad || mask == 0) {
-                printf("사용법: soundlog solo <1-%d[,1-%d...]|off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
+                printf("Usage: soundlog solo <1-%d[,1-%d...]|off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
                 return 1;
             }
             cam_speaker_set_solo_mask(mask);
             printf("SOUNDLOG_SOLO_%s\n", argv[2]);
         }
     } else {
-        printf("사용법: soundlog <on|off|solo <1-%d[,1-%d...]>|solo off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
+        printf("Usage: soundlog <on|off|solo <1-%d[,1-%d...]>|solo off>\n", SPK_EVT_COUNT, SPK_EVT_COUNT);
         return 1;
     }
     return 0;
@@ -99,7 +99,7 @@ static int cmd_soundlog(int argc, char **argv)
 static int cmd_auto(int argc, char **argv)
 {
     if (argc < 2) {
-        printf("사용법: auto <on|off> (현재: %s)\n", cam_node_get_auto_capture() ? "on" : "off");
+        printf("Usage: auto <on|off> (now: %s)\n", cam_node_get_auto_capture() ? "on" : "off");
         return 1;
     }
     if (strcmp(argv[1], "off") == 0) {
@@ -109,7 +109,7 @@ static int cmd_auto(int argc, char **argv)
         cam_node_set_auto_capture(true);
         printf("AUTO_ON\n");
     } else {
-        printf("사용법: auto <on|off>\n");
+        printf("Usage: auto <on|off>\n");
         return 1;
     }
     return 0;
@@ -118,7 +118,7 @@ static int cmd_auto(int argc, char **argv)
 static int cmd_q(int argc, char **argv)
 {
     if (argc < 2) {
-        printf("사용법: q <0~63> (낮을수록 고화질)\n");
+        printf("Usage: q <0~63> (lower = better quality)\n");
         return 1;
     }
     int quality = atoi(argv[1]);
@@ -129,7 +129,7 @@ static int cmd_q(int argc, char **argv)
 static int cmd_xclk(int argc, char **argv)
 {
     if (argc < 2) {
-        printf("사용법: xclk <1~40> (MHz)\n");
+        printf("Usage: xclk <1~40> (MHz)\n");
         return 1;
     }
     int mhz = atoi(argv[1]);
@@ -197,5 +197,5 @@ void dev_console_start(void)
     ESP_ERROR_CHECK(esp_console_cmd_register(&xclk_cmd));
 
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
-    ESP_LOGI(TAG, "개발 콘솔 시작 — shot / auto <on|off> / q <0-63> / xclk <1-40> / help");
+    ESP_LOGI(TAG, "Dev console started - shot / auto <on|off> / q <0-63> / xclk <1-40> / help");
 }

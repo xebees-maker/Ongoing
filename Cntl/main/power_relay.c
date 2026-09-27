@@ -11,7 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static const char *TAG = "power_relay";
+static const char *TAG = "RELAY";
 
 /* 2026-09-16 — 실제 배선 전까지의 자리표시 핀. SSR-DK25DA 제어입력(3-32VDC, 2선)을 직접
  * 구동하기엔 3.3V 로직레벨 전류가 부족할 수 있어 실제 배선 시 트랜지스터/옵토 드라이버
@@ -76,7 +76,7 @@ static void power_relay_save(void)
 {
     FILE *f = fopen(POWER_RELAY_FILE_PATH, "wb");
     if (!f) {
-        ESP_LOGW(TAG, "저장 실패(fopen): %s", POWER_RELAY_FILE_PATH);
+        ESP_LOGW(TAG, "Save failed (fopen): %s", POWER_RELAY_FILE_PATH);
         return;
     }
     power_relay_file_t s = { .version = POWER_RELAY_FILE_VERSION };
@@ -108,14 +108,14 @@ void power_relay_load(void)
     bool ok = (fread(&s, sizeof(s), 1, f) == 1) && s.version == POWER_RELAY_FILE_VERSION;
     fclose(f);
     if (!ok) {
-        ESP_LOGW(TAG, "설정 파일 형식 불일치 — 기본값 유지");
+        ESP_LOGW(TAG, "Config file format mismatch - keeping defaults");
         return;
     }
     for (int i = 0; i < POWER_RELAY_COUNT; i++) {
         s.relays[i].alias[sizeof(s.relays[i].alias) - 1] = '\0';
     }
     memcpy(s_relay_cfg, s.relays, sizeof(s_relay_cfg));
-    ESP_LOGI(TAG, "설정 복원 완료(relay0.configured=%d relay1.configured=%d)",
+    ESP_LOGI(TAG, "Config restored (relay0.configured=%d relay1.configured=%d)",
              (int)s_relay_cfg[0].configured, (int)s_relay_cfg[1].configured);
 }
 
@@ -160,7 +160,7 @@ bool power_relay_get_commanded_on(int idx)
 static void relay_set_gpio(int idx, bool on)
 {
     if (s_relay_gpio[idx] == GPIO_NUM_NC) {
-        ESP_LOGW(TAG, "릴레이%d: GPIO 미배정(자리표시) — 명령상태만 갱신, 실제 핀 출력 없음", idx);
+        ESP_LOGW(TAG, "Relay%d: no GPIO assigned (placeholder) - state only, no pin output", idx);
         return;
     }
     gpio_set_level(s_relay_gpio[idx], on ? 1 : 0);
@@ -172,7 +172,7 @@ static void power_relay_command(int idx, bool on, uint32_t now_ms)
     s_commanded_on[idx] = on;
     s_last_transition_ms[idx] = now_ms;
     relay_set_gpio(idx, on);
-    ESP_LOGI(TAG, "릴레이%d(%s) -> %s", idx, s_relay_cfg[idx].alias, on ? "On" : "Off");
+    ESP_LOGI(TAG, "Relay%d(%s) -> %s", idx, s_relay_cfg[idx].alias, on ? "On" : "Off");
 }
 
 static void power_relay_apply_override_immediate(int idx)
@@ -393,10 +393,10 @@ void power_relay_start(void)
     if (stack_buf) {
         xTaskCreateStaticPinnedToCore(power_relay_task, "power_relay", 8192, NULL, 15, stack_buf, &s_power_relay_tcb, 1);
     } else {
-        ESP_LOGE(TAG, "SR 태스크 스택 PSRAM 할당 실패 — 내부 RAM으로 폴백");
+        ESP_LOGE(TAG, "SR task stack PSRAM alloc failed - falling back to internal RAM");
         xTaskCreatePinnedToCore(power_relay_task, "power_relay", 8192, NULL, 15, NULL, 1);
     }
     size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG power_relay_start 비용: internal %u -> %u (소모 %d bytes)",
+    ESP_LOGD(TAG, "MEMDIAG power_relay_start cost: internal %u -> %u (used %d bytes)",
              (unsigned)before, (unsigned)after, (int)before - (int)after);
 }

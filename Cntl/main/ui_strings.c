@@ -3,7 +3,7 @@
 #include "esp_log.h"
 #include <stdio.h>
 
-static const char *TAG = "ui_strings";
+static const char *TAG = "UI";
 #define SETTINGS_PATH  FS_MOUNT_POINT "/settings.bin"
 
 /* 2026-09-07(임시 실험 — 비트맵 폰트엔 한글 글리프가 없음) — 기본값을 EN으로 강제.
@@ -120,23 +120,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LABEL_TIME]                 = { "시각",                       "Time" },
     [STR_BTN_SET_TIME]               = { "설정",                       "Set" },
     [STR_TITLE_SET_TIME]             = { "시각 설정",                   "Set time" },
-    [STR_PANEL_DEEPSLEEP]            = { "절전 상태",                   "Power Status" },
-    /* 2026-08-10 사용자 지시로 축약 포맷 확정 — awake/I/slept/R 라벨은 언어 무관 고정,
-     * 라벨-숫자 사이 공백 추가(가독성), interval->I, "RWDT n회"/"RWDT xn"->"R n" */
-    /* awake만 ms 단위(2026-08-10) — 필요시 초기화+채널기억 최적화 이후 1초 미만이 흔해져서
-     * 초 단위로는 대부분 0으로 뭉개짐(정보 없음) */
-    /* 2026-08-22 — 끝에 배터리 진단정보(mV/%%/raw) 추가. USB 없이 배터리만으로 테스트할 때
-     * 이 화면(전력로그판넬)이 유일한 확인 수단이라 raw ADC값까지 남김(실측 대조/보정용,
-     * CH32V003 ADC 비트폭·기준전압 미확정 상태) */
-    [STR_DEEPSLEEP_LINE_FMT]         = { "%s: C#%lu [%s] Aw %lums/I %lu초, SL %lu초, R %lu, bat %umV(%u%%) raw=%u",
-                                          "%s: C#%lu [%s] Aw %lums/I %lus, SL %lus, R %lu, bat %umV(%u%%) raw=%u" },
-    /* 2026-08-22 — 전력로그 한 줄이 배터리 진단정보 추가로 길어져서 화면폭을 넘기고 "..."로
-     * 잘리는 문제(사용자 지적) — 줄여서 여유 확보. RWDT는 그대로 둠(카운터 R과 별개, 그
-     * 자체로 이미 짧음) */
-    [STR_WAKE_REASON_TIMER]          = { "NM",                         "NM" },
-    [STR_WAKE_REASON_RWDT]           = { "RWDT복구",                   "RWDT-caught" },
-    [STR_WAKE_REASON_POWERON]        = { "PO",                         "PO" },
-    [STR_WAKE_REASON_OTHER]          = { "OT",                         "OT" },
+    [STR_PANEL_DEV_LOG]              = { "Dev Log",                    "Dev Log" },  /* 2026-09-27 — 전력 로그 자리, 로그는 영문 고정 */
     [STR_RESPONSE_HELP_0] = { "성능모드 — 즉시 반응(사실상 상시 동작)",
                                "Performance mode - responds instantly (effectively always on)" },
     [STR_RESPONSE_HELP_1] = { "동작확인 모드 — Sleep이 실제로 도는지 테스트용",
@@ -419,7 +403,7 @@ void ui_lang_set(ui_lang_t lang)
 
     FILE *f = fopen(SETTINGS_PATH, "wb");
     if (!f) {
-        ESP_LOGW(TAG, "언어 설정 저장 실패(fopen)");
+        ESP_LOGW(TAG, "Language setting save failed (fopen)");
         return;
     }
     uint8_t val = (uint8_t)lang;

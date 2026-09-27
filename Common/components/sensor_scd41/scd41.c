@@ -9,7 +9,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 
-static const char *TAG = "scd41";
+static const char *TAG = "SENS";
 
 #define CMD_WAKE_UP                     0x36F6
 #define CMD_STOP_PERIODIC_MEASUREMENT   0x3F86
@@ -55,7 +55,7 @@ static void force_reinit(const char *reason)
 {
     if (s_reinit_in_progress) return;
 
-    ESP_LOGW(TAG, "%s — 센서 재초기화 시도", reason);
+    ESP_LOGW(TAG, "%s - sensor reinit attempt", reason);
     s_fail_count = 0;
     s_reinit_in_progress = true;
     recover_bus();
@@ -66,7 +66,7 @@ static void force_reinit(const char *reason)
     if (s_single_shot_mode) {
         s_reinit_in_progress = false;
         s_last_success_tick = xTaskGetTickCount();
-        ESP_LOGI(TAG, "싱글샷 모드 — I2C 버스 리셋만 수행(컨티뉴어스 재시작 안 함)");
+        ESP_LOGI(TAG, "Single-shot mode - I2C bus reset only (no continuous restart)");
         return;
     }
 
@@ -75,9 +75,9 @@ static void force_reinit(const char *reason)
     s_last_success_tick = xTaskGetTickCount();  /* 재시도 폭주 방지 — 다음 측정까지는 정상으로 간주 */
 
     if (ok) {
-        ESP_LOGI(TAG, "센서 재초기화 성공 — 주기 측정 재시작");
+        ESP_LOGI(TAG, "Sensor reinit OK - periodic measurement restarted");
     } else {
-        ESP_LOGW(TAG, "센서 재초기화 실패 — 다음 실패/정체 감지 시 재시도");
+        ESP_LOGW(TAG, "Sensor reinit failed - retry on next failure/stall");
     }
 }
 
@@ -123,7 +123,7 @@ static bool send_cmd(uint16_t cmd)
     uint8_t buf[2] = { (uint8_t)(cmd >> 8), (uint8_t)(cmd & 0xFF) };
     esp_err_t err = i2c_master_transmit(s_dev, buf, sizeof(buf), I2C_TIMEOUT_MS);
     if (err == ESP_OK) return true;
-    ESP_LOGW(TAG, "send_cmd(0x%04X) 실패: %s", cmd, esp_err_to_name(err));
+    ESP_LOGW(TAG, "send_cmd(0x%04X) failed: %s", cmd, esp_err_to_name(err));
     recover_bus();
     note_failure();
     return false;
@@ -137,14 +137,14 @@ static bool start_measurement_sequence(void)
 
     /* 이전 상태와 무관하게 정지 후 재시작 (정지 명령 실패는 무시) */
     bool stop_ok = send_cmd(CMD_STOP_PERIODIC_MEASUREMENT);
-    ESP_LOGI(TAG, "stop_periodic_measurement: %s", stop_ok ? "ACK" : "NACK(무시)");
+    ESP_LOGD(TAG, "stop_periodic_measurement: %s", stop_ok ? "ACK" : "NACK(ignored)");
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     bool start_ok = false;
     for (int retry = 0; retry < 5 && !start_ok; retry++) {
         start_ok = send_cmd(CMD_START_PERIODIC_MEASUREMENT);
         if (!start_ok) {
-            ESP_LOGW(TAG, "start_periodic_measurement 실패 (시도 %d/5)", retry + 1);
+            ESP_LOGW(TAG, "start_periodic_measurement failed (try %d/5)", retry + 1);
             vTaskDelay(pdMS_TO_TICKS(200));
         }
     }
@@ -176,7 +176,7 @@ static bool init_i2c_bus_and_device(int i2c_port, gpio_num_t sda_gpio, gpio_num_
         ESP_LOGE(TAG, "i2c_new_master_bus failed (SDA=%d SCL=%d)", sda_gpio, scl_gpio);
         return false;
     }
-    ESP_LOGI(TAG, "전용 I2C 버스 OK  SDA=%d SCL=%d", sda_gpio, scl_gpio);
+    ESP_LOGI(TAG, "Dedicated I2C bus OK  SDA=%d SCL=%d", sda_gpio, scl_gpio);
 
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -196,12 +196,12 @@ bool scd41_init(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
     if (!init_i2c_bus_and_device(i2c_port, sda_gpio, scl_gpio)) return false;
 
     if (!start_measurement_sequence()) {
-        ESP_LOGW(TAG, "센서 응답 없음 — 연결 확인 필요");
+        ESP_LOGW(TAG, "No sensor response - check connection");
         return false;
     }
     s_last_success_tick = xTaskGetTickCount();
 
-    ESP_LOGI(TAG, "SCD41 주기 측정 시작 (5초 간격)");
+    ESP_LOGI(TAG, "SCD41 periodic measurement start (5s interval)");
     return true;
 }
 
@@ -214,20 +214,20 @@ bool scd41_init_single_shot(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gp
 static bool data_ready(void)
 {
     if (!send_cmd(CMD_GET_DATA_READY_STATUS)) {
-        ESP_LOGW(TAG, "data_ready: 명령 전송 실패");
+        ESP_LOGW(TAG, "data_ready: command send failed");
         return false;
     }
     vTaskDelay(pdMS_TO_TICKS(1));
 
     uint8_t resp[3] = { 0 };
     if (i2c_master_receive(s_dev, resp, sizeof(resp), I2C_TIMEOUT_MS) != ESP_OK) {
-        ESP_LOGW(TAG, "data_ready: 응답 수신 실패");
+        ESP_LOGW(TAG, "data_ready: response receive failed");
         recover_bus();
         note_failure();
         return false;
     }
     if (crc8(resp, 2) != resp[2]) {
-        ESP_LOGW(TAG, "data_ready: CRC 불일치");
+        ESP_LOGW(TAG, "data_ready: CRC mismatch");
         note_failure();  /* 통신은 됐지만 데이터가 깨짐 — 연속 실패 카운트에 포함시켜야
                            * REINIT_FAIL_THRESHOLD로 재초기화가 걸림(안 그러면 이 경로는
                            * note_failure()도 check_stale()도 안 타서 영원히 복구 안 됨) */
@@ -236,7 +236,7 @@ static bool data_ready(void)
 
     uint16_t status = ((uint16_t)resp[0] << 8) | resp[1];
     bool ready = (status & 0x07FF) != 0;
-    ESP_LOGI(TAG, "data_ready: status=0x%04X ready=%d", status, ready);
+    ESP_LOGD(TAG, "data_ready: status=0x%04X ready=%d", status, ready);
     if (!ready) check_stale();
     return ready;
 }
@@ -260,7 +260,7 @@ static bool read_measurement_frame(int *co2_ppm, float *temperature, float *humi
 
     for (int w = 0; w < 3; w++) {
         if (crc8(&resp[w * 3], 2) != resp[w * 3 + 2]) {
-            ESP_LOGW(TAG, "CRC 불일치 (word %d)", w);
+            ESP_LOGW(TAG, "CRC mismatch (word %d)", w);
             note_failure();  /* data_ready()와 동일 이유 — CRC 실패도 실패로 집계해야 함 */
             return false;
         }
@@ -276,7 +276,7 @@ static bool read_measurement_frame(int *co2_ppm, float *temperature, float *humi
     if (temperature) *temperature = -45.0f + 175.0f * ((float)temp_raw / 65536.0f);
     if (humidity)     *humidity   = 100.0f * ((float)humi_raw / 65536.0f);
 
-    ESP_LOGI(TAG, "co2=%u ppm  temp_raw=%u  humi_raw=%u", co2_raw, temp_raw, humi_raw);
+    ESP_LOGD(TAG, "co2=%u ppm  temp_raw=%u  humi_raw=%u", co2_raw, temp_raw, humi_raw);
     return true;
 }
 

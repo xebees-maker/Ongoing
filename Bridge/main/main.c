@@ -20,7 +20,7 @@
  * 전부 콘 쪽(진짜 CASK 판단)의 몫.
  */
 
-static const char *TAG = "bridge_main";
+static const char *TAG = "SYS";
 
 void app_main(void)
 {
@@ -70,5 +70,5 @@ void app_main(void)
     can_link_init();
     bridge_esp_now_init();
 
-    ESP_LOGI(TAG, "브 시작됨 (콘 소스 미사용, 자체 초기화)");
+    ESP_LOGI(TAG, "Bridge started (standalone init)");
 }

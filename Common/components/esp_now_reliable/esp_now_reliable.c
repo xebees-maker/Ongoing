@@ -11,7 +11,13 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-static const char *TAG = "esp_now_reliable";
+static const char *TAG = "LINK";
+/* 2026-09-27(로그 정리) — 반복될 수 있는 경고는 1초에 1번만(그 사이 건너뛴 횟수를 붙임) */
+#define LOG_W_RL(tag, fmt, ...) do { \
+    static TickType_t _rl_last; static uint32_t _rl_skip; TickType_t _rl_now = xTaskGetTickCount(); \
+    if (_rl_last == 0 || (_rl_now - _rl_last) >= pdMS_TO_TICKS(1000)) { \
+        ESP_LOGW(tag, fmt " (+%u skipped)", ##__VA_ARGS__, (unsigned)_rl_skip); _rl_last = _rl_now; _rl_skip = 0; \
+    } else { _rl_skip++; } } while (0)
 
 /* 2026-09-26(설계 Docs/설계_CAN링크_2026-09-26.md §4, 3단계) — 노드별 슬롯 + 이벤트로 움직이는 상태 기계.
  * 예전엔 대기 슬롯 1개 + API 뮤텍스라 한 번에 요청 하나만 기다릴 수 있었고, 브가 콘의 RELIABLE_SEND를
@@ -140,7 +146,7 @@ static void service_slot(slot_t *s)
                 int total = s->attempts_total;
                 s->state = SLOT_FREE;   /* 콜백 전에 비움 — 위 성공 경로와 같은 이유 */
                 xSemaphoreGive(s_lock);
-                ESP_LOGW(TAG, "요청 타임아웃(%d회 시도 모두 무응답)", total);
+                ESP_LOGW(TAG, "Request timeout (all %d tries no response)", total);
                 if (cb) cb(cb_ctx, ESP_ERR_TIMEOUT, NULL, 0);
                 return;
             }
@@ -172,7 +178,7 @@ static void service_slot(slot_t *s)
             return;
         }
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "esp_now_send 실패(시도 %d/%d): %s",
+            LOG_W_RL(TAG, "esp_now_send failed (try %d/%d): %s",
                      s->attempts_total - s->attempts_left + 1, s->attempts_total, esp_err_to_name(err));
         }
         /* 보냈거나(또는 NO_MEM 재시도 소진) — 이번 시도의 응답 대기 */
@@ -227,7 +233,7 @@ esp_err_t esp_now_reliable_request_async(const uint8_t *peer_mac,
     for (int i = 0; i < SLOT_COUNT; i++) {
         if (s_slots[i].state != SLOT_FREE && memcmp(s_slots[i].mac, peer_mac, 6) == 0) {
             xSemaphoreGive(s_lock);
-            ESP_LOGE(TAG, "이 노드에 진행 중인 요청이 이미 있음(노드당 1개 원칙 위반) — %02X%02X%02X%02X%02X%02X",
+            ESP_LOGE(TAG, "Request already in progress for this node (one per node rule) - %02X%02X%02X%02X%02X%02X",
                      peer_mac[0], peer_mac[1], peer_mac[2], peer_mac[3], peer_mac[4], peer_mac[5]);
             return ESP_ERR_INVALID_STATE;
         }
@@ -235,7 +241,7 @@ esp_err_t esp_now_reliable_request_async(const uint8_t *peer_mac,
     }
     if (!free_slot) {
         xSemaphoreGive(s_lock);
-        ESP_LOGE(TAG, "슬롯 부족(%d)", SLOT_COUNT);
+        ESP_LOGE(TAG, "Slots exhausted (%d)", SLOT_COUNT);
         return ESP_ERR_NO_MEM;
     }
     if (!free_slot->req) free_slot->req = (uint8_t *)alloc_buf(REQ_BUF_CAP);

@@ -43,7 +43,7 @@
 #include "dev_console.h"
 #include "rwdt_guard.h"
 
-static const char *TAG = "cam_node";
+static const char *TAG = "CAM";
 
 /* 2026-07-28: XCLK/fb_count는 센서마다 실기에서 확인된 값이 달라서(project_cam_esp_now_production
  * 메모리) main/Kconfig.projbuild의 CAM_SENSOR_VARIANT 선택("카메라 센서")으로 갈라진다 —
@@ -186,7 +186,7 @@ static uint32_t clamp_capture_interval_sec(uint32_t sec)
 {
     if (sec == 0) return 0;
     if (sec < CAM_CAPTURE_INTERVAL_MIN_SAFE_SEC) {
-        ESP_LOGW(TAG, "촬영주기 %us는 최소 안전값(%us) 미만 — 올림",
+        ESP_LOGW(TAG, "Capture interval %us below safe minimum (%us) - raised",
                  (unsigned)sec, (unsigned)CAM_CAPTURE_INTERVAL_MIN_SAFE_SEC);
         return CAM_CAPTURE_INTERVAL_MIN_SAFE_SEC;
     }
@@ -201,7 +201,7 @@ void cam_node_set_capture_interval_sec(uint32_t sec)
 
     if (sec == 0) {
         cam_node_set_auto_capture(false);
-        if (changed) ESP_LOGI(TAG, "자동촬영 끔(주기=0)");
+        if (changed) ESP_LOGI(TAG, "Auto capture off (interval=0)");
         return;
     }
     cam_node_set_auto_capture(true);
@@ -211,7 +211,7 @@ void cam_node_set_capture_interval_sec(uint32_t sec)
          * 같은 값을 반복해서 실어오는데, 그때마다 리셋하면 예전 esp_timer 버그와 똑같이
          * 촬영주기를 절대 못 채움 */
         s_next_capture_due_unix_time = time(NULL) + (time_t)sec;
-        ESP_LOGI(TAG, "자동촬영 주기 변경: %us (다음 촬영 목표시각 갱신)", (unsigned)sec);
+        ESP_LOGI(TAG, "Auto capture interval changed: %us (next capture time updated)", (unsigned)sec);
     }
 }
 
@@ -240,7 +240,7 @@ void cam_node_set_response_interval_sec(uint32_t sec)
         ? RWDT_LIVE_MODE_BUDGET_SEC
         : s_response_interval_sec + CONFIG_CAM_DEEPSLEEP_AWAKE_MARGIN_SEC;
     rwdt_guard_arm(rwdt_budget_sec);
-    ESP_LOGI(TAG, "응답성 설정 변경: %us (RWDT 재무장 %us)",
+    ESP_LOGI(TAG, "Response setting changed: %us (RWDT re-armed %us)",
              (unsigned)s_response_interval_sec, (unsigned)rwdt_budget_sec);
 }
 
@@ -292,7 +292,7 @@ static void capture_wake_reason(void)
     } else {
         s_wake_reason = CAM_WAKE_REASON_OTHER;
     }
-    ESP_LOGI(TAG, "웨이크 원인 판정: reset_reason=%d -> wake_reason=%d", rr, s_wake_reason);
+    ESP_LOGD(TAG, "Wake reason: reset_reason=%d -> wake_reason=%d", rr, s_wake_reason);
 
     /* 실측 — 타이머 웨이크일 때만 의미 있음(POWERON/RWDT는 어차피 getter가 0 반환).
      * s_sleep_entry_unix_time==0이면 이번이 첫 사이클(재플래시 등으로 RTC가 막 초기화됨)
@@ -447,7 +447,7 @@ static esp_err_t camera_init(bool save_warmup_frames)
     esp_err_t init_err = esp_camera_init(&config);
     if (init_err != ESP_OK) {
         bsp_esp32s3_cam_sensor_power(false);
-        ESP_LOGE(TAG, "esp_camera_init 실패: %s", esp_err_to_name(init_err));
+        ESP_LOGE(TAG, "esp_camera_init failed: %s", esp_err_to_name(init_err));
         return init_err;
     }
 
@@ -467,11 +467,11 @@ static esp_err_t camera_init(bool save_warmup_frames)
         camera_fb_t *warmup_fb = esp_camera_fb_get();
         if (warmup_fb) esp_camera_fb_return(warmup_fb);
     }
-    ESP_LOGI(TAG, "노출 워밍업 %d프레임 소요: %lldms", CAM_WARMUP_FRAME_COUNT,
+    ESP_LOGD(TAG, "Exposure warm-up %d frames: %lldms", CAM_WARMUP_FRAME_COUNT,
              (esp_timer_get_time() - warmup_start_us) / 1000);
 
     s_camera_ready = true;
-    ESP_LOGI(TAG, "카메라 초기화 완료 (XCLK=%dMHz, fb_count=%d, 해상도 %d, JPEG q=%d)",
+    ESP_LOGI(TAG, "Camera init done (XCLK=%dMHz, fb_count=%d, res %d, JPEG q=%d)",
              (int)s_xclk_target_mhz, CAM_VIDEO_FB_COUNT, CAM_FRAME_SIZE, CAM_JPEG_QUALITY);
     return ESP_OK;
 }
@@ -482,7 +482,7 @@ static esp_err_t ensure_camera_ready(bool save_warmup_frames)
 {
     if (s_camera_ready) return ESP_OK;
     esp_err_t err = camera_init(save_warmup_frames);
-    if (err != ESP_OK) ESP_LOGE(TAG, "카메라 초기화 실패(필요시 초기화)");
+    if (err != ESP_OK) ESP_LOGE(TAG, "Camera init failed (on demand)");
     return err;
 }
 
@@ -556,16 +556,16 @@ static bool camera_capture_one(cam_capture_kind_t kind)
 
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
-        ESP_LOGW(TAG, "esp_camera_fb_get 실패");
+        ESP_LOGW(TAG, "esp_camera_fb_get failed");
         xSemaphoreGive(s_capture_mutex);
         return false;
     }
 
     bool ok = esp_now_cam_push_captured_photo(fb->buf, fb->len, kind);
     if (ok) {
-        ESP_LOGI(TAG, "CNTL로 푸시 완료: kind=%c, %u bytes", (char)kind, (unsigned)fb->len);
+        ESP_LOGI(TAG, "Pushed to CNTL: kind=%c, %u bytes", (char)kind, (unsigned)fb->len);
     } else {
-        ESP_LOGW(TAG, "CNTL 푸시 실패(kind=%c) — 이번 사진은 버려짐", (char)kind);
+        ESP_LOGW(TAG, "CNTL push failed (kind=%c) - photo dropped", (char)kind);
     }
     esp_camera_fb_return(fb);
 
@@ -586,38 +586,38 @@ bool cam_node_get_auto_capture(void) { return s_auto_capture_enabled; }
 bool cam_node_set_jpeg_quality(int quality)
 {
     if (quality < 0 || quality > 63) {
-        ESP_LOGW(TAG, "JPEG 화질 범위 밖(0~63): %d", quality);
+        ESP_LOGW(TAG, "JPEG quality out of range (0~63): %d", quality);
         return false;
     }
     sensor_t *sensor = esp_camera_sensor_get();
     if (!sensor || sensor->set_quality(sensor, quality) != 0) {
-        ESP_LOGW(TAG, "JPEG 화질 변경 실패");
+        ESP_LOGW(TAG, "JPEG quality change failed");
         return false;
     }
-    ESP_LOGI(TAG, "JPEG 화질 변경: %d (다음 촬영부터 계속 적용됨)", quality);
+    ESP_LOGI(TAG, "JPEG quality changed: %d (applies from next capture)", quality);
     return true;
 }
 
 bool cam_node_set_xclk(int mhz)
 {
     if (mhz < 1 || mhz > 40) {
-        ESP_LOGW(TAG, "XCLK 범위 밖(1~40MHz): %d", mhz);
+        ESP_LOGW(TAG, "XCLK out of range (1~40MHz): %d", mhz);
         return false;
     }
     sensor_t *sensor = esp_camera_sensor_get();
     if (!sensor || !sensor->set_xclk) {
-        ESP_LOGW(TAG, "이 센서는 set_xclk 미지원");
+        ESP_LOGW(TAG, "This sensor does not support set_xclk");
         return false;
     }
     if (sensor->set_xclk(sensor, LEDC_TIMER_0, mhz) != 0) {
-        ESP_LOGW(TAG, "XCLK 변경 실패");
+        ESP_LOGW(TAG, "XCLK change failed");
         return false;
     }
     if (sensor->set_framesize(sensor, sensor->status.framesize) != 0) {
-        ESP_LOGW(TAG, "XCLK 변경 후 PLL 재계산 실패");
+        ESP_LOGW(TAG, "PLL recalculation after XCLK change failed");
         return false;
     }
-    ESP_LOGI(TAG, "XCLK 변경: %dMHz (PLL 재계산 완료)", mhz);
+    ESP_LOGI(TAG, "XCLK changed: %dMHz (PLL recalculated)", mhz);
     return true;
 }
 
@@ -628,7 +628,7 @@ bool cam_node_set_xclk(int mhz)
 void cam_node_set_xclk_target_mhz(uint8_t mhz)
 {
     if (mhz < 1 || mhz > 40) {
-        ESP_LOGW(TAG, "XCLK 목표값 범위 밖(1~40MHz), 무시: %u", (unsigned)mhz);
+        ESP_LOGW(TAG, "XCLK target out of range (1~40MHz), ignored: %u", (unsigned)mhz);
         return;
     }
     s_xclk_target_mhz = mhz;
@@ -648,7 +648,7 @@ bool cam_node_capture_now_sized(const char *size_name)
      * 센서 핸들이 필요해서 camera_capture_one() 진입 전에 여기서 먼저 준비돼 있어야 함.
      * 이 함수 자체가 수동(콘솔 shot/CAPTURE_NOW) 전용 경로라 save_warmup_frames=true 고정 */
     if (ensure_camera_ready(true) != ESP_OK) {
-        ESP_LOGW(TAG, "수동 촬영 요청 — 카메라 초기화 실패");
+        ESP_LOGW(TAG, "Manual capture request - camera init failed");
         return false;
     }
 
@@ -661,16 +661,16 @@ bool cam_node_capture_now_sized(const char *size_name)
         } else if (strcasecmp(size_name, "vga") == 0) {
             fs = FRAMESIZE_VGA;
         } else {
-            ESP_LOGW(TAG, "알 수 없는 해상도 이름: %s (5m/qvga/vga만 지원)", size_name);
+            ESP_LOGW(TAG, "Unknown resolution name: %s (5m/qvga/vga only)", size_name);
             return false;
         }
 
         sensor_t *sensor = esp_camera_sensor_get();
         if (!sensor || sensor->set_framesize(sensor, fs) != 0) {
-            ESP_LOGW(TAG, "해상도 변경 실패");
+            ESP_LOGW(TAG, "Resolution change failed");
             return false;
         }
-        ESP_LOGI(TAG, "해상도 변경: %s (다음 촬영부터 계속 적용됨)", size_name);
+        ESP_LOGI(TAG, "Resolution changed: %s (applies from next capture)", size_name);
     }
 
     return camera_capture_one(CAM_CAPTURE_KIND_MANUAL);
@@ -727,7 +727,7 @@ void app_main(void)
     /* 2026-08-23 — 스피커로 6가지 이벤트만 소리로 구분(CAML에서 검증, 기본 꺼짐 —
      * dev_console의 soundlog on/off로 켬). 실패해도 계속 진행 */
     if (cam_speaker_init() != ESP_OK) {
-        ESP_LOGW(TAG, "스피커 초기화 실패 — 소리 알림 없이 계속 진행");
+        ESP_LOGW(TAG, "Speaker init failed - continuing without sound");
     } else {
         esp_reset_reason_t spk_rr = esp_reset_reason();
         if (spk_rr == ESP_RST_USB) {
@@ -776,14 +776,14 @@ void app_main(void)
      * ESP-NOW 수신에 맞춰 알아서 깨는지는 실기로 확인 필요(2026-08-08 설계 대화에서 짚은
      * 미검증 지점) — 문제가 보이면 이 줄만 빼면 원복됨 */
     esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
-    ESP_LOGI(TAG, "WiFi 모뎀슬립 설정: %s", esp_err_to_name(ps_err));
+    ESP_LOGI(TAG, "WiFi modem sleep: %s", esp_err_to_name(ps_err));
 
     /* 2026-09-26 — 상태 LED = PWR_LED(IO 익스팬더 EXIO6, 스키매틱 확인). GPIO가 아니라서
      * status_led의 사용자 출력 함수 방식으로 등록(쓰기는 BSP 태스크가 비동기로 함) */
     if (status_led_init_custom(BSP_CAM_PWR_LED_STATUS_ID, bsp_esp32s3_cam_pwr_led_set)) {
         esp_now_cam_set_status_led(BSP_CAM_PWR_LED_STATUS_ID);
     } else {
-        ESP_LOGW(TAG, "상태 LED 초기화 실패 — LED 표시 없이 계속 진행");
+        ESP_LOGW(TAG, "Status LED init failed - continuing without LED");
     }
     esp_now_cam_init();  /* fast path 시도(성공하면 이미 PAIRED) 또는 폴백 스캔 시작 */
     /* esp_now_cam_init() 다음에 저장된(또는 기본) 응답성 설정을 반영(RWDT도 여기서
@@ -799,7 +799,7 @@ void app_main(void)
         cam_node_set_auto_capture(true);
     }
 
-    ESP_LOGI(TAG, "CAM 노드 시작 (%s, 촬영주기=%us 응답성=%us, wake_reason=%d)", esp_now_cam_get_name(),
+    ESP_LOGI(TAG, "CAM node start (%s, capture=%us response=%us, wake_reason=%d)", esp_now_cam_get_name(),
              (unsigned)s_capture_interval_sec, (unsigned)s_response_interval_sec, s_wake_reason);
 
 #if CONFIG_CAM_DEEPSLEEP_ENABLE
@@ -832,7 +832,7 @@ void app_main(void)
                 /* 못 찾음 — 백오프 간격만큼 짧게 자고 처음부터(광고) 재시도 */
                 sleep_sec = next_unpaired_retry_sleep_sec();
                 s_unpaired_backoff_elapsed_sec += sleep_sec;
-                ESP_LOGW(TAG, "폴백 스윕 완료 — CNTL 못 찾음, %us 후 재시도", (unsigned)sleep_sec);
+                ESP_LOGW(TAG, "Fallback sweep done - CNTL not found, retry in %us", (unsigned)sleep_sec);
                 break;
             }
         }
@@ -850,7 +850,7 @@ void app_main(void)
         while (!s_sleep_now_requested) {
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
             if (now_ms - cask_start_ms >= CASK_TIMEOUT_MS) {
-                ESP_LOGW(TAG, "CASK 미완주(%ums 경과, SLEEP_NOW 못 받음) — WAKE_HELLO부터 재시도",
+                ESP_LOGW(TAG, "CASK incomplete (%ums, no SLEEP_NOW) - retrying from WAKE_HELLO",
                          (unsigned)CASK_TIMEOUT_MS);
                 cask_timed_out = true;
                 break;
@@ -914,7 +914,7 @@ void app_main(void)
         paired_now = esp_now_cam_reconnect();
     }
 
-    ESP_LOGI(TAG, "딥슬립 진입: %us 후 웨이크", (unsigned)sleep_sec);
+    ESP_LOGI(TAG, "Deep sleep: wake in %us", (unsigned)sleep_sec);
     /* 2026-08-26 — 명령값(sleep_sec)이 아니라 실제 잠든 시각을 남김(위 capture_wake_reason()의
      * 실측 계산이 다음 부팅 때 이 값과 비교함) */
     time(&s_sleep_entry_unix_time);
@@ -937,10 +937,10 @@ void app_main(void)
      * 그냥 리턴하는 건 아닌지도 의심스러워서" — esp_deep_sleep_start()는 noreturn이라 내부에
      * 로그를 넣을 순 없으니, 호출 바로 직전에 명확한 마커를 찍어 여기까지 실제로 도달하는지
      * (그리고 그 이후 시리얼이 뚝 끊기는지 = 진짜 딥슬립 진입했는지) 눈으로 바로 확인 가능하게 함 */
-    ESP_LOGI(TAG, "esp_deep_sleep_start() 호출 직전 (sleep_sec=%u) — 이 줄 이후 시리얼 끊기면 정상 진입",
+    ESP_LOGD(TAG, "Just before esp_deep_sleep_start() (sleep_sec=%u) - serial drop after this line is normal",
              (unsigned)sleep_sec);
     esp_deep_sleep_start();  /* RWDT는 이미 무장돼있음, 안 건드림 */
-    ESP_LOGE(TAG, "esp_deep_sleep_start()가 리턴함(있어선 안 되는 상황) — sleep_sec=%u", (unsigned)sleep_sec);
+    ESP_LOGE(TAG, "esp_deep_sleep_start() returned (must not happen) - sleep_sec=%u", (unsigned)sleep_sec);
 #else
     dev_console_start();  /* 딥슬립 완전 비활성 — 상시 동작(벤치/콘솔 개발용, Kconfig 이스케이프 해치) */
 #endif

@@ -12,6 +12,7 @@
 #include "sens_kind_store.h"
 #include "photo_rx.h"
 #include "ui_log.h"
+#include "dev_log.h"
 #include "rtc_sync.h"
 #include "esp_heap_caps.h"
 #include "esp_jpeg_dec.h"
@@ -31,7 +32,7 @@
 #include <string.h>
 #include <time.h>
 
-static const char *TAG = "ui_main";
+static const char *TAG = "UI";
 
 /* 벤더 lv_demo_widgets 내부 함수/전역 — 로고 타이틀 스타일(style_text_muted)은 계속 씀.
  * 통계 탭의 Analytics 위젯은 로그박스로 교체함(2026-08-01, 사용자 지시). 공개
@@ -421,23 +422,31 @@ static lv_obj_t *s_log_label     = NULL;
 static lv_obj_t *s_log_panel_title = NULL;  /* 2026-08-11 — 스크롤 안 되는 고정 제목 행, 페이지
                                                 스크롤을 잡기 위한 영역. refresh_lang_texts에서 갱신 */
 
-/* 통계 탭 좌측 절전상태 판넬 — CAM의 Deep Sleep 사이클 통계(2026-08-10 Light Sleep 폐기 후
- * 개편, 2026-08-25부터 ESP_NOW_MSG_WAKE_HELLO에 실려 옴)를 로그처럼 한 줄씩 누적(사용자 지시: 최신값으로
- * 덮어쓰는 대신 매번 새 줄로, 2026-08-09) — s_log_container/s_log_label과 같은 구조.
- * s_power_panel_title은 refresh_lang_texts에서 갱신 */
-static lv_obj_t *s_power_panel_title = NULL;
-static lv_obj_t *s_power_list        = NULL;  /* 스크롤 컨테이너(s_log_container 대응) */
-static lv_obj_t *s_power_log_label   = NULL;  /* 누적 텍스트(s_log_label 대응) */
-static lv_obj_t   *s_power_log_pause_btn = NULL;
-static lv_obj_t   *s_power_log_pause_lbl = NULL;
-static lv_timer_t *s_power_panel_timer   = NULL;  /* 일시멈춤 단추가 pause/resume(2026-08-10) */
+/* 2026-09-27(사용자 설계 — 로그 정리) — 개발 로그 판넬(예전 전력 로그 자리). dev_log 모듈이 가로챈 ESP_LOG 줄을
+ * 보여줌. 위쪽 조절 줄: 저장 문턱 드롭다운 + 보기 레벨 체크박스(E/W/I/D) + 태그 필터 드롭다운 — 콘 안의 값이라
+ * 적용 버튼 없이 바꾸는 즉시 반영(전체화면 팝업 규칙). 줄은 폭에 맞춰 "..."로 자르고, 탭하면 원문을 토스트로 */
+static lv_obj_t *s_dev_panel_title   = NULL;
+static lv_obj_t *s_dev_list          = NULL;  /* 스크롤 컨테이너(s_log_container 대응) */
+static lv_obj_t *s_dev_log_label     = NULL;
+static lv_obj_t   *s_dev_log_pause_btn = NULL;
+static lv_obj_t   *s_dev_log_pause_lbl = NULL;
+static lv_obj_t   *s_dev_save_dd       = NULL;
+static lv_obj_t   *s_dev_tag_dd        = NULL;
+static lv_obj_t   *s_dev_lvl_cb[DEV_LOG_LVL_D + 1];  /* 레벨 번호로 인덱스(1~4) */
+static lv_timer_t *s_dev_panel_timer   = NULL;
+static uint32_t    s_dev_log_last_seq  = UINT32_MAX;
+#define LOG_VIEW_CAP 6144
+static char *s_dev_log_full = NULL;   /* 원문(탭 토스트용) — 화면 줄과 1:1 */
+static char *s_dev_log_disp = NULL;   /* 폭에 맞춰 자른 것(화면) */
+static char *s_log_full = NULL;       /* 일반 로그 원문 — 같은 구조 */
+static char *s_log_disp = NULL;
 
 /* 2026-09-08(재설계 — 단일화면+전체화면 팝업) — 로그는 설정 팝업 안에 중첩됨(별도 팝업
  * 아님). s_log_tab_built는 지금 설정 팝업의 콘텐츠 영역(s_option_content)에 로그 내용이
  * 지어져 있는지 플래그(= s_option_showing_log와 사실상 동기화됨) */
 static bool        s_log_tab_built = false;
 static lv_timer_t *s_log_box_timer   = NULL;  /* refresh_log_box, 예전엔 핸들 없이 생성만 하고 버림 */
-static bool        s_power_log_paused    = false;
+static bool        s_dev_log_paused      = false;
 
 /* 통계탭(2026-09-06, 사용자 설계) — 실제 시계열 통계 판넬. 그래프는 다음 단계, 이번엔
  * 항목별 최대/최소(peak_label)와 페이지네이션된 값 테이블(stats_table)만 구현.
@@ -560,7 +569,7 @@ static void cb_stats_draw_refr_ready(lv_event_t *e)
     if (!s_stats_draw_pending) return;
     s_stats_draw_pending = false;
     int64_t now_us = esp_timer_get_time();
-    ESP_LOGI(TAG, "STATSGRAPH 그리기완료 실측: %lldus", (long long)(now_us - s_stats_draw_request_us));
+    ESP_LOGD(TAG, "STATSGRAPH draw done: %lldus", (long long)(now_us - s_stats_draw_request_us));
 }
 /* 2026-09-11(사용자 지시 — "기기 반응이 느린 편... 스와이프 인식됨을 알려야") — 제스처
  * 인식 즉시(느릴 수 있는 실제 갱신 전에) 잠깐 보여주는 방향 힌트 */
@@ -682,18 +691,6 @@ static float      s_value_roller_max        = 0.0f;
 static float      s_value_roller_step       = 1.0f;
 static int        s_value_roller_decimals   = 0;
 
-/* ds_cycle_count 하나만 비교하면 됨(2026-08-10) — 매 리포트가 항상 새 사이클이라 Light
- * Sleep 시절처럼 여러 필드를 같이 diff할 필요가 없어짐(단조증가 카운터) */
-typedef struct {
-    uint8_t  mac[6];
-    bool     used;
-    uint32_t last_cycle_count;
-} power_log_track_t;
-static power_log_track_t s_power_log_track[NODE_HUB_MAX_NODES];
-/* 2026-08-21 — 내부(비-PSRAM) DRAM이 httpd_start 실패(5005)를 겪을 만큼 빠듯했던 걸 실기로
- * 확인 — 텍스트 로그 버퍼라 PSRAM으로 옮김(ui_init()에서 할당, 다른 고정버퍼들과 동일 원칙) */
-#define POWER_LOG_BUF_CAP 2048
-static char *s_power_log_buf = NULL;
 
 /* 설정탭 카메라 리스트/상황판 1초 갱신 타이머 — 팝업/뷰어가 떠 있는 동안은 일시정지
  * (모달 위에서 터치하는 도중에 뒤에서 리스트를 지우고 다시 그리면 터치 처리와 간섭해서
@@ -929,7 +926,7 @@ static void refresh_lang_texts(void)
     }
 
     if (s_log_tab_built) {
-        lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
+        lv_label_set_text(s_dev_panel_title, ui_str(STR_PANEL_DEV_LOG));
         lv_label_set_text(s_log_panel_title, ui_str(STR_PANEL_GENERAL_LOG));
     }
 
@@ -1436,7 +1433,7 @@ static void show_storage_cleanup_popup(const char *category_name, uint32_t delet
 static void mark_sd_io_fail(const char *context)
 {
     if (!s_sd_io_fail_active) {
-        ESP_LOGE(TAG, "SD I/O 오류 감지(%s) — 복구(재연결/포맷) 전까지 SD 조회 회로차단기 작동", context);
+        ESP_LOGE(TAG, "SD I/O error (%s) - SD access circuit breaker on until recovery (reconnect/format)", context);
         ui_log_add_err(UI_ERR_SD_IO_FAIL, "SD I/O failure (%s)", context);
     }
     s_sd_io_fail_active = true;
@@ -1531,7 +1528,7 @@ static void refresh_storage_status_label(void)
     {
         uint64_t recs = measure_used / sizeof(stats_record_t);
         double hours = (double)recs / 4.0 * 30.0 / 3600.0;
-        ESP_LOGW(TAG, "MEMDIAG stats_store: used=%llu bytes records=%llu (~%.2fh, 30s/4ch 가정)",
+        ESP_LOGD(TAG, "MEMDIAG stats_store: used=%llu bytes records=%llu (~%.2fh, assuming 30s/4ch)",
                  (unsigned long long)measure_used, (unsigned long long)recs, hours);
     }
     uint64_t picture_used_clamped = (picture_used > picture_budget) ? picture_budget : picture_used;
@@ -2376,33 +2373,33 @@ static bool decode_jpeg_scaled(const uint8_t *jpeg_data, size_t jpeg_len,
 
     jpeg_dec_handle_t dec = NULL;
     if (jpeg_dec_open(&config, &dec) != JPEG_ERR_OK || !dec) {
-        ESP_LOGW(TAG, "jpeg_dec_open 실패");
+        ESP_LOGW(TAG, "jpeg_dec_open failed");
         return false;
     }
 
     jpeg_dec_io_t io = { .inbuf = (uint8_t *)jpeg_data, .inbuf_len = (int)jpeg_len };
     jpeg_dec_header_info_t info = { 0 };
     if (jpeg_dec_parse_header(dec, &io, &info) != JPEG_ERR_OK) {
-        ESP_LOGW(TAG, "jpeg_dec_parse_header 실패");
+        ESP_LOGW(TAG, "jpeg_dec_parse_header failed");
         jpeg_dec_close(dec);
         return false;
     }
 
     int outbuf_len = 0;
     if (jpeg_dec_get_outbuf_len(dec, &outbuf_len) != JPEG_ERR_OK || outbuf_len <= 0) {
-        ESP_LOGW(TAG, "jpeg_dec_get_outbuf_len 실패");
+        ESP_LOGW(TAG, "jpeg_dec_get_outbuf_len failed");
         jpeg_dec_close(dec);
         return false;
     }
     if ((size_t)outbuf_len > out_cap) {
-        ESP_LOGE(TAG, "디코드 결과가 고정 버퍼보다 큼(%d > %u bytes)", outbuf_len, (unsigned)out_cap);
+        ESP_LOGE(TAG, "Decoded size exceeds fixed buffer (%d > %u bytes)", outbuf_len, (unsigned)out_cap);
         jpeg_dec_close(dec);
         return false;
     }
     io.outbuf = out_buf;
 
     if (jpeg_dec_process(dec, &io) != JPEG_ERR_OK) {
-        ESP_LOGW(TAG, "jpeg_dec_process 실패");
+        ESP_LOGW(TAG, "jpeg_dec_process failed");
         jpeg_dec_close(dec);
         return false;
     }
@@ -2440,30 +2437,30 @@ static void fill_rgb565_dsc(lv_image_dsc_t *dsc, uint8_t *pixel_buf, uint16_t w,
 static void display_photo(uint8_t kind, uint32_t seq)
 {
     if (!s_photo_jpeg_buf || !s_photo_raw_buf) {
-        ESP_LOGE(TAG, "display_photo: 버퍼 없음(초기 할당 실패?)");
+        ESP_LOGE(TAG, "display_photo: no buffer (initial alloc failed?)");
         return;
     }
     if (!s_has_selected_cam) return;
 
     size_t jpeg_len = 0;
     if (!photo_storage_read_file(s_selected_cam_mac, kind, seq, s_photo_raw_buf, PHOTO_RAW_BUF_CAP, &jpeg_len)) {
-        ESP_LOGW(TAG, "display_photo: SD 읽기 실패(kind=%c seq=%u)", (char)kind, (unsigned)seq);
-        ui_log_add("DISPLAY read MISS kind=%c seq=%u", (char)kind, (unsigned)seq);
+        ESP_LOGW(TAG, "display_photo: SD read failed (kind=%c seq=%u)", (char)kind, (unsigned)seq);
+        ESP_LOGD(TAG, "DISPLAY read MISS kind=%c seq=%u", (char)kind, (unsigned)seq);
         s_photo_raw_len = 0;
         return;
     }
     s_photo_raw_len = jpeg_len;
-    ui_log_add("DISPLAY kind=%c seq=%u jpeg_len=%u", (char)kind, (unsigned)seq, (unsigned)jpeg_len);
+    ESP_LOGD(TAG, "DISPLAY kind=%c seq=%u jpeg_len=%u", (char)kind, (unsigned)seq, (unsigned)jpeg_len);
 
     uint16_t w = 0, h = 0;
     size_t pixel_len = 0;
     if (!decode_jpeg_scaled(s_photo_raw_buf, jpeg_len, PHOTO_PANEL_DECODE_W, PHOTO_PANEL_DECODE_H,
                              s_photo_jpeg_buf, PHOTO_PANEL_BUF_CAP, &w, &h, &pixel_len)) {
-        ESP_LOGE(TAG, "display_photo: decode_jpeg_scaled 실패(kind=%c seq=%u)", (char)kind, (unsigned)seq);
+        ESP_LOGE(TAG, "display_photo: decode_jpeg_scaled failed (kind=%c seq=%u)", (char)kind, (unsigned)seq);
         ui_log_add_err(UI_ERR_DECODE_FAIL, "Photo display failed (decode) kind=%c seq=%u", (char)kind, (unsigned)seq);
         return;
     }
-    ui_log_add("DISPLAY decode OK kind=%c seq=%u w=%u h=%u", (char)kind, (unsigned)seq, w, h);
+    ESP_LOGD(TAG, "DISPLAY decode OK kind=%c seq=%u w=%u h=%u", (char)kind, (unsigned)seq, w, h);
 
     fill_rgb565_dsc(&s_photo_dsc, s_photo_jpeg_buf, w, h, pixel_len);
     /* 버퍼 내용은 바뀌었지만 &s_photo_dsc 주소는 고정이라, LVGL의 이미지 캐시가 그 주소를
@@ -3857,7 +3854,7 @@ static bool refresh_stats_graph(void)
         if (got[s] == 0 && stats_store_had_io_error()) return false;  /* SD 자체 문제 — 즉시 중단 */
     }
     int64_t t_sdread_end_us = esp_timer_get_time();
-    ESP_LOGI(TAG, "STATSGRAPH SD읽기 실측(계열%d개, 스케일idx=%u): %lldus", s_stats_slot_count,
+    ESP_LOGD(TAG, "STATSGRAPH SD read (%d series, scaleidx=%u): %lldus", s_stats_slot_count,
              (unsigned)idx, (long long)(t_sdread_end_us - t_sdread_start_us));
 
     lv_chart_set_point_count(s_stats_chart, STATS_GRAPH_POINT_COUNT);
@@ -3960,7 +3957,7 @@ static bool refresh_stats_graph(void)
             gap_vals[i]  = on_dashed ? slot_norm[i] : LV_CHART_POINT_NONE;
         }
         int64_t t_regr_end_us = esp_timer_get_time();
-        ESP_LOGI(TAG, "STATSGRAPH 회귀 실측(계열%d, %d슬롯): %lldus", s, STATS_GRAPH_POINT_COUNT,
+        ESP_LOGD(TAG, "STATSGRAPH regression (%d series, %d slots): %lldus", s, STATS_GRAPH_POINT_COUNT,
                  (long long)(t_regr_end_us - t_regr_start_us));
 
         lv_chart_set_series_values(s_stats_chart, s_stats_chart_series[s], norm_vals, STATS_GRAPH_POINT_COUNT);
@@ -4004,7 +4001,7 @@ static bool refresh_stats_graph(void)
     s_stats_draw_pending = true;
 
     int64_t t_end_us = esp_timer_get_time();
-    ESP_LOGW(TAG, "MEMDIAG 그래프 윈도 1회 갱신(읽기~차트데이터세팅) 소요시간: %lld us (스케일idx=%u)",
+    ESP_LOGD(TAG, "MEMDIAG graph window refresh (read..chart data): %lld us (scaleidx=%u)",
              (long long)(t_end_us - t_start_us), (unsigned)idx);
     return true;
 }
@@ -4186,12 +4183,12 @@ static void refresh_stats_page(lv_timer_t *t)
     uint32_t t3 = lv_tick_get();
     if (!ok) report_sd_io_fail("stats tab query");
     if ((t3 - t0) > 50) {  /* 50ms 이상 걸린 사이클만 로그(매번 찍으면 스팸) */
-        ESP_LOGW(TAG, "MEMDIAG refresh_stats_page timing: overview=%ums graph=%ums total=%ums",
+        ESP_LOGD(TAG, "MEMDIAG refresh_stats_page timing: overview=%ums graph=%ums total=%ums",
                  (unsigned)(t1 - t0), (unsigned)(t3 - t1), (unsigned)(t3 - t0));
     }
     size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     if (before != after) {
-        ESP_LOGW(TAG, "MEMDIAG refresh_stats_page: internal %u -> %u (delta=%d)",
+        ESP_LOGD(TAG, "MEMDIAG refresh_stats_page: internal %u -> %u (delta=%d)",
                  (unsigned)before, (unsigned)after, (int)before - (int)after);
     }
 }
@@ -4487,7 +4484,7 @@ static void refresh_dashboard(lv_timer_t *t)
     static int s_mem_log_tick = 0;
     if (++s_mem_log_tick >= 10) {
         s_mem_log_tick = 0;
-        ESP_LOGW(TAG, "MEMDIAG periodic internal free=%u", (unsigned)free_internal_now);
+        ESP_LOGD(TAG, "MEMDIAG periodic internal free=%u", (unsigned)free_internal_now);
     }
 
     if (!s_dash_nodes || !s_dash_nodes_prev) return;  /* PSRAM 할당 실패 시(극히 드묾) */
@@ -4729,7 +4726,7 @@ static void refresh_dashboard(lv_timer_t *t)
         size_t heap_before_scan = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         known_cam_count_raw = (int)photo_storage_list_camera_macs(known_cam_macs, NODE_HUB_MAX_NODES);
         size_t heap_after_scan = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-        ESP_LOGW(TAG, "MEMDIAG 카메라팝업 열려있음(틱): internal %u -> %u (변화 %d bytes)",
+        ESP_LOGD(TAG, "MEMDIAG camera popup open (tick): internal %u -> %u (change %d bytes)",
                  (unsigned)heap_before_scan, (unsigned)heap_after_scan,
                  (int)heap_after_scan - (int)heap_before_scan);
     }
@@ -4987,149 +4984,137 @@ static void trim_multiline_to_width(const char *src, char *dst, size_t dst_cap,
 static void refresh_log_box(lv_timer_t *t)
 {
     (void)t;
-    /* 2026-08-21 — 내부(비-PSRAM) DRAM이 httpd_start 실패(5005)를 겪을 만큼 빠듯했던 걸
-     * 실기로 확인(free internal=1111~1419B) — 텍스트 표시용이라 빠른 접근이 필수가 아닌
-     * 이 버퍼를 PSRAM으로 옮김(폰트버퍼 font_buf_malloc과 동일 원칙). 부팅 시 한 번만
-     * 할당하고 계속 재사용(다른 고정버퍼들과 동일 원칙) */
-    static char *snapshot = NULL;
-    static char *trimmed = NULL;
+    /* 2026-08-21 — 버퍼는 PSRAM(내부 DRAM이 빠듯함). 2026-09-27 — 원문(s_log_full)과 자른 것(s_log_disp)을 파일
+     * 범위로 둠: 줄을 탭하면 원문을 토스트로(cb_log_label_tap) */
     static size_t last_len = 0;
-    if (!snapshot) {
-        snapshot = heap_caps_malloc(LOG_BOX_SNAPSHOT_CAP, MALLOC_CAP_SPIRAM);
-        trimmed  = heap_caps_malloc(LOG_BOX_SNAPSHOT_CAP, MALLOC_CAP_SPIRAM);
-        if (!snapshot || !trimmed) return;
+    if (!s_log_full) {
+        s_log_full = heap_caps_malloc(LOG_VIEW_CAP, MALLOC_CAP_SPIRAM);
+        s_log_disp = heap_caps_malloc(LOG_VIEW_CAP, MALLOC_CAP_SPIRAM);
+        if (!s_log_full || !s_log_disp) return;
     }
 
-    ui_log_get_snapshot(snapshot, LOG_BOX_SNAPSHOT_CAP);
-    size_t len = strlen(snapshot);
+    ui_log_get_snapshot(s_log_full, LOG_BOX_SNAPSHOT_CAP);
+    size_t len = strlen(s_log_full);
     if (len == last_len) return;
     last_len = len;
 
     int32_t max_w = lv_obj_get_content_width(s_log_container);
-    trim_multiline_to_width(snapshot, trimmed, LOG_BOX_SNAPSHOT_CAP, &lv_font_montserrat_18, max_w);
+    trim_multiline_to_width(s_log_full, s_log_disp, LOG_VIEW_CAP, &lv_font_montserrat_18, max_w);
 
-    lv_label_set_text(s_log_label, trimmed);
+    lv_label_set_text(s_log_label, s_log_disp);
     lv_obj_scroll_to_y(s_log_container, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
-/* 2026-08-10, 사용자 지시 — 값을 읽는 동안 로그가 계속 밀리면 불편하니 일시멈춤 단추 추가.
- * 타이머 자체를 pause/resume(lv_timer_pause/resume) — 멈춰있는 동안은 새 줄이 아예 안 쌓임 */
-static void cb_power_log_pause_toggle(lv_event_t *e)
+/* 2026-09-27(사용자 설계) — 로그 줄 탭 → 원문 토스트. 탭한 좌표가 라벨의 몇 번째 글자인지(lv_label_get_letter_on)로
+ * 화면 줄 번호를 구하고, 같은 번호의 원문 줄을 띄움(자른 것과 원문은 줄 수가 같음 — trim_multiline_to_width) */
+static void show_log_line_toast(lv_obj_t *label, const char *full)
+{
+    lv_indev_t *indev = lv_indev_active();
+    if (!indev || !label || !full) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    lv_area_t a;
+    lv_obj_get_coords(label, &a);
+    lv_point_t rel = { p.x - a.x1, p.y - a.y1 };
+    uint32_t ch = lv_label_get_letter_on(label, &rel, false);
+    const char *txt = lv_label_get_text(label);
+    uint32_t line = 0;
+    for (uint32_t i = 0; txt[i] && i < ch; i++) if (txt[i] == '\n') line++;
+    const char *q = full;
+    for (uint32_t i = 0; i < line && q; i++) {
+        q = strchr(q, '\n');
+        if (q) q++;
+    }
+    if (!q || !*q) return;
+    const char *end = strchr(q, '\n');
+    size_t n = end ? (size_t)(end - q) : strlen(q);
+    char buf[192];
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    memcpy(buf, q, n);
+    buf[n] = '\0';
+    show_toast(buf, lv_palette_darken(LV_PALETTE_GREY, 3));
+}
+
+static void cb_log_label_tap(lv_event_t *e)
 {
     (void)e;
-    s_power_log_paused = !s_power_log_paused;
-    if (s_power_log_paused) {
-        if (s_power_panel_timer) lv_timer_pause(s_power_panel_timer);
-        lv_label_set_text(s_power_log_pause_lbl, ui_str(STR_BTN_RESUME));
+    show_log_line_toast(s_log_label, s_log_full);
+}
+
+static void cb_dev_log_label_tap(lv_event_t *e)
+{
+    (void)e;
+    show_log_line_toast(s_dev_log_label, s_dev_log_full);
+}
+
+/* 2026-08-10, 사용자 지시 — 값을 읽는 동안 로그가 계속 밀리면 불편하니 일시멈춤 단추(개발 로그 판넬로 이어받음).
+ * 타이머 자체를 pause/resume — 멈춰있는 동안 화면만 멈추고, 줄은 dev_log에 계속 쌓임 */
+static void cb_dev_log_pause_toggle(lv_event_t *e)
+{
+    (void)e;
+    s_dev_log_paused = !s_dev_log_paused;
+    if (s_dev_log_paused) {
+        if (s_dev_panel_timer) lv_timer_pause(s_dev_panel_timer);
+        lv_label_set_text(s_dev_log_pause_lbl, ui_str(STR_BTN_RESUME));
     } else {
-        if (s_power_panel_timer) lv_timer_resume(s_power_panel_timer);
-        lv_label_set_text(s_power_log_pause_lbl, ui_str(STR_BTN_PAUSE));
+        s_dev_log_last_seq = UINT32_MAX;  /* 재개하면 바로 다시 그림 */
+        if (s_dev_panel_timer) lv_timer_resume(s_dev_panel_timer);
+        lv_label_set_text(s_dev_log_pause_lbl, ui_str(STR_BTN_PAUSE));
     }
 }
 
-/* 통계 탭 좌측 절전상태 판넬 갱신(2026-08-09) — 최신값으로 덮어쓰지 않고 로그처럼 한 줄씩
- * 누적(사용자 지시). 값이 실제로 바뀐 경우에만 새 줄 추가(2초 tick마다 찍으면 스팸이라
- * mac별 마지막 값을 기억해서 diff) — 로그박스(s_log_container/refresh_log_box)와 동일한
- * "누적 버퍼 + wrap 라벨 + 자동 스크롤" 구조 */
-static void refresh_power_panel(lv_timer_t *t)
+/* 2026-09-27 — 개발 로그 판넬 갱신: dev_log에 새 줄이 있거나 보기 설정이 바뀌었을 때만 다시 거름 */
+static void refresh_dev_panel(lv_timer_t *t)
 {
     (void)t;
-    if (!s_power_log_buf) return;  /* PSRAM 할당 실패 시(극히 드묾) */
-    node_hub_node_t nodes[NODE_HUB_MAX_NODES];
-    int count = node_hub_get_nodes(HUB_NODE_KIND_CAM, nodes, NODE_HUB_MAX_NODES);
-
-    bool appended = false;
-    for (int i = 0; i < count; i++) {
-        if (!nodes[i].has_deepsleep_stats) continue;
-
-        power_log_track_t *tr = NULL;
-        for (int j = 0; j < NODE_HUB_MAX_NODES; j++) {
-            if (s_power_log_track[j].used && memcmp(s_power_log_track[j].mac, nodes[i].mac, 6) == 0) {
-                tr = &s_power_log_track[j];
-                break;
-            }
-        }
-        if (!tr) {
-            for (int j = 0; j < NODE_HUB_MAX_NODES; j++) {
-                if (!s_power_log_track[j].used) {
-                    tr = &s_power_log_track[j];
-                    tr->used = true;
-                    memcpy(tr->mac, nodes[i].mac, 6);
-                    tr->last_cycle_count = UINT32_MAX;  /* 이 장치의 첫 값은 무조건 한 줄 찍히게 */
-                    break;
-                }
-            }
-        }
-        if (!tr) continue;  /* 자리 없음 — MAX_NODES 이상은 원래 못 옴 */
-
-        /* 2026-08-25(CASK 재설계) — 예전엔 여기서 SLEEP_NOW 발신 시점을 별도 줄로 찍었는데
-         * (sleep_now_send_count 기반), CNTL이 능동적으로 "언제 보낼지" 미리 판단해서 먼저
-         * 쏘던 구조 자체가 없어짐 — SLEEP_NOW는 이제 매 WAKE_HELLO의 CASK 마지막 단계로
-         * 결정적으로(항상) 나가므로, "보냈다"는 사실 자체가 더 이상 별도로 기록할 만한
-         * 이벤트가 아님(항상 일어나는 일이라서) */
-
-        /* ds_cycle_count는 Cntl이 리포트를 받을 때마다 직접 증가시키는 단조증가 카운터라
-         * (node_hub.c) 이것 하나만 비교하면 "새 보고서가 왔는가"를 정확히 알 수 있음
-         * (2026-08-10, Light Sleep 시절엔 count=0이 계속 이어지는 상태를 여러 필드로 힘겹게
-         * 구분해야 했음 — 매 사이클이 곧 새 리포트인 이 구조에선 그 문제 자체가 없어짐) */
-        if (tr->last_cycle_count == nodes[i].ds_cycle_count) continue;
-        tr->last_cycle_count = nodes[i].ds_cycle_count;
-
-        const char *wake_str;
-        switch (nodes[i].ds_last_wake_reason) {
-            case CAM_WAKE_REASON_TIMER:   wake_str = ui_str(STR_WAKE_REASON_TIMER); break;
-            case CAM_WAKE_REASON_RWDT:    wake_str = ui_str(STR_WAKE_REASON_RWDT); break;
-            case CAM_WAKE_REASON_POWERON: wake_str = ui_str(STR_WAKE_REASON_POWERON); break;
-            default:                      wake_str = ui_str(STR_WAKE_REASON_OTHER); break;
-        }
-        /* 2026-08-10 — 이 줄이 실제로 몇 시(mm:ss, Cntl 부팅 후 경과) 찍혔는지 붙여서, 줄 사이
-         * 실제 간격을 육안으로 바로 잴 수 있게 함(사용자 지시 — "20초마다 뜬다" 같은 관찰을
-         * 스톱워치 없이 확인하기 위함). 2026-08-11 — 줄 끝(-mm:ss)에서 줄 맨 앞([mm:ss] )으로
-         * 이동(사용자 지시) */
-        char line[176];  /* 2026-08-22 — 배터리 진단정보 추가로 여유 늘림(원래 144) */
-        int prefix_len = 0;
-        ui_log_format_timestamp(line, sizeof(line));
-        prefix_len = (int)strlen(line);
-        lv_snprintf(line + prefix_len, sizeof(line) - prefix_len, ui_str(STR_DEEPSLEEP_LINE_FMT), nodes[i].name,
-                    (unsigned long)nodes[i].ds_cycle_count, wake_str,
-                    (unsigned long)nodes[i].ds_last_awake_uptime_ms,
-                    (unsigned long)nodes[i].ds_last_sleep_interval_sec,
-                    (unsigned long)nodes[i].ds_last_actual_sleep_sec,
-                    (unsigned long)nodes[i].ds_rwdt_catch_count,
-                    (unsigned)nodes[i].battery_mv, (unsigned)nodes[i].battery_pct,
-                    (unsigned)nodes[i].battery_adc_raw);
-
-        size_t cur_len  = strlen(s_power_log_buf);
-        size_t line_len = strlen(line);
-        if (cur_len + line_len + 2 > POWER_LOG_BUF_CAP) {
-            size_t keep_from = POWER_LOG_BUF_CAP / 2;
-            memmove(s_power_log_buf, s_power_log_buf + keep_from, cur_len - keep_from + 1);
-            cur_len = strlen(s_power_log_buf);
-        }
-        strcat(s_power_log_buf, line);
-        strcat(s_power_log_buf, "\n");
-        appended = true;
+    if (!s_dev_log_label) return;
+    uint32_t seq = dev_log_seq();
+    if (seq == s_dev_log_last_seq) return;
+    s_dev_log_last_seq = seq;
+    if (!s_dev_log_full) {
+        s_dev_log_full = heap_caps_malloc(LOG_VIEW_CAP, MALLOC_CAP_SPIRAM);
+        s_dev_log_disp = heap_caps_malloc(LOG_VIEW_CAP, MALLOC_CAP_SPIRAM);
+        if (!s_dev_log_full || !s_dev_log_disp) return;
     }
+    dev_log_render(s_dev_log_full, LOG_VIEW_CAP);
+    int32_t max_w = lv_obj_get_content_width(s_dev_list);
+    trim_multiline_to_width(s_dev_log_full, s_dev_log_disp, LOG_VIEW_CAP, &lv_font_montserrat_18, max_w);
+    lv_label_set_text(s_dev_log_label, s_dev_log_disp);
+    lv_obj_scroll_to_y(s_dev_list, LV_COORD_MAX, LV_ANIM_OFF);
+}
 
-    if (appended) {
-        static char *trimmed = NULL;
-        if (!trimmed) trimmed = heap_caps_malloc(POWER_LOG_BUF_CAP, MALLOC_CAP_SPIRAM);
-        if (trimmed) {
-            int32_t max_w = lv_obj_get_content_width(s_power_list);
-            trim_multiline_to_width(s_power_log_buf, trimmed, POWER_LOG_BUF_CAP, &lv_font_montserrat_18, max_w);
-            lv_label_set_text(s_power_log_label, trimmed);
-        } else {
-            lv_label_set_text(s_power_log_label, s_power_log_buf);
-        }
-        lv_obj_scroll_to_y(s_power_list, LV_COORD_MAX, LV_ANIM_OFF);
-    } else if (count == 0 && s_power_log_buf[0] == '\0') {
-        /* 2026-09-07 버그수정(사용자 지적) — 이 라벨(s_power_log_label)은 성능 때문에
-         * 나눔고딕 TTF가 아니라 lv_font_montserrat_18(한글 글리프 없음)을 씀 — 로그 자체가
-         * 원래 항상 영문(feedback_cntl_stats_tab_log_perf 참고)인데 여기만 ui_str()로
-         * 한국어 문구를 시도해서 한글모드에서 네모박스로 깨졌었음. 이 판넬 한정으로는
-         * 언어 무관 항상 영문 고정이 맞음 */
-        lv_label_set_text(s_power_log_label, "No camera device");
+/* 저장 문턱보다 낮은 레벨(쌓이지 않음)의 보기 체크박스는 비활성 */
+static void update_dev_lvl_cb_enabled(void)
+{
+    uint8_t save = dev_log_get_save_level();
+    for (int l = DEV_LOG_LVL_E; l <= DEV_LOG_LVL_D; l++) {
+        if (!s_dev_lvl_cb[l]) continue;
+        if (l <= save) lv_obj_remove_state(s_dev_lvl_cb[l], LV_STATE_DISABLED);
+        else lv_obj_add_state(s_dev_lvl_cb[l], LV_STATE_DISABLED);
     }
+}
+
+static void cb_dev_save_changed(lv_event_t *e)
+{
+    (void)e;
+    dev_log_set_save_level((uint8_t)(lv_dropdown_get_selected(s_dev_save_dd) + DEV_LOG_LVL_E));
+    update_dev_lvl_cb_enabled();
+}
+
+static void cb_dev_lvl_cb_changed(lv_event_t *e)
+{
+    (void)e;
+    uint8_t mask = 0;
+    for (int l = DEV_LOG_LVL_E; l <= DEV_LOG_LVL_D; l++) {
+        if (s_dev_lvl_cb[l] && lv_obj_has_state(s_dev_lvl_cb[l], LV_STATE_CHECKED)) mask |= DEV_LOG_MASK(l);
+    }
+    dev_log_set_view_mask(mask);
+}
+
+static void cb_dev_tag_changed(lv_event_t *e)
+{
+    (void)e;
+    dev_log_set_tag_filter((uint8_t)lv_dropdown_get_selected(s_dev_tag_dd));
 }
 
 /* 그룹박스 하나 생성 — 제목 라벨을 넣고 box 자체를 반환. 내용물은 호출부가 box의 직접
@@ -5449,7 +5434,7 @@ static void cb_network_mode_changed(lv_event_t *e)
     uint16_t sel = lv_dropdown_get_selected(dd);
     bool new_ap_mode = (sel == 0);  /* 0=독립(AP), 1=종속(STA) — 드롭다운 옵션 순서와 일치 */
     bool cur_ap_mode = device_config_get_wifi_ap_mode();
-    ui_log_add("net_mode_dd changed: sel=%u new_ap=%d cur_ap=%d", (unsigned)sel, (int)new_ap_mode, (int)cur_ap_mode);
+    ESP_LOGD(TAG, "net_mode_dd changed: sel=%u new_ap=%d cur_ap=%d", (unsigned)sel, (int)new_ap_mode, (int)cur_ap_mode);
     if (new_ap_mode == cur_ap_mode) return;  /* 실제로 바뀐 게 없으면 팝업 안 띄움 */
     show_network_mode_confirm_popup(new_ap_mode);
 }
@@ -5543,8 +5528,9 @@ static void wifi_test_result_async_cb(void *user_data)
     if (success) {
         /* TEMP TEST 2026-08-29 — 비번 저장 복원, 크래시 재현 시 정확히 뭘 저장하려던
          * 순간이었는지 캡처에 남기기 위한 직전 로그 */
-        ESP_LOGI(TAG, "비번 저장 시도: SSID=[%s] PW=[%s](len=%d)",
-                 s_wifi_selected_ssid, s_wifi_test_password, (int)strlen(s_wifi_test_password));
+        /* 2026-09-27(로그 정리) — 비밀번호 평문은 찍지 않음(길이만) */
+        ESP_LOGD(TAG, "WiFi password save attempt: SSID=[%s] PW len=%d",
+                 s_wifi_selected_ssid, (int)strlen(s_wifi_test_password));
         device_config_set_sta_credentials(s_wifi_selected_ssid, s_wifi_test_password);
         close_wifi_popups();
         refresh_network_right_zone();  /* 2026-08-29 버그수정(사용자 리포트: "연결됐는데 상단은
@@ -5597,8 +5583,9 @@ static void cb_wifi_connect_btn(lv_event_t *e)
     strncpy(s_wifi_test_password, lv_textarea_get_text(s_wifi_password_ta), sizeof(s_wifi_test_password) - 1);
     s_wifi_test_password[sizeof(s_wifi_test_password) - 1] = '\0';
     /* TEMP TEST 2026-08-29 — 키보드로 입력한 값이 실제로 그대로 캡처되는지 비교용. 원복할 것 */
-    ESP_LOGI(TAG, "WiFi 테스트 접속 캡처값: SSID=[%s] PW=[%s](len=%d)",
-             s_wifi_selected_ssid, s_wifi_test_password, (int)strlen(s_wifi_test_password));
+    /* 2026-09-27(로그 정리) — 비밀번호 평문은 찍지 않음(길이만) */
+    ESP_LOGD(TAG, "WiFi test connect values: SSID=[%s] PW len=%d",
+             s_wifi_selected_ssid, (int)strlen(s_wifi_test_password));
 
     /* 2026-08-29 버그수정(사용자 리포트: "이미 연결된 AP를 선택해도 재시작한다는데") —
      * 저장된 값과 완전히 동일한 SSID+비밀번호면 실제로 바뀐 게 없으니 접속 시도 없이
@@ -6337,32 +6324,25 @@ void ui_init(void)
 
     /* 판넬 JPEG 디코드 버퍼 — 부팅 시 한 번만 잡고 계속 재사용(위 s_photo_jpeg_buf
      * 선언부 주석 참고) */
-    ui_log_add("INIT free PSRAM(after font load)=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    ESP_LOGD(TAG, "INIT free PSRAM(after font load)=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     s_photo_jpeg_buf = jpeg_calloc_align(PHOTO_PANEL_BUF_CAP, 16);
     if (s_photo_jpeg_buf) {
-        ui_log_add("INIT panel_buf=OK free PSRAM=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        ESP_LOGD(TAG, "INIT panel_buf=OK free PSRAM=%u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     } else {
-        ESP_LOGE(TAG, "판넬 디코드 버퍼 할당 실패(%u bytes)", (unsigned)PHOTO_PANEL_BUF_CAP);
+        ESP_LOGE(TAG, "Panel decode buffer alloc failed (%u bytes)", (unsigned)PHOTO_PANEL_BUF_CAP);
         ui_log_add_err(UI_ERR_PANEL_BUF_ALLOC, "Panel buffer alloc failed - photo preview unavailable");
-    }
-
-    s_power_log_buf = heap_caps_malloc(POWER_LOG_BUF_CAP, MALLOC_CAP_SPIRAM);
-    if (s_power_log_buf) {
-        s_power_log_buf[0] = '\0';
-    } else {
-        ESP_LOGE(TAG, "전력로그 버퍼 할당 실패(%u bytes)", (unsigned)POWER_LOG_BUF_CAP);
     }
 
     s_current_list = heap_caps_malloc(sizeof(photo_storage_item_t) * PHOTO_LIST_PAGE_SIZE,
                                        MALLOC_CAP_SPIRAM);
     if (!s_current_list) {
-        ESP_LOGE(TAG, "사진목록 버퍼 할당 실패 — 목록 표시 불가");
+        ESP_LOGE(TAG, "Photo list buffer alloc failed - list unavailable");
     }
 
     s_photo_raw_buf = heap_caps_malloc(PHOTO_RAW_BUF_CAP, MALLOC_CAP_SPIRAM);
     if (!s_photo_raw_buf) {
-        ESP_LOGE(TAG, "원본 JPEG 버퍼 할당 실패(%u bytes)", (unsigned)PHOTO_RAW_BUF_CAP);
+        ESP_LOGE(TAG, "Original JPEG buffer alloc failed (%u bytes)", (unsigned)PHOTO_RAW_BUF_CAP);
     }
 
     s_dash_nodes      = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
@@ -6373,7 +6353,7 @@ void ui_init(void)
     s_sensor_nodes_prev = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
     if (!s_dash_nodes || !s_dash_nodes_prev || !s_camera_nodes || !s_camera_nodes_prev ||
         !s_sensor_nodes || !s_sensor_nodes_prev) {
-        ESP_LOGE(TAG, "노드 추적 버퍼 할당 실패 — 상황판/카메라/측정기 목록 표시 불가");
+        ESP_LOGE(TAG, "Node tracking buffer alloc failed - dashboard/camera/sensor lists unavailable");
     }
 
     /* 2026-09-08(사용자 재설계 — "UI를 완전히 바꾸려고 해... 단일 화면") — lv_tabview 자체를
@@ -6964,7 +6944,7 @@ static void teardown_stats_tab(void)
     s_stats_popup_title = NULL;
     s_stats_tab_built = false;
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 통계팝업 닫기: internal %u -> %u (회수 %d bytes)",
+    ESP_LOGD(TAG, "MEMDIAG stats popup close: internal %u -> %u (freed %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
     s_stats_overview_title = NULL;
@@ -7033,7 +7013,7 @@ static void teardown_record_tab(void)
     s_record_popup_title = NULL;
     s_record_tab_built = false;
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 기록팝업 닫기: internal %u -> %u (회수 %d bytes)",
+    ESP_LOGD(TAG, "MEMDIAG record popup close: internal %u -> %u (freed %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
     s_stats_delete_btn = NULL;
@@ -7656,7 +7636,7 @@ static void build_stats_tab(void)
     disable_scroll_recursive(stats_page);
 
     size_t heap_after_stats_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 통계탭 위젯 생성 비용: internal %u -> %u (소모 %d bytes)",
+    ESP_LOGD(TAG, "MEMDIAG stats tab widget cost: internal %u -> %u (used %d bytes)",
              (unsigned)heap_before_stats_tab, (unsigned)heap_after_stats_tab,
              (int)heap_before_stats_tab - (int)heap_after_stats_tab);
 }
@@ -7703,7 +7683,7 @@ static void build_camera_tab(void)
      * 함수가 아니라 다음 refresh_dashboard() 틱에서 일어나므로(아래 known_cam_macs 관련
      * 주석 참고), 여기서는 시작점만 찍고 실제 변화는 refresh_dashboard() 쪽 로그로 추적 */
     size_t heap_before_open = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 카메라팝업 열기: internal=%u (시작점)", (unsigned)heap_before_open);
+    ESP_LOGD(TAG, "MEMDIAG camera popup open: internal=%u (start)", (unsigned)heap_before_open);
 
     lv_obj_t *popup = create_page_popup();
     s_camera_popup = popup;
@@ -7752,7 +7732,7 @@ static void teardown_camera_tab(void)
     s_camera_popup_title = NULL;
 
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 카메라팝업 닫기: internal %u -> %u (회수 %d bytes)",
+    ESP_LOGD(TAG, "MEMDIAG camera popup close: internal %u -> %u (freed %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
 }
@@ -7828,7 +7808,7 @@ static void cb_device_disconnect_clicked(lv_event_t *e)
 static void cb_close_device_popup(lv_event_t *e)
 {
     (void)e;
-    ESP_LOGW(TAG, "MEMDIAG 개별설정 팝업 X 탭 수신 t=%u", (unsigned)lv_tick_get());
+    ESP_LOGD(TAG, "MEMDIAG device popup X tap t=%u", (unsigned)lv_tick_get());
     teardown_device_popup();
 }
 
@@ -7843,7 +7823,7 @@ static void cb_camera_dash_row_clicked(lv_event_t *e)
 {
     lv_obj_t *row = lv_event_get_target(e);
     uintptr_t idx = (uintptr_t)lv_obj_get_user_data(row);
-    ESP_LOGW(TAG, "MEMDIAG 카메라 행 탭 수신 t=%u idx=%u/%d", (unsigned)lv_tick_get(), (unsigned)idx, s_camera_dash_row_count);
+    ESP_LOGD(TAG, "MEMDIAG camera row tap t=%u idx=%u/%d", (unsigned)lv_tick_get(), (unsigned)idx, s_camera_dash_row_count);
     if ((int)idx >= s_camera_dash_row_count) return;
     build_device_popup(s_camera_dash_row_macs[idx], s_camera_dash_row_names[idx], false);
 }
@@ -7852,7 +7832,7 @@ static void cb_sensor_dash_row_clicked(lv_event_t *e)
 {
     lv_obj_t *row = lv_event_get_target(e);
     uintptr_t idx = (uintptr_t)lv_obj_get_user_data(row);
-    ESP_LOGW(TAG, "MEMDIAG 센서 행 탭 수신 t=%u idx=%u/%d", (unsigned)lv_tick_get(), (unsigned)idx, s_sensor_dash_row_count);
+    ESP_LOGD(TAG, "MEMDIAG sensor row tap t=%u idx=%u/%d", (unsigned)lv_tick_get(), (unsigned)idx, s_sensor_dash_row_count);
     if ((int)idx >= s_sensor_dash_row_count) return;
     build_device_popup(s_sensor_dash_row_macs[idx], s_sensor_dash_row_names[idx], true);
 }
@@ -7892,7 +7872,7 @@ static void teardown_device_popup(void)
      * 다시 동기화하도록 강제 — 아래 build_device_popup() 참고 */
     s_has_selected_sensor = false;
 
-    ESP_LOGW(TAG, "MEMDIAG 개별설정 팝업 닫기 완료 t=%u", (unsigned)lv_tick_get());
+    ESP_LOGD(TAG, "MEMDIAG device popup closed t=%u", (unsigned)lv_tick_get());
 }
 
 static void build_device_popup(const uint8_t *mac, const char *name, bool is_sensor)
@@ -8084,7 +8064,7 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
     lv_label_set_text(disconnect_lbl, ui_str(STR_BTN_DISCONNECT));
     lv_obj_set_style_text_font(disconnect_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    ESP_LOGW(TAG, "MEMDIAG 개별설정 팝업 완성 t=%u", (unsigned)lv_tick_get());
+    ESP_LOGD(TAG, "MEMDIAG device popup built t=%u", (unsigned)lv_tick_get());
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -9274,7 +9254,7 @@ static void teardown_option_tab(void)
      * 아니라 주화면에 상주(ui_init()에서 한 번만 생성, 여기서 손 안 댐) */
     lv_obj_clean(s_option_content);
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 설정 콘텐츠 지움: internal %u -> %u (회수 %d bytes)",
+    ESP_LOGD(TAG, "MEMDIAG settings content cleared: internal %u -> %u (freed %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
     memset(s_group_title, 0, sizeof(s_group_title));  /* 제어기/측정기/영상/시스템 그룹박스 제목 4개 */
@@ -9661,7 +9641,7 @@ static void build_option_tab(void)
     lv_obj_set_width(s_network_find_btn, s_action_btn_width);
 
     size_t heap_after_option_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 설정탭 위젯 생성 비용(순수): internal %u -> %u (소모 %d bytes)",
+    ESP_LOGD(TAG, "MEMDIAG settings tab widget cost (net): internal %u -> %u (used %d bytes)",
              (unsigned)heap_before_option_tab, (unsigned)heap_after_option_tab,
              (int)heap_before_option_tab - (int)heap_after_option_tab);
 }
@@ -9715,22 +9695,26 @@ static void cb_option_log_btn_tap(lv_event_t *e)
 static void teardown_log_tab(void)
 {
     size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    if (s_power_panel_timer) { lv_timer_delete(s_power_panel_timer); s_power_panel_timer = NULL; }
+    if (s_dev_panel_timer) { lv_timer_delete(s_dev_panel_timer); s_dev_panel_timer = NULL; }
     if (s_log_box_timer) { lv_timer_delete(s_log_box_timer); s_log_box_timer = NULL; }
     lv_obj_clean(s_option_content);
     s_log_tab_built = false;
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 로그탭 이탈: internal %u -> %u (회수 %d bytes)",
+    ESP_LOGD(TAG, "MEMDIAG log tab leave: internal %u -> %u (freed %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
     s_log_panel_title = NULL;
     s_log_container = NULL;
     s_log_label = NULL;
-    s_power_panel_title = NULL;
-    s_power_log_pause_btn = NULL;
-    s_power_log_pause_lbl = NULL;
-    s_power_list = NULL;
-    s_power_log_label = NULL;
+    s_dev_panel_title = NULL;
+    s_dev_log_pause_btn = NULL;
+    s_dev_log_pause_lbl = NULL;
+    s_dev_list = NULL;
+    s_dev_log_label = NULL;
+    s_dev_save_dd = NULL;
+    s_dev_tag_dd = NULL;
+    memset(s_dev_lvl_cb, 0, sizeof(s_dev_lvl_cb));
+    s_dev_log_paused = false;
 }
 
 /* 2026-09-08(사용자 재설계) — s_log_tab_page(부팅 시 이미 만들어진 빈 탭) 안에 내용을 지음 */
@@ -9792,60 +9776,106 @@ static void build_log_tab(void)
     lv_obj_set_width(s_log_label, LV_PCT(100));
     lv_obj_set_style_text_font(s_log_label, &lv_font_montserrat_18, 0);
     lv_label_set_text(s_log_label, "");
+    lv_obj_add_flag(s_log_label, LV_OBJ_FLAG_CLICKABLE);  /* 2026-09-27 — 줄 탭 → 원문 토스트 */
+    lv_obj_add_event_cb(s_log_label, cb_log_label_tap, LV_EVENT_CLICKED, NULL);
 
     s_log_box_timer = lv_timer_create(refresh_log_box, 500, NULL);
 
-    lv_obj_t *power_box = lv_obj_create(log_page);
-    lv_obj_set_size(power_box, LV_PCT(100), 320);  /* 2026-08-10, 사용자 지시 — 고정 320px */
-    lv_obj_set_flex_flow(power_box, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(power_box, 6, 0);
+    /* 2026-09-27(사용자 설계 — 로그 정리) — 개발 로그 판넬(예전 전력 로그 자리, 같은 크기) */
+    lv_obj_t *dev_box = lv_obj_create(log_page);
+    lv_obj_set_size(dev_box, LV_PCT(100), 320);
+    lv_obj_set_flex_flow(dev_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(dev_box, 6, 0);
+    lv_obj_set_style_pad_row(dev_box, 4, 0);
 
-    /* 제목 + 일시멈춤 단추를 한 행에(2026-08-10, 사용자 지시 — 값 읽는 동안 로그가 계속
-     * 밀리지 않게 멈출 수 있게). 2026-08-11 — 이 행은 스크롤 컨테이너(s_power_list) 밖의
-     * 고정 영역이라, 여기를 탭+드래그하면 안쪽 리스트가 가로채지 않고 바깥 log_page가
-     * 스크롤됨(사용자 지시 — 로그 판넬이 전체 다 내부 스크롤 입력을 받아서 페이지 스크롤을
-     * 잡을 영역이 없었던 문제의 해결책) */
-    lv_obj_t *power_title_row = lv_obj_create(power_box);
-    lv_obj_set_size(power_title_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_style_border_width(power_title_row, 0, 0);
-    lv_obj_set_style_pad_all(power_title_row, 0, 0);
-    lv_obj_set_flex_flow(power_title_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(power_title_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    /* 제목 + 일시멈춤 한 행 — 스크롤 컨테이너 밖 고정 영역이라 여기를 잡고 끌면 바깥 페이지가 스크롤됨(2026-08-11) */
+    lv_obj_t *dev_title_row = lv_obj_create(dev_box);
+    lv_obj_set_size(dev_title_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(dev_title_row, 0, 0);
+    lv_obj_set_style_pad_all(dev_title_row, 0, 0);
+    lv_obj_set_flex_flow(dev_title_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(dev_title_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    s_power_panel_title = lv_label_create(power_title_row);
-    lv_label_set_text(s_power_panel_title, ui_str(STR_PANEL_DEEPSLEEP));
-    lv_obj_set_style_text_font(s_power_panel_title, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_dev_panel_title = lv_label_create(dev_title_row);
+    lv_label_set_text(s_dev_panel_title, ui_str(STR_PANEL_DEV_LOG));
+    lv_obj_set_style_text_font(s_dev_panel_title, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    s_power_log_pause_btn = lv_button_create(power_title_row);
-    lv_obj_add_event_cb(s_power_log_pause_btn, cb_power_log_pause_toggle, LV_EVENT_CLICKED, NULL);
-    s_power_log_pause_lbl = lv_label_create(s_power_log_pause_btn);
-    lv_label_set_text(s_power_log_pause_lbl, ui_str(STR_BTN_PAUSE));
-    lv_obj_set_style_text_font(s_power_log_pause_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_dev_log_pause_btn = lv_button_create(dev_title_row);
+    lv_obj_add_event_cb(s_dev_log_pause_btn, cb_dev_log_pause_toggle, LV_EVENT_CLICKED, NULL);
+    s_dev_log_pause_lbl = lv_label_create(s_dev_log_pause_btn);
+    lv_label_set_text(s_dev_log_pause_lbl, ui_str(STR_BTN_PAUSE));
+    lv_obj_set_style_text_font(s_dev_log_pause_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    /* s_log_container와 동일 구조 — 스크롤 컨테이너 + 폭 100% wrap 라벨 하나, 텍스트를
-     * 통째로 갈아끼우고 맨 아래로 자동 스크롤(2026-08-09, 로그처럼 누적 지시) */
-    s_power_list = lv_obj_create(power_box);
-    lv_obj_set_size(s_power_list, LV_PCT(100), 0);
-    lv_obj_set_flex_grow(s_power_list, 1);
-    lv_obj_set_scroll_dir(s_power_list, LV_DIR_VER);
-    lv_obj_set_style_border_width(s_power_list, 0, 0);
-    lv_obj_set_style_bg_opa(s_power_list, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(s_power_list, 6, 0);
+    /* 조절 줄: [Save 문턱▼] [E][W][I][D] [태그▼] */
+    lv_obj_t *dev_ctrl_row = lv_obj_create(dev_box);
+    lv_obj_set_size(dev_ctrl_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(dev_ctrl_row, 0, 0);
+    lv_obj_set_style_pad_all(dev_ctrl_row, 0, 0);
+    lv_obj_set_style_pad_column(dev_ctrl_row, 10, 0);
+    lv_obj_set_flex_flow(dev_ctrl_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(dev_ctrl_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    s_power_log_label = lv_label_create(s_power_list);
-    /* 2026-08-22 — 일반로그와 동일 이유로 CLIP + 18pt 비트맵 폰트로 통일(사용자 지시) */
-    lv_label_set_long_mode(s_power_log_label, LV_LABEL_LONG_CLIP);
-    lv_obj_set_width(s_power_log_label, LV_PCT(100));
-    lv_obj_set_style_text_font(s_power_log_label, &lv_font_montserrat_18, 0);
-    /* 2026-08-10 — C/S 줄을 구분하려고 recolor(#RRGGBB text#) 켰었으나, 2026-08-11에 3가지
-     * 형태 다 실기에서 깨지는 걸 확인하고 recolor 자체를 포기(순수 텍스트 ">>> " 마커로
-     * 대체, refresh_power_panel 참고) — 더 이상 안 쓰므로 켜두지 않음 */
-    lv_label_set_text(s_power_log_label, "");
+    lv_obj_t *save_lbl = lv_label_create(dev_ctrl_row);
+    lv_label_set_text(save_lbl, "Save");
+    lv_obj_set_style_text_font(save_lbl, &lv_font_montserrat_18, 0);
+    s_dev_save_dd = lv_dropdown_create(dev_ctrl_row);
+    lv_dropdown_set_options(s_dev_save_dd, "E\nW\nI\nD");
+    lv_dropdown_set_selected(s_dev_save_dd, (uint16_t)(dev_log_get_save_level() - DEV_LOG_LVL_E));
+    lv_obj_set_width(s_dev_save_dd, 70);
+    lv_obj_set_style_pad_ver(s_dev_save_dd, 7, 0);
+    lv_obj_set_style_text_font(s_dev_save_dd, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_dev_save_dd), &lv_font_montserrat_18, 0);
+    lv_obj_add_event_cb(s_dev_save_dd, cb_dev_save_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    s_power_panel_timer = lv_timer_create(refresh_power_panel, 2000, NULL);
+    static const char *const lvl_names[] = { "", "E", "W", "I", "D" };
+    uint8_t view = dev_log_get_view_mask();
+    for (int l = DEV_LOG_LVL_E; l <= DEV_LOG_LVL_D; l++) {
+        s_dev_lvl_cb[l] = lv_checkbox_create(dev_ctrl_row);
+        lv_checkbox_set_text(s_dev_lvl_cb[l], lvl_names[l]);
+        lv_obj_set_style_text_font(s_dev_lvl_cb[l], &lv_font_montserrat_18, 0);
+        if (view & DEV_LOG_MASK(l)) lv_obj_add_state(s_dev_lvl_cb[l], LV_STATE_CHECKED);
+        lv_obj_add_event_cb(s_dev_lvl_cb[l], cb_dev_lvl_cb_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    update_dev_lvl_cb_enabled();
+
+    s_dev_tag_dd = lv_dropdown_create(dev_ctrl_row);
+    {
+        char opts[96] = "";
+        for (int i = 0; i < DEV_LOG_TAG_COUNT; i++) {
+            if (i) strlcat(opts, "\n", sizeof(opts));
+            strlcat(opts, DEV_LOG_TAGS[i], sizeof(opts));
+        }
+        lv_dropdown_set_options(s_dev_tag_dd, opts);
+    }
+    lv_dropdown_set_selected(s_dev_tag_dd, dev_log_get_tag_filter());
+    lv_obj_set_width(s_dev_tag_dd, 110);  /* 가장 긴 "PHOTO"/"RELAY"/"Other" + 화살표 */
+    lv_obj_set_style_pad_ver(s_dev_tag_dd, 7, 0);
+    lv_obj_set_style_text_font(s_dev_tag_dd, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_dev_tag_dd), &lv_font_montserrat_18, 0);
+    lv_obj_add_event_cb(s_dev_tag_dd, cb_dev_tag_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* s_log_container와 동일 구조 — 스크롤 컨테이너 + 라벨 하나, 텍스트를 통째로 갈아끼우고 맨 아래로 */
+    s_dev_list = lv_obj_create(dev_box);
+    lv_obj_set_size(s_dev_list, LV_PCT(100), 0);
+    lv_obj_set_flex_grow(s_dev_list, 1);
+    lv_obj_set_scroll_dir(s_dev_list, LV_DIR_VER);
+    lv_obj_set_style_border_width(s_dev_list, 0, 0);
+    lv_obj_set_style_bg_opa(s_dev_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_dev_list, 6, 0);
+
+    s_dev_log_label = lv_label_create(s_dev_list);
+    lv_label_set_long_mode(s_dev_log_label, LV_LABEL_LONG_CLIP);  /* 폭은 우리가 "..."로 자름(일반 로그와 동일) */
+    lv_obj_set_width(s_dev_log_label, LV_PCT(100));
+    lv_obj_set_style_text_font(s_dev_log_label, &lv_font_montserrat_18, 0);
+    lv_label_set_text(s_dev_log_label, "");
+    lv_obj_add_flag(s_dev_log_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_dev_log_label, cb_dev_log_label_tap, LV_EVENT_CLICKED, NULL);
+
+    s_dev_log_last_seq = UINT32_MAX;
+    s_dev_panel_timer = lv_timer_create(refresh_dev_panel, 500, NULL);
 
     size_t heap_after_log_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG 로그탭 위젯 생성 비용(순수): internal %u -> %u (소모 %d bytes)",
+    ESP_LOGD(TAG, "MEMDIAG log tab widget cost (net): internal %u -> %u (used %d bytes)",
              (unsigned)heap_before_log_tab, (unsigned)heap_after_log_tab,
              (int)heap_before_log_tab - (int)heap_after_log_tab);
 }

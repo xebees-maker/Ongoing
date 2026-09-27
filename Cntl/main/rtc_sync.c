@@ -12,7 +12,7 @@
 
 #define TIME_SYNC_PATH  FS_MOUNT_POINT "/time_sync.txt"
 
-static const char *TAG = "rtc_sync";
+static const char *TAG = "SYS";
 
 /* PCF85063A는 전원이 나가면(배터리 없음) 연도 레지스터가 1970으로 리셋됨 — 이보다 한참
  * 뒤인 값이면 "그럴듯한 시각이 이미 들어있다"로 보고 안 건드림 */
@@ -67,13 +67,13 @@ esp_err_t rtc_sync_init(void)
 {
     i2c_master_bus_handle_t bus = waveshare_rgb_lcd_get_i2c_bus();
     if (!bus) {
-        ESP_LOGW(TAG, "I2C 버스가 아직 없음 — waveshare_esp32_s3_rgb_lcd_init() 먼저 호출했는지 확인");
+        ESP_LOGW(TAG, "I2C bus not ready - call waveshare_esp32_s3_rgb_lcd_init() first");
         return ESP_ERR_INVALID_STATE;
     }
 
     esp_err_t err = pcf85063a_init(&s_rtc_dev, bus, PCF85063A_ADDRESS);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "PCF85063A 초기화 실패: %s (RTC 미실장/배선 문제?)", esp_err_to_name(err));
+        ESP_LOGW(TAG, "PCF85063A init failed: %s (RTC missing/wiring?)", esp_err_to_name(err));
         return err;
     }
     s_rtc_ready = true;
@@ -95,11 +95,11 @@ esp_err_t rtc_sync_init(void)
                 .sec   = (uint8_t)build_tm.tm_sec,
             };
             esp_err_t set_err = pcf85063a_set_time_date(&s_rtc_dev, seed);
-            ESP_LOGW(TAG, "RTC 값이 유효하지 않음(배터리 없음/최초 부팅) — 빌드 시각으로 초기화: %s",
+            ESP_LOGW(TAG, "RTC value invalid (no battery/first boot) - set to build time: %s",
                      esp_err_to_name(set_err));
             rtc_time = seed;
         } else {
-            ESP_LOGW(TAG, "빌드 시각 파싱 실패 — RTC를 그대로 둠");
+            ESP_LOGW(TAG, "Build time parse failed - RTC left as is");
         }
     }
 
@@ -128,7 +128,7 @@ esp_err_t rtc_sync_init(void)
             .sec   = (uint8_t)file_tm.tm_sec,
         };
         esp_err_t set_err = pcf85063a_set_time_date(&s_rtc_dev, seed);
-        ESP_LOGI(TAG, "%s의 플래시 시점 PC 시각이 더 최신 — RTC 전진: %s",
+        ESP_LOGI(TAG, "Flash-time PC clock of %s is newer - RTC advanced: %s",
                  TIME_SYNC_PATH, esp_err_to_name(set_err));
         rtc_time = seed;
         tm_val = file_tm;
@@ -138,7 +138,7 @@ esp_err_t rtc_sync_init(void)
     struct timeval tv = { .tv_sec = rtc_unix, .tv_usec = 0 };
     settimeofday(&tv, NULL);
 
-    ESP_LOGI(TAG, "RTC 시각: %04u-%02u-%02u %02u:%02u:%02u",
+    ESP_LOGI(TAG, "RTC time: %04u-%02u-%02u %02u:%02u:%02u",
              rtc_time.year, rtc_time.month, rtc_time.day, rtc_time.hour, rtc_time.min, rtc_time.sec);
     return ESP_OK;
 }
@@ -174,7 +174,7 @@ esp_err_t rtc_sync_set_datetime(int year, int month, int day, int hour, int min,
     struct timeval tv = { .tv_sec = mktime(&tm_val), .tv_usec = 0 };
     settimeofday(&tv, NULL);
 
-    ESP_LOGI(TAG, "수동 시각 설정: %04d-%02d-%02d %02d:%02d:%02d (RTC 쓰기 %s)",
+    ESP_LOGI(TAG, "Manual time set: %04d-%02d-%02d %02d:%02d:%02d (RTC write %s)",
              year, month, day, hour, min, sec, esp_err_to_name(err));
     return err;
 }

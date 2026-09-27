@@ -4,7 +4,7 @@
 
 static i2c_master_dev_handle_t i2c_handle;
 
-static const char *TAG = "tca9554";
+static const char *TAG = "SYS";
 
 uint8_t Read_REG(uint8_t REG)
 {

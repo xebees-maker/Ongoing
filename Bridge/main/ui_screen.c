@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static const char *TAG = "ui_screen";
+static const char *TAG = "UI";
 
 void ui_screen_mac6(const uint8_t mac[6], char out[7])
 {
@@ -128,12 +128,12 @@ void ui_screen_init(void)
     s_wireless_log = make_log_box(scr, LV_ALIGN_TOP_LEFT, half_w, log_h);
     s_can_log = make_log_box(scr, LV_ALIGN_TOP_RIGHT, half_w, log_h);
 
-    ESP_LOGI(TAG, "브 화면 구성됨(메모리 표시 + 무선/CAN 로그창 2개)");
+    ESP_LOGI(TAG, "Bridge screen built (memory view + wireless/CAN log panes)");
 
     s_fmt_mutex = xSemaphoreCreateMutex();
     s_fmt_line = (ui_log_line_t *)heap_caps_malloc(sizeof(ui_log_line_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_fmt_mutex || !s_fmt_line) {
-        ESP_LOGE(TAG, "로그 포맷 버퍼/뮤텍스 할당 실패 — 로그 출력 안 함");
+        ESP_LOGE(TAG, "Log format buffer/mutex alloc failed - no log output");
     }
 
     /* 로그 표시 큐 + ui_log 태스크 — 큐 저장소/태스크 스택 모두 PSRAM(feedback_prefer_psram_for_buffers) */
@@ -147,11 +147,11 @@ void ui_screen_init(void)
         if (log_stack) {
             xTaskCreateStaticPinnedToCore(log_ui_task, "ui_log", 4096 / sizeof(StackType_t), NULL, 5, log_stack, &s_log_tcb, 0);
         } else {
-            ESP_LOGE(TAG, "ui_log 스택 할당 실패 — 화면 로그 표시 안 함(시리얼 로그는 유지)");
+            ESP_LOGE(TAG, "ui_log stack alloc failed - no screen log (serial log kept)");
             s_log_q = NULL;
         }
     } else {
-        ESP_LOGE(TAG, "로그 큐 할당 실패 — 화면 로그 표시 안 함(시리얼 로그는 유지)");
+        ESP_LOGE(TAG, "Log queue alloc failed - no screen log (serial log kept)");
     }
 
     /* 2026-09-25(사용자 설계 — 코어 분리) — UI 쪽 태스크는 LVGL과 같은 코어 0 */
@@ -199,7 +199,7 @@ static void log_append(bool is_wireless, const char *fmt, va_list args)
     if (n >= 0) {
         /* 2026-09-23(디버깅용) — 화면에만 찍히고 시리얼엔 전혀 안 남아서 원격으로 확인이
          * 불가능했음(사용자는 화면으로 보지만 Claude는 시리얼로만 봄) — 둘 다 남김 */
-        ESP_LOGI(is_wireless ? "wireless" : "can_ui", "%s", line);
+        ESP_LOGD(is_wireless ? "wireless" : "can_ui", "%s", line);
         if (s_log_q) {
             size_t len = strnlen(line, cap);
             if (len == 0 || line[len - 1] != '\n') {

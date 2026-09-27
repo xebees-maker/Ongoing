@@ -38,7 +38,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const char *TAG = "stats_store";
+static const char *TAG = "SENS";
 
 #define STATS_DIR       SD_STORAGE_MOUNT_POINT "/stats"
 #define STATS_WEEK_SEC  604800u
@@ -93,7 +93,7 @@ static bool ensure_alloc_locked(void)
     if (!s_scratch) s_scratch = heap_caps_malloc(STATS_CHUNK * sizeof(stats_record_t), MALLOC_CAP_SPIRAM);
     if (!s_bscratch) s_bscratch = heap_caps_malloc(STATS_CHUNK * sizeof(stats_bucket_t), MALLOC_CAP_SPIRAM);
     if (!s_weeks || !s_scratch || !s_bscratch) {
-        ESP_LOGE(TAG, "색인/읽기 버퍼 할당 실패");
+        ESP_LOGE(TAG, "Index/read buffer alloc failed");
         return false;
     }
     return true;
@@ -126,7 +126,7 @@ static int week_get_or_add_locked(uint32_t week)
     int idx = week_find_locked(week);
     if (idx >= 0) return idx;
     if (s_week_count >= STATS_MAX_WEEKS) {
-        ESP_LOGE(TAG, "주 색인 가득참(%u) — week=%u 기록 불가", (unsigned)STATS_MAX_WEEKS, (unsigned)week);
+        ESP_LOGE(TAG, "Week index full (%u) - week=%u not recorded", (unsigned)STATS_MAX_WEEKS, (unsigned)week);
         return -1;
     }
     uint32_t pos = s_week_count;
@@ -219,7 +219,7 @@ static void agg_flush_bucket_locked(uint8_t scale_idx, uint8_t kind, uint8_t cha
     agg_path(scale_idx, week, path, sizeof(path));
     FILE *f = fopen(path, "ab");
     if (!f) {
-        ESP_LOGW(TAG, "사전집계 버킷 열기 실패(scale=%u) — 이 포인트만 유실", (unsigned)scale_idx);
+        ESP_LOGW(TAG, "Aggregate bucket open failed (scale=%u) - this point lost", (unsigned)scale_idx);
         return;
     }
     size_t n = fwrite(&rec, sizeof(rec), 1, f);
@@ -430,7 +430,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
         if (!f) {
             s_last_io_error = true;
             s_write_io_error_pending = true;
-            ESP_LOGW(TAG, "값 파일 열기 실패(append, errno=%d) — 이번 값 %u개 유실", errno, (unsigned)(j - i));
+            ESP_LOGW(TAG, "Value file open failed (append, errno=%d) - %u values lost", errno, (unsigned)(j - i));
             ok = false;
             i = j;
             continue;
@@ -440,7 +440,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
         if (written != j - i || !synced) {
             s_last_io_error = true;
             s_write_io_error_pending = true;
-            ESP_LOGW(TAG, "값 파일 쓰기 불완전(%u/%u, sync=%d)", (unsigned)written, (unsigned)(j - i), synced ? 1 : 0);
+            ESP_LOGW(TAG, "Value file write incomplete (%u/%u, sync=%d)", (unsigned)written, (unsigned)(j - i), synced ? 1 : 0);
             ok = false;
         }
         s_weeks[widx].raw_count += (uint32_t)written;
@@ -459,7 +459,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
 
     s_stats_append_call_count++;
     size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG stats_store_append #%u(레코드 %u개): internal free %u -> %u (delta=%d)",
+    ESP_LOGD(TAG, "MEMDIAG stats_store_append #%u (%u records): internal free %u -> %u (delta=%d)",
              (unsigned)s_stats_append_call_count, (unsigned)count, (unsigned)before, (unsigned)after,
              (int)before - (int)after);
     return ok;
@@ -677,10 +677,10 @@ static uint32_t delete_week_locked(uint32_t idx)
     uint32_t removed = s_weeks[idx].raw_count;
     char path[48];
     raw_path(week, path, sizeof(path));
-    if (unlink(path) != 0 && errno != ENOENT) ESP_LOGW(TAG, "주 파일 삭제 실패(errno=%d): %s", errno, path);
+    if (unlink(path) != 0 && errno != ENOENT) ESP_LOGW(TAG, "Week file delete failed (errno=%d): %s", errno, path);
     for (uint8_t s = 0; s < STATS_SCALE_COUNT; s++) {
         agg_path(s, week, path, sizeof(path));
-        if (unlink(path) != 0 && errno != ENOENT) ESP_LOGW(TAG, "집계 파일 삭제 실패(errno=%d): %s", errno, path);
+        if (unlink(path) != 0 && errno != ENOENT) ESP_LOGW(TAG, "Aggregate file delete failed (errno=%d): %s", errno, path);
     }
     s_total_raw -= removed;
     for (uint32_t k = idx + 1; k < s_week_count; k++) s_weeks[k - 1] = s_weeks[k];
@@ -699,7 +699,7 @@ void stats_store_delete_all(void)
     memset(s_agg_accum, 0, sizeof(s_agg_accum));
     unlock();
     storage_mgr_notify_changed();
-    ESP_LOGI(TAG, "측정값 파일 전체 삭제 완료");
+    ESP_LOGI(TAG, "All measurement files deleted");
 }
 
 uint64_t stats_store_get_used_bytes(void)
@@ -722,7 +722,7 @@ uint32_t stats_store_trim_to(uint64_t target_bytes)
         }
     }
     unlock();
-    if (weeks > 0) ESP_LOGI(TAG, "정리: 가장 오래된 %u주 삭제(레코드 %u개)", (unsigned)weeks, (unsigned)deleted);
+    if (weeks > 0) ESP_LOGI(TAG, "Trim: oldest %u weeks deleted (%u records)", (unsigned)weeks, (unsigned)deleted);
     return deleted;
 }
 
@@ -733,10 +733,10 @@ static uint64_t align_file_size(const char *path, uint64_t size, size_t rec_size
     uint64_t aligned = size - (size % rec_size);
     if (aligned != size) {
         if (truncate(path, (off_t)aligned) == 0) {
-            ESP_LOGW(TAG, "재스캔: 끝이 반쯤 쓰인 파일을 레코드 경계로 자름(%llu -> %llu): %s",
+            ESP_LOGW(TAG, "Rescan: half-written tail cut to record boundary (%llu -> %llu): %s",
                      (unsigned long long)size, (unsigned long long)aligned, path);
         } else {
-            ESP_LOGW(TAG, "재스캔: 반쯤 쓰인 파일 자르기 실패(errno=%d): %s", errno, path);
+            ESP_LOGW(TAG, "Rescan: half-written file cut failed (errno=%d): %s", errno, path);
         }
     }
     return aligned;
@@ -759,7 +759,7 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
             size_t len = strlen(name);
             char path[48 + 16];
             if (len > 40) {
-                ESP_LOGW(TAG, "재스캔: 이름이 비정상인 항목 제외(손상 의심)");
+                ESP_LOGW(TAG, "Rescan: malformed name skipped (possibly corrupt)");
                 bad++;
                 continue;
             }
@@ -774,9 +774,9 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
                 if (len > 4 && strcmp(name + len - 4, ".tmp") == 0) {
                     unlink(path);  /* 예전 방식(다시 쓰기) 정리 도중 리셋으로 남은 임시파일 */
                 } else if (strncmp(name, "values", 6) == 0 || strncmp(name, "agg_", 4) == 0) {
-                    ESP_LOGW(TAG, "재스캔: 옛 형식 파일은 읽지 않음: %s", name);
+                    ESP_LOGW(TAG, "Rescan: old-format file not read: %s", name);
                 } else {
-                    ESP_LOGW(TAG, "재스캔: 알 수 없는 항목 제외(손상 의심): %s", name);
+                    ESP_LOGW(TAG, "Rescan: unknown entry skipped (possibly corrupt): %s", name);
                     bad++;
                 }
                 continue;
@@ -784,7 +784,7 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
 
             struct stat st;
             if (stat(path, &st) != 0 || st.st_size < 0 || (sd_total > 0 && (uint64_t)st.st_size > sd_total)) {
-                ESP_LOGW(TAG, "재스캔: 크기가 비정상인 항목 제외(손상 의심): %s", name);
+                ESP_LOGW(TAG, "Rescan: bad size skipped (possibly corrupt): %s", name);
                 bad++;
                 continue;
             }

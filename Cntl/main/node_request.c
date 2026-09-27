@@ -11,7 +11,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
-static const char *TAG = "node_request";
+static const char *TAG = "LINK";
 
 /* 2026-08-10 도입 -> 2026-08-26 삭제(사용자 지시) — 원래는 "CAM이 자고 있을 때 도착한 명령도
  * CAM의 다음 자연스러운 웨이크까지는 재시도해서 언젠가 닿게 하자"는 취지로, 응답성 설정
@@ -170,9 +170,9 @@ static void tx_worker_task(void *arg)
              * 폴링에서 이미 처리)가 있으므로 여기서는 진단용 로그만 남기고 UI 에러는 안 띄움.
              * 자동 재연결(node_hub_pair)처럼 애초에 사용자에게 알릴 필요 없는 백그라운드
              * 요청도 있어서, 범용 계층에서 일괄 판단하는 게 애초에 무리였음 */
-            ESP_LOGW(TAG, "%s 무응답(%d회 시도)", item.what, item.max_attempts);
+            ESP_LOGW(TAG, "%s no response (%d tries)", item.what, item.max_attempts);
         } else {
-            ESP_LOGI(TAG, "%s 완료", item.what);
+            ESP_LOGD(TAG, "%s done", item.what);
         }
     }
 }
@@ -208,7 +208,7 @@ static void send_to_worker(tx_worker_t *w, const tx_item_t *item)
             return;
         }
     }
-    ESP_LOGW(TAG, "%s: 워커 큐 가득 — 버림 mac=%02X:%02X:%02X:%02X:%02X:%02X",
+    ESP_LOGW(TAG, "%s: worker queue full - dropped mac=%02X:%02X:%02X:%02X:%02X:%02X",
              item->what, item->mac[0], item->mac[1], item->mac[2],
              item->mac[3], item->mac[4], item->mac[5]);
 }
@@ -230,7 +230,7 @@ static void tx_dispatcher_task(void *arg)
             if (!w) {
                 /* 이론상 도달 불가 — mac은 항상 node_hub.c에 이미 등록된 노드(최대
                  * NODE_HUB_MAX_NODES개)에서만 오므로 동시 워커 수도 그 이상 못 감 */
-                ESP_LOGE(TAG, "%s: 워커 슬롯 부족(%d개 초과) — 버림", item.what, TX_MAX_WORKERS);
+                ESP_LOGE(TAG, "%s: worker slots exhausted (>%d) - dropped", item.what, TX_MAX_WORKERS);
             } else {
                 /* 2026-09-21 — 큐 저장소/태스크 스택/큐 제어블록은 PSRAM, TCB만 Internal
                  * (ESP-IDF 제약) — 넷 다 슬롯당 1회 지연 할당, 이후 재사용(정의부 주석 참고) */
@@ -248,7 +248,7 @@ static void tx_dispatcher_task(void *arg)
                     w->task_tcb = heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
                 }
                 if (!w->queue_storage || !w->task_stack || !w->queue_cb || !w->task_tcb) {
-                    ESP_LOGE(TAG, "%s: 워커 버퍼 할당 실패 — 버림", item.what);
+                    ESP_LOGE(TAG, "%s: worker buffer alloc failed - dropped", item.what);
                 } else {
                     w->queue = xQueueCreateStatic(TX_WORKER_QUEUE_LEN, sizeof(tx_item_t),
                                                    w->queue_storage, w->queue_cb);
@@ -276,7 +276,7 @@ void node_request_init(void)
     if (tx_queue_storage) {
         s_tx_queue = xQueueCreateStatic(TX_QUEUE_LEN, sizeof(tx_item_t), tx_queue_storage, &s_tx_queue_cb);
     } else {
-        ESP_LOGE(TAG, "TX 큐 PSRAM 할당 실패 — 내부 RAM으로 폴백");
+        ESP_LOGE(TAG, "TX queue PSRAM alloc failed - falling back to internal RAM");
         s_tx_queue = xQueueCreate(TX_QUEUE_LEN, sizeof(tx_item_t));
     }
     s_workers_mutex = xSemaphoreCreateMutex();
@@ -289,7 +289,7 @@ void node_request_init(void)
         xTaskCreateStaticPinnedToCore(tx_dispatcher_task, "node_req_disp", 3072, NULL, 17,
                            tx_dispatcher_stack, &s_tx_dispatcher_tcb, 1);
     } else {
-        ESP_LOGE(TAG, "디스패처 태스크 스택 PSRAM 할당 실패 — 내부 RAM으로 폴백");
+        ESP_LOGE(TAG, "Dispatcher stack PSRAM alloc failed - falling back to internal RAM");
         xTaskCreatePinnedToCore(tx_dispatcher_task, "node_req_disp", 3072, NULL, 17, NULL, 1);
     }
 }
@@ -299,7 +299,7 @@ void node_request_enqueue(const uint8_t *mac, const void *req, size_t req_len,
                          uint32_t timeout_ms, int max_attempts, const char *what)
 {
     if (req_len > TX_REQ_MAX_LEN) {
-        ESP_LOGE(TAG, "%s: req_len(%u)이 TX_REQ_MAX_LEN(%d) 초과 — 무시", what, (unsigned)req_len, TX_REQ_MAX_LEN);
+        ESP_LOGE(TAG, "%s: req_len(%u) exceeds TX_REQ_MAX_LEN(%d) - ignored", what, (unsigned)req_len, TX_REQ_MAX_LEN);
         return;
     }
     tx_item_t item = {
@@ -331,7 +331,7 @@ void node_request_enqueue(const uint8_t *mac, const void *req, size_t req_len,
          * 로그(ESP_LOGW)만 남기고 화면엔 아무 표시가 없어서 시리얼 안 보고 있으면 통째로
          * 놓쳤음. 이건 재시도 여지없이 그 자리에서 완전히 버려지는 거라 워닝이 아니라
          * 에러 — ui_log_add_err()로 화면 토스트까지 뜨게 함(2xxx 통신 전송 대역) */
-        ESP_LOGE(TAG, "%s: 큐 가득 — 버림", what);
+        ESP_LOGE(TAG, "%s: queue full - dropped", what);
         ui_log_add_err(UI_ERR_TX_QUEUE_FULL, "TX queue full, dropped: %s", what);
         /* 2026-09-10(사용자 지시 — "이 에러가 났을 때 TX 큐를 초기화하든 하는 거야") — 큐가
          * 꽉 찬 채로 계속 남아있으면 이후 모든 enqueue가 계속 실패해서 "한번 나면 계속
@@ -339,6 +339,6 @@ void node_request_enqueue(const uint8_t *mac, const void *req, size_t req_len,
          * 요청부터는 다시 들어갈 수 있게 함 */
         UBaseType_t stuck_count = uxQueueMessagesWaiting(s_tx_queue);
         xQueueReset(s_tx_queue);
-        ESP_LOGW(TAG, "TX 큐 초기화됨(밀려있던 %u개 버림)", (unsigned)stuck_count);
+        ESP_LOGW(TAG, "TX queue reset (%u pending dropped)", (unsigned)stuck_count);
     }
 }

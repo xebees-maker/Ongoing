@@ -7,7 +7,7 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 
-static const char *TAG = "status_led";
+static const char *TAG = "SYS";
 
 #define STATUS_LED_MAX_COUNT     4
 #define BLINK_SLOW_PERIOD_MS     1000
@@ -105,7 +105,7 @@ static status_led_slot_t *alloc_slot(void)
     for (int i = 0; i < STATUS_LED_MAX_COUNT; i++) {
         if (!s_slots[i].in_use) return &s_slots[i];
     }
-    ESP_LOGE(TAG, "슬롯 부족 (최대 %d개)", STATUS_LED_MAX_COUNT);
+    ESP_LOGE(TAG, "Slots exhausted (max %d)", STATUS_LED_MAX_COUNT);
     return NULL;
 }
 
@@ -118,7 +118,7 @@ static bool finish_slot(status_led_slot_t *slot, gpio_num_t pin, status_led_writ
         .name     = "status_led",
     };
     if (esp_timer_create(&timer_args, &slot->blink_timer) != ESP_OK) {
-        ESP_LOGE(TAG, "esp_timer_create 실패 (pin=%d)", pin);
+        ESP_LOGE(TAG, "esp_timer_create failed (pin=%d)", pin);
         return false;
     }
 
@@ -135,7 +135,7 @@ bool status_led_init(gpio_num_t pin)
 {
     if (find_slot(pin)) return true;  /* 이미 초기화됨 */
     if (pin < 0 || pin >= GPIO_NUM_MAX) {
-        ESP_LOGE(TAG, "잘못된 GPIO (pin=%d)", pin);
+        ESP_LOGE(TAG, "Invalid GPIO (pin=%d)", pin);
         return false;
     }
 
@@ -147,7 +147,7 @@ bool status_led_init(gpio_num_t pin)
         .mode         = GPIO_MODE_OUTPUT,
     };
     if (gpio_config(&cfg) != ESP_OK) {
-        ESP_LOGE(TAG, "gpio_config 실패 (pin=%d)", pin);
+        ESP_LOGE(TAG, "gpio_config failed (pin=%d)", pin);
         return false;
     }
     gpio_set_level(pin, 0);
@@ -158,7 +158,7 @@ bool status_led_init_custom(gpio_num_t id, status_led_write_fn_t write_fn)
 {
     if (find_slot(id)) return true;  /* 이미 초기화됨 */
     if (id < GPIO_NUM_MAX || !write_fn) {
-        ESP_LOGE(TAG, "init_custom: id=%d는 GPIO_NUM_MAX(%d) 이상이어야 하고 write_fn 필요", id, GPIO_NUM_MAX);
+        ESP_LOGE(TAG, "init_custom: id=%d must be >= GPIO_NUM_MAX(%d) and write_fn required", id, GPIO_NUM_MAX);
         return false;
     }
 
@@ -173,7 +173,7 @@ void status_led_set_pattern(gpio_num_t pin, led_pattern_t pattern)
 {
     status_led_slot_t *slot = find_slot(pin);
     if (!slot) {
-        ESP_LOGW(TAG, "status_led_init() 안 된 pin=%d", pin);
+        ESP_LOGW(TAG, "status_led_init() not called for pin=%d", pin);
         return;
     }
     if (slot->pattern == pattern) return;

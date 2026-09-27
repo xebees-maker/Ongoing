@@ -5,7 +5,7 @@
 #include <string.h>
 #include "esp_log.h"
 
-static const char *TAG = "sens_kind_store";
+static const char *TAG = "SENS";
 
 #define SENS_KIND_FILE_PATH SD_STORAGE_MOUNT_POINT "/sens_kind.bin"
 #define SENS_KIND_SLOTS 8  /* device_config.c의 ALIAS_SLOTS(알려진 장치 상한)와 동일 관례 */
@@ -28,7 +28,7 @@ static void save(void)
 {
     FILE *f = fopen(SENS_KIND_FILE_PATH, "wb");
     if (!f) {
-        ESP_LOGW(TAG, "저장 실패(fopen): %s", SENS_KIND_FILE_PATH);
+        ESP_LOGW(TAG, "Save failed (fopen): %s", SENS_KIND_FILE_PATH);
         return;
     }
     sens_kind_file_t s = { .version = SENS_KIND_FILE_VERSION };
@@ -47,11 +47,11 @@ void sens_kind_store_load(void)
     bool ok = (fread(&s, sizeof(s), 1, f) == 1) && s.version == SENS_KIND_FILE_VERSION;
     fclose(f);
     if (!ok) {
-        ESP_LOGW(TAG, "형식 불일치 — 빈 상태로 시작: %s", SENS_KIND_FILE_PATH);
+        ESP_LOGW(TAG, "Format mismatch - starting empty: %s", SENS_KIND_FILE_PATH);
         return;
     }
     memcpy(s_entries, s.entries, sizeof(s_entries));
-    ESP_LOGI(TAG, "복원 완료");
+    ESP_LOGI(TAG, "Restored");
 }
 
 static sens_kind_entry_t *find_slot(const uint8_t mac[6])
@@ -77,7 +77,7 @@ void sens_kind_store_set(const uint8_t mac[6], uint8_t kind)
             if (!s_entries[i].in_use) { e = &s_entries[i]; break; }
         }
         if (!e) {
-            ESP_LOGW(TAG, "슬롯 꽉 참(%d개) — 저장 못 함", SENS_KIND_SLOTS);
+            ESP_LOGW(TAG, "Slots full (%d) - not saved", SENS_KIND_SLOTS);
             return;
         }
         memcpy(e->mac, mac, 6);

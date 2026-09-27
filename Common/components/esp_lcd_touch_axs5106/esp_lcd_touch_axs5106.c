@@ -12,7 +12,7 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_touch.h"
 
-static const char *TAG = "esp_lcd_touch_axs5106";
+static const char *TAG = "UI";
 
 #define TOUCH_AXS5106_TOUCH_POINTS_REG (0X01)
 #define TOUCH_AXS5106_TOUCH_P1_XH_REG (0x03)

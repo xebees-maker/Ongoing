@@ -14,7 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-static const char *TAG = "bridge_sr";
+static const char *TAG = "PHOTO";
 
 #define SR_SESSIONS         4
 /* 순서가 어긋난 청크 보관 개수 — 설계는 "최대 윈도우 1개(16)"인데, 캠은 윈도우의 누락분을 재전송한 뒤 그 재전송이
@@ -77,7 +77,7 @@ static void reply(const uint8_t *mac, const void *msg, size_t len)
 {
     bridge_esp_now_ensure_peer(mac);
     esp_err_t err = esp_now_send(mac, (const uint8_t *)msg, len);
-    if (err != ESP_OK) ESP_LOGW(TAG, "응답 송신 실패(type=%u): %s", ((const uint8_t *)msg)[1], esp_err_to_name(err));
+    if (err != ESP_OK) ESP_LOGW(TAG, "Reply send failed (type=%u): %s", ((const uint8_t *)msg)[1], esp_err_to_name(err));
 }
 
 static void reply_nack(const uint8_t *mac, uint8_t msg_type, uint32_t file_id, uint16_t n)
@@ -154,7 +154,7 @@ static void on_meta(const uint8_t *mac, const uint8_t *data, int len)
     memcpy(&meta, data, sizeof(meta));
     sr_cam_t *c = alloc_cam(mac);
     if (!c || !c->hold) {
-        ESP_LOGE(TAG, "SR 세션 없음(동시 %d개 초과) — META 무시", SR_SESSIONS);
+        ESP_LOGE(TAG, "No SR session (>%d concurrent) - META ignored", SR_SESSIONS);
         return;
     }
     if (c->active && c->file_id == meta.file_id) {
@@ -164,7 +164,7 @@ static void on_meta(const uint8_t *mac, const uint8_t *data, int len)
         return;
     }
     if (c->active) {
-        ESP_LOGW(TAG, MACSTR " 이전 사진(file_id=%u) 미완료 — 중단 통지", MAC2STR(mac), (unsigned)c->file_id);
+        ESP_LOGW(TAG, MACSTR " previous photo (file_id=%u) incomplete - abort notice", MAC2STR(mac), (unsigned)c->file_id);
         push_done(c, CAN_BRIDGE_SR_DONE_ABORTED);
     }
     c->active = true;
@@ -237,7 +237,7 @@ static void on_window_status(const uint8_t *mac, const uint8_t *data, int len)
 static void on_done(const uint8_t *mac)
 {
     sr_cam_t *c = find_cam(mac);
-    ESP_LOGI(TAG, MACSTR " DONE 수신(세션 %s, next=%u/%u)", MAC2STR(mac), c ? (c->active ? "진행" : "완료") : "없음",
+    ESP_LOGD(TAG, MACSTR " DONE received (session %s, next=%u/%u)", MAC2STR(mac), c ? (c->active ? "active" : "done") : "none",
              c ? c->next_idx : 0, c ? c->total_chunks : 0);
     if (!c) return;
     if (!c->active) {
@@ -297,7 +297,7 @@ static void idle_timer_cb(void *arg)
     for (int i = 0; i < SR_SESSIONS; i++) {
         sr_cam_t *c = &s_cams[i];
         if (c->active && now - c->last_us > SR_IDLE_TIMEOUT_US) {
-            ESP_LOGW(TAG, MACSTR " SR 무응답 %llds — 중단(file_id=%u, %u/%u)", MAC2STR(c->mac),
+            ESP_LOGW(TAG, MACSTR " SR no response %llds - aborted (file_id=%u, %u/%u)", MAC2STR(c->mac),
                      (long long)(SR_IDLE_TIMEOUT_US / 1000000), (unsigned)c->file_id, c->next_idx, c->total_chunks);
             push_done(c, CAN_BRIDGE_SR_DONE_ABORTED);
             c->active = false;
@@ -313,7 +313,7 @@ void bridge_sr_init(void)
     s_lock = xSemaphoreCreateMutex();
     for (int i = 0; i < SR_SESSIONS; i++) {
         s_cams[i].hold = heap_caps_malloc((size_t)SR_HOLD * ESP_NOW_PHOTO_CHUNK_DATA_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s_cams[i].hold) ESP_LOGE(TAG, "SR 보관 버퍼[%d] 할당 실패", i);
+        if (!s_cams[i].hold) ESP_LOGE(TAG, "SR hold buffer[%d] alloc failed", i);
     }
     const esp_timer_create_args_t args = { .callback = idle_timer_cb, .name = "sr_idle" };
     esp_timer_create(&args, &s_idle_timer);

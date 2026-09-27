@@ -10,7 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-static const char *TAG = "esp_now_chsync";
+static const char *TAG = "LINK";
 
 /* 2026-08-23 — 공유 상태(s_scan_channel/s_synced/타이머들) 보호용 뮤텍스. esp_timer 콜백
  * (scan/rest)은 전부 esp_timer 전용 태스크 하나에서 순차 실행되지만,
@@ -161,7 +161,7 @@ static void send_advertise_on_current_channel(void)
 
     /* 채널 스캔 훅 — 원래 scan_timer_cb/enter_unsynced에 따로 있었는데, 이 함수가 항상
      * 그 직후에 불려서 사실상 같은 순간이므로 여기로 합침(사용자 지시) */
-    ESP_LOGI(TAG, "채널 스캔 (CH%d)", s_scan_channel);
+    ESP_LOGD(TAG, "Channel scan (CH%d)", s_scan_channel);
     if (s_on_channel_scanned) s_on_channel_scanned();
 
     esp_now_advertise_t msg = {
@@ -177,7 +177,7 @@ static void send_advertise_on_current_channel(void)
      * send_cb로 나중에 옴 — esp_now_channelsync_notify_advertise_send_done() 참고). 여기선
      * 큐잉 자체가 실패한 경우만 경고 로그 — "전송됨" 로그/소리는 절대 여기서 안 냄 */
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "ADVERTISE 전송 실패 (큐잉, CH%d): %s", s_scan_channel, esp_err_to_name(err));
+        ESP_LOGW(TAG, "ADVERTISE send failed (queue, CH%d): %s", s_scan_channel, esp_err_to_name(err));
     }
 }
 
@@ -268,7 +268,7 @@ static void scan_timer_cb(void *arg)
          * 주기 유지(사람이 기다릴 때 늦게 찾지 않도록) */
         int64_t rest_us = sweep_rest_us();
         if (rest_us != 0) {
-            ESP_LOGI(TAG, "SCAN 스윕 완료 — %lld us 휴식", (long long)rest_us);
+            ESP_LOGD(TAG, "SCAN sweep done - rest %lld us", (long long)rest_us);
             esp_timer_stop(s_scan_timer);
             if (s_rest_timer) esp_timer_start_once(s_rest_timer, rest_us);
         }
@@ -350,7 +350,7 @@ void esp_now_channelsync_on_recv(const esp_now_recv_info_t *info, uint8_t msg_ty
 
     if (!s_synced && msg_type == ESP_NOW_MSG_ADVERTISE_ACK) {
         if (len < (int)sizeof(esp_now_advertise_ack_t)) {
-            ESP_LOGW(TAG, "ADVERTISE_ACK 길이 부족(len=%d) — 무시", len);
+            ESP_LOGW(TAG, "ADVERTISE_ACK too short (len=%d) - ignored", len);
             goto done;
         }
         /* s_scan_channel을 그대로 믿으면 안 됨 — scan_timer_cb(별도 타이머 콜백)가 이 콜백과
@@ -379,7 +379,7 @@ void esp_now_channelsync_on_recv(const esp_now_recv_info_t *info, uint8_t msg_ty
 
         s_synced = true;
 
-        ESP_LOGI(TAG, "채널 동기화됨(CH%d)", s_scan_channel);
+        ESP_LOGI(TAG, "Channel synced (CH%d)", s_scan_channel);
         if (s_on_synced) s_on_synced(s_scan_channel, s_hub_mac);
         if (s_on_advertise_ack_recv) s_on_advertise_ack_recv();
         goto done;
@@ -401,7 +401,7 @@ void esp_now_channelsync_notify_paired(void)
      * "스캔 정지"만 함 */
     if (s_scan_timer) esp_timer_stop(s_scan_timer);
     if (s_rest_timer) esp_timer_stop(s_rest_timer);
-    ESP_LOGI(TAG, "페어링 완료 — 스캔 잠금(CH%d)", s_scan_channel);
+    ESP_LOGI(TAG, "Paired - scan locked (CH%d)", s_scan_channel);
     xSemaphoreGive(s_state_mutex);
 }
 
@@ -411,7 +411,7 @@ void esp_now_channelsync_notify_paired(void)
  * 부팅 시 한 번만 설정되고 이후 안 바뀜, 다른 공유 상태를 안 건드림 */
 void esp_now_channelsync_notify_advertise_send_done(void)
 {
-    ESP_LOGI(TAG, "ADVERTISE 전송됨(무선 송출 완료 확인)");
+    ESP_LOGD(TAG, "ADVERTISE sent (TX done confirmed)");
     if (s_on_advertise_sent) s_on_advertise_sent();
 }
 

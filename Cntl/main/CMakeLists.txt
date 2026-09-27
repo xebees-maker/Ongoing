@@ -6,6 +6,7 @@ idf_component_register(
         "ui_strings.c"
         "ui_main.c"
         "ui_log.c"
+        "dev_log.c"
         "node_hub.c"
         "photo_rx.c"
         "node_request.c"

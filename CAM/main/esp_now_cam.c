@@ -20,7 +20,15 @@
 #include "freertos/semphr.h"
 #include "status_led.h"
 
-static const char *TAG = "esp_now_cam";
+static const char *TAG = "LINK";
+/* 2026-09-27(로그 정리) — 반복될 수 있는 경고는 1초에 1번만(그 사이 건너뛴 횟수를 붙임) */
+#define LOG_W_RL(tag, fmt, ...) do { \
+    static TickType_t _rl_last; static uint32_t _rl_skip; TickType_t _rl_now = xTaskGetTickCount(); \
+    if (_rl_last == 0 || (_rl_now - _rl_last) >= pdMS_TO_TICKS(1000)) { \
+        ESP_LOGW(tag, fmt " (+%u skipped)", ##__VA_ARGS__, (unsigned)_rl_skip); _rl_last = _rl_now; _rl_skip = 0; \
+    } else { _rl_skip++; } } while (0)
+static const char *TAG_CASK = "CASK";
+static const char *TAG_PHOTO = "PHOTO";
 
 /* --- 페어링 --- 채널 추적(스캔/광고/생존확인)은 전부 esp_now_channelsync로 이관됨
  * (2026-08-04 재설계 — 예전엔 keepalive가 PAIR_ACK를 재사용하고 send_cb의 물리계층 ACK로
@@ -95,18 +103,18 @@ static void send_reply(const uint8_t *mac, const void *msg, size_t len)
 {
     esp_err_t err = esp_now_send(mac, (const uint8_t *)msg, len);
     if (err != ESP_ERR_ESPNOW_NO_MEM) {
-        if (err != ESP_OK) ESP_LOGW(TAG, "응답(type=%u) 송신 실패: %s", ((const uint8_t *)msg)[1], esp_err_to_name(err));
+        if (err != ESP_OK) ESP_LOGW(TAG, "Reply (type=%u) send failed: %s", ((const uint8_t *)msg)[1], esp_err_to_name(err));
         return;
     }
     if (!s_reply_q || len > REPLY_MAX_LEN) {
-        ESP_LOGW(TAG, "응답(type=%u) NO_MEM — 재전송 불가(버림)", ((const uint8_t *)msg)[1]);
+        ESP_LOGW(TAG, "Reply (type=%u) NO_MEM - cannot resend (dropped)", ((const uint8_t *)msg)[1]);
         return;
     }
     reply_item_t item;
     memcpy(item.mac, mac, 6);
     item.len = (uint8_t)len;
     memcpy(item.data, msg, len);
-    if (xQueueSend(s_reply_q, &item, 0) != pdTRUE) ESP_LOGW(TAG, "응답 재전송 큐 가득 — 버림");
+    if (xQueueSend(s_reply_q, &item, 0) != pdTRUE) ESP_LOGW(TAG, "Reply resend queue full - dropped");
 }
 
 static void reply_task(void *arg)
@@ -120,8 +128,8 @@ static void reply_task(void *arg)
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));   /* 송신 완료(자리 생김) 또는 20ms */
             err = esp_now_send(item.mac, item.data, item.len);
         }
-        if (err != ESP_OK) ESP_LOGW(TAG, "응답(type=%u) 재전송 실패: %s", item.data[1], esp_err_to_name(err));
-        else ESP_LOGI(TAG, "응답(type=%u) NO_MEM 뒤 재전송 성공", item.data[1]);
+        if (err != ESP_OK) ESP_LOGW(TAG, "Reply (type=%u) resend failed: %s", item.data[1], esp_err_to_name(err));
+        else ESP_LOGD(TAG, "Reply (type=%u) resent after NO_MEM", item.data[1]);
     }
 }
 /* 2026-08-10 도입 — photo_transfer_task가 뭔가 처리 중인지(2026-09-19: esp_now_cam_enqueue_
@@ -276,14 +284,14 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
             else vTaskDelay(pdMS_TO_TICKS(20));
         }
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "재전송 실패(buf): chunk[%u] -> %s(시도 %d회)", idx, esp_err_to_name(err), attempt + 1);
+            LOG_W_RL(TAG_PHOTO, "Resend failed (buf): chunk[%u] -> %s (%d tries)", idx, esp_err_to_name(err), attempt + 1);
         }
         vTaskDelay(pdMS_TO_TICKS(5));
         if ((i + 1) % CHUNK_QUEUE_DRAIN_INTERVAL == 0) {
             vTaskDelay(pdMS_TO_TICKS(CHUNK_QUEUE_DRAIN_MS));
         }
     }
-    ESP_LOGI(TAG, "NACK 재전송 완료(buf): file_id=%u %u개 청크", (unsigned)file_id, (unsigned)nack->missing_count);
+    ESP_LOGD(TAG_PHOTO, "NACK resend done (buf): file_id=%u %u chunks", (unsigned)file_id, (unsigned)nack->missing_count);
 }
 
 /* Selective Repeat(2026-08-05 도입, 30분 BMT에서 블라스트+끝에 NACK 방식보다 꼬리 지연이
@@ -306,10 +314,10 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
 static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, uint32_t file_id,
                                        cam_capture_kind_t kind, uint32_t my_generation)
 {
-    ESP_LOGI(TAG, "CKPT(SR-push): 시작 file_id=%u kind=%c len=%u", (unsigned)file_id, (char)kind, (unsigned)jpeg_len);
+    ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): start file_id=%u kind=%c len=%u", (unsigned)file_id, (char)kind, (unsigned)jpeg_len);
     uint16_t total_chunks = (uint16_t)((jpeg_len + ESP_NOW_PHOTO_CHUNK_DATA_LEN - 1) / ESP_NOW_PHOTO_CHUNK_DATA_LEN);
     uint32_t crc = esp_rom_crc32_le(0, jpeg_buf, jpeg_len);
-    ESP_LOGI(TAG, "CKPT(SR-push): CRC 계산 완료 crc=%08x total_chunks=%u", (unsigned)crc, total_chunks);
+    ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): CRC done crc=%08x total_chunks=%u", (unsigned)crc, total_chunks);
 
     esp_now_photo_meta_t meta = {
         .version      = ESP_NOW_LINK_VERSION,
@@ -325,9 +333,9 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
                                                    s_meta_ack_types, 1,
                                                    800, 3,
                                                    NULL, 0, NULL);
-    ESP_LOGI(TAG, "CKPT(SR-push): META_ACK: %s", esp_err_to_name(meta_err));
+    ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): META_ACK: %s", esp_err_to_name(meta_err));
     if (meta_err != ESP_OK) {
-        ESP_LOGW(TAG, "CKPT(SR-push): META 무응답 — 전송 포기(file_id=%u)", (unsigned)file_id);
+        ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): META no response - giving up (file_id=%u)", (unsigned)file_id);
         return false;
     }
 
@@ -338,7 +346,7 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
 
     for (uint16_t window_base = 0; window_base < total_chunks; ) {
         if (s_request_generation != my_generation) {
-            ESP_LOGI(TAG, "SR-push: 더 최신 요청으로 대체됨 — 중단(file_id=%u)", (unsigned)file_id);
+            ESP_LOGI(TAG_PHOTO, "SR-push: superseded by newer request - stopped (file_id=%u)", (unsigned)file_id);
             return false;
         }
         uint16_t window_count = total_chunks - window_base;
@@ -372,12 +380,12 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
                 total_sent_chunks += status_ack.missing_count;
             }
         } else {
-            ESP_LOGW(TAG, "SR-push: WINDOW_STATUS_ACK 무응답([%u,%u)) — 다음 윈도우로 진행(끝의 DONE/NACK가 안전망)",
+            ESP_LOGW(TAG_PHOTO, "SR-push: WINDOW_STATUS_ACK no response ([%u,%u)) - next window (final DONE/NACK is the safety net)",
                      window_base, window_end);
         }
         window_base = window_end;
     }
-    ESP_LOGI(TAG, "CKPT(SR-push): 윈도우 루프 완료 — 총 전송청크(재전송포함)=%u/%u, 상태확인 %u회",
+    ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): window loop done - chunks sent (incl. resend)=%u/%u, status checks %u",
              (unsigned)total_sent_chunks, (unsigned)total_chunks, (unsigned)status_requests);
 
     esp_now_photo_done_t done = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_DONE };
@@ -393,19 +401,19 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
                                                   800, 3,
                                                   &done_ack, sizeof(done_ack), &reply_len);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "CKPT(SR-push): DONE_ACK 무응답(라운드 %d) — 판단 보류", round + 1);
+            ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): DONE_ACK no response (round %d) - undecided", round + 1);
             return true;
         }
         if (done_ack.missing_count == 0) {
-            ESP_LOGI(TAG, "CKPT(SR-push): DONE_ACK 완료 확인(라운드 %d)", round + 1);
+            ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): DONE_ACK confirmed (round %d)", round + 1);
             return true;
         }
 
-        ESP_LOGI(TAG, "SR-push DONE_ACK: %u개 누락 — 재전송(라운드 %d/%d)", (unsigned)done_ack.missing_count, round + 1, s_nack_max_rounds);
+        ESP_LOGD(TAG_PHOTO, "SR-push DONE_ACK: %u missing - resending (round %d/%d)", (unsigned)done_ack.missing_count, round + 1, s_nack_max_rounds);
         resend_chunks_from_buffer(jpeg_buf, jpeg_len, file_id, &done_ack);
         if (s_request_generation != my_generation) return false;
     }
-    ESP_LOGW(TAG, "CKPT(SR-push): 재전송 라운드 소진");
+    ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): resend rounds exhausted");
     return true;
 }
 
@@ -416,7 +424,7 @@ static uint32_t s_push_file_id_counter = 0;
 bool esp_now_cam_push_captured_photo(const uint8_t *buf, size_t len, cam_capture_kind_t kind)
 {
     if (s_conn_state != CAM_CONN_PAIRED) {
-        ESP_LOGW(TAG, "촬영 푸시 스킵 — 페어링 안 됨");
+        ESP_LOGW(TAG_PHOTO, "Capture push skipped - not paired");
         return false;
     }
     uint32_t file_id = ++s_push_file_id_counter;
@@ -428,7 +436,7 @@ bool esp_now_cam_enqueue_auto_capture(void)
     if (!s_photo_request_queue) return false;
     cam_task_request_t item = { .kind = CAM_TASK_REQ_AUTO_CAPTURE };
     if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "AUTO_CAPTURE 큐잉 실패(큐 가득참, 직전 촬영 처리 중) — 이번 주기 건너뜀");
+        ESP_LOGW(TAG_PHOTO, "AUTO_CAPTURE queue failed (queue full, previous capture in progress) - skipping this cycle");
         return false;
     }
     /* 2026-09-19(주기촬영 재설계) — photo_transfer_task가 실제로 큐에서 꺼내기 *전*이라도
@@ -475,7 +483,7 @@ static void send_capture_status(uint8_t status)
                                               s_capture_ack_types, 1,
                                               800, 3,
                                               NULL, 0, NULL);
-    ESP_LOGI(TAG, "CAPTURE_STATUS(%u) 전송: %s", (unsigned)status, esp_err_to_name(err));
+    ESP_LOGD(TAG_PHOTO, "CAPTURE_STATUS(%u) sent: %s", (unsigned)status, esp_err_to_name(err));
 }
 
 /* 2026-09-26(설계 5단계) — recv_cb에서 reliable로 보낼 수 없는 캡처 상태(RECEIVED)를 대신 보내는 작은 태스크 */
@@ -503,10 +511,10 @@ static void photo_transfer_task(void *arg)
         if (item.kind == CAM_TASK_REQ_AUTO_CAPTURE) {
             if ((s_conn_state == CAM_CONN_PAIRED)) {
                 if (!cam_node_run_auto_capture()) {
-                    ESP_LOGW(TAG, "AUTO_CAPTURE: 촬영 또는 푸시 실패 — 다음 주기에 재시도");
+                    ESP_LOGW(TAG_PHOTO, "AUTO_CAPTURE: capture or push failed - retry next cycle");
                 }
             } else {
-                ESP_LOGW(TAG, "AUTO_CAPTURE: 페어링 안 됨 — 이번 주기 건너뜀");
+                ESP_LOGW(TAG_PHOTO, "AUTO_CAPTURE: not paired - skipping this cycle");
             }
             mark_transfer_idle();
             continue;
@@ -524,7 +532,7 @@ static void photo_transfer_task(void *arg)
          * 까지 큐로 넘겨서 처리한다. 접수 확인(RECEIVED)은 recv_cb에서 이미 보냈음.
          * cam_node_capture_now()가 촬영 후 곧바로 CNTL에 푸시까지 함(2026-09-18 SD 제거 재설계) */
         if (req.mode == PHOTO_REQUEST_MODE_CAPTURE_NOW) {
-            ESP_LOGI(TAG, "CAPTURE_NOW 요청 — 즉시 촬영 시작");
+            ESP_LOGI(TAG_PHOTO, "CAPTURE_NOW request - capturing now");
 
             /* 2026-08-21 핸드셰이크 재설계(사용자 설계) — RECEIVED 이후 아무 중간신호 없이
              * 촬영이 끝날 때까지 블로킹 대기하던 걸(4004 오탐의 근본원인) 단계별로 나눔.
@@ -534,7 +542,7 @@ static void photo_transfer_task(void *arg)
             if (needs_init) {
                 send_capture_status(CAM_CAPTURE_STATUS_INIT_NEEDED);
                 bool init_ok = cam_node_ensure_camera_ready();
-                ESP_LOGI(TAG, "CAPTURE_NOW: 카메라 초기화 %s", init_ok ? "완료" : "실패");
+                ESP_LOGI(TAG_PHOTO, "CAPTURE_NOW: camera init %s", init_ok ? "done" : "failed");
                 if (!init_ok) {
                     send_capture_status(CAM_CAPTURE_STATUS_FAILED);
                     mark_transfer_idle();
@@ -545,7 +553,7 @@ static void photo_transfer_task(void *arg)
 
             send_capture_status(CAM_CAPTURE_STATUS_CAPTURING);
             bool captured = cam_node_capture_now();
-            ESP_LOGI(TAG, "CAPTURE_NOW 촬영 결과: %s", captured ? "성공" : "실패");
+            ESP_LOGI(TAG_PHOTO, "CAPTURE_NOW result: %s", captured ? "OK" : "failed");
             /* 2026-08-05 Layer 1 재설계 — CAPTURE_STATUS_ACK를 기다리는 reliable_request로
              * 교체(3번 수동 반복 대신 레이어가 재시도). 이 최종 결과가 안 가면 Cntl은
              * 지금촬영이 끝났는지 몰라서 UI_ERR_CAPTURE_NORESPONSE(4004)로 빠짐(실기 확인) */
@@ -556,7 +564,7 @@ static void photo_transfer_task(void *arg)
 
         /* 2026-09-26 — CAPTURE_NOW 외 모드(ALL/LATEST/BY_ID 등, SD에 저장된 사진 전송)는 SD
          * 제거로 삭제. CAM엔 저장된 사진이 없으니 응답할 것도 없음 */
-        ESP_LOGW(TAG, "PHOTO_REQUEST mode=%d 지원 안 함(CAM에 저장된 사진 없음) — 무시", req.mode);
+        ESP_LOGW(TAG_PHOTO, "PHOTO_REQUEST mode=%d not supported (no photos stored on CAM) - ignored", req.mode);
         mark_transfer_idle();
     }
 }
@@ -603,7 +611,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 콘 PHOTO_REQUEST(브 대행 reliable)의 응답이기도 함 */
         if (req.mode == PHOTO_REQUEST_MODE_CAPTURE_NOW && s_status_q) {
             uint8_t st = CAM_CAPTURE_STATUS_RECEIVED;
-            if (xQueueSend(s_status_q, &st, 0) != pdTRUE) ESP_LOGW(TAG, "CAPTURE_STATUS(RECEIVED) 큐 가득 — 버림");
+            if (xQueueSend(s_status_q, &st, 0) != pdTRUE) ESP_LOGW(TAG_CASK, "CAPTURE_STATUS(RECEIVED) queue full - dropped");
         }
 
         /* 새 PHOTO_REQUEST 자체가 "이전 요청은 이제 필요없다"는 신호 — 세대번호를 먼저
@@ -630,7 +638,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             s_last_req_us = now_us;
             cam_task_request_t item = { .kind = CAM_TASK_REQ_PHOTO, .photo_req = req, .generation = s_request_generation };
             if (xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
-                ESP_LOGW(TAG, "PHOTO_REQUEST 큐 가득 — 이전 전송 아직 진행중, 무시");
+                ESP_LOGW(TAG_CASK, "PHOTO_REQUEST queue full - previous transfer in progress, ignored");
             }
         } else {
             /* 2026-08-04 — 예전엔 세대번호만 안 올리고 큐에는 그대로 다시 넣었음. ESP-NOW
@@ -638,7 +646,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * 신뢰성을 위해 같은 요청을 의도적으로 여러 번 보내는 경우(아래 photo_rx.c
              * 참고)에도 그대로 큐에 쌓여서 같은 사진/배치를 몇 번씩 중복 전송하고 있었음 —
              * 진짜 새 요청이 아니면 아예 무시 */
-            ESP_LOGI(TAG, "PHOTO_REQUEST 중복 수신(mode=%d param=%u) — 무시", req.mode, (unsigned)req.param);
+            ESP_LOGD(TAG_CASK, "PHOTO_REQUEST duplicate (mode=%d param=%u) - ignored", req.mode, (unsigned)req.param);
         }
         return;
     }
@@ -669,7 +677,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * cam_node.c 밖으로 안 내보내서, sensor_t 직접 접근은 그쪽에만 있음 — 지금은
              * wb_mode 저장/전달만 하고 실제 센서 적용은 TODO로 남김, 촬영주기/응답성이 이번
              * 세션의 핵심 스코프) */
-            ESP_LOGI(TAG, "CAM_CONFIG_SET: wb_mode=%u(적용 TODO) capture=%us response=%us",
+            ESP_LOGI(TAG_CASK, "CAM_CONFIG_SET: wb_mode=%u(TODO) capture=%us response=%us",
                      cfg.wb_mode, (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec);
         }
         esp_now_cam_config_ack_t ack = {
@@ -678,7 +686,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             .success  = 1,
         };
         send_reply(s_hub_mac, &ack, sizeof(ack));
-        ESP_LOGI(TAG, "CAM_CONFIG_ACK 전송");
+        ESP_LOGD(TAG_CASK, "CAM_CONFIG_ACK sent");
         return;
     }
 
@@ -692,10 +700,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     if (msg_type == ESP_NOW_MSG_UNPAIR) {
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_unpair_t)) return;
         if (memcmp(info->src_addr, s_hub_mac, sizeof(s_hub_mac)) != 0) return;
-        ESP_LOGI(TAG, "Cntl이 연결 해제함");
+        ESP_LOGI(TAG_CASK, "Unpaired by Cntl");
         s_conn_state = CAM_CONN_ORPHAN;
         s_wake_hub_known = false;  /* 이 CNTL로의 빠른 재연결 시도 자체를 그만둠 */
-        ESP_LOGI(TAG, "[STATE] -> %s (unpair)", conn_state_name(s_conn_state));
+        ESP_LOGI(TAG_CASK, "[STATE] -> %s (unpair)", conn_state_name(s_conn_state));
         set_led(LED_PATTERN_BLINK_FAST);
         esp_now_unpair_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_UNPAIR_ACK };
         send_reply(info->src_addr, &ack, sizeof(ack));
@@ -718,12 +726,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     if (msg_type == ESP_NOW_MSG_SLEEP_NOW) {
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_sleep_now_t)) return;
         const esp_now_sleep_now_t *msg = (const esp_now_sleep_now_t *)data;
-        ESP_LOGI(TAG, "SLEEP_NOW 수신(sleep_sec=%u)", (unsigned)msg->sleep_sec);
+        ESP_LOGD(TAG_CASK, "SLEEP_NOW received (sleep_sec=%u)", (unsigned)msg->sleep_sec);
         cam_speaker_notify(SPK_EVT_SLEEP_NOW);
         cam_node_note_sleep_now_requested(msg->sleep_sec);
         esp_now_sleep_now_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SLEEP_NOW_ACK };
         send_reply(s_hub_mac, &ack, sizeof(ack));
-        ESP_LOGI(TAG, "SLEEP_NOW_ACK 전송");
+        ESP_LOGD(TAG_CASK, "SLEEP_NOW_ACK sent");
         cam_speaker_notify(SPK_EVT_SLEEP_NOW_ACK);
         return;
     }
@@ -742,7 +750,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * 더 보낼 수 있는 창을 최소화함(peer 등록/레이트 설정 같은 뒤쪽 작업이 끝날 때까지
      * 기다릴 이유가 없음 — 어차피 hub_mac은 이미 확정됐으므로) */
     s_conn_state = CAM_CONN_PAIRED;
-    ESP_LOGI(TAG, "[STATE] -> %s (pair_request)", conn_state_name(s_conn_state));
+    ESP_LOGI(TAG_CASK, "[STATE] -> %s (pair_request)", conn_state_name(s_conn_state));
     esp_now_channelsync_notify_paired();
     cam_speaker_notify(SPK_EVT_PAIR_REQUESTED);
     set_led(LED_PATTERN_HEARTBEAT);
@@ -762,7 +770,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * 실패해도(ESP_ERR 리턴) 치명적이지 않음 — 기본 1Mbps로 계속 동작하니 CHECK 안 함 */
     esp_now_rate_config_t rate_cfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };
     esp_err_t rate_err = esp_now_set_peer_rate_config(s_hub_mac, &rate_cfg);
-    ESP_LOGI(TAG, "CKPT: 허브 피어 레이트 설정(MCS0/HT20) -> %s", esp_err_to_name(rate_err));
+    ESP_LOGD(TAG_CASK, "CKPT: hub peer rate set (MCS0/HT20) -> %s", esp_err_to_name(rate_err));
 
     esp_now_pair_ack_t ack = {
         .version  = ESP_NOW_LINK_VERSION,
@@ -774,7 +782,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * esp_now_cam_try_wake_hello_fast_path()의 동일 조치와 같은 이유 */
     cam_node_reset_sleep_now_state();
     send_reply(s_hub_mac, &ack, sizeof(ack));
-    ESP_LOGI(TAG, "페어링됨: hub " MACSTR ", PAIR_ACK 전송", MAC2STR(s_hub_mac));
+    ESP_LOGI(TAG_CASK, "Paired: hub " MACSTR ", PAIR_ACK sent", MAC2STR(s_hub_mac));
     cam_speaker_notify(SPK_EVT_PAIR_ACK);
 
     /* 2026-08-25(CASK 재설계) — "졸업": 지금 막 전체 스캔으로 찾아낸 이 CNTL을 다음 웨이크부터
@@ -855,7 +863,7 @@ bool esp_now_cam_checkin_during_transfer(void)
 {
     if (s_conn_state != CAM_CONN_PAIRED) return false;
     esp_err_t err = send_wake_hello(false);
-    if (err != ESP_OK) ESP_LOGW(TAG, "전송 중 체크인 무응답 — 무시(전송 계속)");
+    if (err != ESP_OK) ESP_LOGW(TAG, "Check-in during transfer: no response - ignored (transfer continues)");
     return err == ESP_OK;
 }
 
@@ -880,7 +888,7 @@ static bool esp_now_cam_try_wake_hello_fast_path(void)
 
     esp_err_t err = send_wake_hello(true);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "WAKE_HELLO 무응답(3회) — 폴백 스캔으로 전환");
+        ESP_LOGW(TAG, "WAKE_HELLO no response (3 tries) - switching to fallback scan");
         s_conn_state = CAM_CONN_ORPHAN;  /* 재시도 중이었다면(이미 PAIRED였을 수 있음) 정리 */
         ESP_LOGI(TAG, "[STATE] -> %s (wake_hello_fail)", conn_state_name(s_conn_state));
         set_led(LED_PATTERN_BLINK_FAST);  /* 센스와 동일 — 폴백 스캔(광고)으로 돌아감 */
@@ -926,7 +934,7 @@ bool esp_now_cam_reconnect(void)
 void esp_now_cam_init(void)
 {
     resolve_name();
-    ESP_LOGI(TAG, "노드 이름: %s (MAC " MACSTR ")", s_name, MAC2STR(s_mac));
+    ESP_LOGI(TAG, "Node name: %s (MAC " MACSTR ")", s_name, MAC2STR(s_mac));
 
     s_photo_request_queue = xQueueCreate(4, sizeof(cam_task_request_t));
     s_status_q = xQueueCreate(4, sizeof(uint8_t));

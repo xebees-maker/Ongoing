@@ -12,11 +12,11 @@
 #include "lvgl.h"
 #include "esp_log.h"
 
-static const char *TAG = "ui_font";
+static const char *TAG = "UI";
 
 esp_err_t ui_font_init(void)
 {
-    ESP_LOGI(TAG, "비트맵 폰트 모드(TTF 임시 비활성화) — 12/18/24/30pt 내장 Montserrat");
+    ESP_LOGI(TAG, "Bitmap font mode (TTF disabled for now) - built-in Montserrat 12/18/24/30pt");
     return ESP_OK;
 }
 

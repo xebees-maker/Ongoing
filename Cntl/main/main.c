@@ -19,6 +19,7 @@
 #include "node_request.h"
 #include "esp_lv_decoder.h"
 #include "ui_log.h"
+#include "dev_log.h"
 #include "rtc_sync.h"
 #include "device_config.h"
 #include "sd_storage.h"
@@ -33,7 +34,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static const char *TAG = "lvgl9_demo";
+static const char *TAG = "SYS";
 
 /* 2026-08-10 — 적응형 반응시간(node_hub.h)의 "마지막 사용자 조작" 시각을 통신 관련
  * 5개 함수뿐 아니라 화면 터치 전체로 넓힘(보류했다가 재활성화 — 통신 경로에 남아있던 버그를
@@ -500,7 +501,7 @@ void web_dashboard_start(void)
     if (s_started) return;
     s_started = true;
 
-    ui_log_add("Web: entered web_dashboard_start()");
+    ESP_LOGD(TAG, "Web: entered web_dashboard_start()");
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     /* 2026-08-21 — 5005(httpd_start 실패) 원인 확인됨: 부팅 이 시점엔 내부(비-PSRAM) DRAM이
      * 거의 바닥남(실기 확인: free internal=1419B) — HTTPD_DEFAULT_CONFIG()의 task_caps
@@ -527,21 +528,21 @@ void web_dashboard_start(void)
                        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         return;
     }
-    ui_log_add("Web: httpd_start SUCC");
+    ESP_LOGD(TAG, "Web: httpd_start SUCC");
     static const httpd_uri_t root_uri = { .uri = "/", .method = HTTP_GET, .handler = root_get_handler };
     esp_err_t root_err = httpd_register_uri_handler(server, &root_uri);
-    ui_log_add("Web: '/' register %s", root_err == ESP_OK ? "SUCC" : "FAIL");
+    ESP_LOGD(TAG, "Web: '/' register %s", root_err == ESP_OK ? "SUCC" : "FAIL");
     static const httpd_uri_t photo_uri = { .uri = "/photo", .method = HTTP_GET, .handler = photo_get_handler };
     esp_err_t photo_err = httpd_register_uri_handler(server, &photo_uri);
-    ui_log_add("Web: '/photo' register %s", photo_err == ESP_OK ? "SUCC" : "FAIL");
+    ESP_LOGD(TAG, "Web: '/photo' register %s", photo_err == ESP_OK ? "SUCC" : "FAIL");
     static const httpd_uri_t admin_upload_uri = { .uri = "/admin/upload", .method = HTTP_POST,
                                                     .handler = admin_upload_post_handler };
     esp_err_t admin_upload_err = httpd_register_uri_handler(server, &admin_upload_uri);
-    ui_log_add("Web: '/admin/upload' register %s", admin_upload_err == ESP_OK ? "SUCC" : "FAIL");
+    ESP_LOGD(TAG, "Web: '/admin/upload' register %s", admin_upload_err == ESP_OK ? "SUCC" : "FAIL");
     static const httpd_uri_t admin_download_uri = { .uri = "/admin/download", .method = HTTP_GET,
                                                       .handler = admin_download_get_handler };
     esp_err_t admin_download_err = httpd_register_uri_handler(server, &admin_download_uri);
-    ui_log_add("Web: '/admin/download' register %s", admin_download_err == ESP_OK ? "SUCC" : "FAIL");
+    ESP_LOGD(TAG, "Web: '/admin/download' register %s", admin_download_err == ESP_OK ? "SUCC" : "FAIL");
     static const httpd_uri_t api_devices_uri = { .uri = "/api/devices", .method = HTTP_GET,
                                                    .handler = api_devices_get_handler };
     httpd_register_uri_handler(server, &api_devices_uri);
@@ -567,7 +568,7 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_photo_fetch_uri = { .uri = "/api/photo_fetch", .method = HTTP_GET,
                                                        .handler = api_photo_fetch_get_handler };
     httpd_register_uri_handler(server, &api_photo_fetch_uri);
-    ui_log_add("Web: API endpoints registered");
+    ESP_LOGD(TAG, "Web: API endpoints registered");
     static const httpd_uri_t app_uri = { .uri = "/app", .method = HTTP_GET, .handler = app_get_handler };
     httpd_register_uri_handler(server, &app_uri);
     /* 2026-08-21 — 성공할 때도 같은 여유메모리를 남김(사용자 지시) — 실패할 때만 찍으면
@@ -577,7 +578,7 @@ void web_dashboard_start(void)
     unsigned free_heap = (unsigned)esp_get_free_heap_size();
     unsigned free_internal = (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGI(TAG, "Web dashboard (stub) started (free heap=%u, free internal=%u)", free_heap, free_internal);
-    ui_log_add("Web server started (heap=%uB, internal=%uB)", free_heap, free_internal);
+    ESP_LOGD(TAG, "Web server started (heap=%uB, internal=%uB)", free_heap, free_internal);
 }
 
 /* 2026-08-21 — 예전엔 app_main() 맨 끝에서 node_hub_init() 직후 곧바로 불렀는데, 그
@@ -589,7 +590,7 @@ void web_dashboard_start(void)
 static void ip_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg; (void)event_base; (void)event_data;
-    ui_log_add("IP_EVENT(id=%ld) received", (long)event_id);
+    ESP_LOGD(TAG, "IP_EVENT(id=%ld) received", (long)event_id);
     if (event_id == IP_EVENT_STA_GOT_IP) {
         web_dashboard_start();
     }
@@ -621,6 +622,8 @@ void app_main(void)
     /* LittleFS "assets" 파티션 마운트 — LCD/I2C와 무관해서 최대한 먼저: 언어 설정
      * (/assets/settings.bin)과 RTC 시드값(/assets/time_sync.txt) 둘 다 이 안에 있음 */
     ESP_ERROR_CHECK(fs_init());
+    /* 2026-09-27(로그 정리) — 개발 로그: ESP_LOG 가로채기 시작 + 저장 문턱 적용(설정은 /assets/devlog.cfg라 fs 뒤) */
+    dev_log_init();
 
     /* 영구 저장 설정값(언어 등) 복원 — UI 생성(ui_init) 전에 해야 라벨이 처음부터
      * 올바른 언어로 뜸 */
@@ -657,11 +660,11 @@ void app_main(void)
     size_t heap_before_sd = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     esp_err_t sd_err = sd_storage_init();
     size_t heap_after_sd = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGW(TAG, "MEMDIAG SD카드 마운트 비용: internal %u -> %u (소모 %d bytes)",
+    ESP_LOGD(TAG, "MEMDIAG SD mount cost: internal %u -> %u (used %d bytes)",
              (unsigned)heap_before_sd, (unsigned)heap_after_sd,
              (int)heap_before_sd - (int)heap_after_sd);
     if (sd_err != ESP_OK) {
-        ESP_LOGW(TAG, "SD카드 마운트 실패(%s) — 통계 저장 기능 없이 계속 진행", esp_err_to_name(sd_err));
+        ESP_LOGW(TAG, "SD mount failed (%s) - continuing without stats storage", esp_err_to_name(sd_err));
         ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "SD card mount failed: %s", esp_err_to_name(sd_err));
     } else {
         ui_log_add("SD card mounted OK");

@@ -21,7 +21,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-static const char *TAG = "node_hub";
+static const char *TAG = "CASK";
+static const char *TAG_LINK = "LINK";
 
 
 static node_hub_node_t s_nodes[NODE_HUB_MAX_NODES];
@@ -99,7 +100,7 @@ static void send_cask_sleep_now(node_hub_node_t *n)
     }
     uint32_t sleep_sec = (quiet_ms < threshold_ms || transacting) ? 0 : base_sleep_sec;
 
-    ESP_LOGI(TAG, "SLEEP_NOW -> %s: sleep_sec=%u(조용%lums/임계값%lums/통신중=%d)",
+    ESP_LOGD(TAG, "SLEEP_NOW -> %s: sleep_sec=%u (quiet %lums/threshold %lums/busy=%d)",
              n->name, (unsigned)sleep_sec, (unsigned long)quiet_ms, (unsigned long)threshold_ms, (int)transacting);
 
     esp_now_sleep_now_t msg = {
@@ -135,7 +136,7 @@ static void liveness_sweep_cb(void *arg)
         uint32_t timeout_ms = node_hub_node_timeout_ms(n);  /* 2026-09-05 — 노드별(특히
                                                                     Sens 자체 샘플주기) 기준으로 */
         if (n->conn_state == NODE_CONN_PAIRED && now_ms - n->last_seen_ms > timeout_ms) {
-            ESP_LOGW(TAG, "%s 무응답(%us 이상) — PAIRED에서 강등", n->name, (unsigned)(timeout_ms / 1000));
+            ESP_LOGW(TAG_LINK, "%s no response (%us+) - demoted from PAIRED", n->name, (unsigned)(timeout_ms / 1000));
             n->conn_state = NODE_CONN_ORPHAN;
         }
     }
@@ -182,7 +183,7 @@ void node_hub_queue_action(const uint8_t *mac, const void *req, size_t req_len,
                                uint32_t timeout_ms, int max_attempts, const char *what)
 {
     if (req_len > NODE_HUB_PENDING_ACTION_MAX_LEN) {
-        ESP_LOGE(TAG, "액션 큐잉 실패(%s) — 페이로드 %u > %u", what, (unsigned)req_len,
+        ESP_LOGE(TAG, "Action queue failed (%s) - payload %u > %u", what, (unsigned)req_len,
                  (unsigned)NODE_HUB_PENDING_ACTION_MAX_LEN);
         return;
     }
@@ -190,7 +191,7 @@ void node_hub_queue_action(const uint8_t *mac, const void *req, size_t req_len,
     node_hub_node_t *n = find_or_add_node(mac);
     if (!n) {
         xSemaphoreGive(s_nodes_mutex);
-        ESP_LOGW(TAG, "액션 큐잉 실패(%s) — 노드 테이블 가득", what);
+        ESP_LOGW(TAG, "Action queue failed (%s) - node table full", what);
         return;
     }
     /* 링버퍼 가득 — 가장 오래된(head) 항목을 밀어내고 새로 넣음(무한 적체 방지, 사용자
@@ -202,7 +203,7 @@ void node_hub_queue_action(const uint8_t *mac, const void *req, size_t req_len,
     } else {
         idx = n->action_queue_head;
         n->action_queue_head = (n->action_queue_head + 1) % NODE_HUB_PENDING_ACTION_QUEUE_DEPTH;
-        ESP_LOGW(TAG, "%s 액션 큐 가득 — 가장 오래된 항목 버림", n->name);
+        ESP_LOGW(TAG, "%s action queue full - dropped oldest", n->name);
     }
     node_hub_pending_action_t *slot = &n->action_queue[idx];
     memcpy(slot->req, req, req_len);
@@ -213,7 +214,7 @@ void node_hub_queue_action(const uint8_t *mac, const void *req, size_t req_len,
     slot->max_attempts    = max_attempts;
     slot->what            = what;
     xSemaphoreGive(s_nodes_mutex);
-    ESP_LOGI(TAG, "액션 큐잉됨(%s) — %s 대기열 %d개", what, n->name, n->action_queue_count);
+    ESP_LOGD(TAG, "Action queued (%s) - %s queue %d", what, n->name, n->action_queue_count);
 }
 
 /* CASK "할일" 단계에서 호출(s_nodes_mutex를 이미 쥔 상태로 불림) — 있으면 하나 꺼내고 true,
@@ -269,7 +270,7 @@ static void push_cam_config_to(const uint8_t *mac, node_hub_node_t *locked_node)
         xSemaphoreGive(s_nodes_mutex);
     }
     node_request_enqueue(mac, &cfg, sizeof(cfg), s_config_ack_types, 1, 800, 3, "CAM config");
-    ESP_LOGI(TAG, "CAM_CONFIG_SET -> 촬영주기=%us 응답성=%us AGC=%d AEC=%d XCLK=%uMHz NACK라운드=%u 큐잉됨",
+    ESP_LOGD(TAG, "CAM_CONFIG_SET -> capture=%us response=%us AGC=%d AEC=%d XCLK=%uMHz NACKrounds=%u queued",
              (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec,
              (int)cfg.agc_enable, (int)cfg.aec_enable, (unsigned)cfg.xclk_mhz,
              (unsigned)cfg.nack_max_rounds);
@@ -292,7 +293,7 @@ static void push_sens_config_to(const uint8_t *mac)
     };
     static const uint8_t s_sens_config_ack_types[] = { ESP_NOW_MSG_SENS_CONFIG_ACK };
     node_request_enqueue(mac, &cfg, sizeof(cfg), s_sens_config_ack_types, 1, 800, 3, "Sens config");
-    ESP_LOGI(TAG, "SENS_CONFIG_SET -> 샘플링주기=%us 큐잉됨", (unsigned)cfg.sample_interval_sec);
+    ESP_LOGD(TAG, "SENS_CONFIG_SET -> sample=%us queued", (unsigned)cfg.sample_interval_sec);
 }
 
 /* recv_cb(ADVERTISE 핸들러)가 먼저 쓰고 실제 정의는 파일 뒤쪽(node_hub_request_pair
@@ -339,7 +340,7 @@ void node_hub_on_bridge_reset(void)
     }
     xSemaphoreGive(s_nodes_mutex);
     photo_rx_reset_sessions();
-    ESP_LOGW(TAG, "브 재부팅 — 노드 상태 초기화(노드 %d개)", s_node_count);
+    ESP_LOGW(TAG, "Bridge rebooted - node state reset (%d nodes)", s_node_count);
 }
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
@@ -375,7 +376,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         node_hub_node_t *n = find_or_add_node(info->src_addr);
         if (!n) {
             xSemaphoreGive(s_nodes_mutex);
-            ESP_LOGW(TAG, "노드 테이블 가득 — %s 무시", msg->name);
+            ESP_LOGW(TAG, "Node table full - %s ignored", msg->name);
             return;
         }
         /* desync 감지/복구(2026-08-04, 실기에서 발견) — ADVERTISE는 노드가 페어링 전(광고/
@@ -416,7 +417,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         memcpy(mac_copy, info->src_addr, sizeof(mac_copy));
         xSemaphoreGive(s_nodes_mutex);
         if (was_paired) {
-            ESP_LOGW(TAG, "%s가 재광고 시작 — 페어링 끊김으로 판단(desync 복구)", name_copy);
+            ESP_LOGW(TAG, "%s advertising again - treating as unpaired (desync recovery)", name_copy);
         }
         /* 자동 재페어링(2026-08-10, CAM Deep Sleep 전환) — CAM은 매 딥슬립 웨이크마다 완전
          * 재부팅(상태 없음)되므로 ADVERTISE 수신이 곧 "새 사이클 시작"임. was_paired(방금
@@ -525,7 +526,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             size_t m0 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
             fire_connect_event();  /* 2026-09-04 — 웹/앱 대기자 통지 */
             size_t m1 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-            ESP_LOGI(TAG, "페어링 완료: %s", name_copy);
+            ESP_LOGI(TAG, "Paired: %s", name_copy);
             /* 2026-09-08(사용자 설계 — 연결 기능 주화면 이관) — 이 mac을 "알고 있는 장치"로
              * 영구 기록(이미 있으면 손 안 댐, alias 보존) — auto_connect_known 판단 근거이자
              * Alias 슬롯 그 자체 */
@@ -555,7 +556,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 push_sens_config_to(info->src_addr);
             }
             size_t m4 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-            ESP_LOGW(TAG, "MEMDIAG pairing(%s): m0=%u fire_connect_event->%u(d=%d) "
+            ESP_LOGD(TAG, "MEMDIAG pairing(%s): m0=%u fire_connect_event->%u(d=%d) "
                      "mark_known->%u(d=%d) note_user_action->%u(d=%d) push_config->%u(d=%d)",
                      name_copy, (unsigned)m0, (unsigned)m1, (int)m0 - (int)m1,
                      (unsigned)m2, (int)m1 - (int)m2, (unsigned)m3, (int)m2 - (int)m3,
@@ -584,7 +585,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             xSemaphoreGive(s_nodes_mutex);
             esp_now_wake_hello_ack_t dup_ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_WAKE_HELLO_ACK };
             can_bridge_relay_send(info->src_addr, (const uint8_t *)&dup_ack, sizeof(dup_ack));
-            ESP_LOGI(TAG, "WAKE_HELLO 재전송 <- %s — ACK만 다시 보냄(CASK 생략)", dup_name);
+            ESP_LOGD(TAG, "WAKE_HELLO resend <- %s - ACK only (CASK skipped)", dup_name);
             return;
         }
         n->last_seen_ms    = now_ms;
@@ -602,7 +603,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         n->battery_adc_raw = hello->battery_adc_raw;
         n->battery_mv      = hello->battery_mv;
         n->battery_pct     = (uint8_t)battery_mv_to_pct(hello->battery_mv);
-        ESP_LOGI(TAG, "WAKE_HELLO <- %s: 사이클#%lu wake=%u batt_raw=%u batt_mv=%u batt_pct=%u",
+        ESP_LOGD(TAG, "WAKE_HELLO <- %s: cycle#%lu wake=%u batt_raw=%u batt_mv=%u batt_pct=%u",
                  n->name, (unsigned long)n->ds_cycle_count, (unsigned)hello->wake_reason,
                  (unsigned)n->battery_adc_raw, (unsigned)n->battery_mv, (unsigned)n->battery_pct);
 
@@ -633,7 +634,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             node_request_enqueue(info->src_addr, action.req, action.req_len,
                                 action.ack_types, action.ack_types_count,
                                 action.timeout_ms, action.max_attempts, action.what);
-            ESP_LOGI(TAG, "CASK 할일 -> %s: %s (대기열 %d개 남음)", n->name, action.what, n->action_queue_count);
+            ESP_LOGD(TAG, "CASK task -> %s: %s (%d left)", n->name, action.what, n->action_queue_count);
         } else {
             esp_now_cask_work_none_t none = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE };
             static const uint8_t s_work_none_ack_types[] = { ESP_NOW_MSG_CASK_WORK_NONE_ACK };
@@ -662,7 +663,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             xSemaphoreGive(s_nodes_mutex);
             esp_now_wake_hello_sens_ack_t dup_ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_WAKE_HELLO_SENS_ACK };
             can_bridge_relay_send(info->src_addr, (const uint8_t *)&dup_ack, sizeof(dup_ack));
-            ESP_LOGI(TAG, "WAKE_HELLO_SENS 재전송 <- %s — ACK만 다시 보냄(CASK 생략)", dup_name);
+            ESP_LOGD(TAG, "WAKE_HELLO_SENS resend <- %s - ACK only (CASK skipped)", dup_name);
             return;
         }
         n->last_seen_ms    = now_ms;
@@ -731,10 +732,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             }
         }
 
-        ESP_LOGI(TAG, "WAKE_HELLO_SENS <- %s: 사이클#%lu wake=%u batt_mv=%u batt_pct=%u 채널#%u 측정ID=%lu%s",
+        ESP_LOGD(TAG, "WAKE_HELLO_SENS <- %s: cycle#%lu wake=%u batt_mv=%u batt_pct=%u ch#%u measID=%lu%s",
                  n->name, (unsigned long)n->ds_cycle_count, (unsigned)hello->wake_reason,
                  (unsigned)n->battery_mv, (unsigned)n->battery_pct, (unsigned)n->chan_count,
-                 (unsigned long)hello->measurement_id, is_new_measurement ? "" : "(중복)");
+                 (unsigned long)hello->measurement_id, is_new_measurement ? "" : " (dup)");
 
         add_peer_if_needed(info->src_addr);
         esp_now_wake_hello_sens_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_WAKE_HELLO_SENS_ACK };
@@ -750,7 +751,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             node_request_enqueue(info->src_addr, action.req, action.req_len,
                                 action.ack_types, action.ack_types_count,
                                 action.timeout_ms, action.max_attempts, action.what);
-            ESP_LOGI(TAG, "CASK 할일 -> %s: %s (대기열 %d개 남음)", n->name, action.what, n->action_queue_count);
+            ESP_LOGD(TAG, "CASK task -> %s: %s (%d left)", n->name, action.what, n->action_queue_count);
         } else {
             esp_now_cask_work_none_t none = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE };
             static const uint8_t s_work_none_ack_types[] = { ESP_NOW_MSG_CASK_WORK_NONE_ACK };
@@ -819,7 +820,7 @@ void node_hub_init(void)
     esp_timer_create(&sweep_args, &s_liveness_sweep_timer);
     esp_timer_start_periodic(s_liveness_sweep_timer, LIVENESS_SWEEP_INTERVAL_US);
 
-    ESP_LOGI(TAG, "ESP-NOW 허브 시작됨 (STA)");
+    ESP_LOGI(TAG_LINK, "ESP-NOW hub started (STA)");
 }
 
 
@@ -956,7 +957,7 @@ static void node_hub_pair(const uint8_t *mac)
      * 죽는시간(~4.8초)보다 이미 크므로 별도로 안 넣어도 안전마진 안에 들어옴 */
     node_request_enqueue(mac, &req, sizeof(req), s_pair_ack_types, 1,
                         PAIR_REQUEST_RETRY_TIMEOUT_MS, PAIR_REQUEST_RETRY_ATTEMPTS, "Pairing");
-    ESP_LOGI(TAG, "PAIR_REQUEST -> %s 큐잉됨", name_copy);
+    ESP_LOGD(TAG_LINK, "PAIR_REQUEST -> %s queued", name_copy);
 }
 
 /* 2026-08-24(사용자 지시) — "연결" 버튼의 새 진입점. 여기선 아무것도 안 보내고 플래그만
@@ -976,7 +977,7 @@ void node_hub_request_pair(const uint8_t *mac)
     }
     xSemaphoreGive(s_nodes_mutex);
     if (ok) {
-        ESP_LOGI(TAG, "%s 연결 요청 — 다음 ADVERTISE 수신 시 PAIR_REQUEST 전송 예정", name_copy);
+        ESP_LOGI(TAG_LINK, "%s connect requested - PAIR_REQUEST on next ADVERTISE", name_copy);
     }
 }
 
@@ -1063,7 +1064,7 @@ void node_hub_unpair(const uint8_t *mac)
     };
     static const uint8_t s_unpair_ack_types[] = { ESP_NOW_MSG_UNPAIR_ACK };
     node_request_enqueue(mac, &msg, sizeof(msg), s_unpair_ack_types, 1, 300, 3, "UNPAIR");
-    ESP_LOGI(TAG, "연결 해제: %s (UNPAIR 큐잉됨)", name_copy);
+    ESP_LOGI(TAG_LINK, "Disconnect: %s (UNPAIR queued)", name_copy);
 }
 
 void node_hub_set_connect_event_cb(node_hub_event_cb_t cb)

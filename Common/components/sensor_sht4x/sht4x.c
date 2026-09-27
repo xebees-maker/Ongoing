@@ -9,7 +9,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 
-static const char *TAG = "sht4x";
+static const char *TAG = "SENS";
 
 #define CMD_MEASURE_HIGH_PRECISION  0xFD
 #define I2C_TIMEOUT_MS              1000
@@ -67,7 +67,7 @@ bool sht4x_read(float *temperature, float *humidity)
     uint8_t cmd = CMD_MEASURE_HIGH_PRECISION;
     esp_err_t err = i2c_master_transmit(s_dev, &cmd, sizeof(cmd), I2C_TIMEOUT_MS);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "measure cmd 전송 실패: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "measure cmd send failed: %s", esp_err_to_name(err));
         return false;
     }
 
@@ -76,12 +76,12 @@ bool sht4x_read(float *temperature, float *humidity)
     uint8_t resp[6] = { 0 };
     err = i2c_master_receive(s_dev, resp, sizeof(resp), I2C_TIMEOUT_MS);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "측정값 수신 실패: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "Measurement receive failed: %s", esp_err_to_name(err));
         return false;
     }
 
     if (crc8(&resp[0], 2) != resp[2] || crc8(&resp[3], 2) != resp[5]) {
-        ESP_LOGW(TAG, "CRC 불일치");
+        ESP_LOGW(TAG, "CRC mismatch");
         return false;
     }
 

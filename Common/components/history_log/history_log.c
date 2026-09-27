@@ -11,7 +11,7 @@
 #include "nvs.h"
 #include "esp_log.h"
 
-static const char *TAG = "history_log";
+static const char *TAG = "SENS";
 
 #define NVS_NAMESPACE  "hist"
 
@@ -81,14 +81,14 @@ bool history_log_init(void)
 {
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &s_nvs);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_open 실패: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "nvs_open failed: %s", esp_err_to_name(err));
         return false;
     }
 
     size_t sz = sizeof(s_meta);
     err = nvs_get_blob(s_nvs, "meta", &s_meta, &sz);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGI(TAG, "기존 데이터 없음 — 새 링버퍼로 초기화");
+        ESP_LOGI(TAG, "No existing data - new ring buffer");
         rings_reset();
         s_meta.last_write_epoch = 0;
         s_meta.head             = HISTORY_TICK_CAPACITY - 1;  /* 첫 커밋이 인덱스 0에 기록되도록 */
@@ -97,27 +97,27 @@ bool history_log_init(void)
         stage_reset();
         esp_err_t werr = persist_all();
         if (werr != ESP_OK) {
-            ESP_LOGE(TAG, "초기 데이터 기록 실패: %s", esp_err_to_name(werr));
+            ESP_LOGE(TAG, "Initial data write failed: %s", esp_err_to_name(werr));
         }
     } else if (err == ESP_OK) {
         for (int m = 0; m < HISTORY_METRIC_COUNT; m++) {
             size_t rsz = sizeof(s_ring[m]);
             esp_err_t rerr = nvs_get_blob(s_nvs, ring_key((history_metric_t)m), s_ring[m], &rsz);
             if (rerr != ESP_OK) {
-                ESP_LOGW(TAG, "%s 로드 실패(%s) — 해당 지표 초기화", ring_key((history_metric_t)m), esp_err_to_name(rerr));
+                ESP_LOGW(TAG, "%s load failed (%s) - metric reset", ring_key((history_metric_t)m), esp_err_to_name(rerr));
                 for (int i = 0; i < HISTORY_TICK_CAPACITY; i++) s_ring[m][i] = INT16_MIN;
             }
         }
         if (s_meta.magic_tick_sec != HISTORY_TICK_SEC) {
-            ESP_LOGW(TAG, "HISTORY_TICK_SEC 변경 감지(%u -> %u) — 기존 샘플의 시각은 부정확할 수 있음",
+            ESP_LOGW(TAG, "HISTORY_TICK_SEC changed (%u -> %u) - existing sample times may be off",
                      (unsigned)s_meta.magic_tick_sec, (unsigned)HISTORY_TICK_SEC);
             s_meta.magic_tick_sec = HISTORY_TICK_SEC;
         }
         stage_reset();
-        ESP_LOGI(TAG, "기존 데이터 로드 완료 — total_ticks=%u head=%u last_write_epoch=%u",
+        ESP_LOGI(TAG, "Existing data loaded - total_ticks=%u head=%u last_write_epoch=%u",
                  (unsigned)s_meta.total_ticks, (unsigned)s_meta.head, (unsigned)s_meta.last_write_epoch);
     } else {
-        ESP_LOGE(TAG, "meta 로드 실패(%s) — 새 링버퍼로 초기화", esp_err_to_name(err));
+        ESP_LOGE(TAG, "meta load failed (%s) - new ring buffer", esp_err_to_name(err));
         rings_reset();
         s_meta.last_write_epoch = 0;
         s_meta.head             = HISTORY_TICK_CAPACITY - 1;
@@ -140,7 +140,7 @@ void history_log_set_time(time_t now)
 {
     struct timeval tv = { .tv_sec = now, .tv_usec = 0 };
     settimeofday(&tv, NULL);
-    ESP_LOGI(TAG, "벽시계 시각 주입: epoch=%lld", (long long)now);
+    ESP_LOGI(TAG, "Wall clock set: epoch=%lld", (long long)now);
 }
 
 time_t history_log_now(void)
@@ -168,9 +168,9 @@ void history_log_tick_commit(void)
 
     esp_err_t err = persist_all();
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "틱 커밋 영속화 실패: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "Tick commit persist failed: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "틱 커밋: head=%u total_ticks=%u", (unsigned)s_meta.head, (unsigned)s_meta.total_ticks);
+        ESP_LOGD(TAG, "Tick commit: head=%u total_ticks=%u", (unsigned)s_meta.head, (unsigned)s_meta.total_ticks);
     }
 
     stage_reset();

@@ -17,7 +17,7 @@
 #include "freertos/queue.h"
 #include <string.h>
 
-static const char *TAG = "bridge_esp_now";
+static const char *TAG = "LINK";
 
 /* ESP-NOW v2 최대 프레임 — can_link.c의 DATA 재조립 버퍼와 맞춤(1536 = 8+1470 여유) */
 #define BRIDGE_ESPNOW_MAX_FRAME 1470
@@ -65,7 +65,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         const esp_now_advertise_t *adv = (const esp_now_advertise_t *)data;
         if (adv->channel != s_own_channel) {
             s_adjacent_adv_dropped++;
-            ESP_LOGD(TAG, "이웃 채널 광고 버림(광고 CH%u, 브 CH%u, 누적 %u)",
+            ESP_LOGD(TAG, "Neighbor-channel advertise dropped (adv CH%u, bridge CH%u, total %u)",
                      (unsigned)adv->channel, (unsigned)s_own_channel, (unsigned)s_adjacent_adv_dropped);
             return;
         }
@@ -98,7 +98,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     can_bridge_queue_get_stats(&path->q, &count, &hwm);
     if (hwm >= path->hwm_logged + 16) {
         path->hwm_logged = hwm - (hwm % 16);
-        ESP_LOGW(TAG, "%s 수신 큐 적체 최고치 %u개(현재 %u개)", path->name, (unsigned)hwm, (unsigned)count);
+        ESP_LOGW(TAG, "%s RX queue peak %u (now %u)", path->name, (unsigned)hwm, (unsigned)count);
     }
 }
 
@@ -182,7 +182,7 @@ static void add_peer_if_needed(const uint8_t mac[6])
     peer.encrypt = false;
     esp_err_t err = esp_now_add_peer(&peer);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "add_peer 실패(mac=%02X%02X%02X%02X%02X%02X): %s",
+        ESP_LOGW(TAG, "add_peer failed (mac=%02X%02X%02X%02X%02X%02X): %s",
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], esp_err_to_name(err));
         return;
     }
@@ -191,7 +191,7 @@ static void add_peer_if_needed(const uint8_t mac[6])
      * (esp_now_cam.c 동일 설정) */
     esp_now_rate_config_t rate_cfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };
     esp_err_t rate_err = esp_now_set_peer_rate_config(mac, &rate_cfg);
-    ESP_LOGI(TAG, "피어 레이트 설정(MCS0/HT20) -> %s", esp_err_to_name(rate_err));
+    ESP_LOGD(TAG, "Peer rate set (MCS0/HT20) -> %s", esp_err_to_name(rate_err));
 }
 
 void bridge_esp_now_ensure_peer(const uint8_t mac[6])
@@ -234,15 +234,15 @@ void bridge_esp_now_init(void)
     wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
     if (esp_wifi_get_channel(&primary, &second) == ESP_OK) {
         s_own_channel = primary;
-        ESP_LOGI(TAG, "브 채널 CH%u — 다른 채널에서 보낸 광고는 버림(이웃 채널 수신 필터)", (unsigned)primary);
+        ESP_LOGI(TAG, "Bridge channel CH%u - advertises from other channels dropped (neighbor-channel filter)", (unsigned)primary);
     } else {
-        ESP_LOGW(TAG, "채널 조회 실패 — 이웃 채널 광고 필터 끔");
+        ESP_LOGW(TAG, "Channel query failed - neighbor-channel filter off");
     }
 
     s_rx_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + BRIDGE_ESPNOW_MAX_FRAME, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_rx_buf) s_rx_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_APP_HEADER_LEN + BRIDGE_ESPNOW_MAX_FRAME, MALLOC_CAP_8BIT);
     if (!s_rx_buf) {
-        ESP_LOGE(TAG, "수신 조립 버퍼 할당 실패 — ESP-NOW 수신 릴레이 안 함");
+        ESP_LOGE(TAG, "RX assembly buffer alloc failed - ESP-NOW RX relay disabled");
     }
 
     /* 순서 주의 — 큐 초기화 + 릴레이 태스크 생성/알림 등록을 recv_cb 등록보다 먼저 해야 함
@@ -268,5 +268,5 @@ void bridge_esp_now_init(void)
     ESP_ERROR_CHECK(esp_now_register_send_cb(send_cb));
 
     s_ready = true;
-    ESP_LOGI(TAG, "브 ESP-NOW 라디오 소유 시작됨");
+    ESP_LOGI(TAG, "Bridge ESP-NOW radio owner started");
 }

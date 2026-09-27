@@ -13,7 +13,7 @@
 /* 2026-09-26 — node_hub.c(구 esp_now_hub.c)에서 분리(사용자 지시: ESP-NOW/노드 관리와 무관한
  * Wi-Fi 네트워크 기능이라 별도 파일·이름으로). 코드는 옮기기만 하고 동작은 그대로 —
  * STA 연결/재연결, "찾기" 팝업의 실시간 접속 시도, SoftAP 모드, 웹 대시보드 URL용 IP */
-static const char *TAG = "wifi_sta";
+static const char *TAG = "SYS";
 
 /* Cntl 실제 sdkconfig 기준 STA 모드+SSID/PW — 이 PC(원래 PC)의 네트워크로 복원
  * (다른 PC 세션에서 그쪽 네트워크 hkhome으로 바뀌어 커밋됨 — 2026-08-08 원복) */
@@ -98,7 +98,7 @@ static void sta_boot_giveup_timer_cb(void *arg)
 {
     (void)arg;
     if (!s_sta_ever_connected) {
-        ESP_LOGW(TAG, "부팅 후 25초간 저장된 AP를 못 찾음 — 자동 재연결 중단, AP 없음 표시");
+        ESP_LOGW(TAG, "Saved AP not found for 25s after boot - auto reconnect stopped, showing no AP");
         s_sta_boot_giveup = true;
     }
 }
@@ -172,7 +172,7 @@ static void sta_test_finish(bool success)
 static void sta_test_timeout_cb(void *arg)
 {
     (void)arg;
-    ESP_LOGW(TAG, "STA 접속 시도 타임아웃");
+    ESP_LOGW(TAG, "STA connect timeout");
     sta_test_finish(false);
 }
 
@@ -244,7 +244,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             if (!s_sta_reconnect_paused) sta_do_connect();
         } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
             wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
-            ESP_LOGW(TAG, "WiFi 연결 끊김(reason=%d, rssi=%d) — 재시도",
+            ESP_LOGW(TAG, "WiFi disconnected (reason=%d, rssi=%d) - retrying",
                      disc ? disc->reason : -1, disc ? disc->rssi : 0);
             s_own_ip_str[0] = '\0';  /* IP 무효화 — 재연결해서 새 IP 받을 때까지 URL 숨김 */
             s_sta_conn_in_flight = false;  /* 진짜 끊김 확인 — "연결/시도 중" 추적 해제 */
@@ -275,7 +275,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
             if (!s_sta_reconnect_paused && !s_sta_boot_giveup) sta_do_connect();
         } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
             ip_event_got_ip_t *evt = (ip_event_got_ip_t *)event_data;
-            ESP_LOGI(TAG, "IP 받음: " IPSTR, IP2STR(&evt->ip_info.ip));
+            ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&evt->ip_info.ip));
             /* 2026-08-21 — 상황판 요약에 웹 대시보드 접속 URL을 보여주기 위해 저장(사용자 지시) */
             snprintf(s_own_ip_str, sizeof(s_own_ip_str), IPSTR, IP2STR(&evt->ip_info.ip));
             s_sta_ever_connected = true;
@@ -286,10 +286,10 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     } else {
         if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
             wifi_event_ap_staconnected_t *evt = (wifi_event_ap_staconnected_t *)event_data;
-            ESP_LOGI(TAG, "AP: 클라이언트 접속 " MACSTR, MAC2STR(evt->mac));
+            ESP_LOGI(TAG, "AP: client connected " MACSTR, MAC2STR(evt->mac));
         } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
             wifi_event_ap_stadisconnected_t *evt = (wifi_event_ap_stadisconnected_t *)event_data;
-            ESP_LOGI(TAG, "AP: 클라이언트 접속해제 " MACSTR, MAC2STR(evt->mac));
+            ESP_LOGI(TAG, "AP: client disconnected " MACSTR, MAC2STR(evt->mac));
         }
     }
 }
@@ -322,7 +322,7 @@ static void wifi_bringup(void)
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
         ESP_ERROR_CHECK(esp_wifi_start());
-        ESP_LOGI(TAG, "STA 시작: SSID=%s", sta_ssid);
+        ESP_LOGI(TAG, "STA start: SSID=%s", sta_ssid);
     } else {
         /* 채널 격리(위 주석 참고) — 실제 WiFi STA 연결 없이 Cntl 혼자만의 SoftAP로.
          * CAM/Sens용 ESP-NOW 채널을 Cntl이 완전히 독점하게 됨 */
@@ -338,7 +338,7 @@ static void wifi_bringup(void)
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_cfg));
         ESP_ERROR_CHECK(esp_wifi_start());
-        ESP_LOGI(TAG, "SoftAP 시작: SSID=%s CH=%d (독립 AP 모드)", CNTL_AP_SSID, CNTL_AP_CHANNEL);
+        ESP_LOGI(TAG, "SoftAP start: SSID=%s CH=%d (standalone AP mode)", CNTL_AP_SSID, CNTL_AP_CHANNEL);
 
         /* AP 자신의 IP는 STA처럼 IP_EVENT로 오는 게 아니라 시작 즉시 고정값이라, 대시보드
          * 웹 URL(s_own_ip_str, wifi_sta_get_own_ip_str())에 바로 채워넣음 */

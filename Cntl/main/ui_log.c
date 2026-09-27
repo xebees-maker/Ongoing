@@ -7,6 +7,8 @@
 #include "freertos/semphr.h"
 #include "esp_heap_caps.h"
 #include "lvgl.h"
+#include <time.h>
+#include "esp_timer.h"
 
 /* 부팅 시 한 번만 잡고 계속 재사용하는 고정 버퍼(다른 모듈들과 동일 원칙) — 꽉 차면
  * 오래된 앞부분을 memmove로 밀어내고 뒤에 이어붙임(단순 append 버퍼, 진짜 링버퍼는
@@ -101,8 +103,17 @@ static void append_locked(const char *line, size_t add_len)
  * LVGL 틱 카운터 자체는 화면 위젯 존재 여부와 무관하게 계속 흐름 */
 void ui_log_format_timestamp(char *buf, size_t cap)
 {
-    uint32_t total_sec = lv_tick_get() / 1000;
-    snprintf(buf, cap, "[%02lu:%02lu] ", (unsigned long)(total_sec / 60), (unsigned long)(total_sec % 60));
+    /* 2026-09-27(로그 정리, 사용자 확정 형식 "시각 레벨 내용") — RTC 벽시계 HH:MM:SS, RTC가 아직 안 맞았으면
+     * 부팅 후 경과(+MM:SS). 개발 로그(dev_log.c make_ts)와 같은 규칙 */
+    time_t now = time(NULL);
+    struct tm tm_buf;
+    localtime_r(&now, &tm_buf);
+    if (tm_buf.tm_year + 1900 >= 2025) {
+        snprintf(buf, cap, "%02d:%02d:%02d ", tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+    } else {
+        uint32_t total_sec = (uint32_t)(esp_timer_get_time() / 1000000);
+        snprintf(buf, cap, "+%02lu:%02lu ", (unsigned long)(total_sec / 60), (unsigned long)(total_sec % 60));
+    }
 }
 
 void ui_log_add(const char *fmt, ...)
@@ -120,7 +131,7 @@ void ui_log_add(const char *fmt, ...)
     if (n <= 0) return;
 
     char line[160];
-    int total = snprintf(line, sizeof(line), "%s%s", ts, msg);
+    int total = snprintf(line, sizeof(line), "%sI %s", ts, msg);
     if (total <= 0) return;
 
     size_t add_len = ((size_t)total < sizeof(line) - 1) ? (size_t)total : sizeof(line) - 2;
@@ -158,7 +169,7 @@ void ui_log_add_err(int code, const char *fmt, ...)
     ui_log_format_timestamp(ts, sizeof(ts));
 
     char line[160];
-    int total = snprintf(line, sizeof(line), "%s[%04d] %s", ts, code, msg);
+    int total = snprintf(line, sizeof(line), "%sE [%04d] %s", ts, code, msg);
     if (total <= 0) return;
     size_t add_len = ((size_t)total < sizeof(line) - 1) ? (size_t)total : sizeof(line) - 2;
     line[add_len] = '\0';
@@ -266,7 +277,7 @@ void ui_log_add_warn(int code, const char *fmt, ...)
     ui_log_format_timestamp(ts, sizeof(ts));
 
     char line[160];
-    int total = snprintf(line, sizeof(line), "%s[W%04d] %s", ts, code, msg);
+    int total = snprintf(line, sizeof(line), "%sW [%04d] %s", ts, code, msg);
     if (total <= 0) return;
     size_t add_len = ((size_t)total < sizeof(line) - 1) ? (size_t)total : sizeof(line) - 2;
     line[add_len] = '\0';

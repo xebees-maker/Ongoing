@@ -13,7 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static const char *TAG = "storage_mgr";
+static const char *TAG = "SYS";
 
 #define EVT_RESCAN  (1u << 0)
 #define EVT_CHECK   (1u << 1)
@@ -71,7 +71,7 @@ static void storage_task(void *arg)
             stats_store_rescan(total, &stats_bad);
             bad_entries = pic_bad + stats_bad;
             indexes_ready = true;
-            ESP_LOGI(TAG, "재스캔 완료: 사진 %lluKB, 측정값 %lluKB, 손상의심 %u개",
+            ESP_LOGI(TAG, "Rescan done: photos %lluKB, measurements %lluKB, suspect %u",
                      (unsigned long long)(photo_storage_get_used_bytes() / 1024),
                      (unsigned long long)(stats_store_get_used_bytes() / 1024), (unsigned)bad_entries);
             if (bad_entries > 0) {
@@ -116,7 +116,7 @@ void storage_mgr_start(void)
     const uint32_t stack_size = 6144;
     StackType_t *stack = (StackType_t *)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
     if (!stack) {
-        ESP_LOGE(TAG, "파일처리 태스크 스택 할당 실패 — SD 사용량 관리/정리 안 함");
+        ESP_LOGE(TAG, "File task stack alloc failed - SD usage management/trim disabled");
         return;
     }
     /* 파일처리 등급 10(project_cntl_task_priority_scheme), UI와 무관하니 코어 1 */

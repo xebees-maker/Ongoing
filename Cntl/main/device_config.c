@@ -7,7 +7,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 
-static const char *TAG = "device_config";
+static const char *TAG = "SYS";
 
 #define DEVICE_CONFIG_PATH    FS_MOUNT_POINT "/device_config.bin"
 #define DEVICE_CONFIG_VERSION 9  /* 2026-09-18: 촬영주기/AGC/AEC/XCLK를 전역 스칼라 필드에서
@@ -125,7 +125,7 @@ static void device_config_save(void)
 {
     FILE *f = fopen(DEVICE_CONFIG_PATH, "wb");
     if (!f) {
-        ESP_LOGW(TAG, "저장 실패(fopen): %s", DEVICE_CONFIG_PATH);
+        ESP_LOGW(TAG, "Save failed (fopen): %s", DEVICE_CONFIG_PATH);
         return;
     }
     device_config_file_t s = {
@@ -149,7 +149,7 @@ void device_config_load(void)
     if (!s_sta_credentials) {
         s_sta_credentials = heap_caps_calloc(STA_CREDENTIAL_SLOTS, sizeof(sta_credential_t), MALLOC_CAP_SPIRAM);
         if (!s_sta_credentials) {
-            ESP_LOGE(TAG, "STA 자격증명 PSRAM 할당 실패");
+            ESP_LOGE(TAG, "STA credential PSRAM alloc failed");
             ui_log_add_err(UI_ERR_STA_CRED_ALLOC, "STA credential PSRAM alloc failed");
             return;
         }
@@ -157,21 +157,21 @@ void device_config_load(void)
     if (!s_sens_intervals) {
         s_sens_intervals = heap_caps_calloc(SENS_INTERVAL_SLOTS, sizeof(sens_interval_entry_t), MALLOC_CAP_SPIRAM);
         if (!s_sens_intervals) {
-            ESP_LOGE(TAG, "Sens 주기 슬롯 PSRAM 할당 실패");
+            ESP_LOGE(TAG, "Sens interval slot PSRAM alloc failed");
             return;
         }
     }
     if (!s_aliases) {
         s_aliases = heap_caps_calloc(ALIAS_SLOTS, sizeof(alias_entry_t), MALLOC_CAP_SPIRAM);
         if (!s_aliases) {
-            ESP_LOGE(TAG, "Alias 슬롯 PSRAM 할당 실패");
+            ESP_LOGE(TAG, "Alias slot PSRAM alloc failed");
             return;
         }
     }
     if (!s_cam_settings) {
         s_cam_settings = heap_caps_calloc(CAM_SETTINGS_SLOTS, sizeof(cam_settings_entry_t), MALLOC_CAP_SPIRAM);
         if (!s_cam_settings) {
-            ESP_LOGE(TAG, "카메라 설정 슬롯 PSRAM 할당 실패");
+            ESP_LOGE(TAG, "Camera config slot PSRAM alloc failed");
             return;
         }
     }
@@ -182,7 +182,7 @@ void device_config_load(void)
     bool ok = (fread(&s, sizeof(s), 1, f) == 1) && s.version == DEVICE_CONFIG_VERSION;
     fclose(f);
     if (!ok) {
-        ESP_LOGW(TAG, "설정 파일 형식 불일치 — 기본값 유지");
+        ESP_LOGW(TAG, "Config file format mismatch - keeping defaults");
         /* 2026-08-11 — 화면에도 반드시 보이게 함(UI_ERR_CONFIG_FILE_MISMATCH 주석 참고).
          * 이 폴백 자체가 문제가 아니라, 그동안 아무 표시가 없어서 사용자가 모르는 채로
          * 다른 설정 하나만 Apply해도 이 기본값들이 그대로 새 파일에 영구 저장돼버리는 게
@@ -214,7 +214,7 @@ void device_config_load(void)
     memcpy(s_sens_intervals, s.sens_intervals, sizeof(s.sens_intervals));
     memcpy(s_aliases, s.aliases, sizeof(s.aliases));
     memcpy(s_cam_settings, s.cam_settings, sizeof(s.cam_settings));
-    ESP_LOGI(TAG, "설정 복원: 응답성=%us 적응형반응=%us WiFi=%s SSID=%s (카메라별 설정은 mac별로 별도 복원됨)",
+    ESP_LOGI(TAG, "Config restored: response=%us adaptive=%us WiFi=%s SSID=%s (per-camera settings restored per mac)",
              (unsigned)s_response_interval_sec, (unsigned)s_adaptive_response_sec,
              s_wifi_ap_mode ? "AP" : "STA", s_sta_credentials[0].ssid);
 }
@@ -246,7 +246,7 @@ static cam_settings_entry_t *find_or_create_cam_settings_slot(const uint8_t *mac
             return &s_cam_settings[i];
         }
     }
-    ESP_LOGW(TAG, "카메라 설정 슬롯 꽉 참(%d개) — 저장 못 함", CAM_SETTINGS_SLOTS);
+    ESP_LOGW(TAG, "Camera config slots full (%d) - not saved", CAM_SETTINGS_SLOTS);
     return NULL;
 }
 
@@ -401,7 +401,7 @@ void device_config_set_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec
     }
     int slot = (found >= 0) ? found : empty;
     if (slot < 0) {
-        ESP_LOGW(TAG, "Sens 주기 슬롯 꽉 참(%d개) — 저장 못 함", SENS_INTERVAL_SLOTS);
+        ESP_LOGW(TAG, "Sens interval slots full (%d) - not saved", SENS_INTERVAL_SLOTS);
         return;
     }
     memcpy(s_sens_intervals[slot].mac, mac, 6);
@@ -449,7 +449,7 @@ void device_config_set_alias(const uint8_t *mac, const char *alias)
         }
     }
     if (!e) {
-        ESP_LOGW(TAG, "Alias 슬롯 꽉 참(%d개) — 저장 못 함", ALIAS_SLOTS);
+        ESP_LOGW(TAG, "Alias slots full (%d) - not saved", ALIAS_SLOTS);
         return;
     }
     memcpy(e->mac, mac, 6);

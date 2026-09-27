@@ -23,7 +23,13 @@
  * Data 15) — 사진 청크 처리 중에도 WAKE_HELLO/결과가 기다리지 않게.
  */
 
-static const char *TAG = "can_bridge";
+static const char *TAG = "CAN";
+/* 2026-09-27(로그 정리) — 반복될 수 있는 경고는 1초에 1번만(그 사이 건너뛴 횟수를 붙임) */
+#define LOG_W_RL(tag, fmt, ...) do { \
+    static TickType_t _rl_last; static uint32_t _rl_skip; TickType_t _rl_now = xTaskGetTickCount(); \
+    if (_rl_last == 0 || (_rl_now - _rl_last) >= pdMS_TO_TICKS(1000)) { \
+        ESP_LOGW(tag, fmt " (+%u skipped)", ##__VA_ARGS__, (unsigned)_rl_skip); _rl_last = _rl_now; _rl_skip = 0; \
+    } else { _rl_skip++; } } while (0)
 
 #define CAN_BRIDGE_TX_GPIO GPIO_NUM_15
 #define CAN_BRIDGE_RX_GPIO GPIO_NUM_16
@@ -149,7 +155,7 @@ static void can_rx_task(void *arg)
              * PSRAM 송신 풀 슬롯에 복사해서 보냄 */
             esp_err_t fc_err = can_bridge_tx_frame(s_node, fc_id, fc, 8, CAN_BRIDGE_DEFAULT_TIMEOUT_MS);
             if (fc_err != ESP_OK) {
-                ESP_LOGW(TAG, "FC 송신 실패(id=0x%x): %s", (unsigned)fc_id, esp_err_to_name(fc_err));
+                LOG_W_RL(TAG, "FC send failed (id=0x%x): %s", (unsigned)fc_id, esp_err_to_name(fc_err));
             }
         }
     }
@@ -267,10 +273,10 @@ static void note_bridge_alive(const uint8_t *body, size_t body_len)
     s_last_pong_us = esp_timer_get_time();
     if (s_bridge_silent) {
         s_bridge_silent = false;
-        ESP_LOGI(TAG, "브 응답 재개");
+        ESP_LOGI(TAG, "Bridge responding again");
     }
     if (s_bridge_boot_id != 0 && b.boot_id != s_bridge_boot_id) {
-        ESP_LOGW(TAG, "브 재부팅 감지(부팅 ID %08x -> %08x) — 노드 상태를 처음으로", (unsigned)s_bridge_boot_id, (unsigned)b.boot_id);
+        ESP_LOGW(TAG, "Bridge reboot detected (boot ID %08x -> %08x) - resetting node state", (unsigned)s_bridge_boot_id, (unsigned)b.boot_id);
         s_bridge_boot_id = b.boot_id;
         fail_all_pending();
         if (s_bridge_reset_cb) s_bridge_reset_cb();
@@ -305,7 +311,7 @@ static void bridge_ping_task(void *arg)
             if (!s_bridge_silent) {
                 s_bridge_silent = true;
                 last_reset_us = 0;
-                ESP_LOGE(TAG, "브 응답 없음(PONG %llds 없음) — RESET 전송", (long long)((now - s_last_pong_us) / 1000000));
+                ESP_LOGE(TAG, "Bridge not responding (no PONG for %llds) - sending RESET", (long long)((now - s_last_pong_us) / 1000000));
             }
             if (last_reset_us == 0 || now - last_reset_us > BRIDGE_RESET_REPEAT_US) {
                 send_ctrl_to_bridge(CAN_CTRL_RESET, &seq, sizeof(seq));
@@ -325,7 +331,14 @@ static void can_status_task(void *arg)
             uint32_t q_count, q_hwm, cq_count, cq_hwm;
             can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
             can_bridge_queue_get_stats(&s_ctrl_complete_q, &cq_count, &cq_hwm);
-            ESP_LOGI(TAG, "상태=%s TEC=%u REC=%u CTRL큐=%u(최대%u) DATA큐=%u(최대%u) 수신버림=%u RX=%u TX=%u 버스에러=%u 상태전이=%u",
+            /* 2026-09-27(로그 정리) — 주기 상태 줄은 D, 버스 상태가 바뀐 때만 W로 */
+            static int s_last_state = -1;
+            if (s_last_state >= 0 && s_last_state != (int)status.state) {
+                ESP_LOGW(TAG, "CAN state %s -> %s (TEC=%u REC=%u)", names[s_last_state], names[status.state],
+                         (unsigned)status.tx_error_count, (unsigned)status.rx_error_count);
+            }
+            s_last_state = (int)status.state;
+            ESP_LOGD(TAG, "state=%s TEC=%u REC=%u ctrlQ=%u(max%u) dataQ=%u(max%u) rxDrop=%u RX=%u TX=%u busErr=%u stateChg=%u",
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
                      (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm, (unsigned)s_raw_drop,
                      (unsigned)s_rx_frames, (unsigned)s_tx_frames, (unsigned)s_bus_errs, (unsigned)s_state_changes);
@@ -424,7 +437,7 @@ esp_err_t can_bridge_reliable_request(const uint8_t *peer_mac,
     }
     xSemaphoreGive(s_pending_mutex);
     if (slot < 0) {
-        ESP_LOGE(TAG, "미결 요청 테이블 가득참(%d) — mac=%02X%02X%02X%02X%02X%02X",
+        ESP_LOGE(TAG, "Pending request table full (%d) - mac=%02X%02X%02X%02X%02X%02X",
                  CAN_BRIDGE_MAX_PENDING, peer_mac[0], peer_mac[1], peer_mac[2], peer_mac[3], peer_mac[4], peer_mac[5]);
         return ESP_ERR_NO_MEM;
     }
@@ -470,7 +483,7 @@ esp_err_t can_bridge_reliable_request(const uint8_t *peer_mac,
             ret = ESP_ERR_TIMEOUT;
         }
     } else {
-        ESP_LOGW(TAG, "CAN 레벨 타임아웃(브 응답 없음) — mac=%02X%02X%02X%02X%02X%02X",
+        ESP_LOGW(TAG, "CAN-level timeout (no Bridge reply) - mac=%02X%02X%02X%02X%02X%02X",
                  peer_mac[0], peer_mac[1], peer_mac[2], peer_mac[3], peer_mac[4], peer_mac[5]);
         ret = ESP_ERR_TIMEOUT;
     }
@@ -529,7 +542,7 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     };
     esp_err_t err = can_bridge_node_start_on_core(&node_cfg, &cbs, 1, &s_node);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "CAN 노드 시작 실패: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "CAN node start failed: %s", esp_err_to_name(err));
         return;
     }
 
@@ -565,5 +578,5 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
     s_status_task = xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
 
-    ESP_LOGI(TAG, "콘 CAN 링크 시작됨(TX=%d RX=%d %dbps)", CAN_BRIDGE_TX_GPIO, CAN_BRIDGE_RX_GPIO, CAN_BRIDGE_BITRATE);
+    ESP_LOGI(TAG, "Cntl CAN link started (TX=%d RX=%d %dbps)", CAN_BRIDGE_TX_GPIO, CAN_BRIDGE_RX_GPIO, CAN_BRIDGE_BITRATE);
 }

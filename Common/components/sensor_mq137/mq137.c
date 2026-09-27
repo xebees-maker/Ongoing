@@ -2,7 +2,7 @@
 #include "esp_log.h"
 #include <math.h>
 
-static const char *TAG = "mq137";
+static const char *TAG = "SENS";
 
 static adc_oneshot_unit_handle_t s_adc_handle = NULL;
 static adc_channel_t             s_ao_channel  = 0;
@@ -48,7 +48,7 @@ bool mq137_init(adc_oneshot_unit_handle_t adc_handle, adc_channel_t ao_channel,
         .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
     if (adc_oneshot_config_channel(adc_handle, ao_channel, &ao_cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "AO 채널 설정 실패");
+        ESP_LOGW(TAG, "AO channel config failed");
         return false;
     }
 
@@ -58,7 +58,7 @@ bool mq137_init(adc_oneshot_unit_handle_t adc_handle, adc_channel_t ao_channel,
         .pull_up_en   = GPIO_PULLUP_ENABLE,
     };
     if (gpio_config(&do_cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "DO 핀 설정 실패");
+        ESP_LOGW(TAG, "DO pin config failed");
         return false;
     }
 
