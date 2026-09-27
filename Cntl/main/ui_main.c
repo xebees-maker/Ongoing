@@ -2945,6 +2945,28 @@ static void format_battery_tiny(char *buf, size_t buf_size, uint8_t battery_pct)
     snprintf(buf, buf_size, "%s %u%%", ui_str(STR_LABEL_BATTERY_TINY), (unsigned)battery_pct);
 }
 
+/* 2026-09-27(사용자 지적 — "1시간이 3600s 식으로 나온다") — 캠 목록 행의 촬영주기를 설정 드롭다운과 같은 문구로
+ * (STR_OPT_CAPTURE_INTERVAL_LIST의 같은 순번 줄, 한/영 그대로). 프리셋에 없는 값이면 초 단위 */
+static void format_capture_interval(char *buf, size_t buf_size, uint32_t sec)
+{
+    int idx = find_value_index(s_capture_interval_values,
+        sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]), sec);
+    const char *opt = ui_str(STR_OPT_CAPTURE_INTERVAL_LIST);
+    for (int i = 0; idx >= 0 && opt && i < idx; i++) {
+        opt = strchr(opt, '\n');
+        if (opt) opt++;
+    }
+    if (idx < 0 || !opt) {
+        snprintf(buf, buf_size, "%us", (unsigned)sec);
+        return;
+    }
+    const char *end = strchr(opt, '\n');
+    size_t len = end ? (size_t)(end - opt) : strlen(opt);
+    if (len >= buf_size) len = buf_size - 1;
+    memcpy(buf, opt, len);
+    buf[len] = '\0';
+}
+
 /* 2026-09-05(사용자 설계) — sensor_channel_type_t(esp_now_link.h) enum -> 콘 로컬 라벨/단위.
  * 와이어엔 enum만 오가고, 사람이 읽을 텍스트는 여기서만 나옴(i18n, ui_strings) — 새 채널
  * 종류가 생기면 여기 case 하나만 추가하면 됨(프로토콜 구조 자체는 안 바뀜) */
@@ -4793,8 +4815,9 @@ static void refresh_dashboard(lv_timer_t *t)
         int n = snprintf(buf, sizeof(buf), "%s", display_name);
         uint32_t capture_interval_sec = device_config_get_cam_capture_interval_sec(s_camera_dash_row_macs[i]);
         if (n > 0 && (size_t)n < sizeof(buf)) {
-            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %us",
-                          ui_str(STR_LABEL_CAPTURE_TINY), (unsigned)capture_interval_sec);
+            char cap[24];
+            format_capture_interval(cap, sizeof(cap), capture_interval_sec);
+            n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %s", ui_str(STR_LABEL_CAPTURE_TINY), cap);
         }
         for (int j = 0; j < cam_count; j++) {
             if (memcmp(cam_macs[j], s_camera_dash_row_macs[i], 6) != 0) continue;
