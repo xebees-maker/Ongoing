@@ -4,6 +4,8 @@
  */
 #include "sd_storage.h"
 #include "storage_mgr.h"
+#include "photo_storage.h"
+#include "stats_store.h"
 #include "ch422g.h"
 #include "waveshare_rgb_lcd_port.h"
 
@@ -134,12 +136,19 @@ bool sd_storage_get_capacity(uint64_t *out_total_bytes, uint64_t *out_free_bytes
 esp_err_t sd_storage_reconnect(void)
 {
     ESP_LOGW(TAG, "SD reconnect attempt");
+    /* 2026-09-28(사용자 지시) — 사진을 받거나 측정값을 저장하는 중이면 열린 파일부터 닫고 언마운트
+     * (예전엔 열린 파일을 둔 채 언마운트해서, 그 파일이 새 마운트 위에서 계속 쓰일 수 있었음) */
+    photo_storage_io_suspend();
+    stats_store_io_suspend();
     if (s_card) {
         esp_vfs_fat_sdcard_unmount(SD_STORAGE_MOUNT_POINT, s_card);
         s_card = NULL;
         spi_bus_free(SD_SPI_HOST);
     }
-    return sd_storage_init();
+    esp_err_t err = sd_storage_init();
+    stats_store_io_resume();
+    photo_storage_io_resume();
+    return err;
 }
 
 /* 2026-09-10(사용자 설계 — "포맷" 버튼) — esp_vfs_fat_sdcard_format()이 포맷+재마운트까지
@@ -170,7 +179,12 @@ esp_err_t sd_storage_format(void)
     }
 
     ESP_LOGW(TAG, "SD format start");
+    /* 재연결과 포맷 사이에 새로 열린 저장 파일도 닫고 막음(위 reconnect와 같은 이유) */
+    photo_storage_io_suspend();
+    stats_store_io_suspend();
     esp_err_t err = esp_vfs_fat_sdcard_format(SD_STORAGE_MOUNT_POINT, s_card);
+    stats_store_io_resume();
+    photo_storage_io_resume();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "SD format failed: %s", esp_err_to_name(err));
         return err;

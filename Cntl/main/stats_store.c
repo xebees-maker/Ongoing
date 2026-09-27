@@ -86,6 +86,11 @@ static void unlock(void)
     xSemaphoreGive(s_mutex);
 }
 
+/* 2026-09-28 — SD 재마운트/포맷 동안 측정값 파일 조작을 막음(기록은 열기~닫기가 전부 s_mutex 안이라,
+ * 잡으면 진행 중이던 기록이 끝날 때까지 기다린 뒤 막힘) */
+void stats_store_io_suspend(void) { lock(); }
+void stats_store_io_resume(void) { unlock(); }
+
 /* 호출부가 lock() 잡은 상태 — 버퍼가 없으면 한 번만 할당. 실패하면 false */
 static bool ensure_alloc_locked(void)
 {

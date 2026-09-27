@@ -47,6 +47,11 @@ bool photo_storage_append(photo_storage_writer_t *w, const uint8_t *data, size_t
 bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq);
 void photo_storage_abort(photo_storage_writer_t *w);
 
+/* 2026-09-28 — SD 재마운트/포맷 전후(sd_storage.c). suspend: 사진 쓰기·읽기·정리가 끝날 때까지 기다린 뒤
+ * 막고, 열린 저장 파일을 닫고 임시파일을 지움(그 저장기는 실패 처리 — 받던 사진은 버려짐). resume: 풀어 줌 */
+void photo_storage_io_suspend(void);
+void photo_storage_io_resume(void);
+
 /* 모든 카메라 폴더를 합산한 총 사용 바이트 — 2026-09-26부터 폴더 스캔 없이 RAM 합계를 돌려줌
  * (저장/삭제/정리 때 더하고 뺌, photo_storage_rescan() 때 새로 계산). SD I/O 없음 */
 uint64_t photo_storage_get_used_bytes(void);

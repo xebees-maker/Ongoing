@@ -108,6 +108,10 @@ uint32_t stats_store_trim_to(uint64_t target_bytes);
  * 이후 get_count/get_used_bytes는 이 색인만 봄(SD I/O 없음) */
 void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries);
 
+/* 2026-09-28 — SD 재마운트/포맷 전후(sd_storage.c). 진행 중인 기록이 끝날 때까지 기다린 뒤 막고, resume에서 풂 */
+void stats_store_io_suspend(void);
+void stats_store_io_resume(void);
+
 /* 2026-09-26 — 재연결/포맷 직후 "카드가 진짜 읽히는지" 검증용 가벼운 실제 I/O(stats 폴더
  * opendir). 예전엔 stats_store_get_count()가 fopen을 해서 이 용도로 썼는데, 이제 get_count는
  * RAM 색인만 봐서 I/O를 안 함. 실패하면 stats_store_had_io_error()가 true */

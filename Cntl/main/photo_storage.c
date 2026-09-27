@@ -186,7 +186,38 @@ struct photo_storage_writer {
     bool     failed;
     char     file_path[96];
     char     tmp_path[104];
+    struct photo_storage_writer *next;  /* 열린 저장기 목록(s_writers) */
 };
+
+/* 2026-09-28(사용자 지시) — 재마운트/포맷 전에 열린 저장 파일을 닫으려고 열린 저장기를 목록으로 관리.
+ * 저장기의 파일 조작(쓰기/닫기)은 전부 s_wmutex 안에서 함. 잠금 순서: s_wmutex -> s_mutex(photo) */
+static photo_storage_writer_t *s_writers = NULL;
+static SemaphoreHandle_t s_wmutex = NULL;
+static portMUX_TYPE s_wmutex_init_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void wlock(void)
+{
+    if (!s_wmutex) {
+        SemaphoreHandle_t m = xSemaphoreCreateMutex();
+        taskENTER_CRITICAL(&s_wmutex_init_lock);
+        if (!s_wmutex) { s_wmutex = m; m = NULL; }
+        taskEXIT_CRITICAL(&s_wmutex_init_lock);
+        if (m) vSemaphoreDelete(m);
+    }
+    xSemaphoreTake(s_wmutex, portMAX_DELAY);
+}
+
+static void wunlock(void)
+{
+    xSemaphoreGive(s_wmutex);
+}
+
+static void writer_unlink_locked(photo_storage_writer_t *w)
+{
+    for (photo_storage_writer_t **pp = &s_writers; *pp; pp = &(*pp)->next) {
+        if (*pp == w) { *pp = w->next; return; }
+    }
+}
 
 photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
 {
@@ -213,47 +244,66 @@ photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
     unlock();
     snprintf(w->file_path, sizeof(w->file_path), "%s/%c%0*u.jpg", dir_path, (char)kind, PHOTO_SEQ_DIGITS, (unsigned)w->seq);
     snprintf(w->tmp_path, sizeof(w->tmp_path), "%s" PHOTO_TMP_SUFFIX, w->file_path);
+    wlock();
     w->fp = fopen(w->tmp_path, "wb");
     if (!w->fp) {
+        wunlock();
         ESP_LOGW(TAG, "File open failed: %s (errno=%d)", w->tmp_path, errno);
         free(w);
         return NULL;
     }
+    w->next = s_writers;
+    s_writers = w;
+    wunlock();
     return w;
 }
 
 bool photo_storage_append(photo_storage_writer_t *w, const uint8_t *data, size_t len)
 {
-    if (!w || w->failed) return false;
-    if (len == 0) return true;
+    if (!w) return false;
+    wlock();
+    if (w->failed || !w->fp) { wunlock(); return false; }
+    if (len == 0) { wunlock(); return true; }
     size_t n = fwrite(data, 1, len, w->fp);
     w->written += n;
     if (n != len) {
         ESP_LOGW(TAG, "Write failed (%u/%u bytes): %s", (unsigned)n, (unsigned)len, w->tmp_path);
         w->failed = true;
     }
-    return !w->failed;
+    bool ok = !w->failed;
+    wunlock();
+    return ok;
 }
 
 bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
 {
     if (!w) return false;
-    bool synced = (fflush(w->fp) == 0) && (fsync(fileno(w->fp)) == 0);
-    fclose(w->fp);
-    w->fp = NULL;
+    wlock();
+    writer_unlink_locked(w);
+    bool synced = false;
+    if (w->fp) {  /* NULL = 재마운트/포맷이 이미 닫고 임시파일을 지움(photo_storage_io_suspend) */
+        synced = (fflush(w->fp) == 0) && (fsync(fileno(w->fp)) == 0);
+        fclose(w->fp);
+        w->fp = NULL;
+    } else {
+        w->failed = true;
+    }
     if (w->failed || !synced || w->written == 0) {
         ESP_LOGW(TAG, "Write incomplete (%u bytes, sync=%d) - temp file deleted: %s",
                  (unsigned)w->written, synced ? 1 : 0, w->tmp_path);
         unlink(w->tmp_path);
+        wunlock();
         free(w);
         return false;
     }
     if (rename(w->tmp_path, w->file_path) != 0) {
         ESP_LOGW(TAG, "Temp file rename failed (errno=%d): %s", errno, w->tmp_path);
         unlink(w->tmp_path);
+        wunlock();
         free(w);
         return false;
     }
+    wunlock();
     used_add((int64_t)w->written);
     storage_mgr_notify_changed();
     if (out_seq) *out_seq = w->seq;
@@ -265,10 +315,34 @@ bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
 void photo_storage_abort(photo_storage_writer_t *w)
 {
     if (!w) return;
+    wlock();
+    writer_unlink_locked(w);
     if (w->fp) fclose(w->fp);
     unlink(w->tmp_path);
+    wunlock();
     ESP_LOGW(TAG, "Save aborted - temp file deleted: %s", w->tmp_path);
     free(w);
+}
+
+void photo_storage_io_suspend(void)
+{
+    wlock();
+    lock();
+    for (photo_storage_writer_t *w = s_writers; w; w = w->next) {
+        if (w->fp) {
+            fclose(w->fp);
+            w->fp = NULL;
+            unlink(w->tmp_path);
+            ESP_LOGW(TAG, "SD remount/format - open save closed, temp file deleted: %s", w->tmp_path);
+        }
+        w->failed = true;
+    }
+}
+
+void photo_storage_io_resume(void)
+{
+    unlock();
+    wunlock();
 }
 
 bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg, size_t len,
