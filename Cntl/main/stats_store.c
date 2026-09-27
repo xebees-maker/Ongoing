@@ -759,7 +759,9 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
             size_t len = strlen(name);
             char path[48 + 16];
             if (len > 40) {
-                ESP_LOGW(TAG, "Rescan: malformed name skipped (possibly corrupt)");
+                ESP_LOGW(TAG, "Rescan: malformed name skipped (possibly corrupt) in " STATS_DIR ": [%02X%02X%02X%02X%02X%02X%02X%02X]",
+                         (unsigned char)name[0], (unsigned char)name[1], (unsigned char)name[2], (unsigned char)name[3],
+                         (unsigned char)name[4], (unsigned char)name[5], (unsigned char)name[6], (unsigned char)name[7]);
                 bad++;
                 continue;
             }

@@ -301,6 +301,17 @@ static bool ends_with(const char *s, const char *suffix)
     return ls >= lx && strcmp(s + ls - lx, suffix) == 0;
 }
 
+/* 손상 의심 이름 진단용 — 이름 앞 8바이트를 16진수로(깨진 이름이 사진 데이터인지 보려고, JPEG면 FFD8...) */
+static void name_hex8(const char *name, char out[17])
+{
+    size_t n = strnlen(name, 8);
+    for (size_t i = 0; i < 8; i++) {
+        if (i < n) snprintf(out + i * 2, 3, "%02X", (unsigned char)name[i]);
+        else { out[i * 2] = '-'; out[i * 2 + 1] = '-'; }
+    }
+    out[16] = '\0';
+}
+
 void photo_storage_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
 {
     uint32_t bad = 0;
@@ -322,7 +333,8 @@ void photo_storage_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
             if (cam_ent->d_name[0] == '.') continue;  /* "."/".." 건너뜀 */
             uint8_t cam_mac[6];
             if (!hex_to_mac(cam_ent->d_name, cam_mac)) {
-                ESP_LOGW(TAG, "Rescan: unknown entry (not a camera folder) skipped: %.40s", cam_ent->d_name);
+                char hx[17]; name_hex8(cam_ent->d_name, hx);
+                ESP_LOGW(TAG, "Rescan: unknown entry (not a camera folder) skipped in %s: %.40s [%s]", photos_root, cam_ent->d_name, hx);
                 bad++;
                 continue;
             }
@@ -344,7 +356,8 @@ void photo_storage_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
                 }
                 uint8_t kind; uint32_t seq;
                 if (!parse_fname(ent->d_name, &kind, &seq)) {
-                    ESP_LOGW(TAG, "Rescan: malformed name skipped (possibly corrupt): %.40s", ent->d_name);
+                    char hx[17]; name_hex8(ent->d_name, hx);
+                    ESP_LOGW(TAG, "Rescan: malformed name skipped (possibly corrupt) in %s: %.40s [%s]", cam_dir, ent->d_name, hx);
                     bad++;
                     continue;
                 }
