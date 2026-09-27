@@ -1,6 +1,13 @@
 == 2026-09-25~26 작업 요약: 코어 분리 + CAN/ESP-NOW 이벤트 방식 전환 + 콘 SD 저장 구조 재설계
    + CAN 사진 전송 개선 (임시 PC에서 작업) ==
 
+[ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
+- 2026-09-27 저녁: 임시 PC → 원래 PC. 브랜치 cntl-can-bridge, 모두 푸시함(이 기록을 담은 커밋이 마지막).
+  도착해서 Claude가 할 것: ① pull(원래 PC엔 CLAUDE.md가 아직 없으니 이번만 사용자가 "pull하고 인수인계 받아"라고 함)
+  ② Docs/claude_memory_2026-09-27.zip을 메모리 폴더에 풂(기존 폴더 확인, 덮어쓰기 전 사용자에게 물음)
+  ③ 콘 sdkconfig에 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y 반영(git 제외 파일) ④ 캠을 USB에 연결할 때 최신 펌웨어 플래시
+  (사용자는 USB 연결만). git 밖에 남은 것: References/ 스키매틱(커밋 안 함, 사용자 지시).
+
 - **Claude 메모리 이식(PC 이동, 09-27 갱신)**: 같은 폴더의 `claude_memory_2026-09-27.zip`(가장 최신 — 전체화면 팝업
   규칙, 테스트 API 제거 기억 등 09-27 추가분 포함)을 원래 PC의
   `~/.claude/projects/C--Projects-Ongoing/memory/`에 풀 것(09-26 zip보다 최신).
