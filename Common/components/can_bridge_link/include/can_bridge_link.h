@@ -96,7 +96,15 @@ typedef enum {
     CAN_CTRL_LIVENESS_EVENT = 0x16, /* 브릿지->콘: mac에서 원시 수신 이벤트 발생(생존판단은 콘이) */
     CAN_CTRL_SET_CHANNEL = 0x17, /* 콘->브릿지: flags=채널번호(1~13) */
     CAN_CTRL_RESET = 0x18, /* 콘->브릿지: 브릿지 자체 재시작 요청 */
+    CAN_CTRL_BRIDGE_BOOT = 0x19, /* 브->콘: 방금 부팅했음(부팅 ID) — 2026-09-26(설계 6단계) */
 } can_bridge_ctrl_type_t;
+
+/* 2026-09-26(설계 §6, 6단계) — 브 장애 처리. PING(콘→브) 본문은 uint32 순번, PONG·BRIDGE_BOOT(브→콘) 본문은
+ * 브의 부팅 ID(부팅마다 새 난수). 콘은 부팅 ID가 바뀐 걸 보면 브가 재부팅한 것으로 보고 노드 상태를 처음으로 되돌림
+ * (BRIDGE_BOOT를 놓쳐도 다음 PONG으로 알 수 있음). PONG이 일정 시간 없으면 콘이 경고하고 RESET을 보냄 */
+typedef struct __attribute__((packed)) {
+    uint32_t boot_id;
+} can_bridge_ctrl_boot_t;
 
 /* DATA 카테고리 — 브릿지는 이 안의 CASK(esp_now_link.h) 내용을 해석하지 않는 투명 릴레이.
  * mac=상대 CAM/Sens MAC, payload=CASK 프레임 원본 바이트 그대로.

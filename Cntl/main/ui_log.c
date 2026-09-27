@@ -73,6 +73,7 @@ static const ui_err_entry_t s_err_table[] = {
     { UI_ERR_HTTPD_START,         "웹서버 시작 실패" },
     { UI_ERR_RTC_SET_FAILED,      "RTC 시각설정 실패" },
     { UI_ERR_TOUCH_INIT_FAIL,     "터치 초기화 실패" },
+    { UI_ERR_BRIDGE_NORESPONSE,   "브릿지 응답 없음 — 계속되면 전원 리셋" },
 };
 
 void ui_log_init(void)

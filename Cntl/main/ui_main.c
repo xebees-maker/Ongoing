@@ -2,6 +2,7 @@
 #include "ui_strings.h"
 #include "ui_font.h"
 #include "node_hub.h"
+#include "can_bridge.h"
 #include "wifi_sta.h"
 #include "device_config.h"
 #include "stats_store.h"
@@ -6009,6 +6010,21 @@ static void set_cfg_state_label(lv_obj_t *label, ui_str_id_t base_id, int state 
     else       lv_obj_set_style_text_color(label, lv_palette_main(LV_PALETTE_ORANGE), 0);
 }
 
+/* 2026-09-26(설계 6단계) — 브릿지 PONG이 끊기면 한 번 경고(에러 이력·아이콘), 다시 오면 정보 로그 */
+static void refresh_bridge_health(lv_timer_t *t)
+{
+    (void)t;
+    static bool s_warned = false;
+    bool silent = can_bridge_bridge_is_silent();
+    if (silent && !s_warned) {
+        ui_log_add_err(UI_ERR_BRIDGE_NORESPONSE, "Bridge not responding - reset sent, power-cycle if it continues");
+        s_warned = true;
+    } else if (!silent && s_warned) {
+        ui_log_add("Bridge responding again");
+        s_warned = false;
+    }
+}
+
 static void refresh_cam_config_state(lv_timer_t *t)
 {
     (void)t;
@@ -6562,6 +6578,7 @@ void ui_init(void)
     refresh_clock(NULL);  /* 첫 타이머 tick 전까지 빈 채로 안 보이게 즉시 한 번 채움 */
     lv_timer_create(refresh_clock, 1000, NULL);
     lv_timer_create(refresh_cam_config_state, 1000, NULL);  /* CAM 설정 적용 대기/적용됨 표시 */
+    lv_timer_create(refresh_bridge_health, 1000, NULL);     /* 2026-09-26(설계 6단계) — 브 응답 없음 경고 */
 
     /* 2026-09-08(사용자 지시 — "상단바 통계 버튼을 없애고, 센서 판넬 Sensor 역상을 누르면
      * 열리게", "순서를... 시간-네트워크-상태-Settings로") — 통계 버튼 제거(빈 자리는 그냥

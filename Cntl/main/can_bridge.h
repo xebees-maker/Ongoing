@@ -26,6 +26,13 @@ typedef void (*can_bridge_recv_cb_t)(const esp_now_recv_info_t *info, const uint
  * 이미 확인된 사실 그대로) */
 void can_bridge_init(can_bridge_recv_cb_t recv_cb);
 
+/* 2026-09-26(설계 6단계) — 브 장애 처리. 콘이 2초마다 PING, PONG에 실린 브 부팅 ID가 바뀌면(=브 재부팅) cb를 부름
+ * (ctrl_consume 태스크 문맥 — node_hub가 노드 상태를 처음으로 되돌림). 브에 맡긴 reliable 요청은 여기서 실패로 끝냄 */
+typedef void (*can_bridge_bridge_reset_cb_t)(void);
+void can_bridge_set_bridge_reset_cb(can_bridge_bridge_reset_cb_t cb);
+/* PONG이 BRIDGE_SILENT_MS(10초) 넘게 없으면 true — UI가 경고. 이때 콘은 RESET을 20초마다 보냄 */
+bool can_bridge_bridge_is_silent(void);
+
 /* esp_now_send(mac, data, len) 자리 — fire-and-forget, 브가 큐잉만 하고 바로 반환.
  * ADVERTISE_ACK처럼 응답을 기다리지 않는 단발 전송용.
  * 이름이 can_bridge_send가 아니라 can_bridge_relay_send인 이유: 공유 라이브러리

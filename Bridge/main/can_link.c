@@ -7,6 +7,8 @@
 #include "esp_now_reliable.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_random.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -58,6 +60,9 @@ typedef struct {
     uint8_t  data[8];
 } raw_frame_t;
 static QueueHandle_t s_raw_frame_q;
+/* 2026-09-26(설계 6단계) — 부팅마다 새로 뽑는 ID. PONG·BRIDGE_BOOT에 실어 콘이 브 재부팅을 알게 함 */
+static uint32_t s_boot_id = 0;
+static void send_ctrl_to_cntl(uint8_t type, const void *body, size_t len);
 static volatile uint32_t s_raw_drop = 0;  /* ISR 원시 프레임 큐가 차서 버린 수 */
 /* 2026-09-26(버스 에러 조사) — 에러를 트래픽 양으로 나눠 비교하려고 셈 */
 static volatile uint32_t s_rx_frames = 0, s_tx_frames = 0, s_bus_errs = 0, s_state_changes = 0;
@@ -255,6 +260,15 @@ static void can_consume_task(void *arg)
                     bridge_esp_now_send_raw(hdr.mac, body, (uint16_t)body_len);
                 } else if (hdr.msg_type == CAN_DATA_RELIABLE_SEND) {
                     handle_reliable_send(&hdr, body, body_len);
+                } else if (hdr.msg_type == CAN_CTRL_PING) {
+                    /* 2026-09-26(설계 6단계) — 생존 확인 응답(부팅 ID 포함) */
+                    can_bridge_ctrl_boot_t pong = { .boot_id = s_boot_id };
+                    send_ctrl_to_cntl(CAN_CTRL_PONG, &pong, sizeof(pong));
+                } else if (hdr.msg_type == CAN_CTRL_RESET) {
+                    ESP_LOGW(TAG, "콘의 RESET 요청 — 재시작");
+                    ui_screen_log_can("RESET by Cntl - restarting");
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    esp_restart();
                 }
             }
             can_bridge_queue_pop_free(data);
@@ -263,9 +277,29 @@ static void can_consume_task(void *arg)
     }
 }
 
+/* 콘으로 CTRL 메시지(본문 len바이트) — 이 파일의 CAN 태스크(코어 1)에서만 부름. 버스 오프 등으로 실패하면 잠깐씩 재시도 */
+static void send_ctrl_to_cntl(uint8_t type, const void *body, size_t len)
+{
+    uint8_t msg[CAN_BRIDGE_APP_HEADER_LEN + 8];
+    if (len > 8) return;
+    can_bridge_app_header_t hdr = { .msg_type = type, .flags = 0 };
+    memset(hdr.mac, 0, sizeof(hdr.mac));
+    memcpy(msg, &hdr, CAN_BRIDGE_APP_HEADER_LEN);
+    memcpy(msg + CAN_BRIDGE_APP_HEADER_LEN, body, len);
+    esp_err_t err = can_link_send(msg, CAN_BRIDGE_APP_HEADER_LEN + len);
+    for (int retry = 0; err != ESP_OK && retry < 20; retry++) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        err = can_link_send(msg, CAN_BRIDGE_APP_HEADER_LEN + len);
+    }
+    if (err != ESP_OK) ESP_LOGW(TAG, "CTRL 0x%02x 송신 실패: %s", type, esp_err_to_name(err));
+}
+
 static void can_status_task(void *arg)
 {
     (void)arg;
+    /* 2026-09-26(설계 6단계) — 부팅 알림 1회(콘이 아직 안 떴으면 못 받지만, 다음 PONG에 같은 부팅 ID가 실림) */
+    can_bridge_ctrl_boot_t boot = { .boot_id = s_boot_id };
+    send_ctrl_to_cntl(CAN_CTRL_BRIDGE_BOOT, &boot, sizeof(boot));
     for (;;) {
         twai_node_status_t status;
         if (twai_node_get_info(s_node, &status, NULL) == ESP_OK) {
@@ -286,6 +320,7 @@ static void can_status_task(void *arg)
 
 void can_link_init(void)
 {
+    s_boot_id = esp_random() | 1u;  /* 0은 "아직 모름"으로 쓰므로 피함 */
     {
         static StaticQueue_t s_raw_frame_q_struct;
         /* 2026-09-26 — 16칸은 두 경로가 동시에 흐를 때 모자라서 대량으로 버려짐(실기: 콘 2901개/90초 → CF 순번

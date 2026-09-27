@@ -39,6 +39,9 @@ void photo_rx_on_recv(uint8_t msg_type, const uint8_t *src_mac, const uint8_t *d
  * Data 소비 태스크가 부름. 캠별 세션, 받는 대로 SD에 이어 쓰고 DONE에서 CRC 검증 후 저장 */
 void photo_rx_on_sr_stream(uint8_t app_type, const uint8_t *mac, const uint8_t *body, size_t len);
 
+/* 2026-09-26(설계 6단계) — 브 재부팅 시 진행 중이던 사진 수신을 전부 버림(임시파일 삭제) */
+void photo_rx_reset_sessions(void);
+
 /* ────────────────────────────────────────────────────────────
  * 1. 단일 사진 수신 — capture_now/fetch_by_id 공용
  * ──────────────────────────────────────────────────────────── */

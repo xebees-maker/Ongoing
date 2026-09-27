@@ -319,6 +319,29 @@ static bool is_duplicate_hello_locked(node_hub_node_t *n, const uint8_t *data, i
     return dup;
 }
 
+/* 2026-09-26(설계 §6, 6단계 — 사용자 설계: 브 재부팅은 복구하지 않고 콘/브/캠/센스를 최초 상태로, 콘에 저장된 것 제외) —
+ * 노드 연결 상태·CASK 대기열·설정 적용 기록을 처음으로. 노드 목록(이름·종류) 자체는 화면용으로 남김. 캠은 WAKE_HELLO가
+ * 무시되면(ever_paired=false) 스스로 재광고 → 자동연결 설정대로 다시 페어링 */
+void node_hub_on_bridge_reset(void)
+{
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_node_count; i++) {
+        node_hub_node_t *n = &s_nodes[i];
+        n->conn_state = NODE_CONN_ORPHAN;
+        n->ever_paired = false;
+        n->user_pair_wanted = false;
+        n->pair_req_attempts_left = 0;
+        n->action_queue_head = 0;
+        n->action_queue_count = 0;
+        n->last_hello_len = 0;
+        n->cfg_sent_valid = false;
+        n->cfg_applied_valid = false;
+    }
+    xSemaphoreGive(s_nodes_mutex);
+    photo_rx_reset_sessions();
+    ESP_LOGW(TAG, "브 재부팅 — 노드 상태 초기화(노드 %d개)", s_node_count);
+}
+
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
     if (len < 2) return;
@@ -781,6 +804,7 @@ void node_hub_init(void)
      * ESP-NOW 라디오/피어관리/reliable 재시도를 전부 소유. 콘은 CAN을 통해 브를 IPC처럼
      * 호출만 함(can_bridge.c). esp_now_add_peer(브로드캐스트)도 브 쪽 몫이라 여기선 안 함 */
     can_bridge_init(recv_cb);
+    can_bridge_set_bridge_reset_cb(node_hub_on_bridge_reset);
 
     /* 2026-08-25(CASK 재설계) — 예전엔 여기서 HUB_RESET을 브로드캐스트해서, Cntl이 재부팅해도
      * "아직 자기가 페어링된 줄 아는" 노드들을 강제로 재광고시켰음. 이제는 모든 재연결이

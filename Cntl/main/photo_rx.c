@@ -380,6 +380,16 @@ esp_now_capture_stage_t photo_rx_get_capture_stage(void)
     return stage;
 }
 
+void photo_rx_reset_sessions(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (int i = 0; i < SR_SESSIONS; i++) {
+        if (s_sessions[i].active) drop_session_locked(&s_sessions[i]);
+    }
+    s_capture_stage = PHOTO_RX_CAPTURE_STAGE_NONE;
+    xSemaphoreGive(s_mutex);
+}
+
 void photo_rx_capture_stage_clear(void)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);

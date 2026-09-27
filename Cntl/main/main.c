@@ -744,13 +744,16 @@ void app_main(void)
      * 초기화만 건너뛰는 건 이 코드베이스 구조상 안전하지 않음 — 그래서 초기화는 항상 정상
      * 진행하고, 대신 아래에서 recv_cb만 브릿지용으로 바꿔치기하는 방식으로 변경 */
     photo_rx_init();
+    /* 2026-09-26(실기 크래시 — 부팅 루프) — node_hub_init()이 CAN 수신을 시작하면 브가 중계한 캠 광고가 곧바로
+     * 도착해 자동연결로 node_request_enqueue()가 불림. node_request_init()이 아래(Wi-Fi 초기화 뒤)에 있어서 큐가
+     * NULL인 채 assert(uxQueueMessagesWaiting)로 재부팅, 캠이 광고 중이면 매 부팅 반복됐음 → CAN 수신보다 먼저 */
+    node_request_init();
     node_hub_init();
     /* 2026-09-26 — node_hub_init() 안에 있던 Wi-Fi 초기화를 분리. 순서 유지: node_hub가 먼저(노드
      * 뮤텍스 생성 — AP 모드에선 wifi_sta_init() 안에서 웹 대시보드가 바로 시작되고, 그 핸들러가
      * node_hub를 부름) */
     wifi_sta_init();  /* 내부에서 esp_netif_init()+esp_event_loop_create_default() 호출 —
                              아래 이벤트 등록은 반드시 그 다음이어야 함 */
-    node_request_init();
 
     /* SR(Power Control) 판정 루프 시작(2026-09-16) — GPIO 초기화 + 15초 주기 태스크.
      * ui_main_query_power_source_value()가 node_hub 노드 테이블/SD 집계를 읽으므로 그

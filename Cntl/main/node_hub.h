@@ -267,6 +267,9 @@ void node_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz);
  * 캠의 ACK를 한 번도 못 받았으면 false */
 bool node_hub_get_cam_applied_config(const uint8_t *mac, esp_now_cam_config_t *out);
 
+/* 2026-09-26(설계 6단계) — 브 재부팅 감지 시(can_bridge가 부름) 노드 상태를 처음으로 */
+void node_hub_on_bridge_reset(void);
+
 /* 노드별 실제 무응답 타임아웃(ms) — device_config의 시스템 응답성 설정값 배수(여유마진).
  * node_hub_get_nodes()/is_paired()가 내부적으로 이걸 씀 — UI가 "몇 초 뒤에 끊김으로
  * 판단하는지" 표시하고 싶을 때도 그대로 재사용 가능하게 공개.

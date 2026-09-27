@@ -108,6 +108,9 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
                                              브릿지가 같은 공유버스(GPIO8/9)에 물리면서 처음 관측됨
                                              (project_cntl_i2c_bridge_design_2026_09_21) */
 
+#define UI_ERR_BRIDGE_NORESPONSE    5011  /* 2026-09-26(설계 6단계) — 브릿지 PONG 10초 넘게 없음. 콘이 RESET을 보냄.
+                                             계속되면 전원 리셋(브 자체 워치독도 재부팅 시도) */
+
 void ui_log_add_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 /* 확인 안 한 에러가 있으면 out에 채우고 true+플래그 클리어, 없으면 false */

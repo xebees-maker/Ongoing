@@ -6,6 +6,7 @@
 #include "esp_twai_onchip.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -60,6 +61,8 @@ typedef struct {
     uint8_t  data[8];
 } raw_frame_t;
 static QueueHandle_t s_raw_frame_q;
+static void note_bridge_alive(const uint8_t *body, size_t body_len);  /* 2026-09-26(설계 6단계) — 아래 정의 */
+static esp_err_t send_app_msg(const uint8_t *msg, size_t len);
 static volatile uint32_t s_raw_drop = 0;  /* ISR 원시 프레임 큐가 차서 버린 수 */
 /* 2026-09-26(버스 에러 조사) — 에러를 트래픽 양으로 나눠 비교하려고 셈 */
 static volatile uint32_t s_rx_frames = 0, s_tx_frames = 0, s_bus_errs = 0, s_state_changes = 0;
@@ -216,6 +219,8 @@ static void can_consume_task(void *arg)
                     deliver_relay(&hdr, body, body_len);
                 } else if (hdr.msg_type == CAN_DATA_RELIABLE_RESULT) {
                     deliver_reliable_result(&hdr, body, body_len);
+                } else if (hdr.msg_type == CAN_CTRL_PONG || hdr.msg_type == CAN_CTRL_BRIDGE_BOOT) {
+                    note_bridge_alive(body, body_len);
                 } else if (hdr.msg_type == CAN_DATA_SR_META || hdr.msg_type == CAN_DATA_SR_CHUNK ||
                            hdr.msg_type == CAN_DATA_SR_DONE) {
                     /* 2026-09-26(설계 §4, 4단계) — 브가 순서를 맞춘 사진 스트림(Data 경로 → data_consume) */
@@ -225,6 +230,88 @@ static void can_consume_task(void *arg)
             can_bridge_queue_pop_free(data);
         }
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
+}
+
+/* ---- 2026-09-26(설계 §6, 6단계) — 브 장애 처리 ---- */
+#define BRIDGE_PING_INTERVAL_MS  2000
+#define BRIDGE_SILENT_US         (10LL * 1000 * 1000)
+#define BRIDGE_RESET_REPEAT_US   (20LL * 1000 * 1000)
+static volatile int64_t s_last_pong_us = 0;
+static uint32_t s_bridge_boot_id = 0;          /* 0 = 아직 모름(콘이 브보다 늦게 떠도 첫 PONG에서 기록만) */
+static volatile bool s_bridge_silent = false;
+static can_bridge_bridge_reset_cb_t s_bridge_reset_cb = NULL;
+
+void can_bridge_set_bridge_reset_cb(can_bridge_bridge_reset_cb_t cb) { s_bridge_reset_cb = cb; }
+bool can_bridge_bridge_is_silent(void) { return s_bridge_silent; }
+
+/* 브가 재부팅하면 브에 맡긴 reliable 요청은 영영 결과가 안 옴 — 기다리는 호출자를 실패로 깨움 */
+static void fail_all_pending(void)
+{
+    xSemaphoreTake(s_pending_mutex, portMAX_DELAY);
+    for (int i = 0; i < CAN_BRIDGE_MAX_PENDING; i++) {
+        if (s_pending[i].in_use && s_pending[i].done_sem) {
+            s_pending[i].ok = 0;
+            xSemaphoreGive(s_pending[i].done_sem);
+        }
+    }
+    xSemaphoreGive(s_pending_mutex);
+}
+
+/* PONG·BRIDGE_BOOT 수신(ctrl_consume 태스크) */
+static void note_bridge_alive(const uint8_t *body, size_t body_len)
+{
+    if (body_len < sizeof(can_bridge_ctrl_boot_t)) return;
+    can_bridge_ctrl_boot_t b;
+    memcpy(&b, body, sizeof(b));
+    s_last_pong_us = esp_timer_get_time();
+    if (s_bridge_silent) {
+        s_bridge_silent = false;
+        ESP_LOGI(TAG, "브 응답 재개");
+    }
+    if (s_bridge_boot_id != 0 && b.boot_id != s_bridge_boot_id) {
+        ESP_LOGW(TAG, "브 재부팅 감지(부팅 ID %08x -> %08x) — 노드 상태를 처음으로", (unsigned)s_bridge_boot_id, (unsigned)b.boot_id);
+        s_bridge_boot_id = b.boot_id;
+        fail_all_pending();
+        if (s_bridge_reset_cb) s_bridge_reset_cb();
+        return;
+    }
+    s_bridge_boot_id = b.boot_id;
+}
+
+static void send_ctrl_to_bridge(uint8_t type, const void *body, size_t len)
+{
+    uint8_t msg[CAN_BRIDGE_APP_HEADER_LEN + 8];
+    if (len > 8) return;
+    can_bridge_app_header_t hdr = { .msg_type = type, .flags = 0 };
+    memset(hdr.mac, 0, sizeof(hdr.mac));
+    memcpy(msg, &hdr, CAN_BRIDGE_APP_HEADER_LEN);
+    memcpy(msg + CAN_BRIDGE_APP_HEADER_LEN, body, len);
+    send_app_msg(msg, CAN_BRIDGE_APP_HEADER_LEN + len);  /* 실패해도 다음 주기에 다시 — 생존 판단은 PONG 수신으로만 */
+}
+
+static void bridge_ping_task(void *arg)
+{
+    (void)arg;
+    uint32_t seq = 0;
+    int64_t last_reset_us = 0;
+    s_last_pong_us = esp_timer_get_time();   /* 부팅 직후 유예 */
+    for (;;) {
+        seq++;
+        send_ctrl_to_bridge(CAN_CTRL_PING, &seq, sizeof(seq));
+        vTaskDelay(pdMS_TO_TICKS(BRIDGE_PING_INTERVAL_MS));
+        int64_t now = esp_timer_get_time();
+        if (now - s_last_pong_us > BRIDGE_SILENT_US) {
+            if (!s_bridge_silent) {
+                s_bridge_silent = true;
+                last_reset_us = 0;
+                ESP_LOGE(TAG, "브 응답 없음(PONG %llds 없음) — RESET 전송", (long long)((now - s_last_pong_us) / 1000000));
+            }
+            if (last_reset_us == 0 || now - last_reset_us > BRIDGE_RESET_REPEAT_US) {
+                send_ctrl_to_bridge(CAN_CTRL_RESET, &seq, sizeof(seq));
+                last_reset_us = now;
+            }
+        }
     }
 }
 
@@ -457,6 +544,8 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
 
     s_data_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA);
     s_ctrl_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL);
+    /* 2026-09-26(설계 6단계) — 브 생존 확인(코어 1 — CAN 송신은 코어 1에서) */
+    xTaskCreatePinnedToCore(bridge_ping_task, "bridge_ping", 3072, NULL, 5, NULL, 1);
 
     static StaticTask_t s_can_rx_tcb, s_can_consume_tcb, s_ctrl_consume_tcb, s_can_status_tcb;
     StackType_t *can_rx_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
