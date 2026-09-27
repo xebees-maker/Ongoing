@@ -42,7 +42,7 @@ static esp_err_t i2c_master_init(void)
     if (ret != ESP_OK) {
         return ret;
     }
-    ESP_LOGI(TAG, "i2c_master_bus_handle_t 생성됨: %p", (void *)s_i2c_bus);
+    ESP_LOGI(TAG, "i2c_master_bus_handle_t created: %p", (void *)s_i2c_bus);
 
     return ch422g_init(s_i2c_bus);
 }
@@ -165,7 +165,7 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(uint8_t frame_buffer_count,
     ESP_LOGI(TAG, "Initialize I2C bus");   // Log the initialization of the I2C bus
     esp_err_t i2c_err = i2c_master_init(); // Initialize the I2C master
     if (i2c_err != ESP_OK) {
-        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "I2C 버스 초기화 실패: %s", esp_err_to_name(i2c_err));
+        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "I2C bus init failed: %s", esp_err_to_name(i2c_err));
         return ESP_OK;
     }
     ESP_LOGI(TAG, "Initialize GPIO");      // Log GPIO initialization
@@ -183,7 +183,7 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(uint8_t frame_buffer_count,
     ESP_LOGI(TAG, "Initialize I2C panel IO");                                          // Log I2C panel I/O initialization
     esp_err_t io_err = esp_lcd_new_panel_io_i2c(s_i2c_bus, &tp_io_config, &tp_io_handle); // Create new I2C panel I/O
     if (io_err != ESP_OK) {
-        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "터치 패널 IO 초기화 실패: %s", esp_err_to_name(io_err));
+        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "Touch panel IO init failed: %s", esp_err_to_name(io_err));
         return ESP_OK;
     }
 
@@ -205,7 +205,7 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(uint8_t frame_buffer_count,
     };
     esp_err_t gt_err = esp_lcd_touch_new_i2c_gt911(tp_io_handle, &tp_cfg, touch_handle); // Create new I2C GT911 touch controller
     if (gt_err != ESP_OK) {
-        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "GT911 초기화 실패: %s", esp_err_to_name(gt_err));
+        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "GT911 init failed: %s", esp_err_to_name(gt_err));
         *touch_handle = NULL;
         return ESP_OK;
     }
@@ -223,7 +223,7 @@ esp_err_t waveshare_rgb_lcd_backlight_on(void)
 {
     esp_err_t err = i2c_master_init();
     if (err != ESP_OK) {
-        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "백라이트: I2C 버스 초기화 실패: %s", esp_err_to_name(err));
+        ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "Backlight: I2C bus init failed: %s", esp_err_to_name(err));
         return ESP_OK;
     }
 
@@ -234,7 +234,7 @@ esp_err_t waveshare_rgb_lcd_backlight_on(void)
         if (err == ESP_OK) return ESP_OK;
         vTaskDelay(pdMS_TO_TICKS(50));
     }
-    ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "백라이트 켜기 실패(3회 재시도): %s", esp_err_to_name(err));
+    ui_log_add_err(UI_ERR_TOUCH_INIT_FAIL, "Backlight on failed (3 retries): %s", esp_err_to_name(err));
     return ESP_OK;
 }
 
