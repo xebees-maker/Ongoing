@@ -121,8 +121,6 @@ bool ui_log_get_pending_error(char *out, size_t out_cap);
 #define UI_ERR_HISTORY_CAP 16
 int ui_log_get_error_history(int *out_codes, int max);
 
-/* code에 대응하는 짧은 설명 문자열(찾는 코드가 없으면 "알 수 없는 에러") */
-const char *ui_log_err_desc(int code);
 
 /* 2026-09-11(재설계 — 사용자 지시: "행별로 조치 가능한 버튼... 통신 에러인데 지우고
  * 싶으면 에러끄기 식") — 에러목록 팝업의 각 행마다 붙는 "지우기" 버튼용. 이력에서 해당
@@ -145,6 +143,5 @@ void ui_log_add_warn(int code, const char *fmt, ...) __attribute__((format(print
 bool ui_log_get_pending_warn(char *out, size_t out_cap);
 #define UI_WARN_HISTORY_CAP 16
 int ui_log_get_warn_history(int *out_codes, int max);
-const char *ui_log_warn_desc(int code);
 /* 에러목록 팝업의 워닝 행 "지우기" 버튼용 — ui_log_clear_one_error()와 동일 패턴 */
 void ui_log_clear_one_warn(int code);

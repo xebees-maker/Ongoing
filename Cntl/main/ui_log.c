@@ -32,52 +32,6 @@ static bool s_err_pending = false;
 static int s_err_history[UI_ERR_HISTORY_CAP];
 static int s_err_history_count = 0;
 
-/* (코드, 짧은 설명) 표 — ui_log.h의 UI_ERR_* 주석과 1:1로 맞춰둠. 코드만 보고 뭔지
- * 바로 알아보려는 용도라 설명은 짧게(2026-08-01, 사용자 지시) */
-typedef struct {
-    int         code;
-    const char *desc;
-} ui_err_entry_t;
-
-static const ui_err_entry_t s_err_table[] = {
-    { UI_ERR_CACHE_TOO_BIG,       "사진이 캐시 용량보다 큼" },
-    { UI_ERR_CACHE_NO_BUF,        "캐시 슬롯 버퍼 없음" },
-    { UI_ERR_RECV_BUF_ALLOC,      "수신 버퍼 할당 실패" },
-    { UI_ERR_CACHE_SLOT_ALLOC,    "캐시 슬롯 할당 실패" },
-    { UI_ERR_PANEL_BUF_ALLOC,     "판넬 버퍼 할당 실패" },
-    { UI_ERR_SEND_PHOTO_REQ,      "사진 요청 전송 실패" },
-    { UI_ERR_SEND_CAPTURE_REQ,    "지금촬영 요청 전송 실패" },
-    { UI_ERR_SEND_LIST_REQ,       "목록 요청 전송 실패" },
-    { UI_ERR_SEND_DELETE_REQ,     "삭제 요청 전송 실패" },
-    { UI_ERR_SEND_DELETE_ALL_REQ, "전체삭제 요청 전송 실패" },
-    { UI_ERR_REQUEST_BUSY,        "요청 무시됨(이미 수신중)" },
-    { UI_ERR_NOT_PAIRED,          "페어링 끊김 — 재연결 시도" },
-    { UI_ERR_META_TOO_BIG,        "사진이 수신 버퍼보다 큼" },
-    { UI_ERR_CHUNK_MISSING,       "청크 누락" },
-    { UI_ERR_CRC_MISMATCH,        "CRC 불일치" },
-    { UI_ERR_DECODE_FAIL,         "JPEG 디코드 실패" },
-    { UI_ERR_LIST_COUNT_MISMATCH, "목록 항목 유실" },
-    { UI_ERR_FETCH_NORESPONSE,    "사진 가져오기 무응답" },
-    { UI_ERR_LIST_NORESPONSE,     "목록 갱신 무응답" },
-    { UI_ERR_PHOTO_SELECTION_STALE, "선택-도착 불일치(낡은 응답)" },
-    { UI_ERR_DELETE_FAILED,       "사진 삭제 실패" },
-    { UI_ERR_DELETE_ALL_FAILED,   "전체삭제 실패" },
-    { UI_ERR_CAPTURE_FAILED,      "촬영 실패" },
-    { UI_ERR_CAPTURE_NORESPONSE,  "지금촬영 무응답" },
-    { UI_ERR_DELETE_ALL_NORESPONSE, "전체삭제 접수 무응답(통신 끊김)" },
-    { UI_ERR_DELETE_ALL_STOPPED,  "전체삭제 중단됨(완료 무응답)" },
-    { UI_ERR_SET_TIME_NORESPONSE, "시각동기화 무응답" },
-    { UI_ERR_TX_QUEUE_FULL,       "전송 큐 가득 — 요청 버려짐" },
-    { UI_ERR_FONT_FILE_MISSING,   "폰트 파일 없음" },
-    { UI_ERR_FONT_BUF_ALLOC,      "폰트 버퍼 할당 실패" },
-    { UI_ERR_FONT_FILE_OPEN,      "폰트 파일 열기 실패" },
-    { UI_ERR_FONT_CREATE,         "폰트 생성 실패" },
-    { UI_ERR_HTTPD_START,         "웹서버 시작 실패" },
-    { UI_ERR_RTC_SET_FAILED,      "RTC 시각설정 실패" },
-    { UI_ERR_TOUCH_INIT_FAIL,     "터치 초기화 실패" },
-    { UI_ERR_BRIDGE_NORESPONSE,   "브릿지 응답 없음 — 계속되면 전원 리셋" },
-};
-
 void ui_log_init(void)
 {
     s_mutex = xSemaphoreCreateMutex();
@@ -229,14 +183,6 @@ void ui_log_clear_one_error(int code)
     xSemaphoreGive(s_mutex);
 }
 
-const char *ui_log_err_desc(int code)
-{
-    for (size_t i = 0; i < sizeof(s_err_table) / sizeof(s_err_table[0]); i++) {
-        if (s_err_table[i].code == code) return s_err_table[i].desc;
-    }
-    return "알 수 없는 에러";
-}
-
 /* 2026-08-11 — 워닝 레벨. 에러(위)와 완전히 별개 상태를 가지는 이유는 ui_log.h 주석
  * 참고(확인하면 지워짐 vs 안 지워짐) — 그 차이 자체가 두 이력을 하나로 합쳐서 플래그로
  * 구분하는 것보다 완전히 분리된 구조가 더 단순함 */
@@ -246,11 +192,8 @@ static bool s_warn_pending = false;
 static int  s_warn_history[UI_WARN_HISTORY_CAP];
 static int  s_warn_history_count = 0;
 
-/* 2026-08-25 — 유일했던 항목(SLEEP_NOW 재요청)이 CASK 재설계로 제거되어 현재 비어있음 —
- * 빈 배열은 sizeof(arr)/sizeof(arr[0])==0이 되어 아래 조회 루프의 "i < 0"이 컴파일 타임에
- * 항상 거짓임이 증명돼 -Werror=type-limits로 빌드가 깨짐. 테이블 자체를 지워두고, 다음에
- * 쓸 워닝 코드가 생기면 이 배열과 아래 ui_log_warn_desc()의 루프를 함께 되살일 것
- * (ui_log.h의 UI_WARN_* 주석 참고) */
+/* 워닝 설명 문구는 화면 표시용이라 ui_main.c의 warn_code_to_desc_str()(ui_strings)에 둠 —
+ * 여기에 한글 문자열을 두면 비트맵 폰트에서 깨짐 */
 
 static void push_warn_history_locked(int code)
 {
@@ -317,15 +260,6 @@ int ui_log_get_warn_history(int *out_codes, int max)
     for (int i = 0; i < n; i++) out_codes[i] = s_warn_history[i];
     xSemaphoreGive(s_mutex);
     return n;
-}
-
-const char *ui_log_warn_desc(int code)
-{
-    /* 2026-08-25에 표를 비웠다가 2026-09-26 SD 손상 항목 경고로 다시 하나 생김 */
-    switch (code) {
-        case UI_WARN_SD_BAD_ENTRY: return "SD 손상 의심 항목 제외됨";
-        default:                   return "알 수 없는 워닝";
-    }
 }
 
 /* 2026-09-11 — 위 ui_log_clear_one_error()와 동일 패턴(워닝용) */

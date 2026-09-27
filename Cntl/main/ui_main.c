@@ -1194,6 +1194,15 @@ static ui_str_id_t err_code_to_desc_str(int code)
     }
 }
 
+/* 워닝도 에러와 같은 방식(ui_log.c에 한글 설명을 두면 비트맵 폰트에서 깨짐) */
+static ui_str_id_t warn_code_to_desc_str(int code)
+{
+    switch (code) {
+        case UI_WARN_SD_BAD_ENTRY: return STR_WARN_DESC_SD_BAD_ENTRY;
+        default:                   return STR_WARN_DESC_UNKNOWN;
+    }
+}
+
 /* 경고 로고 탭 — 지금까지 쌓인 에러+워닝 코드를 전부 목록으로 보여줌(2026-08-01, 사용자
  * 지시: "로고를 찍으면 error code를 보여주는 팝업... 누적된 게 있으면 여러 개를
  * 보여줄 수도"). 에러는 "Exxxx"(빨강), 워닝은 "Wxxxx"(어두운 노랑 — 팝업 배경이 밝아서
@@ -1297,7 +1306,7 @@ static void cb_logo_warning_tap(lv_event_t *e)
             lv_obj_set_style_border_width(row, 0, 0);
 
             char buf[160];
-            snprintf(buf, sizeof(buf), "W%04d %s", code, ui_log_warn_desc(code));
+            snprintf(buf, sizeof(buf), "W%04d %s", code, ui_str(warn_code_to_desc_str(code)));
             lv_obj_t *lbl = lv_label_create(row);
             lv_label_set_text(lbl, buf);
             lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);

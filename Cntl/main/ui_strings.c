@@ -270,6 +270,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_ERR_DESC_CONFIG_FILE_MISMATCH]  = { "설정 파일 형식 불일치(기본값)",   "Config file mismatch (defaults)" },
     [STR_ERR_DESC_SD_MOUNT_FAILED]       = { "SD카드 마운트 실패",             "SD card mount failed" },
     [STR_ERR_DESC_UNKNOWN]               = { "알 수 없는 에러",               "Unknown error" },
+    [STR_WARN_DESC_SD_BAD_ENTRY]         = { "SD 손상 의심 항목 제외됨",       "SD damaged entries skipped" },
+    [STR_WARN_DESC_UNKNOWN]              = { "알 수 없는 워닝",               "Unknown warning" },
 
     [STR_STATUS_SD_IO_ERROR_MSG] = { "오류 - 상태버튼을 눌러 조치하세요",        "error - tap the status button to act" },
     [STR_STATUS_SD_UNMOUNTED]    = { "미마운트",                                  "not mounted" },
