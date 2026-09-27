@@ -2,6 +2,7 @@
 #include "can_bridge.h"
 #include "node_hub.h"
 #include "ui_log.h"
+#include "memdiag.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -226,6 +227,7 @@ static void tx_dispatcher_task(void *arg)
         if (w) {
             send_to_worker(w, &item);
         } else {
+            MEMDIAG_BEGIN();  /* 2026-09-28(진단) — 새 캠/센스 워커 생성의 내부 RAM 비용 */
             w = find_free_slot_locked();
             if (!w) {
                 /* 이론상 도달 불가 — mac은 항상 node_hub.c에 이미 등록된 노드(최대
@@ -261,6 +263,7 @@ static void tx_dispatcher_task(void *arg)
                                        w, TX_WORKER_PRIORITY, w->task_stack, w->task_tcb, 1);
                 }
             }
+            MEMDIAG_END(TAG, "new worker");
         }
         xSemaphoreGive(s_workers_mutex);
     }

@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "memdiag.h"
 
 static const char *TAG = "UI";
 
@@ -2085,8 +2086,10 @@ static void on_photo_result_event(void)
 static void cb_async_connect_result(void *user_data)
 {
     (void)user_data;
+    MEMDIAG_BEGIN();
     force_camera_list_redraw();
     force_sensor_list_redraw();
+    MEMDIAG_END(TAG, "connect result redraw");
 }
 
 static void on_connect_result_event(void)
@@ -6345,6 +6348,18 @@ static void cb_network_ctrl_tap(lv_event_t *e)
     cb_settings_btn_tap(e);
 }
 
+/* 2026-09-28(진단 — 첫 캠 연결 때 내부 RAM -17.5K 추적) — 주기 UI 타이머를 감싸서 한 번 실행에
+ * 내부 RAM이 크게 변하면 D 로그(memdiag.h) */
+#define MEMDIAG_TIMER_WRAP(fn)     static void fn##_md(lv_timer_t *t) { MEMDIAG_BEGIN(); fn(t); MEMDIAG_END(TAG, "timer " #fn); }
+MEMDIAG_TIMER_WRAP(refresh_clock)
+MEMDIAG_TIMER_WRAP(refresh_bridge_health)
+MEMDIAG_TIMER_WRAP(error_poll_tick)
+MEMDIAG_TIMER_WRAP(refresh_sensor_list)
+MEMDIAG_TIMER_WRAP(refresh_camera_list)
+MEMDIAG_TIMER_WRAP(refresh_dashboard)
+MEMDIAG_TIMER_WRAP(refresh_stats_page)
+MEMDIAG_TIMER_WRAP(refresh_log_box)
+
 void ui_init(void)
 {
     lv_demo_widgets_components_init();  /* profile/analytics가 쓰는 공용 스타일/폰트 초기화 */
@@ -6451,8 +6466,8 @@ void ui_init(void)
     lv_obj_add_event_cb(s_network_ctrl_label, cb_network_ctrl_tap, LV_EVENT_CLICKED, NULL);
 
     refresh_clock(NULL);  /* 첫 타이머 tick 전까지 빈 채로 안 보이게 즉시 한 번 채움 */
-    lv_timer_create(refresh_clock, 1000, NULL);
-    lv_timer_create(refresh_bridge_health, 1000, NULL);     /* 2026-09-26(설계 6단계) — 브 응답 없음 경고 */
+    lv_timer_create(refresh_clock_md, 1000, NULL);
+    lv_timer_create(refresh_bridge_health_md, 1000, NULL);     /* 2026-09-26(설계 6단계) — 브 응답 없음 경고 */
 
     /* 2026-09-08(사용자 지시 — "상단바 통계 버튼을 없애고, 센서 판넬 Sensor 역상을 누르면
      * 열리게", "순서를... 시간-네트워크-상태-Settings로") — 통계 버튼 제거(빈 자리는 그냥
@@ -6497,7 +6512,7 @@ void ui_init(void)
     lv_label_set_text(s_settings_btn_lbl, ui_str(STR_TAB_OPTION));
     lv_obj_set_style_text_font(s_settings_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
-    lv_timer_create(error_poll_tick, 200, NULL);
+    lv_timer_create(error_poll_tick_md, 200, NULL);
 
     /* 주화면 — 판넬 3개(요약/측정기/카메라), 1초마다 연결 상태 반영 */
     lv_obj_t *dashboard_page = lv_obj_create(s_main_screen);
@@ -6699,7 +6714,7 @@ void ui_init(void)
     s_sensor_list = lv_list_create(sensor_box);
     lv_obj_set_size(s_sensor_list, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_add_flag(s_sensor_list, LV_OBJ_FLAG_HIDDEN);
-    s_sensor_list_timer = lv_timer_create(refresh_sensor_list, 1000, NULL);
+    s_sensor_list_timer = lv_timer_create(refresh_sensor_list_md, 1000, NULL);
 
     lv_obj_t *camera_box = create_dashboard_panel(dashboard_page, STR_GROUP_CAMERA, 2);
     s_camera_box = camera_box;
@@ -6738,7 +6753,7 @@ void ui_init(void)
     s_camera_list = lv_list_create(camera_box);
     lv_obj_set_size(s_camera_list, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_add_flag(s_camera_list, LV_OBJ_FLAG_HIDDEN);
-    s_camera_list_timer = lv_timer_create(refresh_camera_list, 1000, NULL);
+    s_camera_list_timer = lv_timer_create(refresh_camera_list_md, 1000, NULL);
 
     /* 상단 툴바 — 지금촬영/목록갱신 외에 나중에 다른 컨트롤도 여기 추가될 예정, 그래서
      * 목록/사진 판넬보다 위에 별도 행으로 둠. camera_box의 직접 자식(예전엔 s_camera_content라는
@@ -6928,7 +6943,7 @@ void ui_init(void)
     lv_obj_set_style_text_font(s_camera_photo_label, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_color(s_camera_photo_label, lv_palette_main(LV_PALETTE_GREY), 0);
 
-    s_dashboard_timer = lv_timer_create(refresh_dashboard, 1000, NULL);
+    s_dashboard_timer = lv_timer_create(refresh_dashboard_md, 1000, NULL);
 
     /* 버튼 폭 통일(2026-08-09, 사용자 지시) — 지금까지 만든 메인 화면(상황판) 버튼들의 실측
      * 자연폭 중 최댓값을 기준폭으로 잡아 적용. 팝업 버튼(add_modal_button)은 s_action_btn_width가
@@ -7647,7 +7662,7 @@ static void build_stats_tab(void)
 
     /* 2026-09-15(사용자 설계) — ">>"(표로 전환) 버튼 삭제, Record 버튼(제목바)이 그 역할 대체 */
 
-    s_stats_page_timer = lv_timer_create(refresh_stats_page, 2000, NULL);
+    s_stats_page_timer = lv_timer_create(refresh_stats_page_md, 2000, NULL);
     /* 2026-09-15(사용자 지적 — "그래프가, 띄우자마자는 안 나오는 버그") — lv_timer_create()는
      * 주기의 첫 실행을 바로 하지 않고 2000ms 뒤로 미루므로, 팝업을 열자마자는 직전 상태(보통
      * 빈 차트)가 그대로 보임. 타이머와 별개로 지금 한 번 직접 그림 */
@@ -9806,7 +9821,7 @@ static void build_log_tab(void)
     lv_obj_add_flag(s_log_label, LV_OBJ_FLAG_CLICKABLE);  /* 2026-09-27 — 줄 탭 → 원문 토스트 */
     lv_obj_add_event_cb(s_log_label, cb_log_label_tap, LV_EVENT_CLICKED, NULL);
 
-    s_log_box_timer = lv_timer_create(refresh_log_box, 500, NULL);
+    s_log_box_timer = lv_timer_create(refresh_log_box_md, 500, NULL);
 
     /* 2026-09-27(사용자 설계 — 로그 정리) — 개발 로그 판넬(예전 전력 로그 자리, 같은 크기) */
     lv_obj_t *dev_box = lv_obj_create(log_page);

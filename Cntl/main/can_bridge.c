@@ -1,4 +1,5 @@
 #include "can_bridge.h"
+#include "memdiag.h"
 #include "can_bridge_link.h"
 #include "photo_rx.h"
 
@@ -221,6 +222,7 @@ static void can_consume_task(void *arg)
                 const uint8_t *body = data + CAN_BRIDGE_APP_HEADER_LEN;
                 size_t body_len = len - CAN_BRIDGE_APP_HEADER_LEN;
 
+                MEMDIAG_BEGIN();  /* 2026-09-28(진단) — 메시지 처리 1건의 내부 RAM 변화 */
                 if (hdr.msg_type == CAN_DATA_RELAY) {
                     deliver_relay(&hdr, body, body_len);
                 } else if (hdr.msg_type == CAN_DATA_RELIABLE_RESULT) {
@@ -232,6 +234,9 @@ static void can_consume_task(void *arg)
                     /* 2026-09-26(설계 §4, 4단계) — 브가 순서를 맞춘 사진 스트림(Data 경로 → data_consume) */
                     photo_rx_on_sr_stream(hdr.msg_type, hdr.mac, body, body_len);
                 }
+                MEMDIAG_END(TAG, "can msg app=%u espnow=%u mac=%02X%02X%02X", hdr.msg_type,
+                            (hdr.msg_type == CAN_DATA_RELAY && body_len >= 2) ? body[1] : 0,
+                            hdr.mac[3], hdr.mac[4], hdr.mac[5]);
             }
             can_bridge_queue_pop_free(data);
         }
