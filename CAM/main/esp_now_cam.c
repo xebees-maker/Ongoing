@@ -76,6 +76,54 @@ typedef struct {
 
 static QueueHandle_t s_photo_request_queue = NULL;
 static QueueHandle_t s_status_q = NULL;  /* 2026-09-26(5단계) — capture_status_task로 넘길 상태 */
+/* 2026-09-26(할 일 8) — 응답(ACK) 재전송. 예전엔 recv_cb에서 esp_now_send()를 한 번만 부르고 결과를 안 봐서, 사진 청크로
+ * 송신 큐가 찬 순간(NO_MEM)이면 응답이 그냥 사라졌음(→ 콘/브 쪽 reliable이 재시도하다 실패). 이제 NO_MEM이면 reply_task에
+ * 넘기고, 그 태스크가 송신 완료 이벤트(send_cb)를 기다렸다가 다시 보냄 */
+#define REPLY_MAX_LEN   48
+#define REPLY_RETRY_MAX 10      /* 송신 완료 이벤트 대기 20ms × 10 = 최대 약 200ms */
+typedef struct {
+    uint8_t mac[6];
+    uint8_t len;
+    uint8_t data[REPLY_MAX_LEN];
+} reply_item_t;
+static QueueHandle_t s_reply_q = NULL;
+static TaskHandle_t s_reply_task = NULL;
+/* 송신 큐에 자리가 났다는 신호(send_cb가 줌) — 청크 재전송 루프가 20ms 폴링 대신 기다림 */
+static SemaphoreHandle_t s_tx_space_sem = NULL;
+
+static void send_reply(const uint8_t *mac, const void *msg, size_t len)
+{
+    esp_err_t err = esp_now_send(mac, (const uint8_t *)msg, len);
+    if (err != ESP_ERR_ESPNOW_NO_MEM) {
+        if (err != ESP_OK) ESP_LOGW(TAG, "응답(type=%u) 송신 실패: %s", ((const uint8_t *)msg)[1], esp_err_to_name(err));
+        return;
+    }
+    if (!s_reply_q || len > REPLY_MAX_LEN) {
+        ESP_LOGW(TAG, "응답(type=%u) NO_MEM — 재전송 불가(버림)", ((const uint8_t *)msg)[1]);
+        return;
+    }
+    reply_item_t item;
+    memcpy(item.mac, mac, 6);
+    item.len = (uint8_t)len;
+    memcpy(item.data, msg, len);
+    if (xQueueSend(s_reply_q, &item, 0) != pdTRUE) ESP_LOGW(TAG, "응답 재전송 큐 가득 — 버림");
+}
+
+static void reply_task(void *arg)
+{
+    (void)arg;
+    reply_item_t item;
+    for (;;) {
+        if (xQueueReceive(s_reply_q, &item, portMAX_DELAY) != pdTRUE) continue;
+        esp_err_t err = ESP_ERR_ESPNOW_NO_MEM;
+        for (int i = 0; i < REPLY_RETRY_MAX && err == ESP_ERR_ESPNOW_NO_MEM; i++) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));   /* 송신 완료(자리 생김) 또는 20ms */
+            err = esp_now_send(item.mac, item.data, item.len);
+        }
+        if (err != ESP_OK) ESP_LOGW(TAG, "응답(type=%u) 재전송 실패: %s", item.data[1], esp_err_to_name(err));
+        else ESP_LOGI(TAG, "응답(type=%u) NO_MEM 뒤 재전송 성공", item.data[1]);
+    }
+}
 /* 2026-08-10 도입 — photo_transfer_task가 뭔가 처리 중인지(2026-09-19: esp_now_cam_enqueue_
  * auto_capture()도 큐잉 시점에 앞당겨 세팅함 — mark_transfer_idle() 주석 참고) */
 static volatile bool s_transfer_busy = false;
@@ -186,6 +234,9 @@ static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t statu
     /* 2026-09-25 — 송신 1건 완료 = 드라이버 송신 큐에 자리 생김. NO_MEM으로 대기 중인
      * esp_now_reliable_request()를 깨움(이벤트 방식, 대기 중인 게 없으면 아무 일도 안 함) */
     esp_now_reliable_on_send_done();
+    /* 2026-09-26(할 일 8) — 송신 큐에 자리 생김: 응답 재전송 태스크와 청크 재전송 루프를 깨움 */
+    if (s_reply_task) xTaskNotifyGive(s_reply_task);
+    if (s_tx_space_sem) xSemaphoreGive(s_tx_space_sem);
     if (info && info->des_addr && memcmp(info->des_addr, s_broadcast_mac, sizeof(s_broadcast_mac)) == 0) {
         if (status == ESP_NOW_SEND_SUCCESS) {
             esp_now_channelsync_notify_advertise_send_done();
@@ -220,7 +271,9 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
         for (attempt = 0; attempt < 6; attempt++) {
             err = esp_now_send(s_hub_mac, (const uint8_t *)&chunk, sizeof(chunk));
             if (err != ESP_ERR_ESPNOW_NO_MEM) break;
-            vTaskDelay(pdMS_TO_TICKS(20));
+            /* 2026-09-26(할 일 8) — 20ms 무조건 대기(폴링) 대신 송신 완료 이벤트(send_cb)가 오면 바로 재시도, 상한 20ms */
+            if (s_tx_space_sem) xSemaphoreTake(s_tx_space_sem, pdMS_TO_TICKS(20));
+            else vTaskDelay(pdMS_TO_TICKS(20));
         }
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "재전송 실패(buf): chunk[%u] -> %s(시도 %d회)", idx, esp_err_to_name(err), attempt + 1);
@@ -624,8 +677,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             .msg_type = ESP_NOW_MSG_CAM_CONFIG_ACK,
             .success  = 1,
         };
-        esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
-        ESP_LOGI(TAG, "CAM_CONFIG_ACK 전송: %s", esp_err_to_name(err));
+        send_reply(s_hub_mac, &ack, sizeof(ack));
+        ESP_LOGI(TAG, "CAM_CONFIG_ACK 전송");
         return;
     }
 
@@ -645,7 +698,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         ESP_LOGI(TAG, "[STATE] -> %s (unpair)", conn_state_name(s_conn_state));
         set_led(LED_PATTERN_BLINK_FAST);
         esp_now_unpair_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_UNPAIR_ACK };
-        esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+        send_reply(info->src_addr, &ack, sizeof(ack));
         return;
     }
 
@@ -658,7 +711,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 참고) */
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_cask_work_none_t)) return;
         esp_now_cask_work_none_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE_ACK };
-        esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
+        send_reply(s_hub_mac, &ack, sizeof(ack));
         return;
     }
 
@@ -669,8 +722,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         cam_speaker_notify(SPK_EVT_SLEEP_NOW);
         cam_node_note_sleep_now_requested(msg->sleep_sec);
         esp_now_sleep_now_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SLEEP_NOW_ACK };
-        esp_err_t ack_err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
-        ESP_LOGI(TAG, "SLEEP_NOW_ACK 전송: %s", esp_err_to_name(ack_err));
+        send_reply(s_hub_mac, &ack, sizeof(ack));
+        ESP_LOGI(TAG, "SLEEP_NOW_ACK 전송");
         cam_speaker_notify(SPK_EVT_SLEEP_NOW_ACK);
         return;
     }
@@ -720,8 +773,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * 보내므로(최초 페어링/졸업 CASK), 전송 직전에 미리 대기 상태를 깨끗하게 함 —
      * esp_now_cam_try_wake_hello_fast_path()의 동일 조치와 같은 이유 */
     cam_node_reset_sleep_now_state();
-    esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
-    ESP_LOGI(TAG, "페어링됨: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
+    send_reply(s_hub_mac, &ack, sizeof(ack));
+    ESP_LOGI(TAG, "페어링됨: hub " MACSTR ", PAIR_ACK 전송", MAC2STR(s_hub_mac));
     cam_speaker_notify(SPK_EVT_PAIR_ACK);
 
     /* 2026-08-25(CASK 재설계) — "졸업": 지금 막 전체 스캔으로 찾아낸 이 CNTL을 다음 웨이크부터
@@ -877,6 +930,9 @@ void esp_now_cam_init(void)
 
     s_photo_request_queue = xQueueCreate(4, sizeof(cam_task_request_t));
     s_status_q = xQueueCreate(4, sizeof(uint8_t));
+    s_reply_q = xQueueCreate(6, sizeof(reply_item_t));
+    s_tx_space_sem = xSemaphoreCreateBinary();
+    xTaskCreatePinnedToCore(reply_task, "reply_tx", 3072, NULL, 6, &s_reply_task, 0);
     xTaskCreatePinnedToCore(capture_status_task, "cap_status", 3072, NULL, 5, NULL, 0);
     /* 4096으로는 촬영(esp_camera_fb_get)+SD 저장(FATFS) 경로에서 스택 오버플로우 실기 확인
      * (2026-08-01) — 여유있게 증설했었으나, 목록조회(LIST) 경로에서 또 다른 스택 오버플로우가
