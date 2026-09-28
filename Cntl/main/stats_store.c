@@ -174,20 +174,10 @@ const uint32_t STATS_SCALE_SECONDS[STATS_SCALE_COUNT] = { 3600, 43200, 86400, 25
  * 의존 안 함(위 chan_type과 동일 원칙) — 실제 페어링 가능한 노드 수 이상은 어차피 안 옴 */
 #define STATS_AGG_MAX_MACS 8
 
-static uint8_t s_agg_known_macs[STATS_AGG_MAX_MACS][6];
-static int     s_agg_known_mac_count = 0;
-
-/* mac -> 누적 슬롯 인덱스. 처음 보는 mac이면 새로 등록, 꽉 찼으면 -1(그 장치의 사전집계는
- * 포기 — 원시 기록엔 여전히 남으므로 데이터 유실은 아님, 표시만 못 함) */
-static int agg_mac_slot(const uint8_t mac[6])
-{
-    for (int i = 0; i < s_agg_known_mac_count; i++) {
-        if (memcmp(s_agg_known_macs[i], mac, 6) == 0) return i;
-    }
-    if (s_agg_known_mac_count >= STATS_AGG_MAX_MACS) return -1;
-    memcpy(s_agg_known_macs[s_agg_known_mac_count], mac, 6);
-    return s_agg_known_mac_count++;
-}
+static uint8_t  s_agg_known_macs[STATS_AGG_MAX_MACS][6];
+static uint8_t  s_agg_slot_kind[STATS_AGG_MAX_MACS];      /* 슬롯을 넘겨줄 때 남은 버킷을 기록하는 데 씀 */
+static uint32_t s_agg_slot_last_unix[STATS_AGG_MAX_MACS]; /* 이 슬롯에 마지막으로 값이 들어온 시각 */
+static int      s_agg_known_mac_count = 0;
 
 /* 각 (스케일, chan_type, mac)마다 "지금 채워지는 중인" 버킷 하나만 RAM에 유지 — 재부팅하면
  * 그냥 리셋(진행 중이던 버킷은 유실, 사용자 설계: "다 채워진 후"에만 보이므로 문제 없음) */
@@ -232,6 +222,39 @@ static void agg_flush_bucket_locked(uint8_t scale_idx, uint8_t kind, uint8_t cha
     if (n == 1) s_weeks[widx].agg_bytes += sizeof(rec);
 }
 
+/* 호출부가 lock() 잡은 상태 — mac -> 누적 슬롯 인덱스. 처음 보는 mac이면 새로 등록.
+ * 2026-09-28(사용자 설계 — 기기 교체) — 예전엔 꽉 차면 -1(그 기기의 집계를 부팅 끝까지 포기)이라, 콘을 켠 채로 센서를
+ * 여러 번 바꾸면 9번째 기기부터 집계 파일에 안 남았음. 이제 가장 오래 값이 안 들어온 슬롯을 넘겨받음 — 동시에
+ * 붙는 기기는 페어링 상한으로 8대를 넘지 않으므로 그 슬롯의 기기는 이미 떠난 기기. 넘기기 전에 그 기기의 진행
+ * 중이던 칸을 파일에 기록(떠난 기기의 마지막 칸은 다음 값이 영영 안 와서 원래도 닫힐 일이 없었음) */
+static int agg_mac_slot(const uint8_t mac[6], uint32_t unix_time)
+{
+    for (int i = 0; i < s_agg_known_mac_count; i++) {
+        if (memcmp(s_agg_known_macs[i], mac, 6) == 0) return i;
+    }
+    int slot;
+    if (s_agg_known_mac_count < STATS_AGG_MAX_MACS) {
+        slot = s_agg_known_mac_count++;
+    } else {
+        slot = 0;
+        for (int i = 1; i < STATS_AGG_MAX_MACS; i++) {
+            if (s_agg_slot_last_unix[i] < s_agg_slot_last_unix[slot]) slot = i;
+        }
+        for (int sc = 0; sc < STATS_SCALE_COUNT; sc++) {
+            for (int ch = 0; ch < STATS_AGG_MAX_CHAN_TYPES; ch++) {
+                agg_flush_bucket_locked((uint8_t)sc, s_agg_slot_kind[slot], (uint8_t)ch, s_agg_known_macs[slot],
+                                        &s_agg_accum[sc][ch][slot]);
+                memset(&s_agg_accum[sc][ch][slot], 0, sizeof(agg_accum_t));
+            }
+        }
+        ESP_LOGI(TAG, "Aggregate slot of %02X%02X handed to %02X%02X", s_agg_known_macs[slot][4],
+                 s_agg_known_macs[slot][5], mac[4], mac[5]);
+    }
+    memcpy(s_agg_known_macs[slot], mac, 6);
+    s_agg_slot_last_unix[slot] = unix_time;
+    return slot;
+}
+
 /* 2026-09-15(사용자 설계 — 그래프 결측/보간 대화, "평균 내지 않는다") — 버킷 구간에 들어온
  * 실측값들 중 "버킷 중앙시각에 가장 가까운 값" 하나를 그대로(합성 없이) 저장. 좁은 스케일의
  * 값이 넓은 스케일보다 더 극단적일 수 없다는 부등식이 자동으로 지켜지고, "마지막 값"처럼
@@ -265,8 +288,9 @@ static void stats_agg_update_locked(const uint8_t mac[6], uint8_t kind, uint8_t 
                                      uint32_t unix_time, float value)
 {
     if (chan_type >= STATS_AGG_MAX_CHAN_TYPES) return;
-    int mac_slot = agg_mac_slot(mac);
-    if (mac_slot < 0) return;  /* STATS_AGG_MAX_MACS 초과 — 이 장치는 사전집계만 스킵(원본은 남음) */
+    int mac_slot = agg_mac_slot(mac, unix_time);
+    s_agg_slot_kind[mac_slot] = kind;
+    if (unix_time > s_agg_slot_last_unix[mac_slot]) s_agg_slot_last_unix[mac_slot] = unix_time;
     for (int scale = 0; scale < STATS_SCALE_COUNT; scale++) {
         stats_agg_update_scale_locked((uint8_t)scale, mac_slot, mac, kind, chan_type, unix_time, value);
     }
@@ -287,10 +311,10 @@ static bool agg_read_bucket_at(FILE *f, uint32_t idx, stats_bucket_t *out)
     return fread(out, sizeof(*out), 1, f) == 1;
 }
 
-uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type, const uint8_t mac[6],
-                                uint32_t window_start_unix, uint32_t window_end_unix,
+uint32_t stats_agg_read_window(uint8_t scale_idx, uint32_t window_start_unix, uint32_t window_end_unix,
                                 stats_bucket_t *out, uint32_t out_cap)
 {
+    s_last_io_error = false;
     if (scale_idx >= STATS_SCALE_COUNT || out_cap == 0 || window_end_unix <= window_start_unix) return 0;
     if (!sd_storage_is_mounted()) return 0;  /* 미마운트면 시도 자체 스킵 */
 
@@ -331,9 +355,7 @@ uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type, const uint8
         while (!done && picked < out_cap && (got = fread(s_bscratch, sizeof(stats_bucket_t), STATS_CHUNK, f)) > 0) {
             for (size_t k = 0; k < got && picked < out_cap; k++) {
                 if (s_bscratch[k].bucket_start_unix >= window_end_unix) { done = true; break; }
-                if (s_bscratch[k].chan_type == chan_type && memcmp(s_bscratch[k].mac, mac, 6) == 0) {
-                    out[picked++] = s_bscratch[k];
-                }
+                out[picked++] = s_bscratch[k];
             }
         }
         fclose(f);
@@ -341,45 +363,6 @@ uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type, const uint8
     }
     unlock();
     return picked;
-}
-
-uint32_t stats_agg_collect_macs(uint8_t chan_type, uint8_t out_macs[][6], uint8_t out_kinds[],
-                                 uint32_t out_cap)
-{
-    if (out_cap == 0) return 0;
-    if (!sd_storage_is_mounted()) return 0;
-
-    /* 가장 넓은 스케일(1주)의 주별 집계 파일 전부를 훑음 — 시간창 제한 없이, 이 chan_type을
-     * 보고한 적 있는 서로 다른 (mac,kind)를 전부 찾음(모든 스케일에 같은 mac 집합이 쓰이므로
-     * 1개 스케일만 봐도 충분, 1주 스케일은 주당 버킷 수가 가장 적음) */
-    lock();
-    if (!ensure_alloc_locked()) { unlock(); return 0; }
-    uint32_t count = 0;
-    for (uint32_t i = 0; i < s_week_count; i++) {
-        if (s_weeks[i].agg_bytes == 0) continue;
-        char path[48];
-        agg_path(STATS_SCALE_COUNT - 1, s_weeks[i].week, path, sizeof(path));
-        FILE *f = open_read(path);
-        if (!f) { if (s_last_io_error) break; continue; }
-        size_t got;
-        while ((got = fread(s_bscratch, sizeof(stats_bucket_t), STATS_CHUNK, f)) > 0) {
-            for (size_t k = 0; k < got; k++) {
-                const stats_bucket_t *rec = &s_bscratch[k];
-                if (rec->chan_type != chan_type) continue;
-                bool dup = false;
-                for (uint32_t j = 0; j < count; j++) {
-                    if (memcmp(out_macs[j], rec->mac, 6) == 0) { dup = true; break; }
-                }
-                if (dup || count >= out_cap) continue;
-                memcpy(out_macs[count], rec->mac, 6);
-                out_kinds[count] = rec->kind;
-                count++;
-            }
-        }
-        fclose(f);
-    }
-    unlock();
-    return count;
 }
 
 bool stats_store_had_io_error(void)

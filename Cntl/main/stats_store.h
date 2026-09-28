@@ -172,26 +172,15 @@ typedef struct __attribute__((packed)) {
                                      (필드명은 하위호환을 위해 유지, 의미만 바뀜) */
 } stats_bucket_t;  /* 17바이트 고정(2026-09-19, kind 추가로 16->17) */
 
-/* scale_idx(0..4)의 사전집계 저장에서, [window_start_unix, window_end_unix) 범위 안의
- * mac+chan_type 버킷들을 out에 채움(파일에 쓰인 순서=시간순 그대로). 실제 채운 개수 반환.
- * 각 버킷이 스케일 안의 몇 번째 슬롯인지는 호출부가
- * (bucket_start_unix - window_start_unix) / (STATS_SCALE_SECONDS[scale_idx] /
- * STATS_AGG_POINTS_PER_SCALE)로 직접 계산 — 없는 슬롯(원본 기록이 아예 없던 구간)은 이
- * 함수가 채워주지 않으므로 호출부가 "데이터 없음"으로 처리 */
-uint32_t stats_agg_read_window(uint8_t scale_idx, uint8_t chan_type, const uint8_t mac[6],
-                                uint32_t window_start_unix, uint32_t window_end_unix,
+/* scale_idx(0..4)의 사전집계 저장에서 [window_start_unix, window_end_unix) 범위 안의 버킷을 기기/채널 구분 없이 전부
+ * out에 채움(주 파일 순서 = 시간순). 실제 채운 개수 반환.
+ * 2026-09-28(사용자 설계 — 그래프는 저장된 테이블을 그 스케일의 창 안에서만 봄) — 예전엔 mac+chan_type 하나씩 읽고,
+ * 어떤 mac들이 있는지는 1주 스케일 파일 전체를 따로 훑어 알아냈음(stats_agg_collect_macs, 1주 칸은 2.8시간마다 닫혀서
+ * 그 전엔 계열이 0개였음). 이제 창 안의 칸을 한 번 읽으면 그 안에 있는 (mac, kind, chan_type)이 곧 계열 —
+ * 계열 찾기와 값 읽기가 한 번의 읽기로 끝남. 각 버킷이 몇 번째 슬롯인지는 호출부가
+ * (bucket_start_unix - window_start_unix) / (STATS_SCALE_SECONDS[scale_idx] / STATS_AGG_POINTS_PER_SCALE)로 계산 */
+uint32_t stats_agg_read_window(uint8_t scale_idx, uint32_t window_start_unix, uint32_t window_end_unix,
                                 stats_bucket_t *out, uint32_t out_cap);
-
-/* 2026-09-19(계열 자기서술 재설계, 사용자 설계 — "레코드의 값이 어떤 계열인지만 알면 항상
- * 대처 가능한 그림을 그릴 수 있다") — 그래프가 "어떤 mac들이 이 chan_type을 갖고 있나"를
- * 알아내려고 예전엔 살아있는 노드 목록+영구저장소(sens_kind_store)를 먼저 훑었음(라이브
- * 연결이 끊기면 조용히 실패하던 근본 원인). 이제 가장 넓은 스케일(1주)의 사전집계 파일
- * 자체를 훑어서, 그 안에 실제로 존재하는 서로 다른 (mac,kind) 조합을 직접 알아냄 — 별도
- * 레지스트리 조회가 전혀 없음. 시간창을 안 받는 이유: "이 chan_type을 보고할 수 있는
- * 후보가 누구인가"라는 존재여부 판정이지, 특정 스케일 화면에 지금 표시될 값 자체가
- * 아니라서(그건 stats_agg_read_window()가 여전히 담당) 창 제한이 필요 없음 */
-uint32_t stats_agg_collect_macs(uint8_t chan_type, uint8_t out_macs[][6], uint8_t out_kinds[],
-                                 uint32_t out_cap);
 
 #ifdef __cplusplus
 }

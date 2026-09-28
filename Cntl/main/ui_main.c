@@ -488,7 +488,7 @@ static lv_obj_t *s_overview_nh3_label   = NULL;
 static bool s_overview_air_temp_precise = true;
 static bool s_overview_air_humi_precise = true;
 /* 2026-09-15(사용자 설계 — "Agar는... 탭해서 서큘라로... 혼합 -> Agar1 -> Agar2 -> 혼합") —
- * 0=혼합, 1..N=stats_collect_group_macs()가 반환한 순서의 개별 기기. 실제 기기 수로 wrap은
+ * 0=혼합, 1..N=Agar 슬롯(기기 사슬, stats_build_chains) 순서의 개별 슬롯. 실제 기기 수로 wrap은
  * refresh_stats_overview_panel()이 매번 함(기기 수가 바뀔 수 있어서 고정 상한을 여기 안 둠) */
 static int s_overview_agar_cycle_idx = 0;
 /* 2026-09-11(그래프 재설계) — stats_store.h의 STATS_SCALE_SECONDS가 정본(스케일별 사전집계
@@ -3118,10 +3118,6 @@ typedef enum {
     STATS_VIEW_GROUP_GAS  = 2,  /* 이산화탄소/암모니아 */
 } stats_view_group_t;
 
-/* NODE_HUB_MAX_NODES(node_hub.h)와 같은 값 — 한 그룹에 속할 수 있는 mac의 상한
- * (stats_store.c의 STATS_AGG_MAX_MACS와 동일 값, 이 파일은 그쪽 내부 상수에 의존 안 함) */
-#define STATS_AGG_MAX_MACS_UI 8
-
 typedef struct {
     uint8_t             kind;       /* sensor_kind_t */
     uint8_t             chan_type;  /* sensor_channel_type_t — 같은 kind도 채널별로 그룹이
@@ -3204,99 +3200,230 @@ static bool stats_classify_by_kind(uint8_t kind, uint8_t chan_type,
     return false;
 }
 
-/* 2026-09-19(계열 자기서술 재설계, 사용자 설계) — group(+chan_type)에 속하는 mac들을
- * out_macs에 채움(최대 out_cap개). 예전엔 "살아있는 노드 목록 + 영구저장소(sens_kind_store)"
- * 를 먼저 훑어서 "아는 기기"를 만든 뒤 분류했음 — 이 방식은 라이브 연결이 끊기고 영구저장소도
- * 비어있으면(재부팅 직후 등) 조용히 실패했음(근본 원인). 이제 stats_agg_collect_macs()로
- * 사전집계 파일 자체에 이미 실려있는 (mac,kind)를 직접 알아내므로, 별도 레지스트리 조회가
- * 전혀 없음 — 과거 기록이 있으면 라이브 연결 여부와 완전히 무관하게 항상 후보에 잡힘.
- * AIR 그룹은 want_precise로 정밀/간이 중 하나만 추림(다른 그룹은 무시됨). AGAR 그룹은 실제
- * 분류(PT100 등, 아직 없음)에 더해 테스트용 SCD41/SHT45 온도도 추가로 끼워넣음(위
- * STATS_TEST_AGAR_FAKE_DATA 주석 참고 — Air 쪽 집계와 별개로 중복 포함되는 게 의도된 동작) */
-static int stats_collect_group_macs(stats_view_group_t group, uint8_t chan_type, bool want_precise,
-                                     uint8_t out_macs[][6], int out_cap)
-{
-    uint8_t macs[STATS_AGG_MAX_MACS_UI][6];
-    uint8_t kinds[STATS_AGG_MAX_MACS_UI];
-    uint32_t n = stats_agg_collect_macs(chan_type, macs, kinds, STATS_AGG_MAX_MACS_UI);
+/* ════════════════════════════════════════════════════════════
+ * 2026-09-28(사용자 설계 — 그래프는 저장된 테이블을 계열별로, 스케일에 맞게 보여줄 뿐) — 창(window) 모델.
+ * 예전엔 계열(mac)을 1주 스케일 집계 파일 전체에서 따로 찾고(stats_agg_collect_macs — 1주 칸이 2.8시간마다 닫혀서
+ * 그 전엔 계열 0개, SD 손상으로 그 파일이 없어지면 영영 0개), 값은 mac마다 따로 읽었음. 이제 그 스케일의 창 안에
+ * 저장된 칸을 한 번 읽고, 그 안에 있는 (mac, kind, chan_type)이 곧 계열. 그래프/Overview/SR 판정이 같은 모델을 씀
+ * ════════════════════════════════════════════════════════════ */
+#define STATS_WIN_MAX_SERIES  24
+#define STATS_WIN_MAX_BUCKETS (STATS_AGG_POINTS_PER_SCALE * STATS_WIN_MAX_SERIES)
 
-    int count = 0;
-    for (uint32_t i = 0; i < n && count < out_cap; i++) {
-        stats_view_group_t g;
-        bool prec;
-        bool matched = false;
-        if (stats_classify_by_kind(kinds[i], chan_type, &g, &prec)) {
-            if (g == group && (group != STATS_VIEW_GROUP_AIR || prec == want_precise)) matched = true;
-        }
-#if STATS_TEST_AGAR_FAKE_DATA
-        if (!matched && group == STATS_VIEW_GROUP_AGAR &&
-            stats_is_agar_fake_source(kinds[i], chan_type)) {
-            matched = true;
-        }
-#endif
-        if (matched) memcpy(out_macs[count++], macs[i], 6);
+/* 2026-09-15(사용자 확인 — "가스도 빨파 중에... Agar도 빨파흑노... 최대 4개로 일단 한정") */
+#define STATS_AGAR_MAX_SLOTS 4
+#define STATS_GAS_MAX_SLOTS  2
+
+typedef struct {
+    uint8_t  mac[6];
+    uint8_t  kind;       /* sensor_kind_t — 저장된 칸 자신이 들고 있는 값 */
+    uint8_t  chan_type;
+    uint32_t first_t;    /* 창 안에서 이 계열의 첫/마지막 칸 시작시각 */
+    uint32_t last_t;
+} stats_win_series_t;
+
+typedef struct {
+    stats_bucket_t     *b;         /* PSRAM, STATS_WIN_MAX_BUCKETS */
+    uint32_t            nb;
+    stats_win_series_t  s[STATS_WIN_MAX_SERIES];
+    int                 ns;
+    uint8_t            *b_series;  /* PSRAM — 칸마다 s[] 인덱스(0xFF=계열 표가 넘쳐 버림) */
+    uint32_t            start;
+    uint32_t            bucket_width;
+} stats_window_t;
+
+/* 창 하나당 한 번만 할당(PSRAM, 스택엔 안 둠) — 호출하는 곳(그래프/Overview/SR 판정 태스크)마다 따로 가짐 */
+static stats_window_t *stats_window_alloc(void)
+{
+    stats_window_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM);
+    if (!w) return NULL;
+    w->b = heap_caps_malloc(sizeof(stats_bucket_t) * STATS_WIN_MAX_BUCKETS, MALLOC_CAP_SPIRAM);
+    w->b_series = heap_caps_malloc(STATS_WIN_MAX_BUCKETS, MALLOC_CAP_SPIRAM);
+    if (!w->b || !w->b_series) {
+        heap_caps_free(w->b);
+        heap_caps_free(w->b_series);
+        heap_caps_free(w);
+        return NULL;
     }
-    return count;
+    return w;
 }
 
-/* mac 하나의 [window_start,window_end) min/max/avg — 사전집계 버킷을 그대로 훑음(스케일당
- * 최대 STATS_AGG_POINTS_PER_SCALE개뿐이라 순차 스캔으로 충분). 데이터 없으면 false */
-static bool stats_read_mac_window_stat(uint8_t scale_idx, uint8_t chan_type, const uint8_t mac[6],
-                                        uint32_t window_start, uint32_t window_end,
-                                        float *out_min, float *out_max, float *out_avg)
+/* [start,end) 창의 저장된 칸을 읽어 계열 표를 만듦. false = SD 자체 오류(회로차단기) */
+static bool stats_window_load(stats_window_t *w, uint8_t scale_idx, uint32_t start, uint32_t end)
 {
-    /* 2026-09-21(사용자 지시 — 메모리 조사) — 예전엔 static 배열(1020바이트)이라 이 함수를
-     * 한 번도 안 불러도 Internal RAM에 영구 예약돼있었음. 스택엔 여전히 안 두면서(2026-08-03
-     * 스택 오버플로우 사고 이후 원칙) PSRAM에 한 번만 할당해 재사용 — 이 프로젝트의 다른
-     * 대용량 버퍼(s_current_list 등)와 동일 패턴 */
-    static stats_bucket_t *buf = NULL;
-    if (!buf) buf = heap_caps_malloc(sizeof(stats_bucket_t) * STATS_AGG_POINTS_PER_SCALE, MALLOC_CAP_SPIRAM);
-    if (!buf) return false;
-    uint32_t got = stats_agg_read_window(scale_idx, chan_type, mac, window_start, window_end,
-                                          buf, STATS_AGG_POINTS_PER_SCALE);
-    if (got == 0) return false;
-    float mn = buf[0].avg_value, mx = buf[0].avg_value;
-    double sum = 0.0;
-    for (uint32_t i = 0; i < got; i++) {
-        float v = buf[i].avg_value;
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
-        sum += (double)v;
+    w->nb = 0;
+    w->ns = 0;
+    w->start = start;
+    w->bucket_width = STATS_SCALE_SECONDS[scale_idx] / STATS_AGG_POINTS_PER_SCALE;
+    if (w->bucket_width == 0) w->bucket_width = 1;
+    w->nb = stats_agg_read_window(scale_idx, start, end, w->b, STATS_WIN_MAX_BUCKETS);
+    if (w->nb == 0 && stats_store_had_io_error()) return false;
+    for (uint32_t i = 0; i < w->nb; i++) {
+        const stats_bucket_t *bk = &w->b[i];
+        int k = 0;
+        while (k < w->ns && !(w->s[k].chan_type == bk->chan_type && memcmp(w->s[k].mac, bk->mac, 6) == 0)) k++;
+        if (k == w->ns) {
+            if (w->ns >= STATS_WIN_MAX_SERIES) { w->b_series[i] = 0xFF; continue; }
+            memcpy(w->s[k].mac, bk->mac, 6);
+            w->s[k].kind = bk->kind;
+            w->s[k].chan_type = bk->chan_type;
+            w->s[k].first_t = bk->bucket_start_unix;
+            w->ns++;
+        }
+        w->s[k].last_t = bk->bucket_start_unix;
+        w->b_series[i] = (uint8_t)k;
     }
+    return true;
+}
+
+/* (kind, chan_type)이 이 보기(그룹, Air면 정밀/간이까지)에 속하는지. Agar는 테스트용 복제 포함 */
+static bool stats_kind_in_view(uint8_t kind, uint8_t chan_type, stats_view_group_t group, bool want_precise)
+{
+    stats_view_group_t g;
+    bool prec;
+    if (stats_classify_by_kind(kind, chan_type, &g, &prec) && g == group &&
+        (group != STATS_VIEW_GROUP_AIR || prec == want_precise)) {
+        return true;
+    }
+#if STATS_TEST_AGAR_FAKE_DATA
+    if (group == STATS_VIEW_GROUP_AGAR && stats_is_agar_fake_source(kind, chan_type)) return true;
+#endif
+    return false;
+}
+
+/* 슬롯 하나 = 기기 사슬. 기록 시간이 겹치지 않는(앞 기기의 마지막 칸 뒤에 시작한) 기기는 같은 슬롯을 이어 씀 —
+ * 사용자 설계: Agar A,B,C,D 중 C를 F로 바꾸면 1주 창은 ABCD -> ABDF, 이름은 "C->F" */
+#define STATS_CHAIN_MAX 4
+typedef struct {
+    uint8_t  mac[STATS_CHAIN_MAX][6];
+    int      series[STATS_CHAIN_MAX];  /* 창 안의 계열 인덱스, -1 = 창엔 기록 없는 연결 기기(이름만) */
+    int      n;
+    uint32_t last_t;
+} stats_chain_t;
+
+/* 이 보기에 속하는 창 안의 계열을 시작 시각 순으로 사슬(슬롯)에 배정 + 지금 연결됐지만 창엔 기록이 없는 기기도
+ * 슬롯에 넣음(사용자 결정 — 빈 그래프로 보임). 반환: 슬롯 수(<= max_slots) */
+static int stats_build_chains(const stats_window_t *w, stats_view_group_t group, uint8_t chan_type, bool want_precise,
+                              stats_chain_t *out, int max_slots)
+{
+    int idx[STATS_WIN_MAX_SERIES];
+    int n = 0;
+    for (int k = 0; k < w->ns; k++) {
+        if (w->s[k].chan_type != chan_type) continue;
+        if (!stats_kind_in_view(w->s[k].kind, chan_type, group, want_precise)) continue;
+        int pos = n++;
+        while (pos > 0 && w->s[idx[pos - 1]].first_t > w->s[k].first_t) { idx[pos] = idx[pos - 1]; pos--; }
+        idx[pos] = k;
+    }
+    int slots = 0;
+    for (int a = 0; a < n; a++) {
+        const stats_win_series_t *se = &w->s[idx[a]];
+        int target = -1;
+        for (int c = 0; c < slots; c++) {
+            if (out[c].n < STATS_CHAIN_MAX && out[c].last_t < se->first_t) { target = c; break; }
+        }
+        if (target < 0) {
+            if (slots >= max_slots) continue;  /* 페어링 상한으로 동시 기기는 슬롯 수를 넘지 않음 */
+            target = slots++;
+            out[target].n = 0;
+        }
+        stats_chain_t *ch = &out[target];
+        memcpy(ch->mac[ch->n], se->mac, 6);
+        ch->series[ch->n] = idx[a];
+        ch->n++;
+        ch->last_t = se->last_t;
+    }
+    node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    if (!nodes) return slots;
+    int total = node_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, NODE_HUB_MAX_NODES);
+    for (int i = 0; i < total; i++) {
+        if (node_hub_get_conn_state(nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
+        if (!stats_kind_in_view(nodes[i].sensor_kind, chan_type, group, want_precise)) continue;
+        bool present = false;
+        for (int c = 0; c < slots && !present; c++) {
+            for (int m = 0; m < out[c].n; m++) {
+                if (memcmp(out[c].mac[m], nodes[i].mac, 6) == 0) { present = true; break; }
+            }
+        }
+        if (present) continue;
+        int target = -1;
+        if (slots < max_slots) { target = slots++; out[target].n = 0; out[target].last_t = 0; }
+        else if (max_slots == 1 && out[0].n == 0) target = 0;
+        if (target < 0 || out[target].n >= STATS_CHAIN_MAX) continue;
+        memcpy(out[target].mac[out[target].n], nodes[i].mac, 6);
+        out[target].series[out[target].n] = -1;
+        out[target].n++;
+    }
+    heap_caps_free(nodes);
+    return slots;
+}
+
+static bool stats_chain_has_series(const stats_chain_t *ch, int series_idx)
+{
+    for (int m = 0; m < ch->n; m++) {
+        if (ch->series[m] == series_idx) return true;
+    }
+    return false;
+}
+
+/* 사슬의 기기 이름을 "C->F"로 이어 붙임(Alias 우선). 화살표는 글꼴에 없을 수 있어 ASCII로 */
+static void stats_chain_label(const stats_chain_t *ch, char *out, size_t out_cap)
+{
+    out[0] = '\0';
+    for (int m = 0; m < ch->n; m++) {
+        char devname[ESP_NOW_LINK_NAME_LEN];
+        find_node_name_by_mac(ch->mac[m], devname, sizeof(devname));
+        const char *alias = device_config_get_alias(ch->mac[m]);
+        size_t len = strlen(out);
+        snprintf(out + len, out_cap - len, "%s%s", (m > 0) ? "->" : "", (alias[0] != '\0') ? alias : devname);
+    }
+}
+
+/* 사슬 하나의 창 안 min/max/avg(칸 값 전체). 데이터 없으면 false */
+static bool stats_chain_stat(const stats_window_t *w, const stats_chain_t *ch, float *out_min, float *out_max, float *out_avg)
+{
+    bool have = false;
+    float mn = 0.0f, mx = 0.0f;
+    double sum = 0.0;
+    uint32_t cnt = 0;
+    for (uint32_t i = 0; i < w->nb; i++) {
+        if (w->b_series[i] == 0xFF || !stats_chain_has_series(ch, w->b_series[i])) continue;
+        float v = w->b[i].avg_value;
+        if (!have) { mn = mx = v; have = true; }
+        else { if (v < mn) mn = v; if (v > mx) mx = v; }
+        sum += (double)v;
+        cnt++;
+    }
+    if (!have) return false;
     *out_min = mn;
     *out_max = mx;
-    *out_avg = (float)(sum / (double)got);
+    *out_avg = (float)(sum / (double)cnt);
     return true;
 }
 
 /* 2026-09-15(사용자 설계 — "1번기기 최대100 최소10 평균30, 2번기기 최대90 최소5 평균50 ->
  * 그룹 100/5/40") — 최대=기기별 최대의 최대, 최소=기기별 최소의 최소, 평균=기기별 평균의
- * 평균(표본수 가중 아님 — 측정주기/도달시각이 기기마다 달라도 한쪽에 치우치지 않게) */
-static bool stats_blend_macs(uint8_t scale_idx, uint8_t chan_type,
-                              const uint8_t macs[][6], int mac_count,
-                              uint32_t window_start, uint32_t window_end,
-                              float *out_min, float *out_max, float *out_avg)
+ * 평균(표본수 가중 아님). 2026-09-28부터 "기기" 단위가 사슬(슬롯) */
+static bool stats_blend_chains(const stats_window_t *w, const stats_chain_t *chains, int n,
+                               float *out_min, float *out_max, float *out_avg)
 {
     bool have = false;
     float mn = 0.0f, mx = 0.0f;
     double avg_sum = 0.0;
     int avg_count = 0;
-    for (int i = 0; i < mac_count; i++) {
+    for (int c = 0; c < n; c++) {
         float dmn, dmx, davg;
-        if (!stats_read_mac_window_stat(scale_idx, chan_type, macs[i], window_start, window_end,
-                                         &dmn, &dmx, &davg)) continue;
+        if (!stats_chain_stat(w, &chains[c], &dmn, &dmx, &davg)) continue;
         if (!have) { mn = dmn; mx = dmx; have = true; }
         else { if (dmn < mn) mn = dmn; if (dmx > mx) mx = dmx; }
         avg_sum += (double)davg;
         avg_count++;
     }
-    if (!have || avg_count == 0) return false;
+    if (!have) return false;
     *out_min = mn;
     *out_max = mx;
     *out_avg = (float)(avg_sum / (double)avg_count);
     return true;
 }
-
 /* 2026-09-16(ui_main.h 선언 참고) — SR 판정 루프용 다리 함수. Overview 패널과 똑같은 분류/
  * 집계 로직을 재사용하되, 실시간 판정에 맞게 짧은 창(최근 5분, 1H 스케일=가장 촘촘한
  * 60초 버킷)만 봄 — Scale 드롭다운으로 고르는 긴 기간 통계와는 별개 */
@@ -3307,19 +3434,30 @@ bool ui_main_query_power_source_value(const power_relay_config_t *cfg, float *ou
     uint32_t window_start = (now > 300) ? now - 300 : 0;
     uint32_t window_end = now;
 
+    /* 파워 릴레이 태스크에서 불림 — 그래프/Overview와 창 버퍼를 따로 씀 */
+    static stats_window_t *s_pw_win = NULL;
+    if (!s_pw_win) s_pw_win = stats_window_alloc();
+    if (!s_pw_win || !stats_window_load(s_pw_win, 0, window_start, window_end)) return false;
+
     float mn = 0, mx = 0, avg = 0;
     bool have = false;
     if (cfg->source_kind == POWER_SRC_SINGLE_DEVICE) {
-        have = stats_read_mac_window_stat(0, cfg->chan_type, cfg->device_mac,
-                                           window_start, window_end, &mn, &mx, &avg);
+        stats_chain_t one = { .n = 0 };
+        for (int k = 0; k < s_pw_win->ns; k++) {
+            if (s_pw_win->s[k].chan_type == cfg->chan_type && memcmp(s_pw_win->s[k].mac, cfg->device_mac, 6) == 0) {
+                memcpy(one.mac[0], cfg->device_mac, 6);
+                one.series[0] = k;
+                one.n = 1;
+                break;
+            }
+        }
+        have = (one.n > 0) && stats_chain_stat(s_pw_win, &one, &mn, &mx, &avg);
     } else {
-        uint8_t macs[STATS_AGG_MAX_MACS_UI][6];
-        int n = stats_collect_group_macs((stats_view_group_t)cfg->group, cfg->chan_type,
-                                          cfg->precise, macs, STATS_AGG_MAX_MACS_UI);
-        have = (n > 0) && stats_blend_macs(0, cfg->chan_type, macs, n,
-                                            window_start, window_end, &mn, &mx, &avg);
-    }
-    if (!have) return false;
+        stats_chain_t chains[STATS_AGAR_MAX_SLOTS];
+        int n = stats_build_chains(s_pw_win, (stats_view_group_t)cfg->group, cfg->chan_type, cfg->precise,
+                                   chains, STATS_AGAR_MAX_SLOTS);
+        have = (n > 0) && stats_blend_chains(s_pw_win, chains, n, &mn, &mx, &avg);
+    }    if (!have) return false;
     switch (cfg->stat) {
         case POWER_STAT_MAX: *out_value = mx; break;
         case POWER_STAT_MIN: *out_value = mn; break;
@@ -3393,7 +3531,7 @@ static void stats_format_overview_badge_value(char *badge_out, size_t badge_cap,
 
 /* 2026-09-15(사용자 설계 — 부위/정밀도 대화 전체) — 개괄 판넬 재설계:
  *   - Air Temperature/Humidity: 탭으로 정밀(SHT45)<->간이(SCD41) 토글, 한 종류에 기기가
- *     여러 대면 stats_blend_macs()로 블렌딩.
+ *     여러 대면 stats_blend_chains()로 블렌딩.
  *   - Agar Temperature: 탭으로 혼합->Agar1->Agar2->...->혼합 순환.
  *   - CO2/암모니아: 가스군 전체를 블렌딩(장치별 개별 표시는 그래프 쪽 담당, 오늘 설계
  *     범위는 Overview는 Air/Agar만 명시됐음).
@@ -3412,16 +3550,21 @@ static bool refresh_stats_overview_panel(void)
     char line[128];
     char badge[64];
     char value[96];
-    uint8_t macs[STATS_AGG_MAX_MACS_UI][6];
-    int mac_count;
-    float mn, mx, avg;
-
-    /* --- Air Temperature (정밀/간이 토글) --- */
-    mac_count = stats_collect_group_macs(STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C,
-                                          s_overview_air_temp_precise, macs, STATS_AGG_MAX_MACS_UI);
-    bool have = (mac_count > 0) && stats_blend_macs((uint8_t)idx, SENSOR_CHAN_TEMP_C, macs, mac_count,
-                                                      window_start, now, &mn, &mx, &avg);
     char label[64];
+    float mn, mx, avg;
+    bool have;
+
+    /* 2026-09-28 — 이 스케일의 창(지금까지 scale_sec)에 저장된 칸 한 번 읽기로 모든 줄을 계산 */
+    static stats_window_t *s_ov_win = NULL;
+    if (!s_ov_win) s_ov_win = stats_window_alloc();
+    if (!s_ov_win) return true;
+    if (!stats_window_load(s_ov_win, (uint8_t)idx, window_start, now)) return false;
+    stats_chain_t chains[STATS_AGAR_MAX_SLOTS];
+    int n;
+
+    /* --- Air Temperature (정밀/간이 토글 — 줄은 항상 있음, 고른 쪽 기록이 없으면 데이터 없음) --- */
+    n = stats_build_chains(s_ov_win, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C, s_overview_air_temp_precise, chains, 1);
+    have = (n > 0) && stats_blend_chains(s_ov_win, chains, n, &mn, &mx, &avg);
     snprintf(label, sizeof(label), "%s(%s)", ui_str(STR_OVERVIEW_AIR_TEMP),
              ui_str(s_overview_air_temp_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
     stats_format_overview_badge_value(badge, sizeof(badge), value, sizeof(value), label,
@@ -3430,10 +3573,8 @@ static bool refresh_stats_overview_panel(void)
     lv_label_set_text(s_overview_temp_value, value);
 
     /* --- Air Humidity (정밀/간이 토글) --- */
-    mac_count = stats_collect_group_macs(STATS_VIEW_GROUP_AIR, SENSOR_CHAN_HUMI_PCT,
-                                          s_overview_air_humi_precise, macs, STATS_AGG_MAX_MACS_UI);
-    have = (mac_count > 0) && stats_blend_macs((uint8_t)idx, SENSOR_CHAN_HUMI_PCT, macs, mac_count,
-                                                 window_start, now, &mn, &mx, &avg);
+    n = stats_build_chains(s_ov_win, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_HUMI_PCT, s_overview_air_humi_precise, chains, 1);
+    have = (n > 0) && stats_blend_chains(s_ov_win, chains, n, &mn, &mx, &avg);
     snprintf(label, sizeof(label), "%s(%s)", ui_str(STR_OVERVIEW_AIR_HUMI),
              ui_str(s_overview_air_humi_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
     stats_format_overview_badge_value(badge, sizeof(badge), value, sizeof(value), label,
@@ -3441,31 +3582,26 @@ static bool refresh_stats_overview_panel(void)
     lv_label_set_text(s_overview_humi_badge, badge);
     lv_label_set_text(s_overview_humi_value, value);
 
-    /* --- Agar Temperature (혼합 -> Agar1 -> Agar2 -> ... 순환) --- */
-    mac_count = stats_collect_group_macs(STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false,
-                                          macs, STATS_AGG_MAX_MACS_UI);
-    if (mac_count == 0) {
+    /* --- Agar Temperature (혼합 -> Agar1 -> Agar2 -> ... 순환, 슬롯 = 기기 사슬) --- */
+    n = stats_build_chains(s_ov_win, STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false, chains, STATS_AGAR_MAX_SLOTS);
+    if (n == 0) {
         s_overview_agar_cycle_idx = 0;
         snprintf(badge, sizeof(badge), "%s[%s]:", ui_str(STR_OVERVIEW_AGAR_TEMP), ui_str(STR_CHAN_UNIT_TEMP_C));
         snprintf(value, sizeof(value), "%s", ui_str(STR_STATS_OVERVIEW_NO_DATA));
     } else {
-        int wrapped = s_overview_agar_cycle_idx % (mac_count + 1);  /* 0=혼합, 1..mac_count=개별 */
+        int wrapped = s_overview_agar_cycle_idx % (n + 1);  /* 0=혼합, 1..n=개별 슬롯 */
         if (wrapped == 0) {
-            have = stats_blend_macs((uint8_t)idx, SENSOR_CHAN_TEMP_C, macs, mac_count,
-                                     window_start, now, &mn, &mx, &avg);
+            have = stats_blend_chains(s_ov_win, chains, n, &mn, &mx, &avg);
             /* 2026-09-15(사용자 정리 — "모든 계열 이름 콘벤션이 Air T/H, Agar T... 장치별로는
              * Alias... T/H") — 혼합(그룹 전체)은 그룹명 그대로("Agar T"), 개별 기기만
              * "Alias T"/"기기명 T" 형식 */
             snprintf(label, sizeof(label), "%s", ui_str(STR_OVERVIEW_AGAR_TEMP));
         } else {
-            const uint8_t *one_mac = macs[wrapped - 1];
-            have = stats_read_mac_window_stat((uint8_t)idx, SENSOR_CHAN_TEMP_C, one_mac,
-                                               window_start, now, &mn, &mx, &avg);
-            char devname[ESP_NOW_LINK_NAME_LEN];
-            find_node_name_by_mac(one_mac, devname, sizeof(devname));
-            const char *alias = device_config_get_alias(one_mac);
-            const char *disp = (alias[0] != '\0') ? alias : devname;
-            snprintf(label, sizeof(label), "%s %s", disp, ui_str(STR_CHAN_LABEL_TEMP_C));
+            const stats_chain_t *one = &chains[wrapped - 1];
+            have = stats_chain_stat(s_ov_win, one, &mn, &mx, &avg);
+            char chain_name[40];
+            stats_chain_label(one, chain_name, sizeof(chain_name));
+            snprintf(label, sizeof(label), "%s %s", chain_name, ui_str(STR_CHAN_LABEL_TEMP_C));
         }
         stats_format_overview_badge_value(badge, sizeof(badge), value, sizeof(value), label,
                                            STR_CHAN_UNIT_TEMP_C, have, mn, mx, avg);
@@ -3473,19 +3609,15 @@ static bool refresh_stats_overview_panel(void)
     lv_label_set_text(s_overview_agar_badge, badge);
     lv_label_set_text(s_overview_agar_value, value);
 
-    /* --- CO2 / 암모니아 (가스군 전체 블렌딩) --- */
-    mac_count = stats_collect_group_macs(STATS_VIEW_GROUP_GAS, SENSOR_CHAN_CO2_PPM, false,
-                                          macs, STATS_AGG_MAX_MACS_UI);
-    have = (mac_count > 0) && stats_blend_macs((uint8_t)idx, SENSOR_CHAN_CO2_PPM, macs, mac_count,
-                                                 window_start, now, &mn, &mx, &avg);
+    /* --- CO2 / 암모니아 (기기는 상한 1대씩 — 교체했으면 사슬) --- */
+    n = stats_build_chains(s_ov_win, STATS_VIEW_GROUP_GAS, SENSOR_CHAN_CO2_PPM, false, chains, 1);
+    have = (n > 0) && stats_blend_chains(s_ov_win, chains, n, &mn, &mx, &avg);
     stats_format_overview_line(line, sizeof(line), ui_str(STR_CHAN_LABEL_CO2_PPM), STR_CHAN_UNIT_CO2_PPM,
                                 have, mn, mx, avg);
     lv_label_set_text(s_overview_co2_label, line);
 
-    mac_count = stats_collect_group_macs(STATS_VIEW_GROUP_GAS, SENSOR_CHAN_NH3_PPM, false,
-                                          macs, STATS_AGG_MAX_MACS_UI);
-    have = (mac_count > 0) && stats_blend_macs((uint8_t)idx, SENSOR_CHAN_NH3_PPM, macs, mac_count,
-                                                 window_start, now, &mn, &mx, &avg);
+    n = stats_build_chains(s_ov_win, STATS_VIEW_GROUP_GAS, SENSOR_CHAN_NH3_PPM, false, chains, 1);
+    have = (n > 0) && stats_blend_chains(s_ov_win, chains, n, &mn, &mx, &avg);
     stats_format_overview_line(line, sizeof(line), ui_str(STR_CHAN_LABEL_NH3_PPM), STR_CHAN_UNIT_NH3_PPM,
                                 have, mn, mx, avg);
     lv_label_set_text(s_overview_nh3_label, line);
@@ -3770,7 +3902,7 @@ static bool stats_graph_local_trend(const bool has[], const float vals[], int po
  * 않음(이번 세션 내내 겪은 malloc 관련 문제들을 감안한 저위험 선택) */
 static stats_view_group_t s_stats_active_group = STATS_VIEW_GROUP_AIR;
 static int     s_stats_slot_count = 0;
-static uint8_t s_stats_slot_mac[STATS_GRAPH_SERIES_COUNT][6];
+static stats_chain_t s_stats_slot_chain[STATS_GRAPH_SERIES_COUNT];  /* 2026-09-28 — 슬롯 = 기기 사슬 */
 static uint8_t s_stats_slot_chan_type[STATS_GRAPH_SERIES_COUNT];
 static char    s_stats_slot_label[STATS_GRAPH_SERIES_COUNT][48];
 /* 그래프 자체의 정밀/간이 토글 상태 — 개괄 판넬(s_overview_air_*_precise)과 위젯이 달라서
@@ -3778,85 +3910,73 @@ static char    s_stats_slot_label[STATS_GRAPH_SERIES_COUNT][48];
 static bool s_stats_air_temp_precise = true;
 static bool s_stats_air_humi_precise = true;
 
-/* 2026-09-15(사용자 확인 — "가스도 빨파 중에... Agar도 빨파흑노... 최대 4개로 일단 한정") */
-#define STATS_AGAR_MAX_SLOTS 4
-#define STATS_GAS_MAX_SLOTS  2
-
+/* 그룹 전환/토글 때 부름 — 2026-09-28부터 슬롯 자체는 창을 읽은 뒤(refresh_stats_graph) stats_graph_build_slots()가
+ * 만듦(계열이 그 스케일의 창에 따라 달라지므로) */
 static void stats_graph_populate_slots_for_group(stats_view_group_t group)
 {
     s_stats_active_group = group;
-    s_stats_slot_count = 0;
-    uint8_t macs[STATS_AGG_MAX_MACS_UI][6];
+}
 
-    if (group == STATS_VIEW_GROUP_AIR) {
-        int n = stats_collect_group_macs(STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C,
-                                          s_stats_air_temp_precise, macs, STATS_AGG_MAX_MACS_UI);
-        if (n > 0) {
-            int s = s_stats_slot_count++;
-            memcpy(s_stats_slot_mac[s], macs[0], 6);
-            s_stats_slot_chan_type[s] = SENSOR_CHAN_TEMP_C;
-            snprintf(s_stats_slot_label[s], sizeof(s_stats_slot_label[0]), "%s(%s)",
-                     ui_str(STR_OVERVIEW_AIR_TEMP),
-                     ui_str(s_stats_air_temp_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
-        }
-        n = stats_collect_group_macs(STATS_VIEW_GROUP_AIR, SENSOR_CHAN_HUMI_PCT,
-                                      s_stats_air_humi_precise, macs, STATS_AGG_MAX_MACS_UI);
-        if (n > 0 && s_stats_slot_count < STATS_GRAPH_SERIES_COUNT) {
-            int s = s_stats_slot_count++;
-            memcpy(s_stats_slot_mac[s], macs[0], 6);
-            s_stats_slot_chan_type[s] = SENSOR_CHAN_HUMI_PCT;
-            snprintf(s_stats_slot_label[s], sizeof(s_stats_slot_label[0]), "%s(%s)",
-                     ui_str(STR_OVERVIEW_AIR_HUMI),
-                     ui_str(s_stats_air_humi_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
-        }
-    } else if (group == STATS_VIEW_GROUP_AGAR) {
-        int n = stats_collect_group_macs(STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false,
-                                          macs, STATS_AGG_MAX_MACS_UI);
-        if (n > STATS_AGAR_MAX_SLOTS) n = STATS_AGAR_MAX_SLOTS;
-        for (int i = 0; i < n; i++) {
-            memcpy(s_stats_slot_mac[i], macs[i], 6);
-            s_stats_slot_chan_type[i] = SENSOR_CHAN_TEMP_C;
-            char devname[ESP_NOW_LINK_NAME_LEN];
-            find_node_name_by_mac(macs[i], devname, sizeof(devname));
-            const char *alias = device_config_get_alias(macs[i]);
-            snprintf(s_stats_slot_label[i], sizeof(s_stats_slot_label[0]), "%s %s",
-                     (alias[0] != '\0') ? alias : devname, ui_str(STR_CHAN_LABEL_TEMP_C));
+static void stats_graph_set_slot(int s, const stats_chain_t *chain, uint8_t chan_type)
+{
+    if (chain) s_stats_slot_chain[s] = *chain;
+    else s_stats_slot_chain[s].n = 0;
+    s_stats_slot_chan_type[s] = chan_type;
+}
+
+/* 사용자 결정(2026-09-28) — Air 온도·습도 슬롯과 CO2·암모니아 슬롯은 기록이 없어도 항상 있음(선택 UI가 사라지면
+ * 토글을 못 누름). Agar는 창 안의 기기 사슬 + 지금 연결된 기기 */
+static void stats_graph_build_slots(const stats_window_t *w)
+{
+    stats_chain_t chains[STATS_AGAR_MAX_SLOTS];
+    int n;
+    s_stats_slot_count = 0;
+
+    if (s_stats_active_group == STATS_VIEW_GROUP_AIR) {
+        n = stats_build_chains(w, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C, s_stats_air_temp_precise, chains, 1);
+        stats_graph_set_slot(s_stats_slot_count, n > 0 ? &chains[0] : NULL, SENSOR_CHAN_TEMP_C);
+        snprintf(s_stats_slot_label[s_stats_slot_count], sizeof(s_stats_slot_label[0]), "%s(%s)",
+                 ui_str(STR_OVERVIEW_AIR_TEMP),
+                 ui_str(s_stats_air_temp_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
+        s_stats_slot_count++;
+        n = stats_build_chains(w, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_HUMI_PCT, s_stats_air_humi_precise, chains, 1);
+        stats_graph_set_slot(s_stats_slot_count, n > 0 ? &chains[0] : NULL, SENSOR_CHAN_HUMI_PCT);
+        snprintf(s_stats_slot_label[s_stats_slot_count], sizeof(s_stats_slot_label[0]), "%s(%s)",
+                 ui_str(STR_OVERVIEW_AIR_HUMI),
+                 ui_str(s_stats_air_humi_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
+        s_stats_slot_count++;
+    } else if (s_stats_active_group == STATS_VIEW_GROUP_AGAR) {
+        n = stats_build_chains(w, STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false, chains, STATS_AGAR_MAX_SLOTS);
+        for (int i = 0; i < n && i < STATS_GRAPH_SERIES_COUNT; i++) {
+            stats_graph_set_slot(i, &chains[i], SENSOR_CHAN_TEMP_C);
+            char chain_name[40];
+            stats_chain_label(&chains[i], chain_name, sizeof(chain_name));
+            snprintf(s_stats_slot_label[i], sizeof(s_stats_slot_label[0]), "%s %s", chain_name,
+                     ui_str(STR_CHAN_LABEL_TEMP_C));
             /* 2026-09-15(사용자 지시 — "기기명(Alias)이 길어지면 ...으로... 스케일, << >>
              * 공간을 확보해야되") */
             trim_to_width(s_stats_slot_label[i], ui_font_get(UI_FONT_SIZE_18), 90);
+            s_stats_slot_count++;
         }
-        s_stats_slot_count = n;
-    } else {  /* STATS_VIEW_GROUP_GAS */
-        uint8_t co2_macs[STATS_AGG_MAX_MACS_UI][6], nh3_macs[STATS_AGG_MAX_MACS_UI][6];
-        int co2_n = stats_collect_group_macs(STATS_VIEW_GROUP_GAS, SENSOR_CHAN_CO2_PPM, false,
-                                              co2_macs, STATS_AGG_MAX_MACS_UI);
-        int nh3_n = stats_collect_group_macs(STATS_VIEW_GROUP_GAS, SENSOR_CHAN_NH3_PPM, false,
-                                              nh3_macs, STATS_AGG_MAX_MACS_UI);
-        int n = 0;
-        for (int i = 0; i < co2_n && n < STATS_GAS_MAX_SLOTS; i++, n++) {
-            memcpy(s_stats_slot_mac[n], co2_macs[i], 6);
-            s_stats_slot_chan_type[n] = SENSOR_CHAN_CO2_PPM;
-            char devname[ESP_NOW_LINK_NAME_LEN];
-            find_node_name_by_mac(co2_macs[i], devname, sizeof(devname));
-            const char *alias = device_config_get_alias(co2_macs[i]);
-            snprintf(s_stats_slot_label[n], sizeof(s_stats_slot_label[0]), "%s %s",
-                     (alias[0] != '\0') ? alias : devname, ui_str(STR_CHAN_LABEL_CO2_PPM));
-            trim_to_width(s_stats_slot_label[n], ui_font_get(UI_FONT_SIZE_18), 90);
+    } else {  /* STATS_VIEW_GROUP_GAS — CO2, 암모니아 한 슬롯씩(상한 1대씩, 교체면 사슬) */
+        static const uint8_t s_gas_chan[STATS_GAS_MAX_SLOTS] = { SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM };
+        static const ui_str_id_t s_gas_label[STATS_GAS_MAX_SLOTS] = { STR_CHAN_LABEL_CO2_PPM, STR_CHAN_LABEL_NH3_PPM };
+        for (int g = 0; g < STATS_GAS_MAX_SLOTS; g++) {
+            n = stats_build_chains(w, STATS_VIEW_GROUP_GAS, s_gas_chan[g], false, chains, 1);
+            int s = s_stats_slot_count++;
+            stats_graph_set_slot(s, n > 0 ? &chains[0] : NULL, s_gas_chan[g]);
+            if (n > 0 && chains[0].n > 0) {
+                char chain_name[40];
+                stats_chain_label(&chains[0], chain_name, sizeof(chain_name));
+                snprintf(s_stats_slot_label[s], sizeof(s_stats_slot_label[0]), "%s %s", chain_name,
+                         ui_str(s_gas_label[g]));
+            } else {
+                snprintf(s_stats_slot_label[s], sizeof(s_stats_slot_label[0]), "%s", ui_str(s_gas_label[g]));
+            }
+            trim_to_width(s_stats_slot_label[s], ui_font_get(UI_FONT_SIZE_18), 90);
         }
-        for (int i = 0; i < nh3_n && n < STATS_GAS_MAX_SLOTS; i++, n++) {
-            memcpy(s_stats_slot_mac[n], nh3_macs[i], 6);
-            s_stats_slot_chan_type[n] = SENSOR_CHAN_NH3_PPM;
-            char devname[ESP_NOW_LINK_NAME_LEN];
-            find_node_name_by_mac(nh3_macs[i], devname, sizeof(devname));
-            const char *alias = device_config_get_alias(nh3_macs[i]);
-            snprintf(s_stats_slot_label[n], sizeof(s_stats_slot_label[0]), "%s %s",
-                     (alias[0] != '\0') ? alias : devname, ui_str(STR_CHAN_LABEL_NH3_PPM));
-            trim_to_width(s_stats_slot_label[n], ui_font_get(UI_FONT_SIZE_18), 90);
-        }
-        s_stats_slot_count = n;
     }
 }
-
 /* 2026-09-10/11(재설계 — 라인그래프, 계열 4개 온도/습도/CO2/암모니아, 스케일별 사전집계
  * 저장에서 읽음, [[project_cntl_stats_graph_redesign_2026_09_10]]) — 계열마다 실제 단위/
  * 범위가 달라서 각 계열을 그 창 안의 최소~최대 기준 0~100으로 정규화.
@@ -3905,24 +4025,15 @@ static bool refresh_stats_graph(void)
      * 그리기 완료는 함수 끝의 LV_EVENT_REFR_READY 훅에서 별도로 로그)
      * 2026-09-15(그룹 재설계) — chan_type뿐 아니라 mac까지 슬롯별로 다름(s_stats_slot_*) */
     int64_t t_sdread_start_us = esp_timer_get_time();
-    /* 2026-09-21(사용자 지시 — 메모리 조사, 링커 맵으로 실측) — 이 파일 전체 .bss(13.6KB) 중
-     * 가장 큰 단일 항목(4080바이트)이 바로 이 static 배열이었음 — 그래프를 한 번도 안 열어도
-     * Internal RAM에 영구 예약. stats_read_mac_window_stat()과 동일하게 PSRAM 1회 할당으로
-     * 전환(스택엔 안 둠, 2026-08-03 원칙 유지) */
-    static stats_bucket_t (*buf)[STATS_GRAPH_POINT_COUNT] = NULL;
-    if (!buf) {
-        buf = heap_caps_malloc(sizeof(stats_bucket_t) * STATS_GRAPH_SERIES_COUNT * STATS_GRAPH_POINT_COUNT,
-                                MALLOC_CAP_SPIRAM);
-    }
-    if (!buf) return false;
-    uint32_t got[STATS_GRAPH_SERIES_COUNT];
-    for (int s = 0; s < s_stats_slot_count; s++) {
-        got[s] = stats_agg_read_window((uint8_t)idx, s_stats_slot_chan_type[s], s_stats_slot_mac[s],
-                                        window_start, window_end, buf[s], STATS_GRAPH_POINT_COUNT);
-        if (got[s] == 0 && stats_store_had_io_error()) return false;  /* SD 자체 문제 — 즉시 중단 */
-    }
+    /* 2026-09-28 — 이 스케일의 창에 저장된 칸을 한 번 읽고, 그 안의 계열로 슬롯을 만듦(PSRAM 창 버퍼, 1회 할당) */
+    static stats_window_t *s_graph_win = NULL;
+    if (!s_graph_win) s_graph_win = stats_window_alloc();
+    if (!s_graph_win) return true;
+    if (!stats_window_load(s_graph_win, (uint8_t)idx, window_start, window_end)) return false;  /* SD 자체 문제 — 즉시 중단 */
+    stats_graph_build_slots(s_graph_win);
     int64_t t_sdread_end_us = esp_timer_get_time();
-    ESP_LOGD(TAG, "STATSGRAPH SD read (%d series, scaleidx=%u): %lldus", s_stats_slot_count,
+    ESP_LOGD(TAG, "STATSGRAPH SD read (%u buckets, %d series, %d slots, scaleidx=%u): %lldus",
+             (unsigned)s_graph_win->nb, s_graph_win->ns, s_stats_slot_count,
              (unsigned)idx, (long long)(t_sdread_end_us - t_sdread_start_us));
 
     lv_chart_set_point_count(s_stats_chart, STATS_GRAPH_POINT_COUNT);
@@ -3947,13 +4058,16 @@ static bool refresh_stats_graph(void)
         static float vals[STATS_GRAPH_POINT_COUNT];
         for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) has[i] = false;
 
-        for (uint32_t i = 0; i < got[s]; i++) {
-            long slot_l = ((long)buf[s][i].bucket_start_unix - (long)window_start) / (long)bucket_width;
+        for (uint32_t i = 0; i < s_graph_win->nb; i++) {
+            if (s_graph_win->b_series[i] == 0xFF) continue;
+            if (!stats_chain_has_series(&s_stats_slot_chain[s], s_graph_win->b_series[i])) continue;
+            long slot_l = ((long)s_graph_win->b[i].bucket_start_unix - (long)window_start) / (long)bucket_width;
             if (slot_l < 0 || slot_l >= STATS_GRAPH_POINT_COUNT) continue;
             uint32_t slot = (uint32_t)slot_l;
             has[slot] = true;
-            vals[slot] = buf[s][i].avg_value;
+            vals[slot] = s_graph_win->b[i].avg_value;
         }
+
 
         /* 2026-09-11 — 스와이프로 지금이 아닌 다른 창을 볼 수 있게 되면서, "지금까지"
          * 기준으로 미리 계산해둔 개괄판넬 min/max 캐시를 그대로 쓰면 안 맞을 수 있음
@@ -8437,11 +8551,21 @@ static void relay_sync_form_from_widgets(void)
         s_relay_form.group = (s_relay_form.chan_type == SENSOR_CHAN_TEMP_C) ? POWER_GROUP_AIR : POWER_GROUP_GAS;
         s_relay_form.stat  = POWER_STAT_AVG;
         if (s_relay_form.chan_type == SENSOR_CHAN_TEMP_C) {
-            /* "정밀 우선" — Fine(SHT45류)을 보고하는 장치가 하나라도 있으면 정밀, 없으면 기본 */
-            uint8_t macs[STATS_AGG_MAX_MACS_UI][6];
-            int n = stats_collect_group_macs(STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C, true,
-                                              macs, STATS_AGG_MAX_MACS_UI);
-            s_relay_form.precise = (n > 0);
+            /* "정밀 우선" — Fine(SHT45류)이 지금 연결돼 있으면 정밀, 없으면 기본.
+             * 2026-09-28 — 예전엔 1주 집계 파일 전체에서 찾았음(stats_agg_collect_macs 제거) — 판정은 실시간이라
+             * 지금 연결된 기기로 봄 */
+            bool fine_connected = false;
+            node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+            if (nodes) {
+                int total = node_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, NODE_HUB_MAX_NODES);
+                for (int i = 0; i < total && !fine_connected; i++) {
+                    if (node_hub_get_conn_state(nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
+                    fine_connected = stats_kind_in_view(nodes[i].sensor_kind, SENSOR_CHAN_TEMP_C,
+                                                        STATS_VIEW_GROUP_AIR, true);
+                }
+                heap_caps_free(nodes);
+            }
+            s_relay_form.precise = fine_connected;
         } else {
             s_relay_form.precise = false;
         }
