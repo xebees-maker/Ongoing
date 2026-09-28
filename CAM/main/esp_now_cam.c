@@ -305,6 +305,11 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
                                        이 값이면 이론상 로컬 큐 포화(NO_MEM) 자체를 거의 안 만남 */
 #define SR_STATUS_TIMEOUT_MS 400   /* DONE의 800ms보다 짧게 — 윈도우당 훨씬 자주 도니까 */
 #define SR_STATUS_MAX_ATTEMPTS 3
+/* 2026-09-28(사용자 결정 1-가) — 브는 콘 쪽이 밀리면(흐름 제어) WINDOW_STATUS_ACK를 일부러 늦게 줌 = "잠깐 멈춰".
+ * 예전엔 400ms×3 안에 대답이 없으면 다음 윈도우로 넘어가서 흐름 제어가 먹히지 않았음(두 캠 동시 전송 때 실측).
+ * 이제 대답이 올 때까지 같은 질문을 반복함. 다만 브가 세션을 잃은 경우(브 재부팅 등) 끝없이 묻지 않도록, 이만큼
+ * 대답이 없으면 예전처럼 다음으로 넘어감(마지막 DONE/NACK가 안전망) — 브의 SR 세션 유휴 정리(10초)와 같은 값 */
+#define SR_STATUS_GIVEUP_US (10LL * 1000 * 1000)
 
 /* 2026-09-18(SD 제거 재설계) — 촬영한 사진 1장을 SR로 CNTL에 푸시. 카메라 드라이버의 PSRAM
  * 프레임버퍼(jpeg_buf/jpeg_len)를 그대로 씀 — 호출자(cam_node.c의 camera_capture_one())가
@@ -369,19 +374,31 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
         };
         static const uint8_t s_status_ack_types[] = { ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK };
         size_t reply_len = 0;
-        esp_err_t err = esp_now_reliable_request(s_hub_mac, &req, sizeof(req),
-                                                  s_status_ack_types, 1,
-                                                  SR_STATUS_TIMEOUT_MS, SR_STATUS_MAX_ATTEMPTS,
-                                                  &status_ack, sizeof(status_ack), &reply_len);
-        status_requests++;
+        esp_err_t err;
+        int64_t status_wait_start = esp_timer_get_time();
+        for (;;) {
+            err = esp_now_reliable_request(s_hub_mac, &req, sizeof(req),
+                                           s_status_ack_types, 1,
+                                           SR_STATUS_TIMEOUT_MS, SR_STATUS_MAX_ATTEMPTS,
+                                           &status_ack, sizeof(status_ack), &reply_len);
+            status_requests++;
+            if (err == ESP_OK) break;
+            if (s_request_generation != my_generation) {
+                ESP_LOGI(TAG_PHOTO, "SR-push: superseded by newer request - stopped (file_id=%u)", (unsigned)file_id);
+                return false;
+            }
+            if (esp_timer_get_time() - status_wait_start >= SR_STATUS_GIVEUP_US) break;
+            ESP_LOGD(TAG_PHOTO, "SR-push: WINDOW_STATUS_ACK not yet ([%u,%u)) - Bridge busy, asking again",
+                     window_base, window_base + window_count);
+        }
         if (err == ESP_OK) {
             if (status_ack.missing_count > 0) {
                 resend_chunks_from_buffer(jpeg_buf, jpeg_len, file_id, &status_ack);
                 total_sent_chunks += status_ack.missing_count;
             }
         } else {
-            ESP_LOGW(TAG_PHOTO, "SR-push: WINDOW_STATUS_ACK no response ([%u,%u)) - next window (final DONE/NACK is the safety net)",
-                     window_base, window_end);
+            ESP_LOGW(TAG_PHOTO, "SR-push: WINDOW_STATUS_ACK no response for %llds ([%u,%u)) - next window (final DONE/NACK is the safety net)",
+                     (long long)(SR_STATUS_GIVEUP_US / 1000000), window_base, window_end);
         }
         window_base = window_end;
     }
