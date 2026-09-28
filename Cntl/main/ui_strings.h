@@ -394,6 +394,15 @@ typedef enum {
     /* 2026-09-18(사용자 지시 — "설정에서 로그를 시스템 판넬에 넣어. Log 공백 View 단추 형식으로") */
     STR_BTN_VIEW,                /* 시스템 판넬의 로그 행 버튼: "보기" / "View" */
 
+    /* 2026-09-28(사용자 설계 — 페어링 구성 강제) */
+    STR_QUOTA_CLASS_CAM,         /* "카메라" / "Camera" */
+    STR_QUOTA_CLASS_FINE,        /* "정밀 센서" / "Fine sensor" */
+    STR_QUOTA_CLASS_BASIC,       /* "간이 센서" / "Basic sensor" */
+    STR_QUOTA_CLASS_AMMONIA,     /* "암모니아 센서" / "Ammonia sensor" */
+    STR_QUOTA_CLASS_AGAR,        /* "Agar 센서" / "Agar sensor" */
+    STR_MSG_PAIR_QUOTA_FULL_FMT, /* %s=그룹명, %u=상한 */
+    STR_STATUS_QUOTA_FULL,       /* 대기 목록 상태: "상한 초과" / "Limit reached" */
+
     STR_COUNT,
 } ui_str_id_t;
 

@@ -380,6 +380,14 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_TITLE_PROGRESS] = { "진행 중", "In Progress" },
 
     [STR_BTN_VIEW] = { "보기", "View" },
+    [STR_QUOTA_CLASS_CAM]         = { "카메라",        "Camera" },
+    [STR_QUOTA_CLASS_FINE]        = { "정밀 센서",     "Fine sensor" },
+    [STR_QUOTA_CLASS_BASIC]       = { "간이 센서",     "Basic sensor" },
+    [STR_QUOTA_CLASS_AMMONIA]     = { "암모니아 센서", "Ammonia sensor" },
+    [STR_QUOTA_CLASS_AGAR]        = { "Agar 센서",     "Agar sensor" },
+    [STR_MSG_PAIR_QUOTA_FULL_FMT] = { "%s: 최대 %u대까지 연결할 수 있습니다.\n기존 기기를 먼저 연결 해제하세요.",
+                                      "%s: up to %u can be connected.\nDisconnect one first." },
+    [STR_STATUS_QUOTA_FULL]       = { "상한 초과",     "Limit reached" },
 };
 
 void ui_lang_load(void)

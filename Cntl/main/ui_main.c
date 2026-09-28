@@ -1681,11 +1681,42 @@ static void fill_rgb565_dsc(lv_image_dsc_t *dsc, uint8_t *pixel_buf, uint16_t w,
 /* ════════════════════════════════════════════════════════════
  * 장치 연결/설정 팝업 — 미연결(연결 허용 확인) / 연결됨(설정+연결해제)
  * ════════════════════════════════════════════════════════════ */
+/* 2026-09-28(사용자 설계 — 페어링 구성 강제) — 수동 연결이 그룹 상한으로 거절됐을 때의 알림 팝업 */
+static void show_pair_quota_popup(node_quota_class_t cls)
+{
+    static const ui_str_id_t s_class_str[NODE_QUOTA_COUNT] = {
+        [NODE_QUOTA_NONE]    = STR_QUOTA_CLASS_CAM,  /* 안 쓰임(NONE은 거절 사유가 아님) */
+        [NODE_QUOTA_CAM]     = STR_QUOTA_CLASS_CAM,
+        [NODE_QUOTA_FINE]    = STR_QUOTA_CLASS_FINE,
+        [NODE_QUOTA_BASIC]   = STR_QUOTA_CLASS_BASIC,
+        [NODE_QUOTA_AMMONIA] = STR_QUOTA_CLASS_AMMONIA,
+        [NODE_QUOTA_AGAR]    = STR_QUOTA_CLASS_AGAR,
+    };
+    if (cls <= NODE_QUOTA_NONE || cls >= NODE_QUOTA_COUNT) return;
+    char msg[160];
+    snprintf(msg, sizeof(msg), ui_str(STR_MSG_PAIR_QUOTA_FULL_FMT), ui_str(s_class_str[cls]),
+             (unsigned)node_hub_quota_limit(cls));
+    show_alert_popup(msg, MODAL_KIND_WARNING);
+}
+
+/* 처음 보는 센스는 종류를 PAIR_ACK에서야 알아서, 거절이 recv 태스크에서 늦게 옴 — LVGL 태스크로 넘겨 팝업 */
+static void cb_async_pair_quota_popup(void *user_data)
+{
+    show_pair_quota_popup((node_quota_class_t)(intptr_t)user_data);
+}
+
+static void on_pair_rejected_event(const uint8_t mac[6], node_quota_class_t cls)
+{
+    (void)mac;
+    lv_async_call(cb_async_pair_quota_popup, (void *)(intptr_t)cls);
+}
+
 static void cb_pair_confirm(lv_event_t *e)
 {
     node_hub_node_t *node = (node_hub_node_t *)lv_event_get_user_data(e);
-    node_hub_request_pair(node->mac);
+    node_quota_class_t full = node_hub_request_pair(node->mac);
     cb_modal_close(e);
+    if (full != NODE_QUOTA_NONE) show_pair_quota_popup(full);
 }
 
 static void cb_unpair_confirm(void *ctx)
@@ -1774,6 +1805,10 @@ static void refresh_camera_row_status_text(void)
         ui_str_id_t status_id = (st == HUB_CONN_STATE_WAITING) ? STR_STATUS_CONNECTING
                                : (st == HUB_CONN_STATE_ACTIVE) ? STR_STATUS_ACTIVE
                                : STR_STATUS_PAIRED;
+        /* 2026-09-28(페어링 구성 강제) — 그룹 상한 때문에 자동 연결이 거절되는 기기 */
+        if (st == HUB_CONN_STATE_WAITING && node_hub_is_quota_blocked(s_camera_row_macs[i])) {
+            status_id = STR_STATUS_QUOTA_FULL;
+        }
         char buf[48];
         snprintf(buf, sizeof(buf), "%s (%s)", s_camera_row_names[i], ui_str(status_id));
         lv_obj_t *lbl = lv_obj_get_child(s_camera_row_objs[i], 0);
@@ -1910,6 +1945,10 @@ static void refresh_sensor_row_status_text(void)
         ui_str_id_t status_id = (st == HUB_CONN_STATE_WAITING) ? STR_STATUS_CONNECTING
                                : (st == HUB_CONN_STATE_ACTIVE) ? STR_STATUS_ACTIVE
                                : STR_STATUS_PAIRED;
+        /* 2026-09-28(페어링 구성 강제) — 그룹 상한 때문에 자동 연결이 거절되는 기기 */
+        if (st == HUB_CONN_STATE_WAITING && node_hub_is_quota_blocked(s_sensor_row_macs[i])) {
+            status_id = STR_STATUS_QUOTA_FULL;
+        }
         char buf[48];
         snprintf(buf, sizeof(buf), "%s (%s)", s_sensor_row_names[i], ui_str(status_id));
         /* 2026-09-06(실기 발견 — s_summary_row_last_text 선언부 설명 참고) */
@@ -6994,6 +7033,7 @@ void ui_init(void)
      * 등록. 매틱 폴링하던 refresh_dashboard()의 해당 부분은 제거하고 여기로 옮김 */
     photo_rx_set_ready_cb(on_photo_result_event);
     node_hub_set_connect_event_cb(on_connect_result_event);
+    node_hub_set_pair_rejected_cb(on_pair_rejected_event);
 }
 
 /* 2026-09-08(재설계) — 통계 팝업 닫기: 타이머 삭제 + 팝업 전체 삭제(lv_obj_delete — 이제

@@ -72,6 +72,10 @@ typedef struct {
      * 확인된 순간에만 보내면 타이밍 문제 자체가 구조적으로 사라짐(자동 재페어링, ever_paired
      * 경로와 동일한 원리를 수동 연결에도 통일 적용) */
     bool            user_pair_wanted;
+    /* 2026-09-28(페어링 구성 강제) — 이번 PAIR_REQUEST가 사용자 연결로 나갔는지(PAIR_ACK에서 상한 초과면 수동만
+     * 팝업), 자동 연결 거절 로그를 이 부팅에 이미 남겼는지 */
+    bool            pair_manual;
+    bool            quota_logged;
     /* CAM Deep Sleep 자동 재페어링용(2026-08-10) — CAM은 매 웨이크마다 완전 재부팅되어
      * ADVERTISE부터 다시 보내므로, "방금 막 페어링이 풀린 순간"(paired: true->false 전환)
      * 에만 재연결을 시도하면 그 시도 자체가 실패했을 때(무선 유실 등, 실기에서 실제로 발생
@@ -181,8 +185,32 @@ int node_hub_get_nodes(hub_node_kind_t kind, node_hub_node_t *out, int max);
  * 도박이었음). user_pair_wanted 플래그만 세우고, 실제 전송은 이 노드의 ADVERTISE를 실제로
  * 받는 시점(node_hub.c의 ADVERTISE 핸들러)에서 함 — 그 순간은 채널이 같다는 게 이미
  * 증명된 시점이라 타이밍 문제 자체가 없음 */
-void node_hub_request_pair(const uint8_t *mac);
+/* 2026-09-28(사용자 설계 — 콘에 동시에 붙는 기기 구성을 강제) — 그룹별 상한: 캠 2, Fine(SHT45) 1, Basic(SCD41) 1,
+ * 암모니아 1, Agar 3(합 8 = NODE_HUB_MAX_NODES). 그래프는 이 상한을 믿고 슬롯을 만듦 */
+typedef enum {
+    NODE_QUOTA_NONE = 0,   /* 상한 없는 기기(종류 모름/레거시) — 전체 8대 제한만 */
+    NODE_QUOTA_CAM,
+    NODE_QUOTA_FINE,
+    NODE_QUOTA_BASIC,
+    NODE_QUOTA_AMMONIA,
+    NODE_QUOTA_AGAR,       /* PT100/DS18B20 — sensor_kind_t에 아직 없음 */
+    NODE_QUOTA_COUNT,
+} node_quota_class_t;
+
+uint8_t node_hub_quota_limit(node_quota_class_t cls);
+
+/* 반환값: NODE_QUOTA_NONE이면 요청 접수. 그 외면 이 기기가 속한 그룹이 이미 상한이라 거절(요청 안 함) —
+ * 호출부가 알림 팝업을 띄움. 기기 종류를 아직 모르면(처음 보는 센스) 접수하고, 페어링 완료(PAIR_ACK) 때 다시
+ * 판정해서 넘치면 거절 콜백(node_hub_set_pair_rejected_cb)으로 알림 */
+node_quota_class_t node_hub_request_pair(const uint8_t *mac);
 void node_hub_unpair(const uint8_t *mac);
+
+/* 사용자가 연결을 누른 기기가 PAIR_ACK 시점에 상한 초과로 거절됐을 때(수동 연결만) — recv 태스크에서 불림 */
+typedef void (*node_hub_pair_rejected_cb_t)(const uint8_t mac[6], node_quota_class_t cls);
+void node_hub_set_pair_rejected_cb(node_hub_pair_rejected_cb_t cb);
+
+/* 대기 목록 표시용 — 이 기기가 속한 그룹이 상한이라 지금 붙을 수 없으면 true */
+bool node_hub_is_quota_blocked(const uint8_t *mac);
 
 /* 2026-09-04(사용자 설계: "이벤트로 처리해") — 연결됨/끊어졌음 공통 이벤트(photo_rx.h의
  * photo_rx_event_cb_t와 동일 패턴). 앱은 콜백 등록, 웹은 node_hub_wait_paired()로
