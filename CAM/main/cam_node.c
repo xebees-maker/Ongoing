@@ -402,6 +402,11 @@ void cam_node_note_scan_restarted(void)
 }
 
 static bool s_camera_ready = false;
+/* 2026-09-28 — 이 보드 센서의 최대 해상도(첫 감지 때 드라이버 정보로 채움, 딥슬립 동안 유지). 펌웨어 하나로 OV5640/
+ * OV3660을 다 쓰는데 Kconfig 기본(5MP)이 두 센서 최대보다 커서 드라이버가 매 초기화마다 "frame size exceeds the
+ * maximum" 경고를 찍고 최대로 줄였음. 알게 된 뒤로는 처음부터 min(설정값, 센서 최대)을 요청(결과 해상도는 같음).
+ * -1 = 아직 모름(전원을 켠 직후 첫 초기화 1번만 예전처럼 경고) */
+static RTC_DATA_ATTR int16_t s_sensor_max_framesize = -1;
 
 /* save_warmup_frames: 예전엔 워밍업 프레임을 SD에 저장하는 임시 진단 스위치였음(2026-08-21).
  * SD 제거(2026-09-18/09-26)로 이 함수 안에서 쓰는 곳이 없음 — 아래 워밍업 루프 주석 참고 */
@@ -436,7 +441,8 @@ static esp_err_t camera_init(bool save_warmup_frames)
         .ledc_timer   = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,
         .pixel_format = PIXFORMAT_JPEG,
-        .frame_size   = CAM_FRAME_SIZE,
+        .frame_size   = (s_sensor_max_framesize >= 0 && s_sensor_max_framesize < CAM_FRAME_SIZE)
+                        ? (framesize_t)s_sensor_max_framesize : CAM_FRAME_SIZE,
         .jpeg_quality = CAM_JPEG_QUALITY,
         .fb_count     = CAM_VIDEO_FB_COUNT,
         .fb_location  = CAMERA_FB_IN_PSRAM,
@@ -480,6 +486,12 @@ static esp_err_t camera_init(bool save_warmup_frames)
     }
 
     sensor_t *s = esp_camera_sensor_get();
+    camera_sensor_info_t *sensor_info = esp_camera_sensor_get_info(&s->id);
+    if (sensor_info && s_sensor_max_framesize != (int16_t)sensor_info->max_size) {
+        s_sensor_max_framesize = (int16_t)sensor_info->max_size;
+        ESP_LOGI(TAG, "Sensor max frame size %d remembered (%s) - requested from next init", s_sensor_max_framesize,
+                 sensor_info->name);
+    }
     if (s->id.PID == OV3660_PID) {
         s->set_vflip(s, 1);
         s->set_brightness(s, 1);
@@ -500,7 +512,7 @@ static esp_err_t camera_init(bool save_warmup_frames)
 
     s_camera_ready = true;
     ESP_LOGI(TAG, "Camera init done (XCLK=%dMHz, fb_count=%d, res %d, JPEG q=%d)",
-             (int)s_xclk_target_mhz, CAM_VIDEO_FB_COUNT, CAM_FRAME_SIZE, CAM_JPEG_QUALITY);
+             (int)s_xclk_target_mhz, CAM_VIDEO_FB_COUNT, (int)config.frame_size, CAM_JPEG_QUALITY);
     return ESP_OK;
 }
 
