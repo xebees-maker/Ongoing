@@ -19,6 +19,7 @@ idf_component_register(
         esp_now_channelsync
         esp_now_reliable
         esp32-camera
+        esp_driver_ledc
         bsp_esp32s3_cam
         io_expander_ch32v003
         console

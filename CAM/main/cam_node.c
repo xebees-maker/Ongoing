@@ -27,6 +27,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -70,6 +71,8 @@ static const char *TAG = "CAM";
  * (2026-08-10, "버리는 프레임은 최대 2개, 보통 1개") — 5장은 과했음이 실측으로 확인됨(가짜
  * "속도 개선 안 됨" 결과의 원인) */
 #define CAM_WARMUP_FRAME_COUNT  2
+/* 센서에 XCLK를 먼저 준 뒤 esp_camera_init() 전까지 기다리는 시간(2026-09-28, camera_init() 참고) */
+#define CAM_XCLK_SETTLE_MS      50
 
 #if CONFIG_CAM_JPEG_VGA
     #define CAM_FRAME_SIZE  FRAMESIZE_VGA
@@ -444,8 +447,33 @@ static esp_err_t camera_init(bool save_warmup_frames)
      * PWDN 해제 후 수 ms 안에 SCCB 응답 — 여유 있게 10ms */
     bsp_esp32s3_cam_sensor_power(true);
     vTaskDelay(pdMS_TO_TICKS(10));
+    /* 2026-09-28 — esp_camera_init()은 XCLK를 켠 뒤 10ms만에 센서 ID를 읽는데, 센서 전원을 매번 끄고 켜니 첫 읽기가
+     * 가끔 실패함("sccb-ng: W [300b]=00 fail", 실제로는 읽기 실패 — 재확인으로 감지는 되지만 초기화가 약 0.9초 늦어짐).
+     * XCLK를 드라이버와 같은 설정(xclk.c의 camera_enable_out_clock과 동일)으로 먼저 켜서 센서가 클럭을 받고 안정될
+     * 시간을 준 뒤 초기화함 — 드라이버가 같은 타이머/채널을 다시 설정하므로 클럭은 끊기지 않음 */
+    ledc_timer_config_t xclk_timer = {
+        .speed_mode      = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_1_BIT,
+        .timer_num       = config.ledc_timer,
+        .freq_hz         = (uint32_t)config.xclk_freq_hz,
+        .clk_cfg         = LEDC_AUTO_CLK,
+    };
+    ledc_channel_config_t xclk_channel = {
+        .gpio_num   = config.pin_xclk,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel    = config.ledc_channel,
+        .timer_sel  = config.ledc_timer,
+        .duty       = 1,
+        .hpoint     = 0,
+    };
+    if (ledc_timer_config(&xclk_timer) == ESP_OK && ledc_channel_config(&xclk_channel) == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(CAM_XCLK_SETTLE_MS));
+    } else {
+        ESP_LOGW(TAG, "XCLK pre-start failed - camera init starts the clock itself");
+    }
     esp_err_t init_err = esp_camera_init(&config);
     if (init_err != ESP_OK) {
+        ledc_stop(LEDC_LOW_SPEED_MODE, config.ledc_channel, 0);
         bsp_esp32s3_cam_sensor_power(false);
         ESP_LOGE(TAG, "esp_camera_init failed: %s", esp_err_to_name(init_err));
         return init_err;
