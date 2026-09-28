@@ -33,6 +33,11 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <errno.h>
+#include "esp_timer.h"
 
 static const char *TAG = "SYS";
 
@@ -263,6 +268,247 @@ static esp_err_t api_devlog_get_handler(httpd_req_t *req)
     int len = snprintf(body, sizeof(body), "{\"save\":\"%c\"}", v[0]);
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     return httpd_resp_send(req, body, len);
+}
+
+/* 2026-09-28(SD 손상 재현 시험 — 사용자 지시, 할 일 24 테스트 API와 함께 나중에 제거) — 5640 사진 폴더에서만 이름이 FF로
+ * 읽히는 디렉터리 손상이 조용히 생김(한일 09-28 61번). 사진 저장과 같은 순서(임시파일에 16KB씩 → fsync → 닫기 → 이름 바꾸기)로
+ * /sdcard/sdtest에 파일을 계속 만들어 디렉터리를 클러스터 경계 너머로 키우고, 50개마다 폴더를 다시 읽어 깨진 항목을 셈 */
+static volatile bool s_sdtest_running = false;
+static int s_sdtest_files = 0, s_sdtest_kb = 0;
+static bool s_sdtest_clean = false;
+
+static void sdtest_scan(const char *dir, int *out_total, int *out_bad, int *out_ff)
+{
+    int total = 0, bad = 0, ff = 0;
+    DIR *d = opendir(dir);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.') continue;
+            total++;
+            size_t len = strlen(e->d_name);
+            bool ok = (len == 13 && e->d_name[0] == 'T' && strcmp(e->d_name + 9, ".jpg") == 0);
+            for (int i = 1; ok && i < 9; i++) if (e->d_name[i] < '0' || e->d_name[i] > '9') ok = false;
+            if (!ok) {
+                bad++;
+                if ((unsigned char)e->d_name[0] == 0xFF) ff++;
+            }
+        }
+        closedir(d);
+    }
+    *out_total = total; *out_bad = bad; *out_ff = ff;
+}
+
+static void sdtest_task(void *arg)
+{
+    (void)arg;
+    const char *dir = SD_STORAGE_MOUNT_POINT "/sdtest";
+    char path[64], tmp[72];
+    if (s_sdtest_clean) {
+        int removed = 0;
+        DIR *d = opendir(dir);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL) {
+                if (e->d_name[0] == '.') continue;
+                snprintf(path, sizeof(path), "%s/%.40s", dir, e->d_name);
+                if (unlink(path) == 0) removed++;
+            }
+            closedir(d);
+        }
+        ESP_LOGW(TAG, "SDTEST clean: %d files removed", removed);
+        s_sdtest_running = false;
+        vTaskDelete(NULL);
+        return;
+    }
+    mkdir(dir, 0777);
+    const size_t chunk = 16 * 1024;
+    uint8_t *buf = heap_caps_malloc(chunk, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) { ESP_LOGE(TAG, "SDTEST buffer alloc failed"); s_sdtest_running = false; vTaskDelete(NULL); return; }
+    int start_total, start_bad, start_ff;
+    sdtest_scan(dir, &start_total, &start_bad, &start_ff);
+    int base = start_total;
+    ESP_LOGW(TAG, "SDTEST start: %d files x %dKB, dir has %d entries (bad %d, FF %d)",
+             s_sdtest_files, s_sdtest_kb, start_total, start_bad, start_ff);
+    int fails = 0;
+    int64_t t0 = esp_timer_get_time();
+    for (int i = 0; i < s_sdtest_files; i++) {
+        int n = base + i;
+        snprintf(path, sizeof(path), "%s/T%08d.jpg", dir, n);
+        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+        memset(buf, (uint8_t)n, chunk);
+        FILE *f = fopen(tmp, "wb");
+        bool ok = (f != NULL);
+        for (int k = 0; ok && k < s_sdtest_kb / 16; k++) ok = (fwrite(buf, 1, chunk, f) == chunk);
+        if (f) {
+            if (ok) ok = (fflush(f) == 0) && (fsync(fileno(f)) == 0);
+            fclose(f);
+        }
+        if (ok) ok = (rename(tmp, path) == 0);
+        if (!ok) {
+            fails++;
+            ESP_LOGW(TAG, "SDTEST file %d failed (errno=%d)", n, errno);
+            unlink(tmp);
+        }
+        if ((i + 1) % 50 == 0 || i + 1 == s_sdtest_files) {
+            int total, bad, ff;
+            sdtest_scan(dir, &total, &bad, &ff);
+            ESP_LOGW(TAG, "SDTEST %d/%d written (fails %d): dir entries %d, bad %d, FF %d, %llds",
+                     i + 1, s_sdtest_files, fails, total, bad, ff, (esp_timer_get_time() - t0) / 1000000);
+        }
+    }
+    free(buf);
+    ESP_LOGW(TAG, "SDTEST done");
+    s_sdtest_running = false;
+    vTaskDelete(NULL);
+}
+
+/* 동시성 모드(?par=1) — 두 캠처럼 서로 다른 폴더에 청크 단위로 번갈아 쓰는 태스크 2개 + 한 폴더를 계속 훑으며 stat하는
+ * 태스크 1개(사진 개수 세기/목록 읽기 흉내). 각 쓰기 태스크는 끝날 때 자기 폴더를 검사해 결과를 찍음 */
+typedef struct { const char *dir; int files; } sdtest_par_arg_t;
+static volatile int s_sdtest_par_left = 0;
+
+static void sdtest_par_writer(void *arg)
+{
+    const sdtest_par_arg_t *a = (const sdtest_par_arg_t *)arg;
+    char path[64], tmp[72];
+    mkdir(a->dir, 0777);
+    const size_t chunk = 16 * 1024;
+    uint8_t *buf = heap_caps_malloc(chunk, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    int fails = 0;
+    for (int i = 0; buf && i < a->files; i++) {
+        snprintf(path, sizeof(path), "%s/T%08d.jpg", a->dir, i);
+        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+        memset(buf, (uint8_t)i, chunk);
+        FILE *f = fopen(tmp, "wb");
+        bool ok = (f != NULL);
+        for (int k = 0; ok && k < s_sdtest_kb / 16; k++) {
+            ok = (fwrite(buf, 1, chunk, f) == chunk);
+            vTaskDelay(1);   /* 다른 쓰기/읽기와 번갈아 가게(청크가 CAN으로 조금씩 오는 실제 흐름 흉내) */
+        }
+        if (f) {
+            if (ok) ok = (fflush(f) == 0) && (fsync(fileno(f)) == 0);
+            fclose(f);
+        }
+        if (ok) ok = (rename(tmp, path) == 0);
+        if (!ok) { fails++; ESP_LOGW(TAG, "SDTEST-PAR %s file %d failed (errno=%d)", a->dir, i, errno); unlink(tmp); }
+        if ((i + 1) % 50 == 0) {
+            int total, bad, ff;
+            sdtest_scan(a->dir, &total, &bad, &ff);
+            ESP_LOGW(TAG, "SDTEST-PAR %s %d/%d (fails %d): entries %d, bad %d, FF %d", a->dir, i + 1, a->files, fails, total, bad, ff);
+        }
+    }
+    free(buf);
+    s_sdtest_par_left--;
+    vTaskSuspend(NULL);  /* WithCaps 태스크 자기 삭제 대신 정지(시험용 — 스택 약간 남음) */
+}
+
+static void sdtest_par_reader(void *arg)
+{
+    const char *dir = (const char *)arg;
+    char path[64];
+    int scans = 0;
+    while (s_sdtest_par_left > 0) {
+        DIR *d = opendir(dir);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL) {
+                if (e->d_name[0] == '.') continue;
+                struct stat st;
+                snprintf(path, sizeof(path), "%s/%.40s", dir, e->d_name);
+                stat(path, &st);
+            }
+            closedir(d);
+        }
+        scans++;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGW(TAG, "SDTEST-PAR reader done: %d scans of %s", scans, dir);
+    s_sdtest_running = false;
+    vTaskSuspend(NULL);  /* WithCaps 태스크 자기 삭제 대신 정지(시험용 — 스택 약간 남음) */
+}
+
+static esp_err_t api_sdtest_get_handler(httpd_req_t *req)
+{
+    char query[48] = { 0 };
+    char v[12] = { 0 };
+    httpd_req_get_url_query_str(req, query, sizeof(query));
+    s_sdtest_clean = (httpd_query_key_value(query, "clean", v, sizeof(v)) == ESP_OK && v[0] == '1');
+    s_sdtest_files = (httpd_query_key_value(query, "files", v, sizeof(v)) == ESP_OK) ? atoi(v) : 300;
+    s_sdtest_kb = (httpd_query_key_value(query, "kb", v, sizeof(v)) == ESP_OK) ? atoi(v) : 64;
+    if (s_sdtest_kb < 16) s_sdtest_kb = 16;
+    bool started = false;
+    bool par = (httpd_query_key_value(query, "par", v, sizeof(v)) == ESP_OK && v[0] == '1');
+    if (par && !s_sdtest_running && sd_storage_is_mounted()) {
+        static sdtest_par_arg_t a = { SD_STORAGE_MOUNT_POINT "/sdtesta", 0 };
+        static sdtest_par_arg_t b = { SD_STORAGE_MOUNT_POINT "/sdtestb", 0 };
+        a.files = b.files = s_sdtest_files;
+        s_sdtest_running = true;
+        s_sdtest_par_left = 2;
+        ESP_LOGW(TAG, "SDTEST-PAR start: 2 writers x %d files x %dKB + reader", s_sdtest_files, s_sdtest_kb);
+        /* 스택은 PSRAM(feedback_prefer_psram_for_buffers) */
+        started = xTaskCreatePinnedToCoreWithCaps(sdtest_par_writer, "sdt_wa", 6144, &a, 10, NULL, 1, MALLOC_CAP_SPIRAM) == pdPASS &&
+                  xTaskCreatePinnedToCoreWithCaps(sdtest_par_writer, "sdt_wb", 6144, &b, 10, NULL, 1, MALLOC_CAP_SPIRAM) == pdPASS &&
+                  xTaskCreatePinnedToCoreWithCaps(sdtest_par_reader, "sdt_r", 4096, (void *)a.dir, 9, NULL, 0, MALLOC_CAP_SPIRAM) == pdPASS;
+    } else if (!s_sdtest_running && sd_storage_is_mounted()) {
+        s_sdtest_running = true;
+        static StaticTask_t s_tcb;
+        static StackType_t *s_stack = NULL;
+        if (!s_stack) s_stack = heap_caps_malloc(6144, MALLOC_CAP_SPIRAM);
+        started = s_stack && xTaskCreateStaticPinnedToCore(sdtest_task, "sdtest", 6144 / sizeof(StackType_t), NULL, 10,
+                                                            s_stack, &s_tcb, 1) != NULL;
+        if (!started) s_sdtest_running = false;
+    }
+    char body[48];
+    int len = snprintf(body, sizeof(body), "{\"started\":%s}", started ? "true" : "false");
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    return httpd_resp_send(req, body, len);
+}
+
+/* 2026-09-28(임시 진단 — 그래프 계열이 안 나오는 원인 조사) — name 없으면 /sdcard/stats 목록(이름 크기),
+ * name=파일이면 그 파일 원본을 그대로 내려줌. 측정값 기록과 겹치지 않게 stats_store_io_suspend 아래에서 읽음 */
+static esp_err_t api_statsfile_get_handler(httpd_req_t *req)
+{
+    char query[64] = { 0 };
+    char name[32] = { 0 };
+    httpd_req_get_url_query_str(req, query, sizeof(query));
+    bool want_file = (httpd_query_key_value(query, "name", name, sizeof(name)) == ESP_OK && name[0] != '\0' &&
+                      strchr(name, '/') == NULL);
+    char *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    if (!buf) return httpd_resp_send_500(req);
+    httpd_resp_set_type(req, want_file ? "application/octet-stream" : "text/plain");
+    stats_store_io_suspend();
+    if (want_file) {
+        char path[64];
+        snprintf(path, sizeof(path), SD_STORAGE_MOUNT_POINT "/stats/%s", name);
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            size_t n;
+            while ((n = fread(buf, 1, 4096, f)) > 0) {
+                if (httpd_resp_send_chunk(req, buf, n) != ESP_OK) break;
+            }
+            fclose(f);
+        }
+    } else {
+        int len = snprintf(buf, 4096, "now %lu\n", (unsigned long)rtc_sync_get_unix_time());
+        httpd_resp_send_chunk(req, buf, len);
+        DIR *d = opendir(SD_STORAGE_MOUNT_POINT "/stats");
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL) {
+                char path[64];
+                struct stat st = { 0 };
+                snprintf(path, sizeof(path), SD_STORAGE_MOUNT_POINT "/stats/%.40s", e->d_name);
+                stat(path, &st);
+                len = snprintf(buf, 4096, "%s %ld\n", e->d_name, (long)st.st_size);
+                httpd_resp_send_chunk(req, buf, len);
+            }
+            closedir(d);
+        }
+    }
+    stats_store_io_resume();
+    free(buf);
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 static esp_err_t api_set_response_interval_get_handler(httpd_req_t *req)
@@ -608,6 +854,12 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_devlog_uri = { .uri = "/api/devlog", .method = HTTP_GET,
                                                 .handler = api_devlog_get_handler };
     httpd_register_uri_handler(server, &api_devlog_uri);
+    static const httpd_uri_t api_sdtest_uri = { .uri = "/api/sdtest", .method = HTTP_GET,
+                                                .handler = api_sdtest_get_handler };
+    httpd_register_uri_handler(server, &api_sdtest_uri);
+    static const httpd_uri_t api_statsfile_uri = { .uri = "/api/statsfile", .method = HTTP_GET,
+                                                   .handler = api_statsfile_get_handler };
+    httpd_register_uri_handler(server, &api_statsfile_uri);
     static const httpd_uri_t api_delete_stats_uri = { .uri = "/api/delete_stats", .method = HTTP_GET,
                                                         .handler = api_delete_stats_get_handler };
     httpd_register_uri_handler(server, &api_delete_stats_uri);
