@@ -2223,6 +2223,7 @@ static void refresh_photo_list_ui(int select_index)
         return;
     }
 
+    MEMDIAG_BEGIN();
     uint32_t total = photo_storage_get_count(s_selected_cam_mac);
     uint32_t total_pages = (total + PHOTO_LIST_PAGE_SIZE - 1) / PHOTO_LIST_PAGE_SIZE;
     if (total_pages == 0) total_pages = 1;
@@ -2233,6 +2234,7 @@ static void refresh_photo_list_ui(int select_index)
     s_current_list_count = (int)photo_storage_read_page(s_selected_cam_mac, s_photo_page_index,
                                                           PHOTO_LIST_PAGE_SIZE, s_current_list,
                                                           PHOTO_LIST_PAGE_SIZE);
+    MEMDIAG_END(TAG, "photo list: SD count+read_page (%d items)", s_current_list_count);
     update_list_info_label();
     update_photo_page_nav(s_photo_page_index, total_pages);
 
@@ -2264,6 +2266,7 @@ static void refresh_photo_list_ui(int select_index)
         return;
     }
 
+    size_t _rows_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     for (int i = 0; i < s_current_list_count; i++) {
         lv_obj_t *row = lv_obj_create(s_photo_list);
         lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
@@ -2326,6 +2329,9 @@ static void refresh_photo_list_ui(int select_index)
             s_selected_row = row;
         }
     }
+    size_t _rows_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGD(TAG, "MEMDIAG photo list: %d rows: internal %u -> %u (used %d)", s_current_list_count,
+             (unsigned)_rows_before, (unsigned)_rows_after, (int)_rows_before - (int)_rows_after);
 }
 
 static void photo_prev_page_cb(lv_event_t *e)
@@ -4757,11 +4763,16 @@ static void refresh_dashboard(lv_timer_t *t)
         memcpy(dd_macs[dd_count], known_cam_macs[i], 6);
         dd_count++;
     }
-    rebuild_camera_dropdown_if_changed(cam_nodes, cam_count, dd_macs, dd_count);
+    {
+        MEMDIAG_BEGIN();
+        rebuild_camera_dropdown_if_changed(cam_nodes, cam_count, dd_macs, dd_count);
+        MEMDIAG_END(TAG, "dash: camera dropdown");
+    }
 
     /* 2026-09-08(카메라 팝업 추출) — 주화면에 남는 "연결된 카메라" 목록, 요약판넬(s_summary_list)과
      * 완전히 같은 2단계 패턴: 구조 재생성은 dash_changed일 때만(위 요약판넬과 같은 조건 재사용),
      * 문구/신호세기는 매 틱 갱신하되 실제로 바뀔 때만 lv_label_set_text 호출 */
+    MEMDIAG_BEGIN();
     if (dash_changed) {
         lv_indev_reset(NULL, s_camera_dash_list);
         lv_obj_clean(s_camera_dash_list);
@@ -4813,6 +4824,7 @@ static void refresh_dashboard(lv_timer_t *t)
         }
         s_camera_dash_row_count = (cam_count < NODE_HUB_MAX_NODES) ? cam_count : NODE_HUB_MAX_NODES;
     }
+    MEMDIAG_END(TAG, "dash: camera rows");
     for (int i = 0; i < s_camera_dash_row_count; i++) {
         hub_conn_state_t st = node_hub_get_conn_state(s_camera_dash_row_macs[i]);
         char buf[96];
@@ -4880,7 +4892,11 @@ static void refresh_dashboard(lv_timer_t *t)
                 break;
             }
         }
-        select_camera(still_valid ? dd_macs[selected_idx] : dd_macs[0]);
+        {
+            MEMDIAG_BEGIN();
+            select_camera(still_valid ? dd_macs[selected_idx] : dd_macs[0]);
+            MEMDIAG_END(TAG, "dash: select_camera");
+        }
         lv_dropdown_set_selected(s_camera_select_dd, (uint16_t)(still_valid ? selected_idx : 0));
     } else if (s_has_selected_cam) {
         s_has_selected_cam = false;
