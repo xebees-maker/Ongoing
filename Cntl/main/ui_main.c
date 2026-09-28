@@ -2210,9 +2210,20 @@ static void update_photo_page_nav(uint32_t page_index, uint32_t total_pages)
  * 모델 기준으로 강조표시만 복원).
  * 2026-09-19(SD 제거 재설계) — CAM에 목록을 요청하던 것을 콘 SD 로컬 읽기로 교체
  * (photo_storage_read_page), 페이지네이션도 stats 탭과 동일 패턴으로 추가 */
+/* 2026-09-28(사용자 지시) — 사진 목록 행(행마다 LVGL 객체 4개 + 로컬 스타일, 20행이면 내부 RAM 약 21.6K)은
+ * 카메라 팝업이 열려 있을 때만 만듦. 예전엔 캠이 연결돼 자동 선택만 돼도 숨겨진 목록을 채웠음(CAM에서 목록을
+ * 받아오던 시절의 잔재). 팝업이 열리면 첫 페이지 맨 위(최신) 사진을 선택함(build_camera_tab) */
 static void refresh_photo_list_ui(int select_index)
 {
     if (!s_current_list) return;  /* PSRAM 할당 실패 시(극히 드묾) */
+    if (!s_camera_popup) {
+        if (lv_obj_get_child_count(s_photo_list) > 0) {
+            lv_indev_reset(NULL, s_photo_list);
+            lv_obj_clean(s_photo_list);
+        }
+        s_selected_row = NULL;
+        return;
+    }
     if (!s_has_selected_cam) {
         s_current_list_count = 0;
         lv_indev_reset(NULL, s_photo_list);
@@ -7770,6 +7781,11 @@ static void build_camera_tab(void)
         lv_obj_set_style_text_font(empty_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_center(empty_lbl);
     }
+
+    /* 목록 행은 이제 팝업이 열려 있을 때만 만듦(refresh_photo_list_ui 주석) — 열자마자 첫 페이지를 채우고
+     * 맨 위(최신) 사진을 선택 */
+    s_photo_page_index = 0;
+    refresh_photo_list_ui(0);
 }
 
 static void teardown_camera_tab(void)
@@ -7788,6 +7804,7 @@ static void teardown_camera_tab(void)
     lv_obj_delete(s_camera_popup);
     s_camera_popup = NULL;
     s_camera_popup_title = NULL;
+    refresh_photo_list_ui(-1);  /* 팝업이 닫혔으니 목록 행을 지움(선택 상태는 유지) */
 
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     ESP_LOGD(TAG, "MEMDIAG camera popup close: internal %u -> %u (freed %d bytes)",
