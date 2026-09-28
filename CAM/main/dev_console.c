@@ -158,7 +158,7 @@ void dev_console_start(void)
 
     const esp_console_cmd_t shot_cmd = {
         .command = "shot",
-        .help    = "즉시 1장 촬영해서 콘으로 전송 (예: shot vga / shot qvga / shot 5m — 해상도 변경 후 촬영, 이후 계속 적용됨)",
+        .help    = "Capture one photo now and push it to Cntl (e.g. shot vga / shot qvga / shot 5m - changes resolution first, stays in effect)",
         .hint    = "[5m|qvga|vga]",
         .func    = cmd_shot,
     };
@@ -166,7 +166,7 @@ void dev_console_start(void)
 
     const esp_console_cmd_t auto_cmd = {
         .command = "auto",
-        .help    = "10초 주기 자동 촬영 on/off (예: auto off)",
+        .help    = "Auto capture every 10 s on/off (e.g. auto off)",
         .hint    = "<on|off>",
         .func    = cmd_auto,
     };
@@ -174,7 +174,7 @@ void dev_console_start(void)
 
     const esp_console_cmd_t soundlog_cmd = {
         .command = "soundlog",
-        .help    = "스피커 소리 로그 on/off, solo <1-13[,1-13...]>으로 이벤트 골라 재생(기본 꺼짐)",
+        .help    = "Speaker event log on/off; solo <1-13[,1-13...]> plays only the chosen events (default off)",
         .hint    = "<on|off|solo N[,N...]|solo off>",
         .func    = cmd_soundlog,
     };
@@ -182,7 +182,7 @@ void dev_console_start(void)
 
     const esp_console_cmd_t q_cmd = {
         .command = "q",
-        .help    = "JPEG 화질 변경 (0~63, 낮을수록 고화질 — 예: q 15), 다음 촬영부터 계속 적용됨",
+        .help    = "Set JPEG quality (0-63, lower = better, e.g. q 15) - from the next capture on",
         .hint    = "<0-63>",
         .func    = cmd_q,
     };
@@ -190,7 +190,7 @@ void dev_console_start(void)
 
     const esp_console_cmd_t xclk_cmd = {
         .command = "xclk",
-        .help    = "XCLK 변경(MHz, 예: xclk 20) — PLL 재계산까지 수행, 다음 촬영부터 계속 적용됨",
+        .help    = "Set XCLK in MHz (e.g. xclk 20) - recalculates the PLL, from the next capture on",
         .hint    = "<1-40>",
         .func    = cmd_xclk,
     };
