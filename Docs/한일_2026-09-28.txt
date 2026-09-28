@@ -2,6 +2,12 @@
    + W6002 원인 확인 + 4시간 무인 로그 (원래 PC, 사용자 부재 중 진행) ==
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
+- 2026-09-28 밤: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
+  메모리: claude_memory_2026-09-28.zip(이 날 추가: feedback_conditional_todos, project_cntl_stats_window_model_2026_09_28,
+  project_cntl_sd_corruption_2026_09_28, test API 메모 갱신, MEMORY.md 한 줄 설명 축약).
+  git 밖 항목: sdkconfig는 네 프로젝트 모두 defaults 기준(09-27 밤 교체) 그대로. 센스만 센서 선택이 이 PC 보드용
+  SCD41(보드마다 다름 — 다른 보드 빌드 때 맞출 것, 할 일 B). SD 카드는 새것으로 교체, 옛 카드는 표시해서 보관.
+  이 PC 포트: 콘 COM19, 브 COM18, 센스(SCD41) COM3, 캠 5640 COM5, 캠 3660 COM17(캠 둘은 지금 꺼져 있음).
 - 2026-09-27 밤: 임시 PC → 원래 PC 도착 처리 완료. 브랜치 cntl-can-bridge.
   ① pull 완료(fast-forward, 로컬 전용 커밋 없음)
   ② 메모리: claude_memory_2026-09-27.zip으로 복원(사용자 확인 후). 원래 PC에만 있던
@@ -326,3 +332,46 @@ C2. 옛 카드와 비교 — 옛 카드는 표시해서 따로 보관. PC에서 
 C3. 깨진 레코드(FF 등)를 만나면 그래프 읽기가 멈추는 문제 — 건너뛸지 결정.
 C4. SD 에러 시 재마운트 검증(에러가 있어야 UI가 나와서 그때 측정).
 C5. W6002/E3002 재발 확인 — dev log는 RAM에만 있으니 재부팅/플래시 전에 먼저 확보할 것.
+[조건: 같은 그룹 센서를 추가하거나 교체할 때]
+C6. 교체한 기기가 한 슬롯을 이어 쓰는지("C->F" 이름, 1주 창에서 ABCD -> ABDF).
+C7. 수동 연결 거절 팝업("%s: up to %u can be connected...")과 대기 목록 "상한 초과" 표시 — 같은 그룹 기기가
+    상한보다 많아야 나옴.
+
+== 09-28 밤 — 마무리 ==
+69. 카메라 팝업 문구(70eb961, 사용자 설계) — 열자마자 "Loading cameras...", 첫 갱신 틱(SD 이력 카메라 스캔) 뒤
+    카메라가 있으면 숨김, 없으면 "No cameras or photos yet."(예전엔 "No camera device"가 잠깐 보였다가 바뀌었음).
+    메인 판넬의 "No camera device"(지금 연결된 캠만)는 그대로. **사용자 화면 확인: 좋음.**
+70. Agar 슬롯 항상 3개(70eb961) — 페어링 상한 3대와 맞춤, 기기 없는 슬롯은 "Agar N T" 빈 그래프,
+    Overview 순환 혼합→1→2→3. **사용자 화면 확인: 좋음.**
+71. 임시 테스트 API /api/sdtest, /api/statsfile 커밋(bda6b8e) — /api/capture_now, /api/devlog와 함께 나중에 제거.
+72. 조건부 할 일 절 신설(위 C1~C7) — 평소 할 일 목록엔 개수만, 조건이 나타나면 보여줌(메모리에도 규칙 저장).
+73. 새 SD 교체 후: 옛 카드는 PC low level format 실패, 다른 도구로 강제 포맷해서 정상 — 표시해서 보관(C2).
+
+[ 남은 할 일 — 09-28 마감 기준 ]
+새로 받은 것(사용자 09-28 밤):
+ A. 캠 LED 연동 — 촬영 전 켜고 촬영 후 끔. 켜는 시점은 센서 초기화 전(추측: 자동노출이 LED 밝기에 맞춰지도록),
+    끄는 시점은 캡처 직후. 구입한 장치·케이블 준비 완료, 모델명과 캠 쪽 핀은 사용자가 내일 알려줌.
+    (Docs/IRLZ44N 회로도.png가 있음 — 추측: 그때 권한 LED 스위칭 MOSFET) 핀은 캠 스키매틱·코드로 충돌 확인 후.
+ B. 다른 센스 보드들 빌드·플래시 — 오늘 수정(fadbdc4 NO_MEM 재전송, 15dd68d 영어 로그). 센서 종류는 보드마다
+    다르고 sdkconfig(git 제외)에 있으므로 보드별로 맞춰 빌드. 보드별 센서·COM은 작업 때 확인.
+ C. Agar 센스 보드(PT100 또는 DS18B20, 부품은 내일 확인) — ① sensor_kind_t에 종류 추가(enum만, 구조체 크기
+    불변) ② 센스 드라이버(PT100이면 MAX31865류 SPI, DS18B20이면 1-Wire 핀 하나) ③ 콘: 분류표 Agar, 페어링
+    상한 AGAR 판정(node_hub.c quota_class_locked), 테스트 복제(STATS_TEST_AGAR_FAKE_DATA) 제거.
+센스:
+ D. SCD41 측정 타임아웃(62번) — 워밍업 측정 성공 후 실제 측정이 6초 타임아웃.
+ E. "PM lock create failed" 경고 정리(63번).
+콘:
+ F. 임시 테스트 API 4개 제거(capture_now, devlog, sdtest, statsfile).
+ G. CASK/UNPAIR 흐름 표시.
+ H. 사진 목록 폴더 스캔을 LVGL 태스크 밖으로.
+ I. 9/18 팝업 터치 확인, 캠 설정 팝업 MVD 리팩토링.
+ J. 태스크 코어·우선순위 검토, power_relay 기아 확인.
+ K. MEMDIAG 계측 정리 여부.
+ L. 안 쓰이는 UI_ERR 코드 정리.
+ M. Dev Log 태그별 저장(결정 대기).
+ N. 메모리 검토(보류).
+브·공통:
+ O. 브 LVGL 잠금 실패.
+ P. 7단계 로그 보강.
+ Q. CAN 버스오프 앱 알림.
+조건부 할 일 7건(SD 손상 재발 5, 센서 추가·교체 2) — 위 "조건부 할 일" 절.
