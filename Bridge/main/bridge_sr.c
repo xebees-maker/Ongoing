@@ -21,8 +21,16 @@ static const char *TAG = "PHOTO";
  * 도착했는지 확인하지 않고 곧장 다음 윈도우를 보냄. 재전송이 또 빠지면 다음 윈도우 청크가 16칸 범위를 넘어 전부
  * 버려지고 DONE 라운드에서 다시 보내야 해서, 윈도우 2개(32청크, 약 38KB/캠, PSRAM)로 잡음 */
 #define SR_HOLD             32
-#define SR_FLOW_HIGH        48      /* Data 송신 큐가 이만큼 쌓이면 WINDOW_STATUS_ACK를 미룸(캠 속도를 CAN에 맞춤) */
-#define SR_FLOW_LOW         16      /* 이만큼 빠지면 미뤄 둔 응답을 보냄 */
+/* 2026-09-28(사용자 설계) — 흐름 제어 기준을 큐 개수(예전 48/16)에서 남은 PSRAM으로 바꿈. Data 송신 큐는 PSRAM에서
+ * 필요한 만큼 늘어나므로, 캠은 자기 사진 한 장(META의 전체 청크 수)을 끝까지 쉬지 않고 보내고 빨리 잠듦 — 캠별 기준
+ * "그 사진 전체"는 한 장을 보내는 동안 넘을 수 없어서 실제로 미루는 건 PSRAM이 모자랄 때뿐.
+ * 기준은 부팅 때 이 보드의 PSRAM 전체 크기로 정함(브 장치가 바뀌어도 맞춰짐, bridge_sr_init):
+ *   미룸: 남은 PSRAM < s_flow_floor(전체의 25%와 1MB 중 큰 값)
+ *   풂:   남은 PSRAM >= s_flow_floor + s_flow_margin(전체의 1/16과 256KB 중 큰 값) — 켜졌다 꺼졌다 반복 방지 */
+static size_t s_flow_floor = 1024 * 1024;
+static size_t s_flow_margin = 256 * 1024;
+
+static size_t psram_free(void) { return heap_caps_get_free_size(MALLOC_CAP_SPIRAM); }
 #define SR_IDLE_TIMEOUT_US  (10LL * 1000 * 1000)  /* 캠이 조용히 포기한 전송 정리(콘의 세션·임시파일도 같이 닫힘) */
 
 typedef struct {
@@ -235,7 +243,9 @@ static void on_window_status(const uint8_t *mac, const uint8_t *data, int len)
              c->next_idx, (unsigned)bridge_esp_now_data_backlog());
     c->st_start = req.range_start;
     c->st_count = req.range_count;
-    if (bridge_esp_now_data_backlog() > SR_FLOW_HIGH) {
+    if (psram_free() < s_flow_floor) {
+        ESP_LOGW(TAG, MACSTR " flow control: PSRAM free %u < floor %u - WINDOW_STATUS_ACK deferred (backlog=%u)",
+                 MAC2STR(mac), (unsigned)psram_free(), (unsigned)s_flow_floor, (unsigned)bridge_esp_now_data_backlog());
         c->status_pending = true;   /* 흐름 제어 — bridge_sr_on_tx_progress()가 큐가 빠지면 응답 */
         return;
     }
@@ -289,7 +299,7 @@ bool bridge_sr_on_recv(const uint8_t *src_mac, const uint8_t *data, int len)
 
 void bridge_sr_on_tx_progress(void)
 {
-    if (bridge_esp_now_data_backlog() > SR_FLOW_LOW) return;
+    if (psram_free() < s_flow_floor + s_flow_margin) return;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     for (int i = 0; i < SR_SESSIONS; i++) {
         if (s_cams[i].active && s_cams[i].status_pending) answer_window_status(&s_cams[i]);
@@ -318,6 +328,11 @@ static void idle_timer_cb(void *arg)
 
 void bridge_sr_init(void)
 {
+    size_t total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    s_flow_floor = total / 4 > 1024 * 1024 ? total / 4 : 1024 * 1024;
+    s_flow_margin = total / 16 > 256 * 1024 ? total / 16 : 256 * 1024;
+    ESP_LOGI(TAG, "SR flow control: PSRAM total %uKB, defer below %uKB free, release at %uKB",
+             (unsigned)(total / 1024), (unsigned)(s_flow_floor / 1024), (unsigned)((s_flow_floor + s_flow_margin) / 1024));
     s_lock = xSemaphoreCreateMutex();
     for (int i = 0; i < SR_SESSIONS; i++) {
         s_cams[i].hold = heap_caps_malloc((size_t)SR_HOLD * ESP_NOW_PHOTO_CHUNK_DATA_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
