@@ -43,7 +43,7 @@ void wifi_dashboard_get_net_status(char *buf, size_t buflen)
 {
 #if CONFIG_SENS_WIFI_MODE_STA
     if (!s_got_ip) {
-        snprintf(buf, buflen, "STA 연결 중...");
+        snprintf(buf, buflen, "STA connecting...");
         return;
     }
     wifi_ap_record_t ap_info;
@@ -258,7 +258,7 @@ static void start_http_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_start 실패");
+        ESP_LOGE(TAG, "httpd_start failed");
         return;
     }
 
@@ -268,7 +268,7 @@ static void start_http_server(void)
     httpd_register_uri_handler(server, &root_uri);
     httpd_register_uri_handler(server, &data_uri);
     httpd_register_uri_handler(server, &history_uri);
-    ESP_LOGI(TAG, "웹 대시보드 시작됨");
+    ESP_LOGI(TAG, "Web dashboard started");
 }
 
 /* dst는 호출 전에 0으로 초기화돼 있어야 함(wifi_config_t = {0}) — 남는 바이트는 그대로 0 유지 */
@@ -287,20 +287,20 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_got_ip = false;
-        ESP_LOGW(TAG, "WiFi 연결 끊김 — 재시도");
+        ESP_LOGW(TAG, "WiFi disconnected - retrying");
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *evt = (ip_event_got_ip_t *)event_data;
         s_ip_info = evt->ip_info;
         s_got_ip  = true;
-        ESP_LOGI(TAG, "IP 받음: " IPSTR, IP2STR(&evt->ip_info.ip));
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&evt->ip_info.ip));
         start_http_server();
     }
 #else
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
-        ESP_LOGI(TAG, "클라이언트 연결됨");
+        ESP_LOGI(TAG, "Client connected");
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
-        ESP_LOGI(TAG, "클라이언트 연결 해제");
+        ESP_LOGI(TAG, "Client disconnected");
     }
 #endif
 }

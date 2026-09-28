@@ -280,7 +280,7 @@ static void maybe_learn_full_mv(bool powered, int avg_mv)
 
     s_full_mv = (float)avg_mv;
     battery_set_full_mv(s_full_mv);
-    ESP_LOGI(TAG, "배터리 완충 전압 학습: %d mV", avg_mv);
+    ESP_LOGI(TAG, "Battery full voltage learned: %d mV", avg_mv);
 
     if (avg_mv != s_full_mv_persisted) {
         nvs_handle_t h;
@@ -491,7 +491,7 @@ void app_main(void)
         if (nvs_get_i32(batt_nvs, NVS_KEY_FULL_MV, &learned_mv) == ESP_OK) {
             s_full_mv           = (float)learned_mv;
             s_full_mv_persisted = learned_mv;
-            ESP_LOGI(TAG, "저장된 배터리 완충 전압 불러옴: %d mV", (int)learned_mv);
+            ESP_LOGI(TAG, "Stored battery full voltage loaded: %d mV", (int)learned_mv);
         }
         nvs_close(batt_nvs);
     }

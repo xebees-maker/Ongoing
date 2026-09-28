@@ -95,7 +95,7 @@ static void unpaired_failed_timer_cb(void *arg)
 {
     (void)arg;
     if (s_paired) return;  /* 그 사이 페어링됐으면 무시 */
-    ESP_LOGW(TAG, "장시간 미페어링 — failed 표시로 전환 (advertising은 계속)");
+    ESP_LOGW(TAG, "Unpaired for a long time - showing failed (advertising continues)");
     set_led(LED_PATTERN_BLINK_SLOW);
 }
 
@@ -137,9 +137,9 @@ static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t statu
     }
 
     s_send_fail_count++;
-    ESP_LOGW(TAG, "SENSOR_DATA 전송 실패 (연속 %d회)", s_send_fail_count);
+    ESP_LOGW(TAG, "SENSOR_DATA send failed (%d in a row)", s_send_fail_count);
     if (s_send_fail_count >= SEND_FAIL_THRESHOLD) {
-        ESP_LOGW(TAG, "허브 응답 끊김으로 판단 — 재광고 시작");
+        ESP_LOGW(TAG, "Hub stopped responding - advertising again");
         enter_advertising(true);
     }
 }
@@ -149,7 +149,7 @@ static void sensor_data_timer_cb(void *arg)
     (void)arg;
     esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&s_pending_msg, sizeof(s_pending_msg));
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SENSOR_DATA 전송 실패: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "SENSOR_DATA send failed: %s", esp_err_to_name(err));
     }
 }
 
@@ -205,7 +205,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         s_channel_locked = true;
         esp_timer_stop(s_advertise_timer);
         esp_timer_start_periodic(s_advertise_timer, ADVERTISE_PERIOD_US);
-        ESP_LOGI(TAG, "Cntl 채널 확인됨(CH%d) — 스캔 중지, 페어링 대기", s_scan_channel);
+        ESP_LOGI(TAG, "Cntl channel found (CH%d) - scan stopped, waiting for pairing", s_scan_channel);
         return;
     }
 
@@ -245,7 +245,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     };
     memcpy(ack.node_mac, s_mac, sizeof(ack.node_mac));
     esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
-    ESP_LOGI(TAG, "페어링됨: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
+    ESP_LOGI(TAG, "Paired: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
 }
 
 static void advertise_timer_cb(void *arg)
@@ -264,9 +264,9 @@ static void advertise_timer_cb(void *arg)
 
     esp_err_t err = esp_now_send(s_broadcast_addr, (const uint8_t *)&msg, sizeof(msg));
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "광고 전송 실패: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "Advertise send failed: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "광고 전송: %s (CH%d)", s_name, s_scan_channel);
+        ESP_LOGI(TAG, "Advertise sent: %s (CH%d)", s_name, s_scan_channel);
     }
 
     if (!s_channel_locked) {
@@ -282,7 +282,7 @@ static void advertise_timer_cb(void *arg)
 void esp_now_node_init(void)
 {
     resolve_name();
-    ESP_LOGI(TAG, "노드 이름: %s (MAC " MACSTR ")", s_name, MAC2STR(s_mac));
+    ESP_LOGI(TAG, "Node name: %s (MAC " MACSTR ")", s_name, MAC2STR(s_mac));
 
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));

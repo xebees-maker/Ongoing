@@ -55,7 +55,7 @@
         SENSOR_CHAN_NH3_PPM,   /* 2026-09-12 — 아직 진짜 ppm 아님, AO 원본 mV(mq137.h 참고) */
     };
 #else
-    #error "SENS_SENSOR_TYPE을 골라야 함 (idf.py menuconfig > Sens Sensor Node) — SCD41은 sens_deep_sleep_node.c가 담당"
+    #error "Select SENS_SENSOR_TYPE (idf.py menuconfig > Sens Sensor Node) - SCD41 is handled by sens_deep_sleep_node.c"
 #endif
 
 static const char *TAG = "sensor_node";
@@ -119,7 +119,7 @@ static bool sensor_read(float out[SENSOR_CHAN_COUNT])
     bool do_alarm = false;
     bool ok = mq137_read(&out[0], &do_alarm);
     if (ok && do_alarm) {
-        ESP_LOGW(TAG, "MQ137 DO 임계값 초과 알림");
+        ESP_LOGW(TAG, "MQ137 DO threshold exceeded");
     }
     return ok;
 #else  /* SHT45 / SHT40 */
@@ -157,7 +157,7 @@ static void maybe_learn_full_mv(bool powered, int avg_mv)
 
     s_full_mv = (float)avg_mv;
     battery_set_full_mv(s_full_mv);
-    ESP_LOGI(TAG, "배터리 완충 전압 학습: %d mV", avg_mv);
+    ESP_LOGI(TAG, "Battery full voltage learned: %d mV", avg_mv);
 
     if (avg_mv != s_full_mv_persisted) {
         nvs_handle_t h;
@@ -264,7 +264,7 @@ void app_main(void)
         if (nvs_get_i32(batt_nvs, NVS_KEY_FULL_MV, &learned_mv) == ESP_OK) {
             s_full_mv           = (float)learned_mv;
             s_full_mv_persisted = learned_mv;
-            ESP_LOGI(TAG, "저장된 배터리 완충 전압 불러옴: %d mV", (int)learned_mv);
+            ESP_LOGI(TAG, "Stored battery full voltage loaded: %d mV", (int)learned_mv);
         }
         nvs_close(batt_nvs);
     }
@@ -304,7 +304,7 @@ void app_main(void)
      * battery_init() 뒤로 옮김(그 전엔 sensor_init()이 더 먼저였음) */
     bool sensor_ok = sensor_init(s_vin_adc);
     if (!sensor_ok) {
-        ESP_LOGW(TAG, "센서 초기화 실패 — 연결 확인 필요(계속 재시도됨)");
+        ESP_LOGW(TAG, "Sensor init failed - check wiring (keeps retrying)");
     }
 
     status_led_init(BSP_C3_LED_BLUE);
@@ -324,5 +324,5 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_create(&history_args, &history_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(history_timer, HISTORY_TIMER_MS * 1000));
 
-    ESP_LOGI(TAG, "헤드리스 센서 노드 준비 완료 (kind=%d, channels=%d)", SENSOR_KIND_CURRENT, SENSOR_CHAN_COUNT);
+    ESP_LOGI(TAG, "Headless sensor node ready (kind=%d, channels=%d)", SENSOR_KIND_CURRENT, SENSOR_CHAN_COUNT);
 }

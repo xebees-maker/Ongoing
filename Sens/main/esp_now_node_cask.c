@@ -129,7 +129,7 @@ void esp_now_node_capture_wake_info(void)
     } else {
         s_last_actual_sleep_sec = 0;
     }
-    ESP_LOGI(TAG, "웨이크 원인 판정: reset_reason=%d -> wake_reason=%u 직전 실제 수면=%us",
+    ESP_LOGI(TAG, "Wake reason: reset_reason=%d -> wake_reason=%u, last actual sleep=%us",
              rr, (unsigned)s_wake_reason, (unsigned)s_last_actual_sleep_sec);
 }
 
@@ -283,7 +283,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     if (msg_type == ESP_NOW_MSG_UNPAIR) {
         if (s_conn_state != SENS_CONN_PAIRED || len < (int)sizeof(esp_now_unpair_t)) return;
         if (memcmp(info->src_addr, s_hub_mac, sizeof(s_hub_mac)) != 0) return;
-        ESP_LOGI(TAG, "Cntl이 연결 해제함");
+        ESP_LOGI(TAG, "Unpaired by Cntl");
         s_conn_state = SENS_CONN_ORPHAN;
         s_wake_hub_known = false;
         ESP_LOGI(TAG, "[STATE] -> %s (unpair)", conn_state_name(s_conn_state));
@@ -315,7 +315,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             struct timeval tv = { .tv_sec = (time_t)cfg->unix_time, .tv_usec = 0 };
             settimeofday(&tv, NULL);
         }
-        ESP_LOGI(TAG, "SENS_CONFIG_SET 수신: sample_interval_sec=%u", (unsigned)s_sample_interval_sec);
+        ESP_LOGI(TAG, "SENS_CONFIG_SET received: sample_interval_sec=%u", (unsigned)s_sample_interval_sec);
         esp_now_sens_config_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SENS_CONFIG_ACK, .success = 1 };
         send_reply(s_hub_mac, &ack, sizeof(ack));
         return;
@@ -325,7 +325,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (s_conn_state != SENS_CONN_PAIRED || len < (int)sizeof(esp_now_sleep_now_t)) return;
         const esp_now_sleep_now_t *msg = (const esp_now_sleep_now_t *)data;
         s_last_sleep_sec = msg->sleep_sec;
-        ESP_LOGI(TAG, "SLEEP_NOW 수신(sleep_sec=%u)", (unsigned)msg->sleep_sec);
+        ESP_LOGI(TAG, "SLEEP_NOW received (sleep_sec=%u)", (unsigned)msg->sleep_sec);
         esp_now_sleep_now_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SLEEP_NOW_ACK };
         send_reply(s_hub_mac, &ack, sizeof(ack));
         /* 캠의 cam_node_note_sleep_now_requested()와 동일 — app_main의 이벤트기반 대기 루프를
@@ -370,7 +370,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     memcpy(ack.node_mac, s_mac, sizeof(ack.node_mac));
     memcpy(ack.chan_type, s_chan_type, s_chan_count);
     esp_err_t err = send_reply(s_hub_mac, &ack, sizeof(ack));
-    ESP_LOGI(TAG, "페어링됨: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
+    ESP_LOGI(TAG, "Paired: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
 
     /* "졸업" — 다음 딥슬립 웨이크가 곧장 유니캐스트로 재연결(WAKE_HELLO_SENS 패스트패스)
      * 시도할 수 있게 미리 기억(esp_now_cam.c와 동일 이유) */
@@ -445,7 +445,7 @@ bool esp_now_node_report_reading(uint8_t chan_count, const uint8_t *chan_ok,
                                                           2026-09-05 수정과 짝) */
                                               &ack, sizeof(ack), NULL);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "WAKE_HELLO_SENS 무응답(3회) — 폴백 스캔으로 전환");
+        ESP_LOGW(TAG, "WAKE_HELLO_SENS no response (3 tries) - falling back to scan");
         s_conn_state = SENS_CONN_ORPHAN;
         ESP_LOGI(TAG, "[STATE] -> %s (wake_hello_fail)", conn_state_name(s_conn_state));
         set_led(LED_PATTERN_BLINK_FAST);
@@ -485,7 +485,7 @@ void esp_now_node_init(sensor_kind_t sensor_kind, uint8_t chan_count, const uint
     memcpy(s_chan_type, chan_type, s_chan_count);
 
     resolve_name();
-    ESP_LOGI(TAG, "노드 이름: %s (MAC " MACSTR ")", s_name, MAC2STR(s_mac));
+    ESP_LOGI(TAG, "Node name: %s (MAC " MACSTR ")", s_name, MAC2STR(s_mac));
 
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));

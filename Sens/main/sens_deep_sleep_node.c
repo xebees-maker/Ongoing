@@ -80,7 +80,7 @@
         SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT,
     };
 #else
-    #error "sens_deep_sleep_node.c는 SCD41/MQ137/SC05/SHT45만 지원 — 다른 센서를 캐스크로 옮기려면 여기 분기 추가"
+    #error "sens_deep_sleep_node.c supports only SCD41/MQ137/SC05/SHT45 - add a branch here to move another sensor to CASK"
 #endif
 
 static const char *TAG = "sens_deep_sleep_node";
@@ -209,7 +209,7 @@ static void maybe_learn_full_mv(bool powered, int mv)
 
     s_full_mv = (float)mv;
     battery_set_full_mv(s_full_mv);
-    ESP_LOGI(TAG, "배터리 완충 전압 학습: %d mV", mv);
+    ESP_LOGI(TAG, "Battery full voltage learned: %d mV", mv);
 
     if (mv != s_full_mv_persisted) {
         nvs_handle_t h;
@@ -252,13 +252,13 @@ typedef enum {
 } ws2812_color_t;
 
 static const struct { uint8_t r, g, b; const char *name; } s_ws2812_colors[WS2812_COLOR_COUNT] = {
-    [WS2812_COLOR_RED]    = { WS2812_TEST_BRIGHTNESS, 0, 0, "빨강" },
-    [WS2812_COLOR_GREEN]  = { 0, WS2812_TEST_BRIGHTNESS, 0, "초록" },
-    [WS2812_COLOR_BLUE]   = { 0, 0, WS2812_TEST_BRIGHTNESS, "파랑" },
-    [WS2812_COLOR_PURPLE] = { WS2812_TEST_BRIGHTNESS, 0, WS2812_TEST_BRIGHTNESS, "보라" },
-    [WS2812_COLOR_YELLOW] = { WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, 0, "노랑" },
-    [WS2812_COLOR_CYAN]   = { 0, WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, "청록" },
-    [WS2812_COLOR_WHITE]  = { WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, "백색" },
+    [WS2812_COLOR_RED]    = { WS2812_TEST_BRIGHTNESS, 0, 0, "red" },
+    [WS2812_COLOR_GREEN]  = { 0, WS2812_TEST_BRIGHTNESS, 0, "green" },
+    [WS2812_COLOR_BLUE]   = { 0, 0, WS2812_TEST_BRIGHTNESS, "blue" },
+    [WS2812_COLOR_PURPLE] = { WS2812_TEST_BRIGHTNESS, 0, WS2812_TEST_BRIGHTNESS, "purple" },
+    [WS2812_COLOR_YELLOW] = { WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, 0, "yellow" },
+    [WS2812_COLOR_CYAN]   = { 0, WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, "cyan" },
+    [WS2812_COLOR_WHITE]  = { WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, "white" },
 };
 
 /* 상태 매핑 코드가 재사용할 헬퍼 — 색 이름(enum)만 넘기면 실제 픽셀 설정+refresh까지 함 */
@@ -284,7 +284,7 @@ static void ws2812_init_once(void)
     };
     led_strip_rmt_config_t rmt_config = { .resolution_hz = 10 * 1000 * 1000 };
     if (led_strip_new_rmt_device(&strip_config, &rmt_config, &s_ws2812_strip) != ESP_OK) {
-        ESP_LOGW(TAG, "WS2812 초기화 실패 — 측정 표시 LED 없이 진행");
+        ESP_LOGW(TAG, "WS2812 init failed - continuing without the measurement LED");
         s_ws2812_strip = NULL;
     }
 }
@@ -329,7 +329,7 @@ static void pm_lock_no_light_sleep_acquire(void)
 {
     if (!s_no_light_sleep_lock) {
         if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "sens_measure", &s_no_light_sleep_lock) != ESP_OK) {
-            ESP_LOGW(TAG, "PM 락 생성 실패 — 라이트슬립 방지 없이 측정 진행");
+            ESP_LOGW(TAG, "PM lock create failed - measuring without light-sleep guard");
             return;
         }
     }
@@ -366,7 +366,7 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
         vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_POLL_MS));
         waited_ms += SCD41_MEASURE_POLL_MS;
     }
-    ESP_LOGW(TAG, "SCD41 측정 타임아웃(%ums)", (unsigned)SCD41_MEASURE_TIMEOUT_MS);
+    ESP_LOGW(TAG, "SCD41 measurement timeout (%ums)", (unsigned)SCD41_MEASURE_TIMEOUT_MS);
     return false;
 }
 #endif
@@ -381,7 +381,7 @@ static bool measure_sensor(float out[SENSOR_CHAN_COUNT])
 #elif CONFIG_SENS_SENSOR_MQ137
     bool do_alarm = false;
     bool ok = mq137_read(&out[0], &do_alarm);
-    if (ok && do_alarm) ESP_LOGW(TAG, "MQ137 DO 임계값 초과 알림");
+    if (ok && do_alarm) ESP_LOGW(TAG, "MQ137 DO threshold exceeded");
     return ok;
 #elif CONFIG_SENS_SENSOR_SC05
     /* Auto 모드(공장 기본값)라 트리거 없이 그냥 다음 프레임을 기다려서 잡음 —
@@ -440,7 +440,7 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
              * 측정해서 그 결과를 진짜 첫 값(측정ID=1)으로 씀 — 사용자 지시로 이 워밍업도
              * 진짜 측정과 동일하게 LED로 표시(구분 없음). MQ137은 히터가 외부전원으로 항상
              * 예열돼 있어서(배터리 아님) 이 워밍업-버림이 필요 없음 */
-            ESP_LOGI(TAG, "SCD41 워밍업 측정 완료(버림, 파워사이클 후 첫 값) — 실제 측정 재시도");
+            ESP_LOGI(TAG, "SCD41 warm-up measurement done (discarded, first value after power cycle) - measuring again");
             fresh_ok = attempt_one_measurement(fresh_vals, measurement_elapsed_ms);
         }
 #else
@@ -459,29 +459,29 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
 #if CONFIG_SENS_SENSOR_SCD41
             int temp_x10 = (int)(s_cached_vals[1] * 10.0f + 0.5f);
             int humi_x10 = (int)(s_cached_vals[2] * 10.0f + 0.5f);
-            ESP_LOGI(TAG, "MEASMARK 측정 성공 — 측정ID=%u co2=%d temp=%d.%d humi=%d.%d",
+            ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u co2=%d temp=%d.%d humi=%d.%d",
                      (unsigned)s_measurement_id, (int)s_cached_vals[0],
                      temp_x10 / 10, temp_x10 % 10, humi_x10 / 10, humi_x10 % 10);
 #elif CONFIG_SENS_SENSOR_MQ137
             int ppm_x10 = (int)(s_cached_vals[0] * 10.0f + 0.5f);
-            ESP_LOGI(TAG, "MEASMARK 측정 성공 — 측정ID=%u NH3=%d.%dppm(잠정계수)",
+            ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u NH3=%d.%dppm (provisional factor)",
                      (unsigned)s_measurement_id, ppm_x10 / 10, ppm_x10 % 10);
 #elif CONFIG_SENS_SENSOR_SC05
             int sc05_ppm_x100 = (int)(s_cached_vals[0] * 100.0f + 0.5f);
-            ESP_LOGI(TAG, "MEASMARK 측정 성공 — 측정ID=%u NH3=%d.%02dppm",
+            ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u NH3=%d.%02dppm",
                      (unsigned)s_measurement_id, sc05_ppm_x100 / 100, sc05_ppm_x100 % 100);
 #elif CONFIG_SENS_SENSOR_SHT45
             int sht_temp_x10 = (int)(s_cached_vals[0] * 10.0f + 0.5f);
             int sht_humi_x10 = (int)(s_cached_vals[1] * 10.0f + 0.5f);
-            ESP_LOGI(TAG, "MEASMARK 측정 성공 — 측정ID=%u temp=%d.%d humi=%d.%d",
+            ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u temp=%d.%d humi=%d.%d",
                      (unsigned)s_measurement_id, sht_temp_x10 / 10, sht_temp_x10 % 10,
                      sht_humi_x10 / 10, sht_humi_x10 % 10);
 #endif
         } else {
-            ESP_LOGW(TAG, "MEASMARK 판독 실패 — 직전 캐시값(측정ID=%u) 재사용", (unsigned)s_measurement_id);
+            ESP_LOGW(TAG, "MEASMARK read failed - reusing cached value (measID=%u)", (unsigned)s_measurement_id);
         }
     } else {
-        ESP_LOGI(TAG, "측정주기(%us) 미도달(경과 %us) — 재측정 생략, 캐시값(측정ID=%u) 재사용",
+        ESP_LOGI(TAG, "Measurement period (%us) not reached (elapsed %us) - skipped, reusing cached value (measID=%u)",
                  (unsigned)measure_period_sec, (unsigned)s_seconds_since_last_measurement,
                  (unsigned)s_measurement_id);
     }
@@ -536,14 +536,14 @@ void app_main(void)
      * 보낼 곳이 없으면 측정 자체가 무의미) */
 #if CONFIG_SENS_SENSOR_SCD41
     if (!scd41_init_single_shot(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) {
-        ESP_LOGW(TAG, "SCD41 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
+        ESP_LOGW(TAG, "SCD41 init failed - check wiring (retry next cycle)");
     }
     vTaskDelay(pdMS_TO_TICKS(1000));  /* 싱글샷용 전원안정화 지연(위 주석 참고) */
 #elif CONFIG_SENS_SENSOR_SHT45
     /* SHT4x는 SCD41과 달리 전원안정화 지연 요구사항이 문서화돼있지 않음(예전 sensor_node.c도
      * 지연 없이 바로 init) — I2C 버스 공유(BSP_C3_I2C_*)는 SCD41과 동일 자리 */
     if (!sht4x_init(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) {
-        ESP_LOGW(TAG, "SHT45 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
+        ESP_LOGW(TAG, "SHT45 init failed - check wiring (retry next cycle)");
     }
 #endif
     /* 2026-09-12(MQ137 추가) — AO 채널 설정에 공유 ADC 유닛 핸들이 필요한데, 그 핸들은
@@ -581,14 +581,14 @@ void app_main(void)
 #if CONFIG_SENS_SENSOR_MQ137
     if (!mq137_init(s_vin_adc, BSP_C3_MQ137_AO_ADC_CHANNEL, BSP_C3_MQ137_AO_ADC_ATTEN,
                     BSP_C3_MQ137_DO_PIN)) {
-        ESP_LOGW(TAG, "MQ137 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
+        ESP_LOGW(TAG, "MQ137 init failed - check wiring (retry next cycle)");
     }
 #elif CONFIG_SENS_SENSOR_SC05
     /* 2026-09-15 — 공유 ADC 핸들 의존성 없음(UART), MQ137과 달리 battery_init() 이후로
      * 미룰 필요는 없지만 위치 일관성을 위해 같은 자리에 둠 */
     if (!sc05_init(BSP_C3_SC05_UART_PORT, BSP_C3_SC05_UART_RX, BSP_C3_SC05_UART_TX,
                    BSP_C3_SC05_UART_BAUD)) {
-        ESP_LOGW(TAG, "SC05 초기화 실패 — 연결 확인 필요(다음 사이클에 재시도)");
+        ESP_LOGW(TAG, "SC05 init failed - check wiring (retry next cycle)");
     }
 #endif
 
@@ -624,7 +624,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
     esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
-    ESP_LOGI(TAG, "WiFi 모뎀슬립 설정: %s", esp_err_to_name(ps_err));
+    ESP_LOGI(TAG, "WiFi modem sleep set: %s", esp_err_to_name(ps_err));
 
     /* 2026-09-05 — 캠은 스피커 이벤트훅을 통해 간접 연결하지만(cam_speaker 의존), 센스는
      * 스피커가 없으니 채널스캔 스윕완료 훅에 직접 연결 */
@@ -634,7 +634,7 @@ void app_main(void)
     esp_now_node_set_status_led(BSP_C3_LED_GREEN);
     esp_now_node_init(SENSOR_KIND_CURRENT, SENSOR_CHAN_COUNT, s_chan_types);
 
-    ESP_LOGI(TAG, "헤드리스 Sens 노드 준비 완료 (kind=%d, channels=%d, 측정ID=%u)",
+    ESP_LOGI(TAG, "Headless Sens node ready (kind=%d, channels=%d, measID=%u)",
              SENSOR_KIND_CURRENT, SENSOR_CHAN_COUNT, (unsigned)s_measurement_id);
 
     /* CAM의 app_main 웨이크 루프와 완전히 동일 구조(2026-09-05 재수정, cam_node.c 참고) —
@@ -671,7 +671,7 @@ void app_main(void)
             if (!esp_now_node_is_paired()) {
                 sleep_sec = next_unpaired_retry_sleep_sec();
                 s_unpaired_backoff_elapsed_sec += sleep_sec;
-                ESP_LOGW(TAG, "폴백 스윕 완료 — Cntl 못 찾음, %us 후 재시도", (unsigned)sleep_sec);
+                ESP_LOGW(TAG, "Fallback sweep done - Cntl not found, retry in %us", (unsigned)sleep_sec);
                 break;
             }
         }
@@ -691,7 +691,7 @@ void app_main(void)
         while (!s_sleep_now_requested) {
             uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
             if (now_ms - cask_start_ms >= SENS_CASK_TIMEOUT_MS) {
-                ESP_LOGW(TAG, "CASK 미완주(%ums 경과, SLEEP_NOW 못 받음) — WAKE_HELLO_SENS부터 재시도",
+                ESP_LOGW(TAG, "CASK incomplete (%ums, no SLEEP_NOW) - retrying from WAKE_HELLO_SENS",
                          (unsigned)SENS_CASK_TIMEOUT_MS);
                 cask_timed_out = true;
                 break;
@@ -732,7 +732,7 @@ void app_main(void)
                 s_seconds_since_last_measurement = 0;
                 live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
             } else {
-                ESP_LOGW(TAG, "센서 판독 실패(Live 재측정) — 직전 캐시값(측정ID=%u) 재사용",
+                ESP_LOGW(TAG, "Sensor read failed (Live re-measure) - reusing cached value (measID=%u)",
                          (unsigned)s_measurement_id);
                 /* 기준점을 안 옮겨서 다음 Live 반복에서 곧바로 다시 재시도됨 */
             }
@@ -762,7 +762,7 @@ void app_main(void)
                                      ? sleep_sec - measurement_elapsed_sec : 0;
 
     esp_now_node_note_sleep_entry();
-    ESP_LOGI(TAG, "딥슬립 진입: %us 후 웨이크(원래 %us, 측정에 %us 씀)",
+    ESP_LOGI(TAG, "Deep sleep: wake in %us (requested %us, %us spent measuring)",
              (unsigned)actual_sleep_sec, (unsigned)sleep_sec, (unsigned)measurement_elapsed_sec);
     esp_sleep_enable_timer_wakeup((uint64_t)actual_sleep_sec * 1000000ULL);
     esp_deep_sleep_start();
