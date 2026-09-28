@@ -50,6 +50,19 @@ static volatile bool s_ready = false;
 bool bridge_esp_now_is_ready(void) { return s_ready; }
 static uint32_t s_adjacent_adv_dropped = 0;
 
+/* 적체가 새 최고치를 16개 단위로 넘을 때만 로그(드롭은 없지만 쌓이는 정도는 보이게).
+ * 2026-09-28 — 무선 수신 RELAY와 사진 SR 스트림(bridge_esp_now_queue_to_cntl) 양쪽 push 뒤에서 부름
+ * (예전엔 recv_cb 쪽만 봐서 사진 청크로 쌓인 건 안 보였음) */
+static void note_backlog(incoming_path_t *path)
+{
+    uint32_t count = 0, hwm = 0;
+    can_bridge_queue_get_stats(&path->q, &count, &hwm);
+    if (hwm >= path->hwm_logged + 16) {
+        path->hwm_logged = hwm - (hwm % 16);
+        ESP_LOGW(TAG, "%s RX queue peak %u (now %u)", path->name, (unsigned)hwm, (unsigned)count);
+    }
+}
+
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
     if (!info || len <= 0 || len > BRIDGE_ESPNOW_MAX_FRAME) return;
@@ -92,14 +105,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     incoming_path_t *path = (len >= 2 && can_bridge_path_for_esp_now_msg(data[1]) == CAN_BRIDGE_CAT_DATA)
                           ? &s_data_in : &s_ctrl_in;
     can_bridge_queue_push(&path->q, s_rx_buf, CAN_BRIDGE_APP_HEADER_LEN + (size_t)len);
-
-    /* 적체가 새 최고치를 16개 단위로 넘을 때만 로그(드롭은 없지만 쌓이는 정도는 보이게) */
-    uint32_t count = 0, hwm = 0;
-    can_bridge_queue_get_stats(&path->q, &count, &hwm);
-    if (hwm >= path->hwm_logged + 16) {
-        path->hwm_logged = hwm - (hwm % 16);
-        ESP_LOGW(TAG, "%s RX queue peak %u (now %u)", path->name, (unsigned)hwm, (unsigned)count);
-    }
+    note_backlog(path);
 }
 
 /* 2026-09-26(설계 3단계) — 무선 수신이 아닌 곳(RELIABLE_SEND 대행 완료 콜백)에서 콘으로 보낼 app 메시지를
@@ -115,6 +121,7 @@ void bridge_esp_now_queue_to_cntl(const uint8_t *msg, size_t len)
 {
     incoming_path_t *path = (can_bridge_path_for_app_msg(msg, len) == CAN_BRIDGE_CAT_DATA) ? &s_data_in : &s_ctrl_in;
     can_bridge_queue_push(&path->q, msg, len);
+    note_backlog(path);
 }
 
 /* 2026-09-26 — 이벤트 방식: 큐에 항목이 들어오면(push) 알림으로 깨어나서 빌 때까지 CAN으로 보냄.
