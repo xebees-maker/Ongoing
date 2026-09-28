@@ -175,6 +175,7 @@ const uint32_t STATS_SCALE_SECONDS[STATS_SCALE_COUNT] = { 3600, 43200, 86400, 25
 #define STATS_AGG_MAX_MACS 8
 
 static uint8_t s_agg_known_macs[STATS_AGG_MAX_MACS][6];
+static uint8_t s_agg_known_kinds[STATS_AGG_MAX_MACS];  /* 2026-09-28 — 슬롯별 기기 종류(계열 찾기용, stats_agg_collect_macs) */
 static int     s_agg_known_mac_count = 0;
 
 /* mac -> 누적 슬롯 인덱스. 처음 보는 mac이면 새로 등록, 꽉 찼으면 -1(그 장치의 사전집계는
@@ -267,6 +268,7 @@ static void stats_agg_update_locked(const uint8_t mac[6], uint8_t kind, uint8_t 
     if (chan_type >= STATS_AGG_MAX_CHAN_TYPES) return;
     int mac_slot = agg_mac_slot(mac);
     if (mac_slot < 0) return;  /* STATS_AGG_MAX_MACS 초과 — 이 장치는 사전집계만 스킵(원본은 남음) */
+    s_agg_known_kinds[mac_slot] = kind;
     for (int scale = 0; scale < STATS_SCALE_COUNT; scale++) {
         stats_agg_update_scale_locked((uint8_t)scale, mac_slot, mac, kind, chan_type, unix_time, value);
     }
@@ -377,6 +379,27 @@ uint32_t stats_agg_collect_macs(uint8_t chan_type, uint8_t out_macs[][6], uint8_
             }
         }
         fclose(f);
+    }
+    /* 2026-09-28(사용자 보고 — "그래프가 계열로 안 잡힌다") — 1주 스케일 버킷은 몇 시간에 한 번 닫혀야 파일에
+     * 기록되므로, SD를 비운 뒤나 새 기기를 처음 붙이면 그동안 계열이 0개였음(SD 리페어 후 실제로 겪음). 이번
+     * 부팅 이후 이 chan_type 값이 실제로 들어온 기기(RAM 누적기에 진행 중인 버킷이 있음)도 계열로 넣음 —
+     * 파일을 더 읽지 않음 */
+    if (chan_type < STATS_AGG_MAX_CHAN_TYPES) {
+        for (int slot = 0; slot < s_agg_known_mac_count && count < out_cap; slot++) {
+            bool live = false;
+            for (int scale = 0; scale < STATS_SCALE_COUNT && !live; scale++) {
+                if (s_agg_accum[scale][chan_type][slot].bucket_start != 0) live = true;
+            }
+            if (!live) continue;
+            bool dup = false;
+            for (uint32_t j = 0; j < count; j++) {
+                if (memcmp(out_macs[j], s_agg_known_macs[slot], 6) == 0) { dup = true; break; }
+            }
+            if (dup) continue;
+            memcpy(out_macs[count], s_agg_known_macs[slot], 6);
+            out_kinds[count] = s_agg_known_kinds[slot];
+            count++;
+        }
     }
     unlock();
     return count;
