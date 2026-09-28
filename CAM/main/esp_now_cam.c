@@ -157,12 +157,9 @@ static volatile bool s_transfer_busy = false;
  * CNTL이 유일한 소유자, CAM_CONFIG_SET으로 전달받은 값을 씀(기본값 3은 구버전 CNTL/값
  * 미수신 시에만 쓰이는 안전값, feedback_cntl_owns_mutually_judged_values 메모리 참고) */
 static uint8_t s_nack_max_rounds = 3;
-/* 청크 버스트 중 CHANNEL_PING이 큐에서 밀리는 문제 완화용(2026-08-05, 위 청크 루프 주석
- * 참고) — 10개마다 50ms 쉬어서 큐를 비움. 10개×(10ms 페이싱)=100ms 주기에 50ms를 더 얹는
- * 셈이라 전송 시간이 그만큼 늘지만(약 1.5배), PING 왕복(현재 500ms 타임아웃) 안에 여유있게
- * 끼어들 수 있는 수준 */
-#define CHUNK_QUEUE_DRAIN_INTERVAL 10
-#define CHUNK_QUEUE_DRAIN_MS       50
+/* 2026-09-28(사용자 지시) — 청크 사이 고정 간격(청크마다 5ms, 10개마다 50ms) 삭제. 50ms는 청크 버스트 중
+ * CHANNEL_PING이 끼어들 틈이었는데 PING은 CASK 재설계로 없어졌고, 5ms는 송신 큐 포화(NO_MEM) 방지였는데 지금은
+ * 큐가 차면 송신 완료 이벤트(send_cb)를 기다렸다 다시 보냄. 받는 쪽 속도는 브의 WINDOW_STATUS 흐름 제어가 맞춤 */
 
 /* 사진 요청 세대 번호(2026-08-02) — Cntl은 사진 전송을 취소하는 프로토콜 메시지가 없어서
  * (지금까지 "취소" 버튼은 로컬 팝업만 닫고 CAM엔 아무 통보도 안 갔음), 사용자가 목록에서
@@ -285,10 +282,6 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
         }
         if (err != ESP_OK) {
             LOG_W_RL(TAG_PHOTO, "Resend failed (buf): chunk[%u] -> %s (%d tries)", idx, esp_err_to_name(err), attempt + 1);
-        }
-        vTaskDelay(pdMS_TO_TICKS(5));
-        if ((i + 1) % CHUNK_QUEUE_DRAIN_INTERVAL == 0) {
-            vTaskDelay(pdMS_TO_TICKS(CHUNK_QUEUE_DRAIN_MS));
         }
     }
     ESP_LOGD(TAG_PHOTO, "NACK resend done (buf): file_id=%u %u chunks", (unsigned)file_id, (unsigned)nack->missing_count);
