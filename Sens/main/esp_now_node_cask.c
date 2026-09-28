@@ -14,6 +14,9 @@
 #include "esp_now_channelsync.h"
 #include "esp_now_reliable.h"
 #include "rwdt_guard.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 
 /**
  * @file esp_now_node_cask.c
@@ -173,11 +176,60 @@ static const uint8_t s_broadcast_mac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF }
 
 /* CAM의 send_cb와 동일 원칙 — 생존판정은 WAKE_HELLO_SENS의 reliable 요청/응답이 전담,
  * 물리계층 ACK는 광고 송출 완료 통보(채널싱크용)로만 씀 */
+/* 2026-09-28(캠 337d58c와 같은 조치) — 응답(ACK) 재전송. esp_now_send()가 NO_MEM(송신 큐 가득)이면 응답이 그냥
+ * 사라져서 콘/브 쪽 reliable이 재시도하다 실패했음. 이제 NO_MEM이면 reply_task에 넘기고, 그 태스크가 송신 완료
+ * 이벤트(send_cb)를 기다렸다가 다시 보냄 */
+#define REPLY_MAX_LEN   64
+#define REPLY_RETRY_MAX 10      /* 송신 완료 이벤트 대기 20ms × 10 = 최대 약 200ms */
+typedef struct {
+    uint8_t mac[6];
+    uint8_t len;
+    uint8_t data[REPLY_MAX_LEN];
+} reply_item_t;
+static QueueHandle_t s_reply_q = NULL;
+static TaskHandle_t s_reply_task = NULL;
+
+static esp_err_t send_reply(const uint8_t *mac, const void *msg, size_t len)
+{
+    esp_err_t err = esp_now_send(mac, (const uint8_t *)msg, len);
+    if (err != ESP_ERR_ESPNOW_NO_MEM) {
+        if (err != ESP_OK) ESP_LOGW(TAG, "Reply (type=%u) send failed: %s", ((const uint8_t *)msg)[1], esp_err_to_name(err));
+        return err;
+    }
+    if (!s_reply_q || len > REPLY_MAX_LEN) {
+        ESP_LOGW(TAG, "Reply (type=%u) NO_MEM - cannot resend (dropped)", ((const uint8_t *)msg)[1]);
+        return err;
+    }
+    reply_item_t item;
+    memcpy(item.mac, mac, 6);
+    item.len = (uint8_t)len;
+    memcpy(item.data, msg, len);
+    if (xQueueSend(s_reply_q, &item, 0) != pdTRUE) ESP_LOGW(TAG, "Reply resend queue full - dropped");
+    return err;
+}
+
+static void reply_task(void *arg)
+{
+    (void)arg;
+    reply_item_t item;
+    for (;;) {
+        if (xQueueReceive(s_reply_q, &item, portMAX_DELAY) != pdTRUE) continue;
+        esp_err_t err = ESP_ERR_ESPNOW_NO_MEM;
+        for (int i = 0; i < REPLY_RETRY_MAX && err == ESP_ERR_ESPNOW_NO_MEM; i++) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));   /* 송신 완료(자리 생김) 또는 20ms */
+            err = esp_now_send(item.mac, item.data, item.len);
+        }
+        if (err != ESP_OK) ESP_LOGW(TAG, "Reply (type=%u) resend failed: %s", item.data[1], esp_err_to_name(err));
+        else ESP_LOGD(TAG, "Reply (type=%u) resent after NO_MEM", item.data[1]);
+    }
+}
+
 static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t status)
 {
     /* 2026-09-25 — 송신 1건 완료 = 드라이버 송신 큐에 자리 생김. NO_MEM으로 대기 중인
      * esp_now_reliable_request()를 깨움(이벤트 방식, 대기 중인 게 없으면 아무 일도 안 함) */
     esp_now_reliable_on_send_done();
+    if (s_reply_task) xTaskNotifyGive(s_reply_task);  /* 응답 재전송 태스크 깨움(할 일 8, 캠과 동일) */
     if (info && info->des_addr && memcmp(info->des_addr, s_broadcast_mac, sizeof(s_broadcast_mac)) == 0) {
         if (status == ESP_NOW_SEND_SUCCESS) {
             esp_now_channelsync_notify_advertise_send_done();
@@ -237,7 +289,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         ESP_LOGI(TAG, "[STATE] -> %s (unpair)", conn_state_name(s_conn_state));
         set_led(LED_PATTERN_BLINK_FAST);
         esp_now_unpair_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_UNPAIR_ACK };
-        esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+        send_reply(info->src_addr, &ack, sizeof(ack));
         start_or_resume_scan();
         esp_now_node_signal_recheck();
         return;
@@ -246,7 +298,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     if (msg_type == ESP_NOW_MSG_CASK_WORK_NONE) {
         if (s_conn_state != SENS_CONN_PAIRED || len < (int)sizeof(esp_now_cask_work_none_t)) return;
         esp_now_cask_work_none_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE_ACK };
-        esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
+        send_reply(s_hub_mac, &ack, sizeof(ack));
         return;
     }
 
@@ -265,7 +317,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         }
         ESP_LOGI(TAG, "SENS_CONFIG_SET 수신: sample_interval_sec=%u", (unsigned)s_sample_interval_sec);
         esp_now_sens_config_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SENS_CONFIG_ACK, .success = 1 };
-        esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
+        send_reply(s_hub_mac, &ack, sizeof(ack));
         return;
     }
 
@@ -275,7 +327,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         s_last_sleep_sec = msg->sleep_sec;
         ESP_LOGI(TAG, "SLEEP_NOW 수신(sleep_sec=%u)", (unsigned)msg->sleep_sec);
         esp_now_sleep_now_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SLEEP_NOW_ACK };
-        esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
+        send_reply(s_hub_mac, &ack, sizeof(ack));
         /* 캠의 cam_node_note_sleep_now_requested()와 동일 — app_main의 이벤트기반 대기 루프를
          * 즉시 깨움(sens_deep_sleep_node.c 구현) */
         esp_now_node_note_sleep_now_requested(msg->sleep_sec);
@@ -317,7 +369,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     };
     memcpy(ack.node_mac, s_mac, sizeof(ack.node_mac));
     memcpy(ack.chan_type, s_chan_type, s_chan_count);
-    esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
+    esp_err_t err = send_reply(s_hub_mac, &ack, sizeof(ack));
     ESP_LOGI(TAG, "페어링됨: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
 
     /* "졸업" — 다음 딥슬립 웨이크가 곧장 유니캐스트로 재연결(WAKE_HELLO_SENS 패스트패스)
@@ -438,6 +490,10 @@ void esp_now_node_init(sensor_kind_t sensor_kind, uint8_t chan_count, const uint
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
     ESP_ERROR_CHECK(esp_now_register_send_cb(send_cb));
+    if (!s_reply_q) {
+        s_reply_q = xQueueCreate(6, sizeof(reply_item_t));
+        xTaskCreate(reply_task, "reply_tx", 3072, NULL, 6, &s_reply_task);
+    }
 
     /* 2026-09-05 — 허브를 몰라서(최초 페어링 전) 스캔부터 시작해야 하는 경우만 여기서
      * 미리 시작. 허브를 이미 알면(딥슬립 복귀) 여기선 아무 것도 안 함 — 호출부
