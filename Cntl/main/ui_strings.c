@@ -388,6 +388,9 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_MSG_PAIR_QUOTA_FULL_FMT] = { "%s: 최대 %u대까지 연결할 수 있습니다.\n기존 기기를 먼저 연결 해제하세요.",
                                       "%s: up to %u can be connected.\nDisconnect one first." },
     [STR_STATUS_QUOTA_FULL]       = { "상한 초과",     "Limit reached" },
+    [STR_CAMERA_POPUP_LOADING]    = { "카메라 목록을 불러오는 중...", "Loading cameras..." },
+    [STR_CAMERA_POPUP_NONE]       = { "카메라도 사진도 아직 없습니다.", "No cameras or photos yet." },
+    [STR_AGAR_SLOT_FMT]           = { "Agar %d",       "Agar %d" },
 };
 
 void ui_lang_load(void)

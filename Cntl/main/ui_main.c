@@ -597,6 +597,9 @@ static lv_timer_t *s_stats_page_timer  = NULL;
  * 손댈 필요 없음 */
 static lv_obj_t   *s_camera_popup       = NULL;
 static lv_obj_t   *s_camera_popup_title = NULL;
+/* 2026-09-28(사용자 지시) — 팝업 안내 문구: 열자마자 "불러오는 중", 첫 갱신 틱(SD 이력 카메라 스캔) 뒤 카메라가
+ * 있으면 숨기고 없으면 "카메라도 사진도 아직 없음"으로 바꿈. 팝업의 자식이라 팝업을 지우면 같이 지워짐 */
+static lv_obj_t   *s_camera_popup_msg   = NULL;
 
 /* 2026-09-08(사용자 설계 — 연결 기능 주화면 이관) — 연결된 장치 행을 탭하면 뜨는 개별설정
  * 팝업(Alias 편집 + [센서일 때만]측정주기 편집 + 연결끊기). s_device_popup_node는 static
@@ -3209,8 +3212,9 @@ static bool stats_classify_by_kind(uint8_t kind, uint8_t chan_type,
 #define STATS_WIN_MAX_SERIES  24
 #define STATS_WIN_MAX_BUCKETS (STATS_AGG_POINTS_PER_SCALE * STATS_WIN_MAX_SERIES)
 
-/* 2026-09-15(사용자 확인 — "가스도 빨파 중에... Agar도 빨파흑노... 최대 4개로 일단 한정") */
-#define STATS_AGAR_MAX_SLOTS 4
+/* 2026-09-15(사용자 확인 — "가스도 빨파 중에... Agar도 빨파흑노... 최대 4개로 일단 한정").
+ * 2026-09-28(사용자 설계 — 페어링 상한 Agar 3대) — 3개로, Gas처럼 기기가 없어도 항상 3슬롯 */
+#define STATS_AGAR_MAX_SLOTS 3
 #define STATS_GAS_MAX_SLOTS  2
 
 typedef struct {
@@ -3357,6 +3361,17 @@ static int stats_build_chains(const stats_window_t *w, stats_view_group_t group,
     return slots;
 }
 
+/* 2026-09-28(사용자 설계) — Agar는 상한이 3대로 정해져 있어 Gas처럼 슬롯을 항상 3개 둠 — 모자라는 슬롯은 빈 사슬 */
+static int stats_build_agar_slots(const stats_window_t *w, stats_chain_t *out)
+{
+    int n = stats_build_chains(w, STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false, out, STATS_AGAR_MAX_SLOTS);
+    for (int i = n; i < STATS_AGAR_MAX_SLOTS; i++) {
+        out[i].n = 0;
+        out[i].last_t = 0;
+    }
+    return STATS_AGAR_MAX_SLOTS;
+}
+
 static bool stats_chain_has_series(const stats_chain_t *ch, int series_idx)
 {
     for (int m = 0; m < ch->n; m++) {
@@ -3365,7 +3380,8 @@ static bool stats_chain_has_series(const stats_chain_t *ch, int series_idx)
     return false;
 }
 
-/* 사슬의 기기 이름을 "C->F"로 이어 붙임(Alias 우선). 화살표는 글꼴에 없을 수 있어 ASCII로 */
+/* 사슬의 기기 이름을 "C->F"로 이어 붙임(Alias 우선). 화살표는 글꼴에 없을 수 있어 ASCII로.
+ * 빈 사슬(Agar 고정 슬롯 중 기기 없는 것)은 호출부가 따로 "Agar N"으로 이름 붙임 */
 static void stats_chain_label(const stats_chain_t *ch, char *out, size_t out_cap)
 {
     out[0] = '\0';
@@ -3376,6 +3392,13 @@ static void stats_chain_label(const stats_chain_t *ch, char *out, size_t out_cap
         size_t len = strlen(out);
         snprintf(out + len, out_cap - len, "%s%s", (m > 0) ? "->" : "", (alias[0] != '\0') ? alias : devname);
     }
+}
+
+/* Agar 슬롯 i(0부터)의 이름 — 기기가 있으면 사슬 이름, 없으면 "Agar N" */
+static void stats_agar_slot_name(const stats_chain_t *ch, int slot_idx, char *out, size_t out_cap)
+{
+    if (ch->n > 0) stats_chain_label(ch, out, out_cap);
+    else snprintf(out, out_cap, ui_str(STR_AGAR_SLOT_FMT), slot_idx + 1);
 }
 
 /* 사슬 하나의 창 안 min/max/avg(칸 값 전체). 데이터 없으면 false */
@@ -3582,13 +3605,9 @@ static bool refresh_stats_overview_panel(void)
     lv_label_set_text(s_overview_humi_badge, badge);
     lv_label_set_text(s_overview_humi_value, value);
 
-    /* --- Agar Temperature (혼합 -> Agar1 -> Agar2 -> ... 순환, 슬롯 = 기기 사슬) --- */
-    n = stats_build_chains(s_ov_win, STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false, chains, STATS_AGAR_MAX_SLOTS);
-    if (n == 0) {
-        s_overview_agar_cycle_idx = 0;
-        snprintf(badge, sizeof(badge), "%s[%s]:", ui_str(STR_OVERVIEW_AGAR_TEMP), ui_str(STR_CHAN_UNIT_TEMP_C));
-        snprintf(value, sizeof(value), "%s", ui_str(STR_STATS_OVERVIEW_NO_DATA));
-    } else {
+    /* --- Agar Temperature (혼합 -> Agar1 -> Agar2 -> Agar3 순환, 슬롯 = 기기 사슬, 항상 3슬롯) --- */
+    n = stats_build_agar_slots(s_ov_win, chains);
+    {
         int wrapped = s_overview_agar_cycle_idx % (n + 1);  /* 0=혼합, 1..n=개별 슬롯 */
         if (wrapped == 0) {
             have = stats_blend_chains(s_ov_win, chains, n, &mn, &mx, &avg);
@@ -3599,9 +3618,9 @@ static bool refresh_stats_overview_panel(void)
         } else {
             const stats_chain_t *one = &chains[wrapped - 1];
             have = stats_chain_stat(s_ov_win, one, &mn, &mx, &avg);
-            char chain_name[40];
-            stats_chain_label(one, chain_name, sizeof(chain_name));
-            snprintf(label, sizeof(label), "%s %s", chain_name, ui_str(STR_CHAN_LABEL_TEMP_C));
+            char slot_name[40];
+            stats_agar_slot_name(one, wrapped - 1, slot_name, sizeof(slot_name));
+            snprintf(label, sizeof(label), "%s %s", slot_name, ui_str(STR_CHAN_LABEL_TEMP_C));
         }
         stats_format_overview_badge_value(badge, sizeof(badge), value, sizeof(value), label,
                                            STR_CHAN_UNIT_TEMP_C, have, mn, mx, avg);
@@ -3946,12 +3965,12 @@ static void stats_graph_build_slots(const stats_window_t *w)
                  ui_str(s_stats_air_humi_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
         s_stats_slot_count++;
     } else if (s_stats_active_group == STATS_VIEW_GROUP_AGAR) {
-        n = stats_build_chains(w, STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false, chains, STATS_AGAR_MAX_SLOTS);
+        n = stats_build_agar_slots(w, chains);  /* 항상 3슬롯 — 기기 없는 슬롯은 "Agar N T" 빈 그래프 */
         for (int i = 0; i < n && i < STATS_GRAPH_SERIES_COUNT; i++) {
             stats_graph_set_slot(i, &chains[i], SENSOR_CHAN_TEMP_C);
-            char chain_name[40];
-            stats_chain_label(&chains[i], chain_name, sizeof(chain_name));
-            snprintf(s_stats_slot_label[i], sizeof(s_stats_slot_label[0]), "%s %s", chain_name,
+            char slot_name[40];
+            stats_agar_slot_name(&chains[i], i, slot_name, sizeof(slot_name));
+            snprintf(s_stats_slot_label[i], sizeof(s_stats_slot_label[0]), "%s %s", slot_name,
                      ui_str(STR_CHAN_LABEL_TEMP_C));
             /* 2026-09-15(사용자 지시 — "기기명(Alias)이 길어지면 ...으로... 스케일, << >>
              * 공간을 확보해야되") */
@@ -5100,6 +5119,15 @@ static void refresh_dashboard(lv_timer_t *t)
     } else if (!camera_selectable) {
         lv_obj_add_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
+    }
+    /* 2026-09-28 — 팝업이 열려 있으면 이 틱에 SD 이력까지 훑었으므로 "불러오는 중"을 결과로 바꿈 */
+    if (s_camera_popup && s_camera_popup_msg) {
+        if (camera_selectable) {
+            lv_obj_add_flag(s_camera_popup_msg, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_label_set_text(s_camera_popup_msg, ui_str(STR_CAMERA_POPUP_NONE));
+            lv_obj_remove_flag(s_camera_popup_msg, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     /* 2026-09-22(사용자 지시로 제거) — 0대일 때 제목을 회색으로 "탭 불가" 표시하던 로직.
      * 이제 카메라 판넬도 센서 판넬처럼 연결 대수와 무관하게 항상 탭 가능해서 더 이상 필요
@@ -7921,19 +7949,19 @@ static void build_camera_tab(void)
      * (다음 틱까지 기다리지 않음) — 아무것도 없으면 toolbar/split_row는 계속 숨겨두고,
      * 다음 refresh_dashboard() 틱이 카메라(라이브든 SD 이력이든)를 감지하면 그때 자연히
      * 보여줌(기존 로직, 위 camera_selectable 분기 참고) */
+    /* 2026-09-22(사용자 지적 — "연결된 적 없는 보드는 아무 것도 안 나오네") — s_camera_empty는 메인화면 camera_box
+     * 소속이라 팝업 안에서는 안 보여서 팝업 전용 안내 라벨을 둠.
+     * 2026-09-28(사용자 지시) — 예전엔 여기서 바로 "연결된 카메라 없음"을 띄웠는데, SD 이력 카메라는 다음 갱신
+     * 틱에서야 훑으므로 이력이 있어도 잠깐 "없음"이 보였다가 바뀌었음. 이제 "불러오는 중"으로 시작하고, 결과는
+     * refresh_dashboard()가 정함 */
+    s_camera_popup_msg = lv_label_create(popup);
+    lv_label_set_text(s_camera_popup_msg, ui_str(STR_CAMERA_POPUP_LOADING));
+    lv_obj_set_style_text_font(s_camera_popup_msg, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_center(s_camera_popup_msg);
     if (s_camera_selectable_prev) {
         lv_obj_remove_flag(s_camera_content, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_camera_split_row, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        /* 2026-09-22(사용자 지적 — "연결된 적 없는 보드는 아무 것도 안 나오네") —
-         * s_camera_empty는 메인화면 camera_box 소속이라 팝업 안에서는 안 보임. 팝업이
-         * 완전히 비어보이지 않게 여기 전용 안내 라벨을 하나 만듦(팝업은 열 때마다 새로
-         * 지어지므로 static 보관 불필요 — teardown_camera_tab()의 lv_obj_delete(popup)가
-         * 자식까지 같이 지움) */
-        lv_obj_t *empty_lbl = lv_label_create(popup);
-        lv_label_set_text(empty_lbl, ui_str(STR_PANEL_NO_CAMERA));
-        lv_obj_set_style_text_font(empty_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-        lv_obj_center(empty_lbl);
+        lv_obj_add_flag(s_camera_popup_msg, LV_OBJ_FLAG_HIDDEN);
     }
 
     /* 목록 행은 이제 팝업이 열려 있을 때만 만듦(refresh_photo_list_ui 주석) — 열자마자 첫 페이지를 채우고
@@ -7958,6 +7986,7 @@ static void teardown_camera_tab(void)
     lv_obj_delete(s_camera_popup);
     s_camera_popup = NULL;
     s_camera_popup_title = NULL;
+    s_camera_popup_msg = NULL;  /* 팝업의 자식이라 위에서 같이 지워짐 */
     refresh_photo_list_ui(-1);  /* 팝업이 닫혔으니 목록 행을 지움(선택 상태는 유지) */
 
     size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
