@@ -577,24 +577,64 @@ static void apply_agc_aec_settings(void)
  * cam_node_run_auto_capture()(AUTO_CAPTURE 큐, 역시 photo_transfer_task) — 둘 다 24KB 스택의
  * 같은 전용 태스크라 안전함. capture_timer_cb()(작은 스택의 esp_timer 콜백)는 이제 이 함수를
  * 직접 안 부르고 esp_now_cam_enqueue_auto_capture()로 큐잉만 함 */
+/* 2026-09-29(시험용 — 어두운 곳에서 LED 동기화 확인, 끝나면 제거) — true면 촬영 때 LED를 켜지 않음(비교 기준) */
+static bool s_light_suppress = false;
+void cam_node_set_light_suppress(bool on) { s_light_suppress = on; }
+
+/* 시험용 — 방금 프레임의 자동노출 결과(OV3660/OV5640 공통: 노출 0x3500~0x3502, 게인 0x350A~0x350B) */
+static void read_ae(unsigned *exposure, unsigned *gain)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    *exposure = 0;
+    *gain = 0;
+    if (!s || !s->get_reg) return;
+    *exposure = ((unsigned)(s->get_reg(s, 0x3500, 0x0F) & 0x0F) << 12) |
+                ((unsigned)(s->get_reg(s, 0x3501, 0xFF) & 0xFF) << 4) |
+                (((unsigned)s->get_reg(s, 0x3502, 0xFF) & 0xFF) >> 4);
+    *gain = ((unsigned)(s->get_reg(s, 0x350A, 0x03) & 0x03) << 8) | ((unsigned)s->get_reg(s, 0x350B, 0xFF) & 0xFF);
+}
+
+/* 2026-09-29(사용자 설계 — 촬영용 LED) — AGC/AEC는 촬영 전 밝기로 정해지므로 LED는 카메라 초기화 전에 켜고,
+ * 초기화 없이 이어 찍을 때도 충분히 일찍 켜져 있어야 함. 선행 시간은 "LED 켜고 초기화"한 첫 촬영의 실측값
+ * (LED 켠 뒤 약 1.1초에 프레임, 게인 108 — 3초 미리 켠 104와 같은 수준; 0.6초면 104~136으로 덜 맞춰짐) */
+#define CAM_LIGHT_LEAD_MS  1100
+
+static int64_t s_light_on_us = 0;  /* 이번 촬영에서 LED를 켠 시각(0 = 아직 안 켬) */
+
+static void capture_light_on(void)
+{
+    if (s_light_suppress || s_light_on_us != 0) return;
+    cam_light_set(true);
+    s_light_on_us = esp_timer_get_time();
+}
+
+static void capture_light_off(void)
+{
+    cam_light_set(false);
+    s_light_on_us = 0;
+}
+
 static bool camera_capture_one(cam_capture_kind_t kind)
 {
-    /* 2026-09-29(사용자 설계 — 촬영용 LED) — 센서 초기화/노출 워밍업 전에 켜서 자동노출이 LED 밝기에 맞춰지게 함.
-     * 카메라가 이번 사이클에 이미 켜져 있었으면(어두운 상태로 노출이 맞춰져 있음) 아래에서 워밍업 프레임을 한 번 더 버림 */
+    capture_light_on();  /* 수동 경로는 cam_node_capture_now_sized()에서 초기화 전에 이미 켰음 */
+    int64_t t0_us = s_light_on_us ? s_light_on_us : esp_timer_get_time();  /* 시험용 */
     bool was_ready = s_camera_ready;
-    cam_light_set(true);
     if (ensure_camera_ready(kind == CAM_CAPTURE_KIND_MANUAL) != ESP_OK) {
-        cam_light_set(false);
+        capture_light_off();
         return false;
     }
     apply_agc_aec_settings();
 
     xSemaphoreTake(s_capture_mutex, portMAX_DELAY);
 
-    if (was_ready && cam_light_present()) {
-        for (int i = 0; i < CAM_WARMUP_FRAME_COUNT; i++) {
-            camera_fb_t *warmup_fb = esp_camera_fb_get();
-            if (warmup_fb) esp_camera_fb_return(warmup_fb);
+    /* LED를 켠 뒤 선행 시간이 지날 때까지 프레임을 계속 받아 버림 — 그동안 자동노출이 LED 밝기에 맞춰짐.
+     * 방금 LED를 켜고 초기화했으면 초기화+워밍업에 이미 그만큼 걸려서 대개 바로 통과, 카메라가 이미 켜져
+     * 있었으면(어두운 상태로 맞춰져 있음) 여기서 기다림 */
+    if (s_light_on_us != 0) {
+        while (esp_timer_get_time() - s_light_on_us < (int64_t)CAM_LIGHT_LEAD_MS * 1000) {
+            camera_fb_t *lead_fb = esp_camera_fb_get();
+            if (lead_fb) esp_camera_fb_return(lead_fb);
+            else break;
         }
     }
 
@@ -609,12 +649,22 @@ static bool camera_capture_one(cam_capture_kind_t kind)
         if (stale) esp_camera_fb_return(stale);
     }
 
+    int64_t t_req_us = esp_timer_get_time();  /* 시험용 — 저장할 프레임 요청 시각 */
     camera_fb_t *fb = esp_camera_fb_get();
-    cam_light_set(false);  /* 프레임을 받았으면 바로 끔 — 전송(수 초)은 LED 없이 */
+    int64_t t_frame_us = esp_timer_get_time();
+    capture_light_off();  /* 프레임을 받았으면 바로 끔 — 전송(수 초)은 LED 없이 */
+    int64_t t_off_us = esp_timer_get_time();
     if (!fb) {
         ESP_LOGW(TAG, "esp_camera_fb_get failed");
         xSemaphoreGive(s_capture_mutex);
         return false;
+    }
+    {   /* 시험용 — LED 켠 시각을 0으로 한 타임라인과 이 프레임의 자동노출 결과 */
+        unsigned ae_exp, ae_gain;
+        read_ae(&ae_exp, &ae_gain);
+        ESP_LOGI(TAG, "LIGHTSYNC light=%s cam_was_ready=%d on@0 frame_req@%lldms frame_got@%lldms off@%lldms exp=%u gain=%u jpeg=%u",
+                 s_light_suppress ? "suppressed" : "auto", was_ready ? 1 : 0, (t_req_us - t0_us) / 1000,
+                 (t_frame_us - t0_us) / 1000, (t_off_us - t0_us) / 1000, ae_exp, ae_gain, (unsigned)fb->len);
     }
 
     bool ok = esp_now_cam_push_captured_photo(fb->buf, fb->len, kind);
@@ -705,9 +755,12 @@ bool cam_node_capture_now_sized(const char *size_name)
 {
     /* 2026-08-10 — 필요시 초기화: 해상도 오버라이드(size_name)는 esp_camera_sensor_get()으로
      * 센서 핸들이 필요해서 camera_capture_one() 진입 전에 여기서 먼저 준비돼 있어야 함.
-     * 이 함수 자체가 수동(콘솔 shot/CAPTURE_NOW) 전용 경로라 save_warmup_frames=true 고정 */
+     * 이 함수 자체가 수동(콘솔 shot/CAPTURE_NOW) 전용 경로라 save_warmup_frames=true 고정.
+     * 2026-09-29 — LED는 초기화 전에 켬(camera_capture_one()의 CAM_LIGHT_LEAD_MS 주석 참고) */
+    capture_light_on();
     if (ensure_camera_ready(true) != ESP_OK) {
         ESP_LOGW(TAG, "Manual capture request - camera init failed");
+        capture_light_off();
         return false;
     }
 
@@ -721,12 +774,14 @@ bool cam_node_capture_now_sized(const char *size_name)
             fs = FRAMESIZE_VGA;
         } else {
             ESP_LOGW(TAG, "Unknown resolution name: %s (5m/qvga/vga only)", size_name);
+            capture_light_off();
             return false;
         }
 
         sensor_t *sensor = esp_camera_sensor_get();
         if (!sensor || sensor->set_framesize(sensor, fs) != 0) {
             ESP_LOGW(TAG, "Resolution change failed");
+            capture_light_off();
             return false;
         }
         ESP_LOGI(TAG, "Resolution changed: %s (applies from next capture)", size_name);

@@ -88,6 +88,9 @@ bool cam_node_is_camera_ready(void);
  *         멱등 호출 — esp_now_cam.c가 INIT_NEEDED/INIT_DONE 사이에 실제 초기화를 수행하는 데 씀 */
 bool cam_node_ensure_camera_ready(void);
 
+/* 2026-09-29(시험용 — LED 동기화 확인) — true면 촬영 때 LED를 켜지 않음 */
+void cam_node_set_light_suppress(bool on);
+
 /** @brief 배터리 전압 읽기(2026-08-22) — CH32V003 IO익스팬더 ADC(0x06) 원시값을 읽어
  *         스키매틱 분배비(R39=200K/R42=100K, ×3)와 CH32V003 ADC 추정 기준(10bit/3.3V)으로
  *         mV 환산. 실패 시 false(out_raw/out_mv 미정의) — mV->%% 변환은 Cntl 쪽 공통함수가
