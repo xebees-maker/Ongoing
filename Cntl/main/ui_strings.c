@@ -393,7 +393,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_AGAR_SLOT_FMT]           = { "Agar %d",       "Agar %d" },
     [STR_LABEL_SCREEN_OFF]        = { "화면 자동 꺼짐", "Screen off" },
     [STR_OPT_SCREEN_OFF_LIST]     = { "끄기\n1분\n5분\n10분", "Off\n1 min\n5 min\n10 min" },
-    [STR_LABEL_CAM_LIGHT]         = { "캠 LED",        "Cam LED" },
+    [STR_LABEL_LIGHT_TEST]        = { "조명 테스트",   "Light Test" },
 };
 
 void ui_lang_load(void)

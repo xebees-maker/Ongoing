@@ -2160,24 +2160,6 @@ static void refresh_sensor_list(lv_timer_t *t)
  * 채움 — 예전엔 여기서 빈 content 래퍼를 하나 더 만들어서 반환했는데, 자식이 하나뿐이거나
  * box와 같은 방향(COLUMN)인 경우엔 그 래퍼가 아무 역할도 안 해서 제거함). idx는
  * s_dash_title[] 저장 위치(언어 전환 갱신용) — 0=요약,1=측정기,2=카메라 */
-/* 2026-09-29(임시 — 사용자 지시: 콘에서 캠 촬영용 LED 켜기/끄기 시험) — 지금 연결된 캠마다 CAM_LIGHT_SET을 CASK 할일
- * 큐에 넣음(Live 모드면 1초 안팎에 전달). 시험이 끝나면 스위치와 함께 제거 */
-static void cb_cam_light_switch(lv_event_t *e)
-{
-    lv_obj_t *sw = lv_event_get_target(e);
-    bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
-    esp_now_cam_light_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_LIGHT_SET, .on = on ? 1 : 0 };
-    static const uint8_t s_light_ack_types[] = { ESP_NOW_MSG_CAM_LIGHT_ACK };
-    node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
-    if (!nodes) return;
-    int total = node_hub_get_nodes(HUB_NODE_KIND_CAM, nodes, NODE_HUB_MAX_NODES);
-    for (int i = 0; i < total; i++) {
-        if (node_hub_get_conn_state(nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
-        node_hub_queue_action(nodes[i].mac, &msg, sizeof(msg), s_light_ack_types, 1, 500, 3, "Cam light");
-        ESP_LOGI(TAG, "Cam light %s -> %s queued", on ? "on" : "off", nodes[i].name);
-    }
-    heap_caps_free(nodes);
-}
 
 static lv_obj_t *create_dashboard_panel(lv_obj_t *parent, ui_str_id_t title_id, int idx)
 {
@@ -6913,20 +6895,6 @@ void ui_init(void)
     lv_obj_set_style_bg_opa(dashboard_page, LV_OPA_COVER, 0);
 
     lv_obj_t *summary_box = create_dashboard_panel(dashboard_page, STR_PANEL_SUMMARY, 0);
-    {   /* 2026-09-29(임시) — 요약 제목 아래 캠 LED 스위치 */
-        lv_obj_t *light_row = lv_obj_create(summary_box);
-        lv_obj_set_size(light_row, LV_PCT(100), LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(light_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(light_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_border_width(light_row, 0, 0);
-        lv_obj_set_style_pad_all(light_row, 0, 0);
-        lv_obj_set_style_pad_column(light_row, 12, 0);
-        lv_obj_t *light_lbl = lv_label_create(light_row);
-        lv_label_set_text(light_lbl, ui_str(STR_LABEL_CAM_LIGHT));
-        lv_obj_set_style_text_font(light_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-        lv_obj_t *light_sw = lv_switch_create(light_row);
-        lv_obj_add_event_cb(light_sw, cb_cam_light_switch, LV_EVENT_VALUE_CHANGED, NULL);
-    }
     /* 2026-08-21 — 요약 맨 윗줄에 웹 대시보드 접속 URL(사용자 지시). IP를 아직 못 받았으면
      * refresh_dashboard()가 숨김 처리함(빈 문자열 반환 시).
      * 2026-09-09(사용자 지적 — "Web : 까지는 밑줄 치지 마") — "Web " 접두문구와 URL을
@@ -8318,6 +8286,18 @@ static void teardown_device_popup(void)
     ESP_LOGD(TAG, "MEMDIAG device popup closed t=%u", (unsigned)lv_tick_get());
 }
 
+/* 2026-09-29(사용자 지시 — 요약 판넬의 임시 캠 LED 스위치를 카메라 팝업으로 옮겨 계속 유지) — 이 팝업의 카메라에만
+ * CAM_LIGHT_SET을 CASK 할일 큐에 넣음(Live 모드면 1초 안팎에 전달) */
+static void cb_cam_light_test_switch(lv_event_t *e)
+{
+    lv_obj_t *sw = lv_event_get_target(e);
+    bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    esp_now_cam_light_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_LIGHT_SET, .on = on ? 1 : 0 };
+    static const uint8_t s_light_ack_types[] = { ESP_NOW_MSG_CAM_LIGHT_ACK };
+    node_hub_queue_action(s_device_popup_node.mac, &msg, sizeof(msg), s_light_ack_types, 1, 500, 3, "Cam light");
+    ESP_LOGI(TAG, "Cam light %s -> %s queued", on ? "on" : "off", s_device_popup_node.name);
+}
+
 static void build_device_popup(const uint8_t *mac, const char *name, bool is_sensor)
 {
     if (s_device_popup) return;  /* 이미 열려있음 */
@@ -8498,8 +8478,34 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
 
     }
 
-    /* 연결끊기 버튼 — 맨 아래, 위험한 조작이라 확인팝업 거침(cb_device_disconnect_clicked) */
-    lv_obj_t *disconnect_btn = lv_button_create(popup);
+    /* 연결끊기 버튼 — 맨 아래, 위험한 조작이라 확인팝업 거침(cb_device_disconnect_clicked).
+     * 2026-09-29(사용자 지시) — 카메라면 같은 줄 왼쪽에 조명 시험 On/Off, 연결끊기는 오른쪽 정렬 */
+    lv_obj_t *disconnect_parent = popup;
+    if (!is_sensor) {
+        lv_obj_t *bottom_row = lv_obj_create(popup);
+        lv_obj_set_size(bottom_row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(bottom_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(bottom_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(bottom_row, 0, 0);
+        lv_obj_set_style_pad_all(bottom_row, 0, 0);
+
+        lv_obj_t *light_cluster = lv_obj_create(bottom_row);
+        lv_obj_set_size(light_cluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(light_cluster, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(light_cluster, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(light_cluster, 0, 0);
+        lv_obj_set_style_pad_all(light_cluster, 0, 0);
+        lv_obj_set_style_pad_column(light_cluster, 12, 0);
+
+        lv_obj_t *light_lbl = lv_label_create(light_cluster);
+        lv_label_set_text(light_lbl, ui_str(STR_LABEL_LIGHT_TEST));
+        lv_obj_set_style_text_font(light_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_t *light_sw = lv_switch_create(light_cluster);
+        lv_obj_add_event_cb(light_sw, cb_cam_light_test_switch, LV_EVENT_VALUE_CHANGED, NULL);
+
+        disconnect_parent = bottom_row;
+    }
+    lv_obj_t *disconnect_btn = lv_button_create(disconnect_parent);
     s_device_disconnect_btn = disconnect_btn;
     lv_obj_set_style_bg_color(disconnect_btn, lv_palette_main(LV_PALETTE_RED), 0);
     lv_obj_add_event_cb(disconnect_btn, cb_device_disconnect_clicked, LV_EVENT_CLICKED, NULL);
@@ -10024,8 +10030,9 @@ static void build_option_tab(void)
     lv_obj_set_style_text_font(s_adaptive_help_label, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_label_set_text(s_adaptive_help_label, ui_str(STR_HELP_ADAPTIVE_RESPONSE));
 
-    /* 2026-09-29(사용자 설계) — 화면 자동 꺼짐 행. 적응형 반응시간 행과 같은 구조, 선택 즉시 저장 */
-    lv_obj_t *screen_off_row = lv_obj_create(system_group_box);
+    /* 2026-09-29(사용자 설계) — 화면 자동 꺼짐 행(CNTL 그룹 맨 아래 — 사용자 지시). 적응형 반응시간 행과 같은 구조,
+     * 선택 즉시 저장 */
+    lv_obj_t *screen_off_row = lv_obj_create(cntl_box);
     lv_obj_set_size(screen_off_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(screen_off_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(screen_off_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
