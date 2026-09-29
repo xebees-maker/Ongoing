@@ -4,6 +4,7 @@ idf_component_register(
         "rwdt_guard.c"
         "esp_now_cam.c"
         "dev_console.c"
+        "cam_light.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -20,6 +21,7 @@ idf_component_register(
         esp_now_reliable
         esp32-camera
         esp_driver_ledc
+        esp_driver_i2c
         bsp_esp32s3_cam
         io_expander_ch32v003
         console

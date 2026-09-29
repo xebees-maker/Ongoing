@@ -2,6 +2,7 @@
 #include "cam_node.h"
 #include "esp_now_link.h"
 #include "cam_speaker.h"
+#include "cam_light.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +39,23 @@ static int cmd_shot(int argc, char **argv)
     note_console_activity();
     const char *size_name = (argc >= 2) ? argv[1] : NULL;
     printf(cam_node_capture_now_sized(size_name) ? "SHOT_OK\n" : "SHOT_FAIL\n");
+    return 0;
+}
+
+/* 2026-09-29 — 촬영용 LED 시험(배선 확인용). 캠이 깨어 있는 동안만 쓸 수 있고, 잠들 때 자동으로 꺼짐 */
+static int cmd_led(int argc, char **argv)
+{
+    if (argc < 2 || (strcmp(argv[1], "on") != 0 && strcmp(argv[1], "off") != 0)) {
+        printf("Usage: led <on|off>\n");
+        return 1;
+    }
+    if (!cam_light_present()) {
+        printf("LED_NONE (no PCF8574 at 0x20)\n");
+        return 1;
+    }
+    note_console_activity();
+    cam_light_set(strcmp(argv[1], "on") == 0);
+    printf("LED_%s\n", strcmp(argv[1], "on") == 0 ? "ON" : "OFF");
     return 0;
 }
 
@@ -195,6 +213,15 @@ void dev_console_start(void)
         .func    = cmd_xclk,
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&xclk_cmd));
+
+    const esp_console_cmd_t led_cmd = {
+        .command = "led",
+        .help    = "Capture light (PCF8574 P0) on/off for wiring tests - turned off again before deep sleep",
+        .hint    = "<on|off>",
+        .func    = cmd_led,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&led_cmd));
+
 
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
     ESP_LOGI(TAG, "Dev console started - shot / auto <on|off> / q <0-63> / xclk <1-40> / help");

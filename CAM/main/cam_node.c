@@ -41,6 +41,7 @@
 #include "esp_now_channelsync.h"
 #include "status_led.h"
 #include "cam_node.h"
+#include "cam_light.h"
 #include "dev_console.h"
 #include "rwdt_guard.h"
 
@@ -578,10 +579,24 @@ static void apply_agc_aec_settings(void)
  * 직접 안 부르고 esp_now_cam_enqueue_auto_capture()로 큐잉만 함 */
 static bool camera_capture_one(cam_capture_kind_t kind)
 {
-    if (ensure_camera_ready(kind == CAM_CAPTURE_KIND_MANUAL) != ESP_OK) return false;
+    /* 2026-09-29(사용자 설계 — 촬영용 LED) — 센서 초기화/노출 워밍업 전에 켜서 자동노출이 LED 밝기에 맞춰지게 함.
+     * 카메라가 이번 사이클에 이미 켜져 있었으면(어두운 상태로 노출이 맞춰져 있음) 아래에서 워밍업 프레임을 한 번 더 버림 */
+    bool was_ready = s_camera_ready;
+    cam_light_set(true);
+    if (ensure_camera_ready(kind == CAM_CAPTURE_KIND_MANUAL) != ESP_OK) {
+        cam_light_set(false);
+        return false;
+    }
     apply_agc_aec_settings();
 
     xSemaphoreTake(s_capture_mutex, portMAX_DELAY);
+
+    if (was_ready && cam_light_present()) {
+        for (int i = 0; i < CAM_WARMUP_FRAME_COUNT; i++) {
+            camera_fb_t *warmup_fb = esp_camera_fb_get();
+            if (warmup_fb) esp_camera_fb_return(warmup_fb);
+        }
+    }
 
     /* DMA 프레임 버퍼 슬롯(fb_count개)은 esp_camera_fb_get()+fb_return()으로 소비해야만
      * ISR이 새로 채운다 — 촬영 사이 유휴 시간엔 아무도 안 비우므로 부팅 시점(또는 그
@@ -595,6 +610,7 @@ static bool camera_capture_one(cam_capture_kind_t kind)
     }
 
     camera_fb_t *fb = esp_camera_fb_get();
+    cam_light_set(false);  /* 프레임을 받았으면 바로 끔 — 전송(수 초)은 LED 없이 */
     if (!fb) {
         ESP_LOGW(TAG, "esp_camera_fb_get failed");
         xSemaphoreGive(s_capture_mutex);
@@ -766,6 +782,8 @@ void app_main(void)
      * 메모리 참고 — corruption의 실제 원인은 콘솔 전송 레이어였고 SD/WiFi/공유 I2C 버스는
      * 전부 무관했음이 확인됨) */
     ESP_ERROR_CHECK(bsp_esp32s3_cam_init());
+    /* 2026-09-29 — 촬영용 LED(PCF8574)는 전원이 들어오면 켜진 채 시작하므로 보드 초기화 직후 바로 끔 */
+    cam_light_init();
 
     /* 2026-08-23 — 스피커로 6가지 이벤트만 소리로 구분(CAML에서 검증, 기본 꺼짐 —
      * dev_console의 soundlog on/off로 켬). 실패해도 계속 진행 */
@@ -969,6 +987,8 @@ void app_main(void)
     /* 2026-09-26 — IO 익스팬더 출력은 ESP32가 자는 동안에도 유지됨 — 상태 LED가 켜진 위상에서
      * 잠들면 딥슬립 내내 켜져 있으므로 확실히 끄고 잠 */
     bsp_esp32s3_cam_pwr_led_shutdown();
+    /* 2026-09-29 — 촬영용 LED도 PCF8574 출력이 자는 동안 유지되므로 확실히 끄고 잠(오류 경로 대비) */
+    cam_light_set(false);
     /* 2026-09-26 — 센서 전원은 딥슬립 중에도 살아 있으므로(스키매틱: LDO 인에이블 없음) 카메라를 정리하고 PWDN으로
      * 대기시킨 뒤 잠. 이번 사이클에 카메라를 안 썼으면 이미 대기 상태 */
     if (s_camera_ready) {
