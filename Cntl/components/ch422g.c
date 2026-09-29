@@ -6,6 +6,8 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "ch422g";
 
@@ -28,6 +30,12 @@ static i2c_master_dev_handle_t s_dev_io_in  = NULL;
  * 전압을 읽으므로 출력모드일 땐 우리가 쓴 값과 같아야 하지만, 입력모드 전환 없이
  * 조용히 확인할 방법은 섀도우 상태뿐) */
 static uint8_t s_io_out_shadow = 0;
+/* 2026-09-29 — 화면 끄기(LVGL 태스크의 백라이트 IO2)와 SD 재연결(IO4 SD_CS)이 실행 중에 서로 다른 태스크에서 같은
+ * 출력 그림자를 읽고-고치고-쓰므로 잠금으로 직렬화(예전엔 백라이트를 부팅 때 한 번만 써서 필요 없었음) */
+static SemaphoreHandle_t s_lock = NULL;
+static StaticSemaphore_t s_lock_buf;
+static void lock(void)   { if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY); }
+static void unlock(void) { if (s_lock) xSemaphoreGive(s_lock); }
 static uint8_t s_od_out_shadow = 0;
 
 static esp_err_t write_byte(i2c_master_dev_handle_t dev, uint8_t value)
@@ -58,6 +66,7 @@ esp_err_t ch422g_init(i2c_master_bus_handle_t bus)
      * 지켜야 터치가 응답한다는 게 확인됨 — 미리 다른 쓰기를 해두면 실패). */
     s_io_out_shadow = 0;
     s_od_out_shadow = 0;
+    if (!s_lock) s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
 
     ESP_LOGI(TAG, "init OK (devices registered, no writes yet)");
     return ESP_OK;
@@ -65,13 +74,22 @@ esp_err_t ch422g_init(i2c_master_bus_handle_t bus)
 
 esp_err_t ch422g_set_io_raw(uint8_t mode_value, uint8_t io_value)
 {
-    ESP_RETURN_ON_ERROR(write_byte(s_dev_mode, mode_value), TAG, "raw mode write failed");
+    lock();
+    esp_err_t err = write_byte(s_dev_mode, mode_value);
+    if (err != ESP_OK) {
+        unlock();
+        ESP_LOGE(TAG, "raw mode write failed: %s", esp_err_to_name(err));
+        return err;
+    }
     s_io_out_shadow = io_value;
-    return write_byte(s_dev_io_out, io_value);
+    err = write_byte(s_dev_io_out, io_value);
+    unlock();
+    return err;
 }
 
 esp_err_t ch422g_set_io(uint8_t bits, bool level)
 {
+    lock();
     if (level) {
         s_io_out_shadow |= bits;
     } else {
@@ -83,10 +101,9 @@ esp_err_t ch422g_set_io(uint8_t bits, bool level)
      * OC0~3에만 영향 준다지만 실제로는 IO뱅크 드라이브에도 영향 있는 듯).
      * OD_EN은 ch422g_set_do()에서 그때그때 따로 켠다. */
     esp_err_t err = write_byte(s_dev_mode, CH422G_MODE_IO_OE);
-    if (err != ESP_OK) {
-        return err;
-    }
-    return write_byte(s_dev_io_out, s_io_out_shadow);
+    if (err == ESP_OK) err = write_byte(s_dev_io_out, s_io_out_shadow);
+    unlock();
+    return err;
 }
 
 esp_err_t ch422g_read_di(bool *out_di0, bool *out_di1)
@@ -95,8 +112,10 @@ esp_err_t ch422g_read_di(bool *out_di0, bool *out_di1)
 
     /* 뱅크 전체를 잠깐 입력모드로 — 이 사이 백라이트/LCD리셋/SD_CS도 하이임피던스가
      * 되므로 최대한 짧게 유지하고 바로 복원한다 */
+    lock();
     err = write_byte(s_dev_mode, 0);  /* IO_OE=0(입력) */
     if (err != ESP_OK) {
+        unlock();
         return err;
     }
 
@@ -106,6 +125,7 @@ esp_err_t ch422g_read_di(bool *out_di0, bool *out_di1)
     /* 출력모드로 즉시 복원 후 이전 섀도우 값 재적용 */
     esp_err_t restore_err = write_byte(s_dev_mode, CH422G_MODE_IO_OE);
     esp_err_t rewrite_err = write_byte(s_dev_io_out, s_io_out_shadow);
+    unlock();
     if (err == ESP_OK) {
         err = (restore_err != ESP_OK) ? restore_err : rewrite_err;
     }
@@ -124,14 +144,14 @@ esp_err_t ch422g_read_di(bool *out_di0, bool *out_di1)
 
 esp_err_t ch422g_set_do(uint8_t bits, bool level)
 {
+    lock();
     if (level) {
         s_od_out_shadow |= bits;
     } else {
         s_od_out_shadow &= (uint8_t)~bits;
     }
     esp_err_t err = write_byte(s_dev_mode, CH422G_MODE_OD_EN);
-    if (err != ESP_OK) {
-        return err;
-    }
-    return write_byte(s_dev_od_out, s_od_out_shadow);
+    if (err == ESP_OK) err = write_byte(s_dev_od_out, s_od_out_shadow);
+    unlock();
+    return err;
 }
