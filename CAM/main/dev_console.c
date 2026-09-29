@@ -50,7 +50,7 @@ static int cmd_led(int argc, char **argv)
         return 1;
     }
     if (!cam_light_present()) {
-        printf("LED_NONE (no PCF8574 at 0x20)\n");
+        printf("LED_NONE (GPIO44 not ready)\n");
         return 1;
     }
     note_console_activity();

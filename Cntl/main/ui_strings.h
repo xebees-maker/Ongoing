@@ -405,6 +405,7 @@ typedef enum {
     STR_CAMERA_POPUP_LOADING,    /* 카메라 팝업을 연 직후 */
     STR_CAMERA_POPUP_NONE,       /* 연결된 적 있는 카메라도, 사진도 없음 */
     STR_AGAR_SLOT_FMT,           /* 기기 없는 Agar 슬롯 이름, %d=1..3 */
+    STR_LABEL_CAM_LIGHT,         /* 2026-09-29 임시 — 요약 판넬 캠 LED 스위치: "캠 LED" / "Cam LED" */
 
     STR_COUNT,
 } ui_str_id_t;

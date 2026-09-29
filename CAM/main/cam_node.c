@@ -766,6 +766,8 @@ void app_main(void)
      * RWDT(rwdt_guard.c)가 이번 사이클 전체를 지키는 안전망 — 소프트웨어가 무슨 이유로든
      * esp_deep_sleep_start()에 못 이르면 강제로 리셋시킴. */
 
+    /* 2026-09-29 — 촬영용 LED 게이트(GPIO44)는 SD 선 풀업(10kΩ) 때문에 전원이 들어오면 HIGH(켜짐) — 가장 먼저 LOW로 */
+    cam_light_init();
     capture_wake_reason();
     rwdt_guard_arm(CAM_RESPONSE_INTERVAL_SEC_DEFAULT + CONFIG_CAM_DEEPSLEEP_AWAKE_MARGIN_SEC);
 
@@ -782,8 +784,6 @@ void app_main(void)
      * 메모리 참고 — corruption의 실제 원인은 콘솔 전송 레이어였고 SD/WiFi/공유 I2C 버스는
      * 전부 무관했음이 확인됨) */
     ESP_ERROR_CHECK(bsp_esp32s3_cam_init());
-    /* 2026-09-29 — 촬영용 LED(PCF8574)는 전원이 들어오면 켜진 채 시작하므로 보드 초기화 직후 바로 끔 */
-    cam_light_init();
 
     /* 2026-08-23 — 스피커로 6가지 이벤트만 소리로 구분(CAML에서 검증, 기본 꺼짐 —
      * dev_console의 soundlog on/off로 켬). 실패해도 계속 진행 */

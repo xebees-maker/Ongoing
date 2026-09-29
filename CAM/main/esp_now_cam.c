@@ -1,6 +1,7 @@
 #include "esp_now_cam.h"
 #include "cam_node.h"  /* cam_node_set_capture_interval_sec/set_response_interval_sec/get_wake_reason/note_activity */
 #include "cam_speaker.h"  /* 2026-08-25 — PAIR_REQUESTED/PAIR_ACK 소리 알림용 */
+#include "cam_light.h"    /* 2026-09-29 — 콘에서 촬영용 LED 켜기/끄기(임시 시험) */
 
 #include <string.h>
 #include <stdio.h>
@@ -729,6 +730,18 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 참고) */
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_cask_work_none_t)) return;
         esp_now_cask_work_none_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE_ACK };
+        send_reply(s_hub_mac, &ack, sizeof(ack));
+        return;
+    }
+
+    /* 2026-09-29(임시 — 콘 요약 판넬 스위치) — 촬영용 LED를 켜거나 끄고 ACK */
+    if (msg_type == ESP_NOW_MSG_CAM_LIGHT_SET) {
+        if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_cam_light_t)) return;
+        const esp_now_cam_light_t *msg = (const esp_now_cam_light_t *)data;
+        cam_light_set(msg->on != 0);
+        ESP_LOGI(TAG_CASK, "CAM_LIGHT_SET: %s", msg->on ? "on" : "off");
+        esp_now_cam_light_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_LIGHT_ACK,
+                                    .on = msg->on };
         send_reply(s_hub_mac, &ack, sizeof(ack));
         return;
     }

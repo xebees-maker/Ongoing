@@ -169,6 +169,9 @@ typedef enum {
      * 골라서 보냄 */
     ESP_NOW_MSG_SENS_CONFIG_SET = 53,
     ESP_NOW_MSG_SENS_CONFIG_ACK = 54,
+    /* 2026-09-29(임시 — 사용자 지시: 콘 요약 판넬의 스위치로 캠 촬영용 LED 켜기/끄기 시험) — CASK 할일 큐로 전달 */
+    ESP_NOW_MSG_CAM_LIGHT_SET = 55,          /* Cntl -> CAM: esp_now_cam_light_t */
+    ESP_NOW_MSG_CAM_LIGHT_ACK = 56,          /* CAM -> Cntl: 같은 구조체, msg_type만 바꿈 */
 } esp_now_msg_type_t;
 
 /* ESP_NOW_MSG_SLEEP_NOW 페이로드. ESP_NOW_MSG_SLEEP_NOW_ACK도 이 구조체를 msg_type만 바꿔
@@ -248,6 +251,13 @@ typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
 } esp_now_cask_work_none_t;
+
+/* ESP_NOW_MSG_CAM_LIGHT_SET / _ACK(2026-09-29, 임시 시험용) */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+    uint8_t on;   /* 1 = 켬, 0 = 끔 */
+} esp_now_cam_light_t;
 
 /* 채널 종류 — 노드가 실제로 붙인 센서가 무엇을 재는지에 대응.
  * 새 센서가 새로운 물리량을 재면 여기에 하나 추가하면 됨(프로토콜 구조 자체는 안 바뀜). */
