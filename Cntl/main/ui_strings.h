@@ -405,6 +405,8 @@ typedef enum {
     STR_CAMERA_POPUP_LOADING,    /* 카메라 팝업을 연 직후 */
     STR_CAMERA_POPUP_NONE,       /* 연결된 적 있는 카메라도, 사진도 없음 */
     STR_AGAR_SLOT_FMT,           /* 기기 없는 Agar 슬롯 이름, %d=1..3 */
+    STR_LABEL_SCREEN_OFF,        /* 2026-09-29 — 설정: 화면 자동 꺼짐 */
+    STR_OPT_SCREEN_OFF_LIST,     /* 2026-09-29 — Off/1분/5분/10분(ui_main.c s_screen_off_values와 같은 순서) */
     STR_LABEL_CAM_LIGHT,         /* 2026-09-29 임시 — 요약 판넬 캠 LED 스위치: "캠 LED" / "Cam LED" */
 
     STR_COUNT,

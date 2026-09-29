@@ -10,6 +10,8 @@
 static const char *TAG = "SYS";
 
 #define DEVICE_CONFIG_PATH    FS_MOUNT_POINT "/device_config.bin"
+#define SCREEN_CFG_PATH       FS_MOUNT_POINT "/screen.cfg"   /* 2026-09-29 — 화면 자동 꺼짐(분) 1바이트 */
+#define SCREEN_OFF_MIN_DEFAULT 5
 #define DEVICE_CONFIG_VERSION 9  /* 2026-09-18: 촬영주기/AGC/AEC/XCLK를 전역 스칼라 필드에서
                                     cam_settings[] 슬롯 배열로 재설계(카메라별 설정)로 8->9
                                     (구버전 파일은 버전 불일치로 기본값으로 자연 폴백 —
@@ -262,6 +264,36 @@ void device_config_set_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec
     if (!slot) return;
     slot->capture_interval_sec = sec;
     device_config_save();
+}
+
+static uint8_t s_screen_off_min = SCREEN_OFF_MIN_DEFAULT;
+static bool    s_screen_cfg_loaded = false;
+
+uint8_t device_config_get_screen_off_min(void)
+{
+    if (!s_screen_cfg_loaded) {
+        s_screen_cfg_loaded = true;
+        FILE *f = fopen(SCREEN_CFG_PATH, "rb");
+        if (f) {
+            uint8_t v = 0;
+            if (fread(&v, 1, 1, f) == 1) s_screen_off_min = v;
+            fclose(f);
+        }
+    }
+    return s_screen_off_min;
+}
+
+void device_config_set_screen_off_min(uint8_t min)
+{
+    s_screen_off_min = min;
+    s_screen_cfg_loaded = true;
+    FILE *f = fopen(SCREEN_CFG_PATH, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "Save failed (fopen): %s", SCREEN_CFG_PATH);
+        return;
+    }
+    fwrite(&min, 1, 1, f);
+    fclose(f);
 }
 
 uint32_t device_config_get_response_interval_sec(void) { return s_response_interval_sec; }

@@ -32,6 +32,7 @@
 #include <string.h>
 #include <time.h>
 #include "memdiag.h"
+#include "ch422g.h"   /* 2026-09-29 — 화면 끄기(백라이트 = CH422G IO2) */
 
 static const char *TAG = "UI";
 
@@ -312,6 +313,9 @@ static void cb_sensor_dash_row_clicked(lv_event_t *e);
  * CAM에는 전송 안 되는 Cntl 내부 판단값이라(node_hub.c 참고), Apply해도 네트워크 왕복이
  * 없어서 진행팝업 없이 즉시 반영됨(다른 두 Apply 버튼과 다른 점) */
 static lv_obj_t *s_adaptive_response_dd    = NULL;
+/* 2026-09-29(사용자 설계) — 설정: 화면 자동 꺼짐 드롭다운 */
+static lv_obj_t *s_screen_off_label = NULL;
+static lv_obj_t *s_screen_off_dd    = NULL;
 static lv_obj_t *s_adaptive_response_label = NULL;
 static lv_obj_t *s_adaptive_help_label     = NULL;
 
@@ -352,6 +356,8 @@ static const uint32_t s_response_interval_values[] = { 0, 3, 10, 30, 60 };
 /* 적응형 반응시간(2026-08-10) — 10초/30초/1분/5분(2026-08-11, 사용자 지시로 5분 추가).
  * STR_OPT_ADAPTIVE_RESPONSE_LIST 순서와 반드시 같이 맞출 것 */
 static const uint32_t s_adaptive_response_values[] = { 10, 30, 60, 300 };
+/* 2026-09-29 — 화면 자동 꺼짐(분), STR_OPT_SCREEN_OFF_LIST와 같은 순서(0 = 끄지 않음) */
+static const uint32_t s_screen_off_values[] = { 0, 1, 5, 10 };
 
 static int find_value_index(const uint32_t *values, int count, uint32_t v)
 {
@@ -779,17 +785,139 @@ static void update_logo_warning_display(void)
     }
 }
 
+/* ════════════════════════════════════════════════════════════
+ * 2026-09-29(사용자 설계) — 화면 끄기: LCD 열화 방지. 백라이트(CH422G IO2)만 끄고 통신/저장/웹은 그대로.
+ *  - 자동: 설정의 분(0=안 끔)만큼 터치가 없으면 끔 — 터치할 때마다 타이머를 다시 시작(이벤트 방식)
+ *  - 수동: 로고 옆 아이콘
+ *  - 켜기: 아무 곳이나 터치. 깨운 첫 터치는 무시(맨 위 레이어의 투명 막이 받아 삼키고 손을 떼면 사라짐)
+ *  - 꺼진 동안 새 W/E가 뜨면 켬(자동 꺼짐이 켜져 있으면 그 시간 뒤 다시 꺼짐)
+ * ════════════════════════════════════════════════════════════ */
+static bool        s_screen_off = false;
+static lv_obj_t   *s_screen_wake_overlay = NULL;
+static lv_timer_t *s_screen_off_timer = NULL;
+
+static void screen_backlight(bool on)
+{
+    esp_err_t err = ch422g_set_io(CH422G_IO_BACKLIGHT, on);
+    if (err != ESP_OK) ESP_LOGW(TAG, "Backlight %s failed: %s", on ? "on" : "off", esp_err_to_name(err));
+}
+
+/* 자동 꺼짐 타이머를 설정값으로 다시 시작(0분이면 멈춤) */
+static void screen_restart_auto_timer(void)
+{
+    if (!s_screen_off_timer) return;
+    uint8_t min = device_config_get_screen_off_min();
+    if (min == 0) {
+        lv_timer_pause(s_screen_off_timer);
+        return;
+    }
+    lv_timer_set_period(s_screen_off_timer, (uint32_t)min * 60000U);
+    lv_timer_reset(s_screen_off_timer);
+    lv_timer_resume(s_screen_off_timer);
+}
+
+static void screen_on(void)
+{
+    if (s_screen_off) {
+        screen_backlight(true);
+        s_screen_off = false;
+        ESP_LOGI(TAG, "Screen on");
+    }
+    screen_restart_auto_timer();
+}
+
+static void cb_screen_wake_overlay(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        screen_on();  /* 켜기만 — 이 터치는 막이 삼킴 */
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if (s_screen_wake_overlay) {
+            lv_obj_delete_async(s_screen_wake_overlay);
+            s_screen_wake_overlay = NULL;
+        }
+    }
+}
+
+static void screen_off(void)
+{
+    if (s_screen_off) return;
+    s_screen_off = true;
+    if (!s_screen_wake_overlay) {
+        s_screen_wake_overlay = lv_obj_create(lv_layer_top());
+        lv_obj_remove_style_all(s_screen_wake_overlay);
+        lv_obj_set_size(s_screen_wake_overlay, LV_PCT(100), LV_PCT(100));
+        lv_obj_add_flag(s_screen_wake_overlay, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(s_screen_wake_overlay, cb_screen_wake_overlay, LV_EVENT_ALL, NULL);
+    }
+    screen_backlight(false);
+    if (s_screen_off_timer) lv_timer_pause(s_screen_off_timer);
+    ESP_LOGI(TAG, "Screen off");
+}
+
+/* 새 W/E — 꺼져 있으면 켜고 막도 치움(이번엔 터치로 깨운 게 아니므로 다음 터치는 정상 동작) */
+static void screen_wake_for_alert(void)
+{
+    if (!s_screen_off) return;
+    if (s_screen_wake_overlay) {
+        lv_obj_delete(s_screen_wake_overlay);
+        s_screen_wake_overlay = NULL;
+    }
+    screen_on();
+}
+
+static void cb_screen_auto_off(lv_timer_t *t)
+{
+    (void)t;
+    screen_off();
+}
+
+static void cb_screen_touch_activity(lv_event_t *e)
+{
+    (void)e;
+    if (!s_screen_off) screen_restart_auto_timer();
+}
+
+static void cb_screen_off_icon(lv_event_t *e)
+{
+    (void)e;
+    screen_off();
+}
+
+static void cb_screen_off_changed(lv_event_t *e)
+{
+    (void)e;
+    uint16_t idx = lv_dropdown_get_selected(s_screen_off_dd);
+    uint32_t min = (idx < (sizeof(s_screen_off_values) / sizeof(s_screen_off_values[0]))) ? s_screen_off_values[idx] : 0;
+    device_config_set_screen_off_min((uint8_t)min);
+    screen_restart_auto_timer();
+}
+
+/* ui 초기화 끝에서 한 번 — 터치 입력마다 자동 꺼짐 타이머를 다시 시작하도록 걸고 타이머 생성 */
+static void screen_power_init(void)
+{
+    for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            lv_indev_add_event_cb(indev, cb_screen_touch_activity, LV_EVENT_PRESSED, NULL);
+        }
+    }
+    s_screen_off_timer = lv_timer_create(cb_screen_auto_off, 60000, NULL);
+    screen_restart_auto_timer();
+}
+
 static void error_poll_tick(lv_timer_t *t)
 {
     (void)t;
     char err[128];
     if (ui_log_get_pending_error(err, sizeof(err))) {
+        screen_wake_for_alert();
         show_toast(err, lv_palette_main(LV_PALETTE_RED));
         s_error_active = true;
         update_logo_warning_display();
     }
     char warn[128];
     if (ui_log_get_pending_warn(warn, sizeof(warn))) {
+        screen_wake_for_alert();
         show_toast(warn, lv_color_hex(0xFFCC00));
         s_warn_active = true;
         update_logo_warning_display();
@@ -881,6 +1009,7 @@ static void refresh_lang_texts(void)
         lv_label_set_text(s_response_interval_label, ui_str(STR_LABEL_RESPONSE_INTERVAL));
         lv_label_set_text(s_adaptive_response_label, ui_str(STR_LABEL_ADAPTIVE_RESPONSE));
         lv_label_set_text(s_adaptive_help_label, ui_str(STR_HELP_ADAPTIVE_RESPONSE));
+        lv_label_set_text(s_screen_off_label, ui_str(STR_LABEL_SCREEN_OFF));
         lv_label_set_text(s_restart_label, ui_str(STR_LABEL_RESTART_DEVICE));
         lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
         lv_label_set_text(s_time_label, ui_str(STR_LABEL_TIME));
@@ -917,6 +1046,10 @@ static void refresh_lang_texts(void)
         uint16_t adaptive_sel = lv_dropdown_get_selected(s_adaptive_response_dd);
         lv_dropdown_set_options(s_adaptive_response_dd, ui_str(STR_OPT_ADAPTIVE_RESPONSE_LIST));
         lv_dropdown_set_selected(s_adaptive_response_dd, adaptive_sel);
+
+        uint16_t screen_sel = lv_dropdown_get_selected(s_screen_off_dd);
+        lv_dropdown_set_options(s_screen_off_dd, ui_str(STR_OPT_SCREEN_OFF_LIST));
+        lv_dropdown_set_selected(s_screen_off_dd, screen_sel);
     }
 
     /* 2026-09-08(연결 기능 주화면 이관) — 측정주기 위젯은 이제 개별설정 팝업(센서일 때만)
@@ -6649,11 +6782,29 @@ void ui_init(void)
 
     /* 2026-09-08(사용자 재수정 지시 — "상단바 순서를 로고 - 공백 - 시간-네트워크-상태-
      * Settings로") — 로고만 단독 좌측, 나머지는 전부 우측 클러스터 */
-    s_logo_title = lv_label_create(s_top_bar);
+    /* 2026-09-29(사용자 설계) — 로고 옆 화면 끄기 아이콘 — 상단바는 양끝 정렬이라 로고와 아이콘을 왼쪽 묶음 하나로 */
+    lv_obj_t *top_bar_left = lv_obj_create(s_top_bar);
+    lv_obj_set_size(top_bar_left, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(top_bar_left, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top_bar_left, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(top_bar_left, 0, 0);
+    lv_obj_set_style_pad_column(top_bar_left, 16, 0);
+    lv_obj_set_style_border_width(top_bar_left, 0, 0);
+    lv_obj_set_style_bg_opa(top_bar_left, LV_OPA_TRANSP, 0);
+
+    s_logo_title = lv_label_create(top_bar_left);
     lv_label_set_text(s_logo_title, ui_str(STR_LOGO_TITLE));
     /* 2026-09-08(사용자 지시 — "폰트는 볼드(가능하면)에 크기가 좀 더 컸으면", "메모리
      * 더먹으면 안먹는 쪽으로") — 볼드 폰트 테이블을 새로 켜면 플래시가 더 드니 크기만 키움 */
     lv_obj_set_style_text_font(s_logo_title, ui_font_get(UI_FONT_SIZE_24), 0);
+
+    lv_obj_t *screen_off_icon = lv_label_create(top_bar_left);
+    lv_label_set_text(screen_off_icon, LV_SYMBOL_EYE_CLOSE);
+    lv_obj_set_style_text_font(screen_off_icon, &lv_font_montserrat_24, 0);  /* 기호 글리프는 Montserrat에만 있음 */
+    lv_obj_set_style_pad_all(screen_off_icon, 6, 0);
+    lv_obj_add_flag(screen_off_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(screen_off_icon, 10);
+    lv_obj_add_event_cb(screen_off_icon, cb_screen_off_icon, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *top_bar_right = lv_obj_create(s_top_bar);
     lv_obj_set_size(top_bar_right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -6694,6 +6845,7 @@ void ui_init(void)
 
     refresh_clock(NULL);  /* 첫 타이머 tick 전까지 빈 채로 안 보이게 즉시 한 번 채움 */
     lv_timer_create(refresh_clock_md, 1000, NULL);
+    screen_power_init();  /* 2026-09-29 — 화면 자동 꺼짐(터치는 ui_init 전에 이미 등록됨, main.c) */
     lv_timer_create(refresh_bridge_health_md, 1000, NULL);     /* 2026-09-26(설계 6단계) — 브 응답 없음 경고 */
 
     /* 2026-09-08(사용자 지시 — "상단바 통계 버튼을 없애고, 센서 판넬 Sensor 역상을 누르면
@@ -9570,6 +9722,8 @@ static void teardown_option_tab(void)
     s_adaptive_response_label = NULL;
     s_adaptive_response_dd = NULL;
     s_adaptive_help_label = NULL;
+    s_screen_off_label = NULL;
+    s_screen_off_dd = NULL;
     s_restart_label = NULL;
     s_restart_btn_lbl = NULL;
     s_time_label = NULL;
@@ -9869,6 +10023,29 @@ static void build_option_tab(void)
     lv_obj_add_style(s_adaptive_help_label, &style_text_muted, 0);
     lv_obj_set_style_text_font(s_adaptive_help_label, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_label_set_text(s_adaptive_help_label, ui_str(STR_HELP_ADAPTIVE_RESPONSE));
+
+    /* 2026-09-29(사용자 설계) — 화면 자동 꺼짐 행. 적응형 반응시간 행과 같은 구조, 선택 즉시 저장 */
+    lv_obj_t *screen_off_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(screen_off_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(screen_off_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(screen_off_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(screen_off_row, 0, 0);
+    lv_obj_set_style_pad_hor(screen_off_row, 12, 0);
+    lv_obj_set_style_pad_ver(screen_off_row, 0, 0);
+
+    s_screen_off_label = lv_label_create(screen_off_row);
+    lv_label_set_text(s_screen_off_label, ui_str(STR_LABEL_SCREEN_OFF));
+    lv_obj_set_style_text_font(s_screen_off_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    s_screen_off_dd = lv_dropdown_create(screen_off_row);
+    lv_obj_set_style_pad_ver(s_screen_off_dd, 7, 0);
+    lv_dropdown_set_options(s_screen_off_dd, ui_str(STR_OPT_SCREEN_OFF_LIST));
+    int screen_idx = find_value_index(s_screen_off_values,
+        sizeof(s_screen_off_values) / sizeof(s_screen_off_values[0]), device_config_get_screen_off_min());
+    lv_dropdown_set_selected(s_screen_off_dd, (uint16_t)(screen_idx >= 0 ? screen_idx : 0));
+    lv_obj_set_style_text_font(s_screen_off_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_screen_off_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_screen_off_dd, cb_screen_off_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     /* 시각설정 행(2026-08-09) — [라벨][현재시각][설정] 인라인, 응답성 행과 같은 구조 */
     lv_obj_t *time_row = lv_obj_create(system_group_box);
