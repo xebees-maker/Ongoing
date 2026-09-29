@@ -823,6 +823,25 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         n->battery_mv      = hello->battery_mv;
         n->battery_pct     = (uint8_t)battery_mv_to_pct(hello->battery_mv);
 
+        /* 2026-09-29(사용자 지시 — SCD41이 밤새 측정을 못 했는데 원인을 알 수 없었음) — 센스의 측정 실패 원인.
+         * 상태가 바뀔 때와, 실패가 이어지는 동안 40번마다(15초 주기면 약 10분) Dev Log에 남김 */
+        if (hello->sensor_fault != n->sensor_fault ||
+            (hello->sensor_fault != SENSOR_FAULT_NONE && hello->sensor_fail_streak % 40 == 0 &&
+             hello->sensor_fail_streak != n->sensor_fail_streak)) {
+            static const char *const s_fault_name[] = { "none", "command NACK", "data not ready", "CRC mismatch",
+                                                        "receive failed", "other" };
+            uint8_t f = hello->sensor_fault;
+            if (f != SENSOR_FAULT_NONE) {
+                ESP_LOGW(TAG, "%s sensor fault: %s (%u failed in a row)", n->name,
+                         (f < sizeof(s_fault_name) / sizeof(s_fault_name[0])) ? s_fault_name[f] : "?",
+                         (unsigned)hello->sensor_fail_streak);
+            } else {
+                ESP_LOGI(TAG, "%s sensor measuring again", n->name);
+            }
+        }
+        n->sensor_fault       = hello->sensor_fault;
+        n->sensor_fail_streak = hello->sensor_fail_streak;
+
         /* 새로 쓰는 부분 — 센서 채널값 저장. 2026-09-05(사용자 지시로 정정) — sensor_kind/
          * chan_count/chan_type은 더 이상 여기 안 옴(페어링 때 PAIR_ACK로 이미 받아둔 n->
          * chan_count/chan_type을 그대로 씀). 센스는 콘 개입 없이 자기 주기대로 측정해서

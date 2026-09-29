@@ -17,6 +17,7 @@ static const char *TAG = "SENS";
 #define CMD_MEASURE_SINGLE_SHOT         0x219D  /* Sensirion SCD4x single-shot — 데이터시트 대조 권장 */
 #define CMD_GET_DATA_READY_STATUS       0xE4B8
 #define CMD_READ_MEASUREMENT            0xEC05
+#define CMD_REINIT                      0x3646
 
 #define I2C_TIMEOUT_MS         1000
 #define REINIT_FAIL_THRESHOLD  3       /* 연속 통신 실패 횟수 — 도달 시 측정 재시작 시퀀스 재실행 */
@@ -39,6 +40,12 @@ static bool                     s_single_shot_mode = false;
  * 예전엔 트리거 시각을 RTC/틱으로 기억해뒀다가 "데이터시트 최대값(5000ms) 지났나"만 보고
  * 판단했는데, data_ready()로 실제 준비 여부를 직접 물어보게 바꾸면서 더 이상 필요 없어짐 */
 static bool s_single_shot_pending = false;
+
+/* 2026-09-29 — 마지막 실패 원인(sensor_fault_t 값과 같음, 0=없음) */
+static int s_last_fault = 0;
+
+int scd41_last_fault(void) { return s_last_fault; }
+void scd41_clear_fault(void) { s_last_fault = 0; }
 
 static bool start_measurement_sequence(void);
 
@@ -124,6 +131,7 @@ static bool send_cmd(uint16_t cmd)
     esp_err_t err = i2c_master_transmit(s_dev, buf, sizeof(buf), I2C_TIMEOUT_MS);
     if (err == ESP_OK) return true;
     ESP_LOGW(TAG, "send_cmd(0x%04X) failed: %s", cmd, esp_err_to_name(err));
+    s_last_fault = 1;  /* SENSOR_FAULT_CMD_NACK */
     recover_bus();
     note_failure();
     return false;
@@ -222,12 +230,14 @@ static bool data_ready(void)
     uint8_t resp[3] = { 0 };
     if (i2c_master_receive(s_dev, resp, sizeof(resp), I2C_TIMEOUT_MS) != ESP_OK) {
         ESP_LOGW(TAG, "data_ready: response receive failed");
+        s_last_fault = 4;  /* SENSOR_FAULT_READ */
         recover_bus();
         note_failure();
         return false;
     }
     if (crc8(resp, 2) != resp[2]) {
         ESP_LOGW(TAG, "data_ready: CRC mismatch");
+        s_last_fault = 3;  /* SENSOR_FAULT_CRC */
         note_failure();  /* 통신은 됐지만 데이터가 깨짐 — 연속 실패 카운트에 포함시켜야
                            * REINIT_FAIL_THRESHOLD로 재초기화가 걸림(안 그러면 이 경로는
                            * note_failure()도 check_stale()도 안 타서 영원히 복구 안 됨) */
@@ -253,6 +263,8 @@ static bool read_measurement_frame(int *co2_ppm, float *temperature, float *humi
 
     uint8_t resp[9] = { 0 };
     if (i2c_master_receive(s_dev, resp, sizeof(resp), I2C_TIMEOUT_MS) != ESP_OK) {
+        ESP_LOGW(TAG, "read_measurement: response receive failed");
+        s_last_fault = 4;  /* SENSOR_FAULT_READ */
         recover_bus();
         note_failure();
         return false;
@@ -261,6 +273,7 @@ static bool read_measurement_frame(int *co2_ppm, float *temperature, float *humi
     for (int w = 0; w < 3; w++) {
         if (crc8(&resp[w * 3], 2) != resp[w * 3 + 2]) {
             ESP_LOGW(TAG, "CRC mismatch (word %d)", w);
+            s_last_fault = 3;  /* SENSOR_FAULT_CRC */
             note_failure();  /* data_ready()와 동일 이유 — CRC 실패도 실패로 집계해야 함 */
             return false;
         }
@@ -291,6 +304,20 @@ bool scd41_stop_periodic_measurement(void)
 {
     if (!s_dev) return false;
     return send_cmd(CMD_STOP_PERIODIC_MEASUREMENT);
+}
+
+bool scd41_reinit(void)
+{
+    if (!s_dev) return false;
+    /* 데이터시트: reinit 전에 stop 필수, stop 뒤 500ms는 다른 명령을 받지 않음. 싱글샷 모드라 주기 측정은 원래
+     * 꺼져 있지만 절차대로 보냄(센서가 어떤 상태로 갇혀 있는지 모르므로) */
+    bool stop_ok = send_cmd(CMD_STOP_PERIODIC_MEASUREMENT);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    bool reinit_ok = send_cmd(CMD_REINIT);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    s_single_shot_pending = false;
+    ESP_LOGW(TAG, "SCD41 reinit: stop=%s reinit=%s", stop_ok ? "ACK" : "NACK", reinit_ok ? "ACK" : "NACK");
+    return reinit_ok;
 }
 
 bool scd41_trigger_single_shot(void)

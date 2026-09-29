@@ -75,3 +75,12 @@ bool scd41_trigger_single_shot(void);
  *         트리거된 적이 없으면 false
  */
 bool scd41_poll_single_shot(int *co2_ppm, float *temperature, float *humidity, bool *out_ok);
+
+/* 2026-09-29(측정 실패 진단) — 마지막 실패 원인. 값은 esp_now_link.h의 sensor_fault_t와 같음
+ * (0=없음, 1=명령 NACK, 3=CRC, 4=수신 실패). "타임아웃까지 준비 안 됨"(2)은 드라이버가 아니라 대기하는 호출부가 판단 */
+int scd41_last_fault(void);
+void scd41_clear_fault(void);
+
+/* 2026-09-29(Sensirion 데이터시트 3.9.5 — 사용자 지시) — 센서 재초기화: stop_periodic_measurement(500ms 대기) 후
+ * reinit(20ms 대기). 데이터시트: 이것으로 안 되면 전원을 껐다 켜야 함(이 보드는 SCD41 전원을 GPIO로 못 끊음) */
+bool scd41_reinit(void);

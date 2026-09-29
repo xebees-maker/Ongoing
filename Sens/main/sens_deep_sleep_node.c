@@ -142,6 +142,15 @@ static RTC_DATA_ATTR uint32_t s_unpaired_backoff_elapsed_sec       = 0;
  * 너머 유지해야 다음 부팅(=다음 웨이크) 때도 정확함 */
 static RTC_DATA_ATTR uint32_t s_seconds_since_last_measurement    = 0;
 
+/* 2026-09-29(사용자 지시 — SCD41이 밤새 측정을 못 했는데 원인을 알 수 없었음) — 마지막 측정 시도 결과
+ * (sensor_fault_t, 0=성공)와 연속 실패 횟수. 딥슬립을 넘어 유지되고, 다음 WAKE_HELLO_SENS에 실려 콘으로 감 */
+static RTC_DATA_ATTR uint8_t  s_sensor_fault                      = 0;
+static RTC_DATA_ATTR uint16_t s_sensor_fail_streak                = 0;
+/* 연속 실패가 이 배수가 될 때마다 SCD41 재초기화(stop -> reinit, 데이터시트 3.9.5) */
+#define SENS_REINIT_EVERY_FAILS 3
+/* measure_sensor()가 실패했을 때 그 원인 — attempt_one_measurement()가 채움 */
+static uint8_t s_attempt_fault = 0;
+
 /* 2026-09-05 — CAM의 cam_node.c 이벤트기반 대기 루프 이식(s_wake_recheck_sem/s_sweep_completed/
  * s_sleep_now_requested). esp_now_node_cask.c(연결 상태 전담, esp_now_cam.c와 대칭)가
  * esp_now_node_signal_recheck()/esp_now_node_note_sleep_now_requested()/
@@ -348,7 +357,11 @@ static void pm_lock_no_light_sleep_release(void)
  * 한 부팅 안에서 블로킹으로 끝냄(scd41.c의 trigger/poll API 자체는 안 건드림) */
 static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
 {
-    if (!scd41_trigger_single_shot()) return false;
+    scd41_clear_fault();
+    if (!scd41_trigger_single_shot()) {
+        s_attempt_fault = SENSOR_FAULT_CMD_NACK;
+        return false;
+    }
 
     /* 위 SCD41_MEASURE_MIN_WAIT_MS 주석 참고 — 데이터시트가 명시한 5000ms 실행시간
      * 동안은 어떤 명령도 안 보내고 그냥 기다림(이전엔 200ms마다 폴링해서 위반) */
@@ -361,12 +374,16 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
         bool ok = false;
         if (scd41_poll_single_shot(&co2, &t, &h, &ok)) {
             if (ok) { out[0] = (float)co2; out[1] = t; out[2] = h; }
+            else s_attempt_fault = scd41_last_fault() ? (uint8_t)scd41_last_fault() : SENSOR_FAULT_READ;
             return ok;
         }
         vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_POLL_MS));
         waited_ms += SCD41_MEASURE_POLL_MS;
     }
-    ESP_LOGW(TAG, "SCD41 measurement timeout (%ums)", (unsigned)SCD41_MEASURE_TIMEOUT_MS);
+    /* 폴링 중 통신 오류가 있었으면 그 원인, 없었으면 "명령은 받았지만 준비가 안 됨" */
+    s_attempt_fault = scd41_last_fault() ? (uint8_t)scd41_last_fault() : SENSOR_FAULT_NOT_READY;
+    ESP_LOGW(TAG, "SCD41 measurement timeout (%ums, fault=%u)", (unsigned)SCD41_MEASURE_TIMEOUT_MS,
+             (unsigned)s_attempt_fault);
     return false;
 }
 #endif
@@ -404,6 +421,7 @@ static bool attempt_one_measurement(float out[SENSOR_CHAN_COUNT], uint32_t *accu
     ws2812_flash(WS2812_COLOR_YELLOW, 100);
     uint32_t start_ms = (uint32_t)(esp_timer_get_time() / 1000);
     pm_lock_no_light_sleep_acquire();
+    s_attempt_fault = SENSOR_FAULT_OTHER;  /* 원인을 구분하는 센서(SCD41)는 measure_* 안에서 덮어씀 */
     bool ok = measure_sensor(out);
     pm_lock_no_light_sleep_release();
     *accum_elapsed_ms += (uint32_t)(esp_timer_get_time() / 1000) - start_ms;
@@ -448,6 +466,12 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
 #endif
 
         if (fresh_ok) {
+            if (s_sensor_fail_streak > 0) {
+                ESP_LOGI(TAG, "Sensor recovered after %u failed measurements (last fault=%u)",
+                         (unsigned)s_sensor_fail_streak, (unsigned)s_sensor_fault);
+            }
+            s_sensor_fault = SENSOR_FAULT_NONE;
+            s_sensor_fail_streak = 0;
             memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
             for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = 1;
             s_measurement_id++;
@@ -478,7 +502,15 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
                      sht_humi_x10 / 10, sht_humi_x10 % 10);
 #endif
         } else {
-            ESP_LOGW(TAG, "MEASMARK read failed - reusing cached value (measID=%u)", (unsigned)s_measurement_id);
+            s_sensor_fault = s_attempt_fault;
+            if (s_sensor_fail_streak < UINT16_MAX) s_sensor_fail_streak++;
+            ESP_LOGW(TAG, "MEASMARK read failed (fault=%u, streak=%u) - reusing cached value (measID=%u)",
+                     (unsigned)s_sensor_fault, (unsigned)s_sensor_fail_streak, (unsigned)s_measurement_id);
+#if CONFIG_SENS_SENSOR_SCD41
+            /* 2026-09-29(Sensirion 데이터시트 3.9.5) — 연속 실패가 이어지면 센서가 갇힌 상태로 보고 재초기화.
+             * 이 보드는 SCD41 전원을 끊을 수 없어서(3.3V 직결) 데이터시트의 마지막 단계(전원 껐다 켜기)는 못 함 */
+            if (s_sensor_fail_streak % SENS_REINIT_EVERY_FAILS == 0) scd41_reinit();
+#endif
         }
     } else {
         ESP_LOGI(TAG, "Measurement period (%us) not reached (elapsed %us) - skipped, reusing cached value (measID=%u)",
@@ -642,7 +674,8 @@ void app_main(void)
      * 캠의 "esp_now_cam_init() 끝에서 esp_now_cam_reconnect() 호출"과 동일 타이밍(esp_now_
      * node_cask.c 파일 헤더 주석 참고) — 그래서 이 결과(paired_now)가 항상 정확함 */
     bool paired_now = esp_now_node_report_reading(SENSOR_CHAN_COUNT, s_cached_chan_ok, s_cached_vals,
-                                                   s_measurement_id, 0, batt_mv_u16);
+                                                   s_measurement_id, 0, batt_mv_u16,
+                                                   s_sensor_fault, s_sensor_fail_streak);
     uint32_t sleep_sec = ESP_NOW_NODE_UNPAIRED_RETRY_SEC;
     /* 2026-09-06(사용자 지시) — Live 모드(sleep_sec==0)로 오래 깨있는 동안에도 측정주기가
      * 되면 재측정해야 함(캠의 독립적 주기촬영과 동일 원칙) — 이 기준점을 실제로 측정할
@@ -701,7 +734,8 @@ void app_main(void)
 
         if (cask_timed_out) {
             paired_now = esp_now_node_report_reading(SENSOR_CHAN_COUNT, s_cached_chan_ok, s_cached_vals,
-                                                       s_measurement_id, 0, batt_mv_u16);
+                                                       s_measurement_id, 0, batt_mv_u16,
+                                                   s_sensor_fault, s_sensor_fail_streak);
             continue;
         }
 
@@ -744,7 +778,8 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(SENS_CASK_LIVE_PACE_MS - elapsed_ms));
         }
         paired_now = esp_now_node_report_reading(SENSOR_CHAN_COUNT, s_cached_chan_ok, s_cached_vals,
-                                                   s_measurement_id, 0, batt_mv_u16);
+                                                   s_measurement_id, 0, batt_mv_u16,
+                                                   s_sensor_fault, s_sensor_fail_streak);
     }
 
     /* 이번에 실제로 잠들 시간만큼 "마지막 실측정 이후 경과시간"에 더해둠 — 다음 부팅에서

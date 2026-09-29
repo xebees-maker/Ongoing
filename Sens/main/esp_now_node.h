@@ -61,9 +61,11 @@ void esp_now_node_capture_wake_info(void);
  *        로 재호출할 땐 새로 측정하지 말고 직전과 같은 chan_val/measurement_id를 그대로
  *        다시 넘기면 됨. chan_count는 ESP_NOW_MAX_CHANNELS를 넘으면 안 됨.
  */
+/* 2026-09-29 — sensor_fault(sensor_fault_t)/sensor_fail_streak: 마지막 측정 시도 결과와 연속 실패 횟수, 그대로 실어 보냄 */
 bool esp_now_node_report_reading(uint8_t chan_count, const uint8_t *chan_ok,
                                   const float *chan_val, uint32_t measurement_id,
-                                  uint16_t battery_adc_raw, uint16_t battery_mv);
+                                  uint16_t battery_adc_raw, uint16_t battery_mv,
+                                  uint8_t sensor_fault, uint16_t sensor_fail_streak);
 
 /**
  * @brief 가장 최근 CASK 왕복에서 받은 SLEEP_NOW.sleep_sec — 0이면 계속 깨어있기(Live),

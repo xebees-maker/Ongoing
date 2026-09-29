@@ -167,6 +167,9 @@ typedef struct {
      * 직전과 같으면 위 chan_* 필드 갱신을 건너뜀(node_hub.c의 WAKE_HELLO_SENS 분기 참고) —
      * 배터리/사이클수 등 다른 통계는 매번 갱신 */
     uint32_t        sensor_measurement_id;
+    /* 2026-09-29(측정 실패 진단) — 센스가 보낸 마지막 측정 시도 결과(sensor_fault_t, 0=성공)와 연속 실패 횟수 */
+    uint8_t         sensor_fault;
+    uint16_t        sensor_fail_streak;
     /* 2026-09-05(사용자 지시) — 상황판 표시용 "Time: HH:MM:SS"의 기준 — 콘이 이 측정ID를
      * 처음 받은 시점의 콘 자체 벽시계 시각(그 순간의 rtc_sync_get_unix_time()) */
     uint32_t        sensor_last_update_unix_time;

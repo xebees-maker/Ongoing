@@ -555,7 +555,22 @@ typedef struct __attribute__((packed)) {
      * 새로 측정할 때마다 1씩 증가하는 카운터 — 콘이 이 값이 직전과 같으면 센서값 갱신
      * 처리를 건너뛸 수 있게(중복 처리 방지) */
     uint32_t measurement_id;
+    /* 2026-09-29(사용자 지시 — SCD41이 밤새 측정을 못 한 원인을 알 수 없었음) — 마지막 측정 시도의 결과
+     * (sensor_fault_t, 0=성공)와 연속 실패 횟수. 측정은 캐스크 뒤에 하므로 다음 웨이크에 실려 옴. 끝에 붙인 필드라
+     * 이 필드가 없는 옛 센스의 WAKE_HELLO_SENS는 콘의 길이 검사에서 걸러짐 — 센스를 모두 새 펌웨어로 올려야 함 */
+    uint8_t  sensor_fault;
+    uint16_t sensor_fail_streak;
 } esp_now_wake_hello_sens_t;
+
+/* esp_now_wake_hello_sens_t.sensor_fault — 측정 실패 원인(센서 종류 공통, SCD41이 가장 자세함) */
+typedef enum {
+    SENSOR_FAULT_NONE      = 0,  /* 마지막 측정 성공 */
+    SENSOR_FAULT_CMD_NACK  = 1,  /* 명령 전송에서 센서가 응답(ACK) 안 함 */
+    SENSOR_FAULT_NOT_READY = 2,  /* 명령은 받았지만 타임아웃까지 데이터 준비가 안 됨 */
+    SENSOR_FAULT_CRC       = 3,  /* 응답은 왔지만 CRC 불일치 */
+    SENSOR_FAULT_READ      = 4,  /* 응답 수신 자체 실패 */
+    SENSOR_FAULT_OTHER     = 5,  /* 그 밖(원인을 구분하지 않는 센서 포함) */
+} sensor_fault_t;
 
 typedef struct __attribute__((packed)) {
     uint8_t version;

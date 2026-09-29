@@ -388,7 +388,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
 bool esp_now_node_report_reading(uint8_t chan_count, const uint8_t *chan_ok,
                                   const float *chan_val, uint32_t measurement_id,
-                                  uint16_t battery_adc_raw, uint16_t battery_mv)
+                                  uint16_t battery_adc_raw, uint16_t battery_mv,
+                                  uint8_t sensor_fault, uint16_t sensor_fail_streak)
 {
     if (chan_count > ESP_NOW_MAX_CHANNELS) chan_count = ESP_NOW_MAX_CHANNELS;
 
@@ -428,6 +429,8 @@ bool esp_now_node_report_reading(uint8_t chan_count, const uint8_t *chan_ok,
         .battery_adc_raw       = battery_adc_raw,
         .battery_mv            = battery_mv,
         .measurement_id        = measurement_id,
+        .sensor_fault          = sensor_fault,
+        .sensor_fail_streak    = sensor_fail_streak,
     };
     memcpy(hello.chan_ok,  chan_ok,  chan_count * sizeof(chan_ok[0]));
     memcpy(hello.chan_val, chan_val, chan_count * sizeof(chan_val[0]));
