@@ -68,6 +68,17 @@ extern "C" {
 #define BSP_C3_SC05_UART_BAUD   9600
 
 /* ════════════════════════════════════════════════════════════
+ * PT100 + MAX31865 모듈(SPI) — 2026-09-30 Agar 온도. J3에서 쓸 수 있는 신호 핀이 IO10/8/6 셋뿐이라
+ * CS만 J2(IO4). GPIO8(스트래핑)엔 C3가 출력하는 SDI를 둠 — 모듈이 SDO로 끌어내리면 다운로드 부팅에 걸릴 수 있어서.
+ * 모듈 VIN은 C3 +3V3(J2) — 모듈 레벨시프터가 SDO를 VIN 전압까지 올리므로 C3 VIN(3.7~4.7V)에 물리면 안 됨
+ * ════════════════════════════════════════════════════════════ */
+#define BSP_C3_PT100_SPI_HOST   SPI2_HOST
+#define BSP_C3_PT100_SPI_CLK    GPIO_NUM_10
+#define BSP_C3_PT100_SPI_SDI    GPIO_NUM_8   /* C3 → 모듈(MOSI) */
+#define BSP_C3_PT100_SPI_SDO    GPIO_NUM_6   /* 모듈 → C3(MISO) */
+#define BSP_C3_PT100_SPI_CS     GPIO_NUM_4
+
+/* ════════════════════════════════════════════════════════════
  * 배터리 ADC — 보드 내장 분압(R7/R10 100k+100k, JP1 "BAT_AD" 점퍼로 GPIO3에 연결)
  * ════════════════════════════════════════════════════════════ */
 #define BSP_C3_BATTERY_ADC_UNIT     ADC_UNIT_1

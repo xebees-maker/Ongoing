@@ -285,6 +285,7 @@ typedef enum {
     SENSOR_KIND_DHT22_SCD41_COMBO   = 5,   /* 레거시 Waveshare LCD 콤보 앱 전용 */
     SENSOR_KIND_MQ137               = 6,   /* 2026-09-12 — 암모니아, 아날로그(AO)+디지털(DO) */
     SENSOR_KIND_SC05                = 7,   /* 2026-09-15 — 암모니아(YYS SC05-NH3), 전기화학식, UART */
+    SENSOR_KIND_PT100               = 8,   /* 2026-09-30 — Agar 접촉 온도, PT100(3선) + MAX31865(SPI) */
     /* 새 센서 추가 시 여기(끝)에 다음 숫자로만 추가 — 기존 항목 순서/값 절대 변경 금지 */
 } sensor_kind_t;
 
@@ -580,6 +581,7 @@ typedef enum {
     SENSOR_FAULT_CRC       = 3,  /* 응답은 왔지만 CRC 불일치 */
     SENSOR_FAULT_READ      = 4,  /* 응답 수신 자체 실패 */
     SENSOR_FAULT_OTHER     = 5,  /* 그 밖(원인을 구분하지 않는 센서 포함) */
+    SENSOR_FAULT_RTD       = 6,  /* 2026-09-30 — MAX31865가 RTD 고장 보고(선 끊김/단락/범위 밖) */
 } sensor_fault_t;
 
 typedef struct __attribute__((packed)) {

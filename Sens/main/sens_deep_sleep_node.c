@@ -26,6 +26,7 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -79,8 +80,15 @@
     static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
         SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT,
     };
+#elif CONFIG_SENS_SENSOR_PT100
+    #include "max31865.h"
+    #define SENSOR_KIND_CURRENT  SENSOR_KIND_PT100
+    #define SENSOR_CHAN_COUNT    1
+    static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
+        SENSOR_CHAN_TEMP_C,    /* 2026-09-30 — Agar 접촉 온도(3선 PT100 + MAX31865) */
+    };
 #else
-    #error "sens_deep_sleep_node.c supports only SCD41/MQ137/SC05/SHT45 - add a branch here to move another sensor to CASK"
+    #error "sens_deep_sleep_node.c supports only SCD41/MQ137/SC05/SHT45/PT100 - add a branch here to move another sensor to CASK"
 #endif
 
 static const char *TAG = "sens_deep_sleep_node";
@@ -408,6 +416,15 @@ static bool measure_sensor(float out[SENSOR_CHAN_COUNT])
     /* sht4x_read()는 명령전송→10ms 대기→수신까지 자체 블로킹으로 끝남(트리거/폴링 분리 없음,
      * sht4x.c 참고) — SCD41처럼 별도 대기/폴링 루프가 필요 없음 */
     return sht4x_read(&out[0], &out[1]);
+#elif CONFIG_SENS_SENSOR_PT100
+    /* 1-shot 변환까지 블로킹 약 80ms(max31865.c). 칩 무응답 = 명령 NACK, RTD 고장 = 선 끊김/단락/범위 밖 */
+    uint8_t fault_status = 0;
+    max31865_result_t r = max31865_read(&out[0], &fault_status);
+    if (r == MAX31865_OK) return true;
+    s_attempt_fault = (r == MAX31865_ERR_FAULT) ? SENSOR_FAULT_RTD
+                    : (r == MAX31865_ERR_NO_CHIP) ? SENSOR_FAULT_CMD_NACK : SENSOR_FAULT_READ;
+    if (r == MAX31865_ERR_FAULT) ESP_LOGW(TAG, "MAX31865 RTD fault status 0x%02X", fault_status);
+    return false;
 #endif
 }
 
@@ -500,6 +517,11 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
             ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u temp=%d.%d humi=%d.%d",
                      (unsigned)s_measurement_id, sht_temp_x10 / 10, sht_temp_x10 % 10,
                      sht_humi_x10 / 10, sht_humi_x10 % 10);
+#elif CONFIG_SENS_SENSOR_PT100
+            int pt_temp_x100 = (int)(s_cached_vals[0] * 100.0f + (s_cached_vals[0] < 0 ? -0.5f : 0.5f));
+            ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u agar_temp=%s%d.%02d",
+                     (unsigned)s_measurement_id, pt_temp_x100 < 0 ? "-" : "",
+                     abs(pt_temp_x100) / 100, abs(pt_temp_x100) % 100);
 #endif
         } else {
             s_sensor_fault = s_attempt_fault;
@@ -576,6 +598,11 @@ void app_main(void)
      * 지연 없이 바로 init) — I2C 버스 공유(BSP_C3_I2C_*)는 SCD41과 동일 자리 */
     if (!sht4x_init(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) {
         ESP_LOGW(TAG, "SHT45 init failed - check wiring (retry next cycle)");
+    }
+#elif CONFIG_SENS_SENSOR_PT100
+    if (!max31865_init(BSP_C3_PT100_SPI_HOST, BSP_C3_PT100_SPI_CLK, BSP_C3_PT100_SPI_SDI,
+                       BSP_C3_PT100_SPI_SDO, BSP_C3_PT100_SPI_CS, true)) {
+        ESP_LOGW(TAG, "MAX31865 init failed - check wiring (retry next cycle)");
     }
 #endif
     /* 2026-09-12(MQ137 추가) — AO 채널 설정에 공유 ADC 유닛 핸들이 필요한데, 그 핸들은
@@ -757,6 +784,10 @@ void app_main(void)
         uint32_t live_now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         uint32_t live_awake_elapsed_sec = (live_now_ms - live_awake_baseline_ms) / 1000;
         uint32_t live_measure_period_sec = esp_now_node_get_sample_interval_sec();
+        /* 2026-09-30(임시 진단 — PT100 보드에서 측정이 몇 분씩 멈춤, 원인 확인 후 제거) */
+        ESP_LOGI(TAG, "LIVECHK since=%u awake=%u period=%u measID=%u",
+                 (unsigned)s_seconds_since_last_measurement, (unsigned)live_awake_elapsed_sec,
+                 (unsigned)live_measure_period_sec, (unsigned)s_measurement_id);
         if (s_seconds_since_last_measurement + live_awake_elapsed_sec >= live_measure_period_sec) {
             float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
             if (attempt_one_measurement(fresh_vals, &measurement_elapsed_ms)) {
@@ -765,6 +796,16 @@ void app_main(void)
                 s_measurement_id++;
                 s_seconds_since_last_measurement = 0;
                 live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                {   /* 2026-09-30(임시 진단) — Live 재측정 성공도 값과 함께 남김 */
+                    int v_x100 = (int)(s_cached_vals[0] * 100.0f + (s_cached_vals[0] < 0 ? -0.5f : 0.5f));
+#if CONFIG_SENS_SENSOR_PT100
+                    unsigned raw = max31865_last_code();
+#else
+                    unsigned raw = 0;
+#endif
+                    ESP_LOGI(TAG, "LIVEMEAS ok measID=%u ch0=%s%d.%02d raw=%u", (unsigned)s_measurement_id,
+                             v_x100 < 0 ? "-" : "", abs(v_x100) / 100, abs(v_x100) % 100, raw);
+                }
             } else {
                 ESP_LOGW(TAG, "Sensor read failed (Live re-measure) - reusing cached value (measID=%u)",
                          (unsigned)s_measurement_id);
