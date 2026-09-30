@@ -1,4 +1,5 @@
 #include "node_hub.h"
+#include <stdlib.h>
 #include "photo_rx.h"
 #include "can_bridge.h"
 #include "node_request.h"
@@ -229,7 +230,8 @@ static node_quota_class_t quota_class_locked(const node_hub_node_t *n)
         case SENSOR_KIND_SCD41: return NODE_QUOTA_BASIC;
         case SENSOR_KIND_MQ137:
         case SENSOR_KIND_SC05:  return NODE_QUOTA_AMMONIA;
-        default:                return NODE_QUOTA_NONE;  /* Agar(PT100/DS18B20) 종류가 생기면 여기 추가 */
+        case SENSOR_KIND_PT100: return NODE_QUOTA_AGAR;
+        default:                return NODE_QUOTA_NONE;
     }
 }
 
@@ -829,7 +831,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             (hello->sensor_fault != SENSOR_FAULT_NONE && hello->sensor_fail_streak % 40 == 0 &&
              hello->sensor_fail_streak != n->sensor_fail_streak)) {
             static const char *const s_fault_name[] = { "none", "command NACK", "data not ready", "CRC mismatch",
-                                                        "receive failed", "other" };
+                                                        "receive failed", "other", "RTD open/short/out of range" };
             uint8_t f = hello->sensor_fault;
             if (f != SENSOR_FAULT_NONE) {
                 ESP_LOGW(TAG, "%s sensor fault: %s (%u failed in a row)", n->name,
@@ -890,7 +892,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 rec_count++;
             }
             if (rec_count > 0) {
-                stats_store_append_batch(recs, rec_count);
+                bool stored = stats_store_append_batch(recs, rec_count);
+                /* 2026-09-30(임시 진단 — PT100 값이 테이블에 안 들어오는 구간 확인, 원인 확인 후 제거) */
+                int v_x100 = (int)(n->chan_val[0] * 100.0f + (n->chan_val[0] < 0 ? -0.5f : 0.5f));
+                ESP_LOGI(TAG, "SENSREC %s measID=%lu ch0=%s%d.%02d recs=%u stored=%d", n->name,
+                         (unsigned long)hello->measurement_id, v_x100 < 0 ? "-" : "", abs(v_x100) / 100,
+                         abs(v_x100) % 100, (unsigned)rec_count, stored ? 1 : 0);
+            } else {
+                ESP_LOGI(TAG, "SENSREC %s measID=%lu no valid channel (ok=%u)", n->name,
+                         (unsigned long)hello->measurement_id, (unsigned)n->chan_ok[0]);
             }
         }
 

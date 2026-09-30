@@ -40,3 +40,6 @@ uint32_t dev_log_seq(void);
 /* 보기 설정(mask/태그)으로 거른 줄을 "시각 레벨 태그 내용\n" 형식으로 out에 채움 — 최신 줄이 맨 끝, out_cap에
  * 들어가는 만큼 최신 쪽부터. 반환: 채운 길이 */
 size_t dev_log_render(char *out, size_t out_cap);
+
+/* 2026-09-30 — 보기 필터 없이 링 전체(최대 400줄)를 오래된 것부터 같은 형식으로 채움. 웹(/api/devlog_dump)에서 부름 */
+size_t dev_log_dump(char *out, size_t out_cap);

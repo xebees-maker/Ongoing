@@ -55,6 +55,11 @@ typedef struct __attribute__((packed)) {
  * 치명적 아님 — sd_storage_init() 실패해도 앱 전체가 안 멈추는 기존 정책과 동일) */
 bool stats_store_append_batch(const stats_record_t *records, uint32_t count);
 
+/* 2026-09-30(사용자 지시 — "새 측정값이 올 때 갱신해야지") — stats_store_append_batch()가 원시 기록을 하나라도 쓰면
+ * 부르는 콜백(Record 표 갱신용). 부르는 쪽 태스크(ESP-NOW 처리)에서 불리므로 UI는 lv_async_call로 넘겨야 함 */
+typedef void (*stats_store_appended_cb_t)(void);
+void stats_store_set_appended_cb(stats_store_appended_cb_t cb);
+
 /* 2026-09-11(SD 신뢰성 항목4 — 쓰기경로도 사용자에게 알려야 함) — stats_store_append_batch()가
  * WAKE_HELLO_SENS 처리 중(node_hub.c, ESP-NOW recv_cb 컨텍스트, LVGL 태스크 아님)에
  * fopen 실패를 만나면 여기 true를 세팅. LVGL 태스크 쪽(ui_main.c의 1초 주기 refresh_dashboard)이

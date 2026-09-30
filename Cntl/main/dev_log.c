@@ -243,3 +243,34 @@ size_t dev_log_render(char *out, size_t out_cap)
     if (pos > 0 && out[pos - 1] == '\n') out[--pos] = '\0';
     return pos;
 }
+
+/* 2026-09-30(사용자 지시 — "Dev Log를 네가 가져갈 수 있게 따로 만들어") — SD 에러 등이 났을 때 재부팅 전에 링 전체를
+ * 밖으로 꺼내기 위함(조건부 할 일 C5). 화면 보기 필터 없이 400줄 전부, 오래된 것부터. 화면 쪽 dev_log_render()와
+ * 다른 태스크(웹)에서 불리므로 복사 버퍼를 따로 씀. 반환: 채운 길이 */
+size_t dev_log_dump(char *out, size_t out_cap)
+{
+    if (!out || out_cap == 0) return 0;
+    out[0] = '\0';
+    if (!s_ring) return 0;
+    static dev_log_entry_t *snap = NULL;
+    if (!snap) snap = heap_caps_malloc(DEV_LOG_ENTRIES * sizeof(dev_log_entry_t), MALLOC_CAP_SPIRAM);
+    if (!snap) return 0;
+    taskENTER_CRITICAL(&s_lock);
+    uint32_t head = s_head;
+    taskEXIT_CRITICAL(&s_lock);
+    uint32_t count = head < DEV_LOG_ENTRIES ? head : DEV_LOG_ENTRIES;
+    for (uint32_t k = 0; k < count; k++) {
+        uint32_t idx = (head - count + k) % DEV_LOG_ENTRIES;
+        taskENTER_CRITICAL(&s_lock);
+        snap[k] = s_ring[idx];
+        taskEXIT_CRITICAL(&s_lock);
+    }
+    size_t pos = 0;
+    for (uint32_t k = 0; k < count; k++) {
+        const dev_log_entry_t *e = &snap[k];
+        int w = snprintf(out + pos, out_cap - pos, "%s %c %-5s %s\n", e->ts, e->lvl, e->tag, e->text);
+        if (w <= 0 || (size_t)w >= out_cap - pos) break;
+        pos += (size_t)w;
+    }
+    return pos;
+}

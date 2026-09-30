@@ -270,6 +270,20 @@ static esp_err_t api_devlog_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, body, len);
 }
 
+/* 2026-09-30(사용자 지시 — "Dev Log를 네가 가져갈 수 있게 따로 만들어") — RAM 링에만 있는 Dev Log 전체(최대 400줄)를
+ * 텍스트로 돌려줌. SD 에러 등이 났을 때 재부팅/플래시 전에 먼저 받아 둠(조건부 할 일 C5) */
+static esp_err_t api_devlog_dump_get_handler(httpd_req_t *req)
+{
+    const size_t cap = 400 * 150;
+    char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    size_t len = dev_log_dump(buf, cap);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    esp_err_t ret = httpd_resp_send(req, buf, len);
+    heap_caps_free(buf);
+    return ret;
+}
+
 /* 2026-09-28(SD 손상 재현 시험 — 사용자 지시, 할 일 24 테스트 API와 함께 나중에 제거) — 5640 사진 폴더에서만 이름이 FF로
  * 읽히는 디렉터리 손상이 조용히 생김(한일 09-28 61번). 사진 저장과 같은 순서(임시파일에 16KB씩 → fsync → 닫기 → 이름 바꾸기)로
  * /sdcard/sdtest에 파일을 계속 만들어 디렉터리를 클러스터 경계 너머로 키우고, 50개마다 폴더를 다시 읽어 깨진 항목을 셈 */
@@ -854,6 +868,9 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_devlog_uri = { .uri = "/api/devlog", .method = HTTP_GET,
                                                 .handler = api_devlog_get_handler };
     httpd_register_uri_handler(server, &api_devlog_uri);
+    static const httpd_uri_t api_devlog_dump_uri = { .uri = "/api/devlog_dump", .method = HTTP_GET,
+                                                     .handler = api_devlog_dump_get_handler };
+    httpd_register_uri_handler(server, &api_devlog_dump_uri);
     static const httpd_uri_t api_sdtest_uri = { .uri = "/api/sdtest", .method = HTTP_GET,
                                                 .handler = api_sdtest_get_handler };
     httpd_register_uri_handler(server, &api_sdtest_uri);

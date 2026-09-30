@@ -3251,7 +3251,7 @@ static void find_node_name_by_mac(const uint8_t mac[6], char *out, size_t out_ca
  * "미분류"로 처리. */
 typedef enum {
     STATS_VIEW_GROUP_AIR  = 0,  /* 온습도(공기) — SCD41/SHT45 */
-    STATS_VIEW_GROUP_AGAR = 1,  /* Agar(접촉 온도) — PT100/DS18B20, 아직 미보유 */
+    STATS_VIEW_GROUP_AGAR = 1,  /* Agar(접촉 온도) — PT100 */
     STATS_VIEW_GROUP_GAS  = 2,  /* 이산화탄소/암모니아 */
 } stats_view_group_t;
 
@@ -3271,16 +3271,8 @@ static const stats_kind_channel_info_t s_stats_kind_channel_table[] = {
     { SENSOR_KIND_SHT45, SENSOR_CHAN_HUMI_PCT, STATS_VIEW_GROUP_AIR, true  },
     { SENSOR_KIND_MQ137, SENSOR_CHAN_NH3_PPM,  STATS_VIEW_GROUP_GAS, false },
     { SENSOR_KIND_SC05,  SENSOR_CHAN_NH3_PPM,  STATS_VIEW_GROUP_GAS, false },
+    { SENSOR_KIND_PT100, SENSOR_CHAN_TEMP_C,   STATS_VIEW_GROUP_AGAR, false },  /* 2026-09-30 */
 };
-
-/* 2026-09-15(임시 테스트용 — 사용자 지시: "SCD41 온습도를 Agar1, SHT45 온습도를 Agar2로
- * 활용하면 나중에 편할 듯", "값은 다 가짜니까... 대부분의 코드는 재사용 가능할 듯") — PT100
- * 실물이 아직 없어서, Agar UI(기기별 체크박스/혼합/순환) 검증용으로 SCD41/SHT45의 "온도"
- * 채널을 Agar 그룹에도 "추가로" 복제해 넣음(사용자 정정 — "Agar는 테스트용이니까, Air가
- * 기본이고 Agar에 복제해서 넣어야지": 배타적 오버라이드였던 첫 구현은 잘못 — Air 쪽 실측
- * 분류는 그대로 두고, Agar 수집 시에만 같은 mac을 추가로 끼워넣는 방식으로 정정함). 실제
- * PT100 연결되면 이 블록만 지우면 됨. */
-#define STATS_TEST_AGAR_FAKE_DATA 1
 
 static uint8_t find_node_kind_by_mac(const uint8_t mac[6])
 {
@@ -3294,13 +3286,6 @@ static uint8_t find_node_kind_by_mac(const uint8_t mac[6])
      * 반환 */
     return sens_kind_store_get(mac);
 }
-
-#if STATS_TEST_AGAR_FAKE_DATA
-static bool stats_is_agar_fake_source(uint8_t kind, uint8_t chan_type)
-{
-    return chan_type == SENSOR_CHAN_TEMP_C && (kind == SENSOR_KIND_SCD41 || kind == SENSOR_KIND_SHT45);
-}
-#endif
 
 /* mac+chan_type -> {그룹, 정밀여부}. 미분류(매핑에 없는 kind, 또는 아예 모르는 mac)면 false.
  * 테스트 오버라이드 없음 — 항상 실제 분류표 그대로(Air는 항상 실측대로 표시됨).
@@ -3413,19 +3398,13 @@ static bool stats_window_load(stats_window_t *w, uint8_t scale_idx, uint32_t sta
     return true;
 }
 
-/* (kind, chan_type)이 이 보기(그룹, Air면 정밀/간이까지)에 속하는지. Agar는 테스트용 복제 포함 */
+/* (kind, chan_type)이 이 보기(그룹, Air면 정밀/간이까지)에 속하는지 */
 static bool stats_kind_in_view(uint8_t kind, uint8_t chan_type, stats_view_group_t group, bool want_precise)
 {
     stats_view_group_t g;
     bool prec;
-    if (stats_classify_by_kind(kind, chan_type, &g, &prec) && g == group &&
-        (group != STATS_VIEW_GROUP_AIR || prec == want_precise)) {
-        return true;
-    }
-#if STATS_TEST_AGAR_FAKE_DATA
-    if (group == STATS_VIEW_GROUP_AGAR && stats_is_agar_fake_source(kind, chan_type)) return true;
-#endif
-    return false;
+    return stats_classify_by_kind(kind, chan_type, &g, &prec) && g == group &&
+           (group != STATS_VIEW_GROUP_AIR || prec == want_precise);
 }
 
 /* 슬롯 하나 = 기기 사슬. 기록 시간이 겹치지 않는(앞 기기의 마지막 칸 뒤에 시작한) 기기는 같은 슬롯을 이어 씀 —
@@ -4151,10 +4130,8 @@ static bool refresh_stats_graph(void)
      * — 1H 스케일 버킷폭(60초)이 전체 스케일 중 가장 좁은 단위라, 그보다 자주 갱신해도
      * 대부분 같은 데이터를 다시 그리는 것뿐 — 15초는 "데이터가 실제로 바뀔 수 있는 최소
      * 간격"과 무관하게 정했던 값이라 60초로 늘림(불필요한 갱신 횟수 1/4로 감소) */
-    static uint32_t s_graph_last_refresh_tick = 0;
-    uint32_t now_tick_ms = lv_tick_get();
-    if (!s_stats_graph_force_refresh && (now_tick_ms - s_graph_last_refresh_tick) < 60000) return true;
-    s_graph_last_refresh_tick = now_tick_ms;
+    /* 2026-09-30(사용자 지시 — 주기는 1분 고정, 매분 경계에 맞춤) — 60초 건너뛰기는 이제 통계 타이머 자체가
+     * 매분 0초 직후에만 울리는 것으로 대신함(stats_page_timer_align_to_minute) */
     s_stats_graph_force_refresh = false;
 
     uint16_t idx = lv_dropdown_get_selected(s_stats_scale_dd);
@@ -4505,11 +4482,25 @@ static void cb_stats_chart_tap(lv_event_t *e)
  * ([[feedback_design_for_exceptions_not_just_fails]]) — 그 SD 접근은 전부 워커로 옮기고,
  * 여기는 워커가 미리 계산해둔 스냅샷을 읽어 화면만 그림. 타이밍 로그는 "렌더가 실제로
  * 빨라졌는지"를 원복 전/후 비교할 수 있게 그대로 유지 */
+/* 2026-09-30(사용자 지시 — "2초는 너무 빠르다... 주기는 그냥 1분으로 고정", 측정값이 없어도 없음 점을 그려야 해서
+ * 타이머는 유지) — 통계 타이머가 다음 분 0초 직후(+500ms)에 울리게 맞춤. 가장 짧은 그래프 점 간격(1H 스케일)이
+ * 1분이라 그 사이엔 그림이 바뀌지 않음. 측정값은 올 때마다 바로 기록되므로 경계 직후면 끝난 1분이 다 반영돼 있음 */
+static void stats_page_timer_align_to_minute(void)
+{
+    if (!s_stats_page_timer) return;
+    uint32_t now = rtc_sync_get_unix_time();
+    uint32_t delay_ms = now ? (60 - now % 60) * 1000 + 500 : 60000;
+    lv_timer_set_period(s_stats_page_timer, delay_ms);
+    lv_timer_reset(s_stats_page_timer);
+}
+
 static void refresh_stats_page(lv_timer_t *t)
 {
     (void)t;
+    stats_page_timer_align_to_minute();
     /* 2026-09-15(사용자 설계) — 표가 별도 Record 팝업으로 분리되면서 refresh_stats_table()
-     * 호출 제거(그 팝업 자체 생명주기/네비게이션 콜백이 직접 부름) */
+     * 호출 제거(그 팝업 자체 생명주기/네비게이션 콜백이 직접 부름, 새 측정값이 기록될 때는
+     * on_stats_appended()가 부름) */
     size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     uint32_t t0 = lv_tick_get();
     bool ok = refresh_stats_overview_panel();
@@ -4526,6 +4517,20 @@ static void refresh_stats_page(lv_timer_t *t)
         ESP_LOGD(TAG, "MEMDIAG refresh_stats_page: internal %u -> %u (delta=%d)",
                  (unsigned)before, (unsigned)after, (int)before - (int)after);
     }
+}
+
+/* 2026-09-30(사용자 지시 — "새 측정값이 올 때 갱신해야지") — 새 측정값이 SD에 기록되면 Record 표를 다시 채움.
+ * 09-15에 표를 Record 팝업으로 나누면서 갱신이 빠졌던 것. 이전 페이지를 보는 중엔 그대로 둠 */
+static void cb_async_stats_appended(void *arg)
+{
+    (void)arg;
+    if (!s_stats_table || s_stats_page_index != 0) return;
+    if (!refresh_stats_table()) report_sd_io_fail("record table");
+}
+
+static void on_stats_appended(void)  /* ESP-NOW 처리 태스크에서 불림 */
+{
+    lv_async_call(cb_async_stats_appended, NULL);
 }
 
 static void stats_prev_page_cb(lv_event_t *e)
@@ -7329,6 +7334,7 @@ void ui_init(void)
     photo_rx_set_ready_cb(on_photo_result_event);
     node_hub_set_connect_event_cb(on_connect_result_event);
     node_hub_set_pair_rejected_cb(on_pair_rejected_event);
+    stats_store_set_appended_cb(on_stats_appended);
 }
 
 /* 2026-09-08(재설계) — 통계 팝업 닫기: 타이머 삭제 + 팝업 전체 삭제(lv_obj_delete — 이제
@@ -8024,7 +8030,7 @@ static void build_stats_tab(void)
 
     /* 2026-09-15(사용자 설계) — ">>"(표로 전환) 버튼 삭제, Record 버튼(제목바)이 그 역할 대체 */
 
-    s_stats_page_timer = lv_timer_create(refresh_stats_page_md, 2000, NULL);
+    s_stats_page_timer = lv_timer_create(refresh_stats_page_md, 60000, NULL);  /* 주기는 refresh_stats_page()가 분 경계로 맞춤 */
     /* 2026-09-15(사용자 지적 — "그래프가, 띄우자마자는 안 나오는 버그") — lv_timer_create()는
      * 주기의 첫 실행을 바로 하지 않고 2000ms 뒤로 미루므로, 팝업을 열자마자는 직전 상태(보통
      * 빈 차트)가 그대로 보임. 타이머와 별개로 지금 한 번 직접 그림 */
@@ -8035,7 +8041,7 @@ static void build_stats_tab(void)
     lv_display_add_event_cb(lv_display_get_default(), cb_stats_draw_refr_ready, LV_EVENT_REFR_READY, NULL);
 
     /* 이 시점까지 만들어진 통계 팝업 전체(테이블뷰+그래프뷰 포함)를 순회하며 스크롤 완전 차단.
-     * 테이블 행(refresh_stats_table)은 이후 주기적으로 새로 생성되지만 그쪽은 생성 시점에
+     * 테이블 행(refresh_stats_table)은 Record 팝업에서 새 기록이 오면 다시 채워지지만 그쪽은 생성 시점에
      * 개별적으로 이미 SCROLLABLE을 빼고 있음(기존 코드) */
     disable_scroll_recursive(stats_page);
 

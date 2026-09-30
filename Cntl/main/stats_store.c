@@ -374,6 +374,9 @@ bool stats_store_had_io_error(void)
  * 측정 성공 사이클마다 서서히 준다는 관찰을 이 함수(SD fopen/fwrite/fclose 반복)로 좁혀서
  * 실측 검증. 원인 확정되면 이 로그는 제거 예정 */
 static size_t s_stats_append_call_count = 0;
+static stats_store_appended_cb_t s_appended_cb = NULL;
+
+void stats_store_set_appended_cb(stats_store_appended_cb_t cb) { s_appended_cb = cb; }
 
 /* 2026-09-11(SD 신뢰성 재설계 항목4) — WAKE_HELLO_SENS 처리(LVGL 태스크가 아님)에서 쓰기실패가
  * 나면 여기만 세팅. ui_main.c의 1초 주기 LVGL 타이머가 매 틱 stats_store_take_write_io_error()로
@@ -404,6 +407,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
     /* 한 번의 호출(WAKE_HELLO_SENS 1건)은 보통 같은 시각이라 같은 주 — 그래도 주가 바뀌는 경계에
      * 걸치면 주별로 나눠서 각자 파일에 씀(주마다 open+연속쓰기+fsync+close 1번) */
     uint32_t i = 0;
+    uint32_t total_written = 0;
     while (i < count) {
         uint32_t week = records[i].unix_time / STATS_WEEK_SEC;
         uint32_t j = i + 1;
@@ -433,6 +437,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
         }
         s_weeks[widx].raw_count += (uint32_t)written;
         s_total_raw += written;
+        total_written += (uint32_t)written;
 
         /* 원시 기록이 된 레코드만 사전집계에 반영 */
         for (uint32_t k = i; k < i + (uint32_t)written; k++) {
@@ -444,6 +449,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
     unlock();
 
     storage_mgr_notify_changed();
+    if (total_written > 0 && s_appended_cb) s_appended_cb();  /* 잠금 밖에서 — 받는 쪽이 표를 다시 읽음 */
 
     s_stats_append_call_count++;
     size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
