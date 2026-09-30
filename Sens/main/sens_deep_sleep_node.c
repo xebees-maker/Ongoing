@@ -87,8 +87,15 @@
     static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
         SENSOR_CHAN_TEMP_C,    /* 2026-09-30 — Agar 접촉 온도(3선 PT100 + MAX31865) */
     };
+#elif CONFIG_SENS_SENSOR_DS18B20
+    #include "ds18b20_sensor.h"
+    #define SENSOR_KIND_CURRENT  SENSOR_KIND_DS18B20
+    #define SENSOR_CHAN_COUNT    1
+    static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
+        SENSOR_CHAN_TEMP_C,    /* 2026-09-30 — Agar 접촉 온도(DS18B20, PT100과 비교용) */
+    };
 #else
-    #error "sens_deep_sleep_node.c supports only SCD41/MQ137/SC05/SHT45/PT100 - add a branch here to move another sensor to CASK"
+    #error "sens_deep_sleep_node.c supports only SCD41/MQ137/SC05/SHT45/PT100/DS18B20 - add a branch here to move another sensor to CASK"
 #endif
 
 static const char *TAG = "sens_deep_sleep_node";
@@ -425,6 +432,13 @@ static bool measure_sensor(float out[SENSOR_CHAN_COUNT])
                     : (r == MAX31865_ERR_NO_CHIP) ? SENSOR_FAULT_CMD_NACK : SENSOR_FAULT_READ;
     if (r == MAX31865_ERR_FAULT) ESP_LOGW(TAG, "MAX31865 RTD fault status 0x%02X", fault_status);
     return false;
+#elif CONFIG_SENS_SENSOR_DS18B20
+    /* 변환 대기 약 800ms(12비트, 컴포넌트가 블로킹). 무응답 = 명령 NACK, CRC 불일치 = CRC */
+    ds18b20_sensor_result_t r = ds18b20_sensor_read(&out[0]);
+    if (r == DS18B20_SENSOR_OK) return true;
+    s_attempt_fault = (r == DS18B20_SENSOR_ERR_NO_DEVICE) ? SENSOR_FAULT_CMD_NACK
+                    : (r == DS18B20_SENSOR_ERR_CRC) ? SENSOR_FAULT_CRC : SENSOR_FAULT_READ;
+    return false;
 #endif
 }
 
@@ -517,7 +531,7 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
             ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u temp=%d.%d humi=%d.%d",
                      (unsigned)s_measurement_id, sht_temp_x10 / 10, sht_temp_x10 % 10,
                      sht_humi_x10 / 10, sht_humi_x10 % 10);
-#elif CONFIG_SENS_SENSOR_PT100
+#elif CONFIG_SENS_SENSOR_PT100 || CONFIG_SENS_SENSOR_DS18B20
             int pt_temp_x100 = (int)(s_cached_vals[0] * 100.0f + (s_cached_vals[0] < 0 ? -0.5f : 0.5f));
             ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u agar_temp=%s%d.%02d",
                      (unsigned)s_measurement_id, pt_temp_x100 < 0 ? "-" : "",
@@ -603,6 +617,10 @@ void app_main(void)
     if (!max31865_init(BSP_C3_PT100_SPI_HOST, BSP_C3_PT100_SPI_CLK, BSP_C3_PT100_SPI_SDI,
                        BSP_C3_PT100_SPI_SDO, BSP_C3_PT100_SPI_CS, true)) {
         ESP_LOGW(TAG, "MAX31865 init failed - check wiring (retry next cycle)");
+    }
+#elif CONFIG_SENS_SENSOR_DS18B20
+    if (!ds18b20_sensor_init(BSP_C3_DS18B20_PIN)) {
+        ESP_LOGW(TAG, "DS18B20 init failed - check wiring (retry on each measurement)");
     }
 #endif
     /* 2026-09-12(MQ137 추가) — AO 채널 설정에 공유 ADC 유닛 핸들이 필요한데, 그 핸들은

@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.5)
 # EXTRA_COMPONENT_DIRS 밑에서 발견된 컴포넌트를 전부 링크함(실제 REQUIRES 여부 무관) —
 # sensor_scd41이 C6 전용 LP_I2C 매크로를 하드코딩해서 S3 빌드를 깨므로 Cntl과 동일하게 제외.
 set(EXTRA_COMPONENT_DIRS "C:/Projects/Ongoing/Common/components")
-set(EXCLUDE_COMPONENTS "sensor_dht22" "sensor_scd41")
+set(EXCLUDE_COMPONENTS "sensor_dht22" "sensor_scd41" "sensor_ds18b20")  # sensor_ds18b20: 센스 전용, 1-Wire 관리형 컴포넌트를 끌어옴
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 

@@ -9,7 +9,7 @@ set(EXTRA_COMPONENT_DIRS "C:/Projects/Ongoing/Common/components")
 # 없어서 esp_lcd_touch 관리형 컴포넌트를 idf_component.yml에 선언하지 않는데, Common/
 # components에 있는 터치 드라이버(Cntl의 1.85C 디스플레이 교체 작업용)가 그걸 요구해서
 # 빌드 자체가 깨진다 — CAM 빌드에서는 아예 뺀다.
-set(EXCLUDE_COMPONENTS "esp_lcd_touch_axs5106" "esp_lcd_touch_cst816")
+set(EXCLUDE_COMPONENTS "esp_lcd_touch_axs5106" "esp_lcd_touch_cst816" "sensor_ds18b20")  # sensor_ds18b20: 센스 전용
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(cam-node)

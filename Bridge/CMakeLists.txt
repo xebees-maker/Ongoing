@@ -8,7 +8,7 @@ set(EXTRA_COMPONENT_DIRS "C:/Projects/Ongoing/Common/components")
 # ESP-IDF는 project()가 발견한 모든 컴포넌트를 REQUIRES 여부와 무관하게 컴파일한다 —
 # Common/components 안의 C6 전용 센서 컴포넌트가 S3 빌드를 깨므로 콘과 동일하게 제외
 # (Cntl/CMakeLists.txt와 동일한 이유, project_cntl_scd41_lp_i2c_bug 메모리 참고)
-set(EXCLUDE_COMPONENTS "sensor_dht22" "sensor_scd41")
+set(EXCLUDE_COMPONENTS "sensor_dht22" "sensor_scd41" "sensor_ds18b20")  # sensor_ds18b20: 센스 전용, 1-Wire 관리형 컴포넌트를 끌어옴
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(bridge)
