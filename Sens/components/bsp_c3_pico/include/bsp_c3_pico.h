@@ -52,7 +52,7 @@ extern "C" {
  * SC05-NH3 (YYS, 전기화학식 암모니아, UART) — 2026-09-15 실험용 배선.
  * 이 보드는 J3 헤더(GND/VIN/IO6/IO8/IO10 등이 한 줄에 나옴, WeMos 공식
  * sch_c3_pico_v1.0.0.pdf 확인) 하나에서 GND/VIN/RX/TX를 전부 뽑음 — 납땜 편의상
- * GPIO0/4(J2 쪽) 대신 GPIO6/8(J3 쪽)로 선택(사용자 확인). U0TXD/U0RXD(GPIO20/21)는
+ * GPIO0/4(J2 쪽) 대신 J3 쪽으로 선택(사용자 확인, 처음엔 GPIO6/8 → 09-30에 GPIO8/10). U0TXD/U0RXD(GPIO20/21)는
  * 콘솔 UART0가 이미 쓰고 있어서 제외(sdkconfig CONFIG_ESP_CONSOLE_UART_NUM=0).
  * 전원은 VIN(배터리/USB 합류, 실측 3.7~4.7V) — SC05 동작전압 3.7~5.5V 범위 안.
  * 단, 배터리 단독 방전 시 3.7V 밑으로 내려가면 스펙 밖이라, 이 노드는 MQ137처럼
@@ -63,7 +63,8 @@ extern "C" {
  * ════════════════════════════════════════════════════════════ */
 #define BSP_C3_SC05_UART_PORT   1
 #define BSP_C3_SC05_UART_RX     GPIO_NUM_8   /* SC05 Pin6/T(TXD) <- 여기로 들어옴 */
-#define BSP_C3_SC05_UART_TX     GPIO_NUM_6   /* SC05 Pin5/R(RXD) <- 여기로 나감(Auto 모드라 실제로 안 씀) */
+#define BSP_C3_SC05_UART_TX     GPIO_NUM_10  /* SC05 Pin5/R(RXD) <- 여기로 나감(Auto 모드라 실제로 안 씀).
+                                                2026-09-30(사용자 지시) — GPIO6 → 10: I2C 보드(SDA 8/SCL 10)와 같은 두 핀으로 통일 */
 #define BSP_C3_SC05_UART_BAUD   9600
 
 /* ════════════════════════════════════════════════════════════
