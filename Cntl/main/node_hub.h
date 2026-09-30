@@ -196,7 +196,7 @@ typedef enum {
     NODE_QUOTA_FINE,
     NODE_QUOTA_BASIC,
     NODE_QUOTA_AMMONIA,
-    NODE_QUOTA_AGAR,       /* PT100(SENSOR_KIND_PT100) */
+    NODE_QUOTA_AGAR,       /* PT100, DS18B20 */
     NODE_QUOTA_COUNT,
 } node_quota_class_t;
 

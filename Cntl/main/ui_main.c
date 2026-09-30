@@ -3251,7 +3251,7 @@ static void find_node_name_by_mac(const uint8_t mac[6], char *out, size_t out_ca
  * "미분류"로 처리. */
 typedef enum {
     STATS_VIEW_GROUP_AIR  = 0,  /* 온습도(공기) — SCD41/SHT45 */
-    STATS_VIEW_GROUP_AGAR = 1,  /* Agar(접촉 온도) — PT100 */
+    STATS_VIEW_GROUP_AGAR = 1,  /* Agar(접촉 온도) — PT100, DS18B20 */
     STATS_VIEW_GROUP_GAS  = 2,  /* 이산화탄소/암모니아 */
 } stats_view_group_t;
 
@@ -3272,6 +3272,7 @@ static const stats_kind_channel_info_t s_stats_kind_channel_table[] = {
     { SENSOR_KIND_MQ137, SENSOR_CHAN_NH3_PPM,  STATS_VIEW_GROUP_GAS, false },
     { SENSOR_KIND_SC05,  SENSOR_CHAN_NH3_PPM,  STATS_VIEW_GROUP_GAS, false },
     { SENSOR_KIND_PT100, SENSOR_CHAN_TEMP_C,   STATS_VIEW_GROUP_AGAR, false },  /* 2026-09-30 */
+    { SENSOR_KIND_DS18B20, SENSOR_CHAN_TEMP_C, STATS_VIEW_GROUP_AGAR, false },  /* 2026-09-30 */
 };
 
 static uint8_t find_node_kind_by_mac(const uint8_t mac[6])
@@ -4498,6 +4499,7 @@ static void refresh_stats_page(lv_timer_t *t)
 {
     (void)t;
     stats_page_timer_align_to_minute();
+    stats_store_flush_ended_buckets(rtc_sync_get_unix_time());  /* 방금 끝난 칸까지 파일에 쓴 뒤 그림 */
     /* 2026-09-15(사용자 설계) — 표가 별도 Record 팝업으로 분리되면서 refresh_stats_table()
      * 호출 제거(그 팝업 자체 생명주기/네비게이션 콜백이 직접 부름, 새 측정값이 기록될 때는
      * on_stats_appended()가 부름) */

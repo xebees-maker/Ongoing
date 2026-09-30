@@ -60,6 +60,10 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count);
 typedef void (*stats_store_appended_cb_t)(void);
 void stats_store_set_appended_cb(stats_store_appended_cb_t cb);
 
+/* 2026-09-30 — now_unix 기준으로 이미 끝난 칸 중 값이 있는데 아직 파일에 안 쓴 것을 모두 씀(값 없는 칸은 안 씀).
+ * 통계 팝업이 그리기 직전(매분 타이머, 팝업 열 때)에 부름 */
+void stats_store_flush_ended_buckets(uint32_t now_unix);
+
 /* 2026-09-11(SD 신뢰성 항목4 — 쓰기경로도 사용자에게 알려야 함) — stats_store_append_batch()가
  * WAKE_HELLO_SENS 처리 중(node_hub.c, ESP-NOW recv_cb 컨텍스트, LVGL 태스크 아님)에
  * fopen 실패를 만나면 여기 true를 세팅. LVGL 태스크 쪽(ui_main.c의 1초 주기 refresh_dashboard)이

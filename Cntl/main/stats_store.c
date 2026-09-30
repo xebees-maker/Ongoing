@@ -189,7 +189,10 @@ typedef struct {
     uint16_t seen_count;     /* 이 버킷에 실제로 들어온 실측값 개수(진단용, sample_count로 기록) */
 } agg_accum_t;
 
-static agg_accum_t s_agg_accum[STATS_SCALE_COUNT][STATS_AGG_MAX_CHAN_TYPES][STATS_AGG_MAX_MACS];
+/* 2026-09-30(사용자 지시 — PSRAM 원칙) — [스케일][chan_type][기기 슬롯], 약 6.4KB. 예전엔 정적 배열이라 내부 RAM(.bss)에
+ * 있었음 — 이제 ensure_alloc_locked()가 다른 버퍼와 같이 PSRAM에 할당(첫 기록 전엔 NULL) */
+#define AGG_ACCUM_BYTES (sizeof(agg_accum_t) * STATS_SCALE_COUNT * STATS_AGG_MAX_CHAN_TYPES * STATS_AGG_MAX_MACS)
+static agg_accum_t (*s_agg_accum)[STATS_AGG_MAX_CHAN_TYPES][STATS_AGG_MAX_MACS] = NULL;
 
 /* 호출부가 lock() 잡은 상태 — 방금 닫힌 버킷 하나를 그 버킷이 속한 주의 집계 파일에 씀. 실패해도
  * 로그만(치명적 아님, 원시 기록 자체는 이미 성공한 뒤라 유실은 이 사전집계 한 포인트뿐) */
@@ -284,10 +287,41 @@ static void stats_agg_update_scale_locked(uint8_t scale, int mac_slot, const uin
     }
 }
 
+/* 2026-09-30(사용자 결정 — "바꾸자") — 예전엔 칸을 그 기기의 다음 측정이 새 칸에 들어올 때만 파일에 써서, 화면이 칸 하나씩
+ * 늦고 측정을 멈춘 기기의 마지막 칸은 끝내 안 써졌음. 이제 칸이 끝났으면(now 기준) 다음 측정을 기다리지 않고 씀.
+ * 값이 없는 칸은 지금처럼 안 씀(그래프의 "없음" 점). 기록 시각은 콘이 받은 시각이라 끝난 칸에 늦게 값이 들어올 일은 없음 */
+void stats_store_flush_ended_buckets(uint32_t now_unix)
+{
+    if (!sd_storage_is_mounted() || now_unix == 0) return;
+    lock();
+    if (!s_agg_accum) { unlock(); return; }  /* 아직 기록이 한 번도 없음 — 쓸 칸도 없음 */
+    for (int sc = 0; sc < STATS_SCALE_COUNT; sc++) {
+        uint32_t width = STATS_SCALE_SECONDS[sc] / STATS_AGG_POINTS_PER_SCALE;
+        if (width == 0) width = 1;
+        for (int ch = 0; ch < STATS_AGG_MAX_CHAN_TYPES; ch++) {
+            for (int slot = 0; slot < s_agg_known_mac_count; slot++) {
+                agg_accum_t *acc = &s_agg_accum[sc][ch][slot];
+                if (!acc->have_value || acc->bucket_start + width > now_unix) continue;
+                agg_flush_bucket_locked((uint8_t)sc, s_agg_slot_kind[slot], (uint8_t)ch, s_agg_known_macs[slot], acc);
+                acc->have_value = false;
+                acc->seen_count = 0;
+            }
+        }
+    }
+    unlock();
+}
+
 static void stats_agg_update_locked(const uint8_t mac[6], uint8_t kind, uint8_t chan_type,
                                      uint32_t unix_time, float value)
 {
     if (chan_type >= STATS_AGG_MAX_CHAN_TYPES) return;
+    if (!s_agg_accum) {
+        s_agg_accum = heap_caps_calloc(1, AGG_ACCUM_BYTES, MALLOC_CAP_SPIRAM);
+        if (!s_agg_accum) {
+            ESP_LOGE(TAG, "Aggregate accumulator alloc failed (%u bytes)", (unsigned)AGG_ACCUM_BYTES);
+            return;
+        }
+    }
     int mac_slot = agg_mac_slot(mac, unix_time);
     s_agg_slot_kind[mac_slot] = kind;
     if (unix_time > s_agg_slot_last_unix[mac_slot]) s_agg_slot_last_unix[mac_slot] = unix_time;
@@ -690,7 +724,7 @@ void stats_store_delete_all(void)
     }
     s_total_raw = 0;
     /* 채워지던 버킷도 버림 — 지운 뒤에 옛 구간 버킷이 새로 써지지 않게 */
-    memset(s_agg_accum, 0, sizeof(s_agg_accum));
+    if (s_agg_accum) memset(s_agg_accum, 0, AGG_ACCUM_BYTES);
     unlock();
     storage_mgr_notify_changed();
     ESP_LOGI(TAG, "All measurement files deleted");

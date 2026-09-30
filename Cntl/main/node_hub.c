@@ -230,7 +230,8 @@ static node_quota_class_t quota_class_locked(const node_hub_node_t *n)
         case SENSOR_KIND_SCD41: return NODE_QUOTA_BASIC;
         case SENSOR_KIND_MQ137:
         case SENSOR_KIND_SC05:  return NODE_QUOTA_AMMONIA;
-        case SENSOR_KIND_PT100: return NODE_QUOTA_AGAR;
+        case SENSOR_KIND_PT100:
+        case SENSOR_KIND_DS18B20: return NODE_QUOTA_AGAR;
         default:                return NODE_QUOTA_NONE;
     }
 }
