@@ -59,12 +59,18 @@ void app_main(void)
     disp_config.profile.buffer_height = 10;  /* 콘의 내부RAM 위기 대응값 그대로(같은 하드웨어) */
     lv_display_t *disp = esp_lv_adapter_register_display(&disp_config);
     assert(disp != NULL);
-    (void)touch_handle;  /* 브는 터치 조작이 필요 없음(로그만 표시) — 등록 안 함 */
+    /* 2026-10-01(사용자 지시 — 임시, 상용 브엔 화면이 없음) — 1분 동안 터치가 없으면 화면을 끄고 터치로 켜려고 터치를
+     * 등록(예전엔 로그만 표시해서 등록 안 했음). 터치 초기화가 실패했으면(NULL) 그냥 넘어감 — 화면 끄기도 안 함 */
+    if (touch_handle != NULL) {
+        esp_lv_adapter_touch_config_t touch_config = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, touch_handle);
+        if (esp_lv_adapter_register_touch(&touch_config) == NULL) ESP_LOGW(TAG, "Touch register failed - screen stays on");
+    }
 
     ESP_ERROR_CHECK(esp_lv_adapter_start());
 
     if (esp_lv_adapter_lock(-1) == ESP_OK) {
         ui_screen_init();
+        ui_screen_power_init();
         esp_lv_adapter_unlock();
     }
 

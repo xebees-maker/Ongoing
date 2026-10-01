@@ -11,6 +11,10 @@
 
 void ui_screen_init(void);
 
+/* 2026-10-01(사용자 지시 — 임시, 상용 브엔 화면이 없음) — 1분 동안 터치가 없으면 백라이트를 끄고 터치하면 켬.
+ * ui_screen_init() 뒤, LVGL 잠금 안에서 한 번 */
+void ui_screen_power_init(void);
+
 /* 무선(ESP-NOW) 쪽 로그 한 줄 추가 — 왼쪽 창 */
 void ui_screen_log_wireless(const char *fmt, ...);
 /* CAN 쪽 로그 한 줄 추가 — 오른쪽 창 */

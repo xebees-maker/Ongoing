@@ -6,6 +6,7 @@
 #include "esp_lv_adapter.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "ch422g.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -178,6 +179,71 @@ void ui_screen_init(void)
     static StaticTask_t s_mem_tcb;
     StackType_t *mem_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
     xTaskCreateStaticPinnedToCore(mem_update_task, "ui_mem", 3072 / sizeof(StackType_t), NULL, 5, mem_stack, &s_mem_tcb, 0);
+}
+
+/* ════════════════════════════════════════════════════════════
+ * 2026-10-01(사용자 지시 — 임시, 상용 브엔 화면이 없음) — 화면 끄기(콘의 화면 끄기를 줄인 것). 백라이트(CH422G IO2)만
+ * 끄고 CAN/무선/로그는 그대로. 1분 고정, 터치할 때마다 타이머를 다시 시작(이벤트 방식), 꺼진 동안 터치하면 켬.
+ * 브 화면엔 누를 것이 없어서 콘처럼 깨운 첫 터치를 삼키는 막은 두지 않음. CH422G는 부팅 뒤 이것(LVGL 태스크)만 써서 잠금 불필요
+ * ════════════════════════════════════════════════════════════ */
+#define SCREEN_OFF_MS 60000
+static bool        s_screen_off = false;
+static lv_timer_t *s_screen_off_timer = NULL;
+
+static void screen_backlight(bool on)
+{
+    esp_err_t err = ch422g_set_io(CH422G_IO_BACKLIGHT, on);
+    if (err != ESP_OK) ESP_LOGW(TAG, "Backlight %s failed: %s", on ? "on" : "off", esp_err_to_name(err));
+}
+
+static void cb_screen_auto_off(lv_timer_t *t)
+{
+    (void)t;
+    if (s_screen_off) return;
+    s_screen_off = true;
+    screen_backlight(false);
+    lv_timer_pause(s_screen_off_timer);
+    ESP_LOGI(TAG, "Screen off");
+}
+
+static void screen_touched(void)
+{
+    if (s_screen_off) {
+        screen_backlight(true);
+        s_screen_off = false;
+        ESP_LOGI(TAG, "Screen on");
+    }
+    lv_timer_reset(s_screen_off_timer);
+    lv_timer_resume(s_screen_off_timer);
+}
+
+/* 터치 입력 읽기 함수를 감쌈 — 원래 읽기를 그대로 부르고, 눌림이 시작되는 순간마다 screen_touched().
+ * indev의 LV_EVENT_PRESSED는 터치한 자리의 객체가 누를 수 있고 DISABLED가 아닐 때만 오는데(lv_indev.c), 브 화면의
+ * 대부분은 DISABLED 로그 상자라 그 이벤트로는 못 잡음(2026-10-01 실기: 터치해도 안 켜짐) */
+static lv_indev_read_cb_t s_orig_touch_read = NULL;
+static bool s_touch_was_pressed = false;
+
+static void touch_read_wrap(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    s_orig_touch_read(indev, data);
+    bool pressed = (data->state == LV_INDEV_STATE_PRESSED);
+    if (pressed && !s_touch_was_pressed) screen_touched();
+    s_touch_was_pressed = pressed;
+}
+
+void ui_screen_power_init(void)
+{
+    lv_indev_t *touch = NULL;
+    for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) { touch = indev; break; }
+    }
+    if (!touch || !lv_indev_get_read_cb(touch)) {  /* 터치가 없으면 다시 켤 방법이 없으니 끄지 않음 */
+        ESP_LOGW(TAG, "No touch input - screen auto-off disabled");
+        return;
+    }
+    s_screen_off_timer = lv_timer_create(cb_screen_auto_off, SCREEN_OFF_MS, NULL);
+    s_orig_touch_read = lv_indev_get_read_cb(touch);
+    lv_indev_set_read_cb(touch, touch_read_wrap);
 }
 
 static void log_ui_task(void *arg)
