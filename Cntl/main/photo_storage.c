@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -32,17 +33,31 @@ static const char *TAG = "PHOTO";
 /* ---- RAM 상태(2026-09-26, storage_mgr.h 참고) — 사용량 합계와 카메라별 다음 순번.
  * 예전엔 사용량을 매번 폴더 전체 스캔으로 구했고(LVGL 태스크에서 약 765ms), 저장할 때마다
  * next_seq_in_dir()로 카메라 폴더를 스캔했음. 이제 재스캔 때 한 번만 훑고 이후엔 여기서 관리 */
-#define PHOTO_SEQ_CACHE_CAP 8  /* NODE_HUB_MAX_NODES와 같은 값(이 파일은 저수준이라 헤더 의존 안 함) */
+/* 2026-10-01(할 일 H — 사진 목록 폴더 스캔을 LVGL 태스크 밖으로) — 카메라별 사진 색인(순번 오름차순). 예전엔 카메라
+ * 팝업이 열리거나 갱신될 때마다 LVGL 태스크가 그 카메라 폴더를 통째로 훑었음(get_count 1번 + read_page 2번 + 정렬).
+ * 이제 재스캔(마운트/재연결/포맷 직후, 파일처리 태스크) 때 한 번 만들고, 저장/삭제/정리 때 더하고 뺌 — 화면은 RAM만
+ * 읽음(stats_store의 RAM 색인과 같은 방식). 예전 "카메라별 다음 순번 캐시"도 여기로 합침. 전부 PSRAM */
+#define PHOTO_IDX_CAM_CAP 16  /* 사진 폴더가 있는 카메라 수 상한(지금까지 2대) */
 typedef struct {
-    uint8_t  mac[6];
-    uint32_t next_seq;
-    bool     used;
-} seq_cache_t;
+    uint32_t seq;
+    uint32_t size;
+    uint32_t mtime;
+    uint8_t  kind;
+} photo_idx_entry_t;
+
+typedef struct {
+    bool               used;
+    uint8_t            mac[6];
+    uint32_t           next_seq;
+    photo_idx_entry_t *items;   /* 순번 오름차순 */
+    uint32_t           count;
+    uint32_t           cap;
+} photo_idx_cam_t;
 
 static SemaphoreHandle_t s_mutex = NULL;
 static portMUX_TYPE s_mutex_init_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint64_t s_used_bytes = 0;
-static seq_cache_t s_seq_cache[PHOTO_SEQ_CACHE_CAP];
+static photo_idx_cam_t *s_cams = NULL;  /* PHOTO_IDX_CAM_CAP개, 처음 쓸 때 PSRAM 할당 */
 
 static void lock(void)
 {
@@ -154,25 +169,95 @@ static uint32_t next_seq_in_dir(const char *dir_path)
     return max_seq_plus_one;
 }
 
-/* 호출부가 lock() 잡은 상태 — 이 카메라의 다음 순번을 캐시에서 꺼내고 1 올림. 캐시에 없으면
- * (재스캔 이후 처음 보는 카메라) 그 폴더를 한 번만 스캔해서 채움 */
+/* ---- 색인(호출부가 lock() 잡은 상태) ---- */
+
+/* 이 카메라의 색인을 찾음. create면 없을 때 새로 만들고 다음 순번은 dir_path 폴더를 한 번 읽어 정함(재스캔이 끝나기 전에
+ * 사진이 와도 기존 파일을 덮어쓰지 않게 — 예전 순번 캐시와 같은 처리). 꽉 찼거나 할당 실패면 NULL */
+static photo_idx_cam_t *cam_find_locked(const uint8_t mac[6], bool create, const char *dir_path)
+{
+    if (!s_cams) {
+        if (!create) return NULL;
+        s_cams = heap_caps_calloc(PHOTO_IDX_CAM_CAP, sizeof(photo_idx_cam_t), MALLOC_CAP_SPIRAM);
+        if (!s_cams) { ESP_LOGE(TAG, "Photo index alloc failed"); return NULL; }
+    }
+    int free_slot = -1;
+    for (int i = 0; i < PHOTO_IDX_CAM_CAP; i++) {
+        if (s_cams[i].used && memcmp(s_cams[i].mac, mac, 6) == 0) return &s_cams[i];
+        if (!s_cams[i].used && free_slot < 0) free_slot = i;
+    }
+    if (!create) return NULL;
+    if (free_slot < 0) { ESP_LOGW(TAG, "Photo index full (%d cameras)", PHOTO_IDX_CAM_CAP); return NULL; }
+    photo_idx_cam_t *c = &s_cams[free_slot];
+    memset(c, 0, sizeof(*c));
+    c->used = true;
+    memcpy(c->mac, mac, 6);
+    c->next_seq = dir_path ? next_seq_in_dir(dir_path) : 0;
+    return c;
+}
+
+/* 맨 뒤에 붙임(순서 신경 안 씀 — 재스캔은 다 넣고 cam_sort_locked로 한 번에 정렬) */
+static bool cam_push_locked(photo_idx_cam_t *c, const photo_idx_entry_t *e)
+{
+    if (c->count == c->cap) {
+        uint32_t ncap = c->cap ? c->cap * 2 : 64;
+        photo_idx_entry_t *n = heap_caps_realloc(c->items, (size_t)ncap * sizeof(*n), MALLOC_CAP_SPIRAM);
+        if (!n) { ESP_LOGE(TAG, "Photo index grow failed (%u items)", (unsigned)ncap); return false; }
+        c->items = n;
+        c->cap = ncap;
+    }
+    c->items[c->count++] = *e;
+    return true;
+}
+
+static int cmp_entry_seq_asc(const void *a, const void *b)
+{
+    uint32_t sa = ((const photo_idx_entry_t *)a)->seq, sb = ((const photo_idx_entry_t *)b)->seq;
+    return (sa > sb) - (sa < sb);
+}
+
+static void cam_sort_locked(photo_idx_cam_t *c)
+{
+    if (c->count > 1) qsort(c->items, c->count, sizeof(c->items[0]), cmp_entry_seq_asc);
+}
+
+/* 순번 오름차순을 지키며 추가(저장할 때 — 순번이 늘어나므로 보통 맨 뒤) */
+static bool cam_add_locked(photo_idx_cam_t *c, const photo_idx_entry_t *e)
+{
+    if (!cam_push_locked(c, e)) return false;
+    uint32_t pos = c->count - 1;
+    while (pos > 0 && c->items[pos - 1].seq > e->seq) {
+        c->items[pos] = c->items[pos - 1];
+        pos--;
+    }
+    c->items[pos] = *e;
+    return true;
+}
+
+static void cam_remove_locked(photo_idx_cam_t *c, uint8_t kind, uint32_t seq)
+{
+    for (uint32_t i = 0; i < c->count; i++) {
+        if (c->items[i].seq == seq && c->items[i].kind == kind) {
+            memmove(&c->items[i], &c->items[i + 1], (size_t)(c->count - i - 1) * sizeof(c->items[0]));
+            c->count--;
+            return;
+        }
+    }
+}
+
+static void index_remove(const uint8_t mac[6], uint8_t kind, uint32_t seq)
+{
+    lock();
+    photo_idx_cam_t *c = cam_find_locked(mac, false, NULL);
+    if (c) cam_remove_locked(c, kind, seq);
+    unlock();
+}
+
+/* 이 카메라의 다음 순번을 꺼내고 1 올림 */
 static uint32_t take_next_seq_locked(const uint8_t mac[6], const char *dir_path)
 {
-    int free_slot = -1;
-    for (int i = 0; i < PHOTO_SEQ_CACHE_CAP; i++) {
-        if (s_seq_cache[i].used && memcmp(s_seq_cache[i].mac, mac, 6) == 0) {
-            return s_seq_cache[i].next_seq++;
-        }
-        if (!s_seq_cache[i].used && free_slot < 0) free_slot = i;
-    }
-    uint32_t seq = next_seq_in_dir(dir_path);
-    if (free_slot >= 0) {
-        memcpy(s_seq_cache[free_slot].mac, mac, 6);
-        s_seq_cache[free_slot].next_seq = seq + 1;
-        s_seq_cache[free_slot].used = true;
-    }
-    /* 캐시가 꽉 찼으면(카메라 9대 이상 — 실제로는 안 옴) 캐시 없이 매번 스캔으로 동작 */
-    return seq;
+    photo_idx_cam_t *c = cam_find_locked(mac, true, dir_path);
+    if (!c) return next_seq_in_dir(dir_path);  /* 색인 꽉 참(실제로는 안 옴) — 예전처럼 매번 폴더에서 */
+    return c->next_seq++;
 }
 
 /* 2026-09-26(설계 §4 SR 수신 — 콘은 받는 대로 이어 씀) — 한 장을 여러 번에 나눠 쓰는 저장기.
@@ -183,6 +268,8 @@ struct photo_storage_writer {
     FILE    *fp;
     size_t   written;
     uint32_t seq;
+    uint8_t  mac[6];   /* 2026-10-01 — 저장이 끝나면 색인에 넣으려고 */
+    uint8_t  kind;
     bool     failed;
     char     file_path[96];
     char     tmp_path[104];
@@ -242,6 +329,8 @@ photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
     lock();
     w->seq = take_next_seq_locked(mac, dir_path);
     unlock();
+    memcpy(w->mac, mac, 6);
+    w->kind = kind;
     snprintf(w->file_path, sizeof(w->file_path), "%s/%c%0*u.jpg", dir_path, (char)kind, PHOTO_SEQ_DIGITS, (unsigned)w->seq);
     snprintf(w->tmp_path, sizeof(w->tmp_path), "%s" PHOTO_TMP_SUFFIX, w->file_path);
     wlock();
@@ -304,6 +393,14 @@ bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
         return false;
     }
     wunlock();
+    lock();
+    photo_idx_cam_t *c = cam_find_locked(w->mac, true, NULL);  /* begin에서 이미 만들어져 있음 */
+    if (c) {
+        photo_idx_entry_t e = { .seq = w->seq, .size = (uint32_t)w->written, .mtime = (uint32_t)time(NULL), .kind = w->kind };
+        cam_add_locked(c, &e);
+        if (c->next_seq <= w->seq) c->next_seq = w->seq + 1;  /* 저장 도중 재스캔으로 색인이 새로 만들어졌을 때 대비 */
+    }
+    unlock();
     used_add((int64_t)w->written);
     storage_mgr_notify_changed();
     if (out_seq) *out_seq = w->seq;
@@ -396,7 +493,10 @@ void photo_storage_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
     /* 스캔 동안 저장(카메라 사진 도착)이 끼어들어 이중으로 세지 않게 전체를 잠금 —
      * 마운트/재연결/포맷 직후에만 도는 일이라 저장이 잠깐 기다리는 건 허용 */
     lock();
-    memset(s_seq_cache, 0, sizeof(s_seq_cache));
+    if (s_cams) {  /* 색인을 처음부터 다시 만듦(항목 배열은 재사용하지 않고 비움) */
+        for (int i = 0; i < PHOTO_IDX_CAM_CAP; i++) heap_caps_free(s_cams[i].items);
+        memset(s_cams, 0, PHOTO_IDX_CAM_CAP * sizeof(photo_idx_cam_t));
+    }
 
     char photos_root[32];
     snprintf(photos_root, sizeof(photos_root), "%s/photos", SD_STORAGE_MOUNT_POINT);
@@ -416,6 +516,7 @@ void photo_storage_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
             camera_dir_path(cam_mac, cam_dir, sizeof(cam_dir));
             DIR *dir = opendir(cam_dir);
             if (!dir) continue;
+            photo_idx_cam_t *cam = cam_find_locked(cam_mac, true, NULL);  /* 사진이 없는 폴더도 목록엔 나옴(예전과 같음) */
 
             uint32_t max_seq_plus_one = 0;
             struct dirent *ent;
@@ -444,16 +545,15 @@ void photo_storage_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
                 }
                 total += (uint64_t)st.st_size;
                 if (seq + 1 > max_seq_plus_one) max_seq_plus_one = seq + 1;
+                if (cam) {
+                    photo_idx_entry_t e = { .seq = seq, .size = (uint32_t)st.st_size, .mtime = (uint32_t)st.st_mtime, .kind = kind };
+                    cam_push_locked(cam, &e);
+                }
             }
             closedir(dir);
-
-            for (int i = 0; i < PHOTO_SEQ_CACHE_CAP; i++) {
-                if (!s_seq_cache[i].used) {
-                    memcpy(s_seq_cache[i].mac, cam_mac, 6);
-                    s_seq_cache[i].next_seq = max_seq_plus_one;
-                    s_seq_cache[i].used = true;
-                    break;
-                }
+            if (cam) {
+                cam_sort_locked(cam);
+                cam->next_seq = max_seq_plus_one;
             }
         }
         closedir(root);
@@ -546,6 +646,7 @@ uint32_t photo_storage_trim_to(uint64_t target_bytes)
                 continue;
             }
             used_add(-(int64_t)s_cands[i].size);
+            index_remove(s_cands[i].mac, s_cands[i].kind, s_cands[i].seq);
             deleted++;
             progress = true;
         }
@@ -555,86 +656,37 @@ uint32_t photo_storage_trim_to(uint64_t target_bytes)
     return deleted;
 }
 
+/* 2026-10-01(할 일 H) — 아래 세 함수는 화면(LVGL 태스크)이 부르므로 폴더를 읽지 않고 색인만 봄 */
 uint32_t photo_storage_get_count(const uint8_t mac[6])
 {
-    char dir_path[64];
-    camera_dir_path(mac, dir_path, sizeof(dir_path));
-    DIR *dir = opendir(dir_path);
-    if (!dir) return 0;
-
-    uint32_t count = 0;
-    struct dirent *ent;
-    uint8_t kind; uint32_t seq;
-    while ((ent = readdir(dir)) != NULL) {
-        if (parse_fname(ent->d_name, &kind, &seq)) count++;
-    }
-    closedir(dir);
+    if (!sd_storage_is_mounted()) return 0;  /* 예전(폴더 열기 실패 = 0)과 같게 */
+    lock();
+    photo_idx_cam_t *c = cam_find_locked(mac, false, NULL);
+    uint32_t count = c ? c->count : 0;
+    unlock();
     return count;
-}
-
-/* seq 내림차순 정렬용(qsort) — 최신(seq 큰 것)이 앞 */
-static int cmp_seq_desc(const void *a, const void *b)
-{
-    uint32_t sa = ((const uint32_t *)a)[0];
-    uint32_t sb = ((const uint32_t *)b)[0];
-    if (sa < sb) return 1;
-    if (sa > sb) return -1;
-    return 0;
 }
 
 uint32_t photo_storage_read_page(const uint8_t mac[6], uint32_t page_index, uint32_t page_size,
                                   photo_storage_item_t *out, uint32_t out_cap)
 {
-    char dir_path[64];
-    camera_dir_path(mac, dir_path, sizeof(dir_path));
-    DIR *dir = opendir(dir_path);
-    if (!dir) return 0;
-
-    /* 1차: 전체 개수 세기(스크래치 배열 크기 결정용) */
-    uint32_t total = 0;
-    struct dirent *ent;
-    uint8_t kind; uint32_t seq;
-    while ((ent = readdir(dir)) != NULL) {
-        if (parse_fname(ent->d_name, &kind, &seq)) total++;
-    }
-    if (total == 0) { closedir(dir); return 0; }
-
-    /* {seq, kind} 쌍을 uint32_t 2개로 — seq가 정렬 키, kind는 나란히 들고만 감(인코딩 아님,
-     * 정렬 후 짝을 잃지 않기 위한 내부 스크래치 구조일 뿐) */
-    uint32_t *scratch = heap_caps_malloc((size_t)total * 2 * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
-    if (!scratch) { closedir(dir); ESP_LOGW(TAG, "read_page: scratch alloc failed (total=%u)", (unsigned)total); return 0; }
-
-    rewinddir(dir);
-    uint32_t filled = 0;
-    while ((ent = readdir(dir)) != NULL && filled < total) {
-        if (!parse_fname(ent->d_name, &kind, &seq)) continue;
-        scratch[filled * 2 + 0] = seq;
-        scratch[filled * 2 + 1] = (uint32_t)kind;
-        filled++;
-    }
-    closedir(dir);
-
-    qsort(scratch, filled, 2 * sizeof(uint32_t), cmp_seq_desc);
-
-    uint64_t start = (uint64_t)page_index * page_size;
     uint32_t got = 0;
-    for (uint64_t i = start; i < filled && got < page_size && got < out_cap; i++) {
-        uint32_t item_seq  = scratch[i * 2 + 0];
-        uint8_t  item_kind = (uint8_t)scratch[i * 2 + 1];
-
-        char file_path[96];
-        file_path_for(mac, item_kind, item_seq, file_path, sizeof(file_path));
-        struct stat st;
-        if (stat(file_path, &st) != 0) continue;  /* 스캔 이후 삭제됐을 수도 있음(드묾) — 건너뜀 */
-
-        out[got].kind = item_kind;
-        out[got].seq = item_seq;
-        out[got].mtime = st.st_mtime;
-        out[got].file_size = (size_t)st.st_size;
-        got++;
+    if (!sd_storage_is_mounted()) return 0;
+    lock();
+    photo_idx_cam_t *c = cam_find_locked(mac, false, NULL);
+    if (c) {
+        /* 색인은 순번 오름차순 — 최신(순번 큰 것)부터 page_index * page_size개를 건너뜀 */
+        uint64_t start = (uint64_t)page_index * page_size;
+        for (uint64_t k = start; k < c->count && got < page_size && got < out_cap; k++) {
+            const photo_idx_entry_t *e = &c->items[c->count - 1 - k];
+            out[got].kind = e->kind;
+            out[got].seq = e->seq;
+            out[got].mtime = (time_t)e->mtime;
+            out[got].file_size = e->size;
+            got++;
+        }
     }
-
-    heap_caps_free(scratch);
+    unlock();
     return got;
 }
 
@@ -682,6 +734,7 @@ bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq)
         return false;
     }
     used_add(-size);  /* 삭제가 성공했을 때만 뺌 */
+    index_remove(mac, kind, seq);
     storage_mgr_notify_changed();
     ESP_LOGI(TAG, "delete: %s", file_path);
     return true;
@@ -711,6 +764,10 @@ uint32_t photo_storage_delete_all(const uint8_t mac[6])
     }
     closedir(dir);
     used_add(-freed);
+    lock();
+    photo_idx_cam_t *c = cam_find_locked(mac, false, NULL);
+    if (c) c->count = 0;  /* 순번(next_seq)은 그대로 — 지운 번호를 다시 쓰지 않음 */
+    unlock();
     storage_mgr_notify_changed();
     ESP_LOGI(TAG, "delete_all: %u deleted (%s)", (unsigned)deleted, dir_path);
     return deleted;
@@ -720,17 +777,11 @@ uint32_t photo_storage_list_camera_macs(uint8_t out_macs[][6], uint32_t out_cap)
 {
     if (!sd_storage_is_mounted()) return 0;
 
-    char photos_root[32];
-    snprintf(photos_root, sizeof(photos_root), "%s/photos", SD_STORAGE_MOUNT_POINT);
-    DIR *root = opendir(photos_root);
-    if (!root) return 0;
-
     uint32_t count = 0;
-    struct dirent *ent;
-    while (count < out_cap && (ent = readdir(root)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
-        if (hex_to_mac(ent->d_name, out_macs[count])) count++;
+    lock();
+    for (int i = 0; s_cams && i < PHOTO_IDX_CAM_CAP && count < out_cap; i++) {
+        if (s_cams[i].used) memcpy(out_macs[count++], s_cams[i].mac, 6);
     }
-    closedir(root);
+    unlock();
     return count;
 }

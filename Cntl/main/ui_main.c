@@ -1288,36 +1288,16 @@ static lv_obj_t *create_modal_btn_row(lv_obj_t *box)
 static ui_str_id_t err_code_to_desc_str(int code)
 {
     switch (code) {
-        case UI_ERR_CACHE_TOO_BIG:         return STR_ERR_DESC_CACHE_TOO_BIG;
-        case UI_ERR_CACHE_NO_BUF:          return STR_ERR_DESC_CACHE_NO_BUF;
         case UI_ERR_RECV_BUF_ALLOC:        return STR_ERR_DESC_RECV_BUF_ALLOC;
-        case UI_ERR_CACHE_SLOT_ALLOC:      return STR_ERR_DESC_CACHE_SLOT_ALLOC;
         case UI_ERR_PANEL_BUF_ALLOC:       return STR_ERR_DESC_PANEL_BUF_ALLOC;
         case UI_ERR_STA_CRED_ALLOC:        return STR_ERR_DESC_STA_CRED_ALLOC;
-        case UI_ERR_SEND_PHOTO_REQ:        return STR_ERR_DESC_SEND_PHOTO_REQ;
-        case UI_ERR_SEND_CAPTURE_REQ:      return STR_ERR_DESC_SEND_CAPTURE_REQ;
-        case UI_ERR_SEND_LIST_REQ:         return STR_ERR_DESC_SEND_LIST_REQ;
-        case UI_ERR_SEND_DELETE_REQ:       return STR_ERR_DESC_SEND_DELETE_REQ;
-        case UI_ERR_SEND_DELETE_ALL_REQ:   return STR_ERR_DESC_SEND_DELETE_ALL_REQ;
-        case UI_ERR_REQUEST_BUSY:          return STR_ERR_DESC_REQUEST_BUSY;
         case UI_ERR_NOT_PAIRED:            return STR_ERR_DESC_NOT_PAIRED;
         case UI_ERR_TX_QUEUE_FULL:         return STR_ERR_DESC_TX_QUEUE_FULL;
-        case UI_ERR_META_TOO_BIG:          return STR_ERR_DESC_META_TOO_BIG;
         case UI_ERR_CHUNK_MISSING:         return STR_ERR_DESC_CHUNK_MISSING;
         case UI_ERR_CRC_MISMATCH:          return STR_ERR_DESC_CRC_MISMATCH;
         case UI_ERR_DECODE_FAIL:           return STR_ERR_DESC_DECODE_FAIL;
-        case UI_ERR_LIST_COUNT_MISMATCH:   return STR_ERR_DESC_LIST_COUNT_MISMATCH;
-        case UI_ERR_FETCH_NORESPONSE:      return STR_ERR_DESC_FETCH_NORESPONSE;
-        case UI_ERR_LIST_NORESPONSE:       return STR_ERR_DESC_LIST_NORESPONSE;
-        case UI_ERR_PHOTO_SELECTION_STALE: return STR_ERR_DESC_PHOTO_SELECTION_STALE;
-        case UI_ERR_DELETE_FAILED:         return STR_ERR_DESC_DELETE_FAILED;
-        case UI_ERR_DELETE_ALL_FAILED:     return STR_ERR_DESC_DELETE_ALL_FAILED;
         case UI_ERR_CAPTURE_FAILED:        return STR_ERR_DESC_CAPTURE_FAILED;
         case UI_ERR_CAPTURE_NORESPONSE:    return STR_ERR_DESC_CAPTURE_NORESPONSE;
-        case UI_ERR_CONFIG_NORESPONSE:     return STR_ERR_DESC_CONFIG_NORESPONSE;
-        case UI_ERR_DELETE_ALL_NORESPONSE: return STR_ERR_DESC_DELETE_ALL_NORESPONSE;
-        case UI_ERR_DELETE_ALL_STOPPED:    return STR_ERR_DESC_DELETE_ALL_STOPPED;
-        case UI_ERR_SET_TIME_NORESPONSE:   return STR_ERR_DESC_SET_TIME_NORESPONSE;
         case UI_ERR_FONT_FILE_MISSING:     return STR_ERR_DESC_FONT_FILE_MISSING;
         case UI_ERR_FONT_BUF_ALLOC:        return STR_ERR_DESC_FONT_BUF_ALLOC;
         case UI_ERR_FONT_FILE_OPEN:        return STR_ERR_DESC_FONT_FILE_OPEN;
@@ -1327,6 +1307,8 @@ static ui_str_id_t err_code_to_desc_str(int code)
         case UI_ERR_CONFIG_FILE_MISMATCH:  return STR_ERR_DESC_CONFIG_FILE_MISMATCH;
         case UI_ERR_SD_MOUNT_FAILED:       return STR_ERR_DESC_SD_MOUNT_FAILED;
         case UI_ERR_SD_IO_FAIL:            return STR_ERR_DESC_SD_IO_FAIL;
+        case UI_ERR_TOUCH_INIT_FAIL:       return STR_ERR_DESC_TOUCH_INIT_FAIL;
+        case UI_ERR_BRIDGE_NORESPONSE:     return STR_ERR_DESC_BRIDGE_NORESPONSE;
         default:                           return STR_ERR_DESC_UNKNOWN;
     }
 }
@@ -1637,6 +1619,12 @@ static void set_storage_label_text(const char *detail, bool is_error)
     }
 }
 
+/* 2026-10-01(할 일 T) — storage_mgr의 영역 표와 같은 순서의 화면 이름. 영역을 더하면 여기도 한 줄 */
+static const ui_str_id_t s_storage_area_name[STORAGE_AREA_COUNT] = {
+    [STORAGE_AREA_PICTURE] = STR_LABEL_PICTURE,
+    [STORAGE_AREA_MEASURE] = STR_LABEL_MEASURE_SHORT,
+};
+
 static void refresh_storage_status_label(void)
 {
     if (!s_storage_status_label) return;
@@ -1664,38 +1652,29 @@ static void refresh_storage_status_label(void)
         lv_label_set_text(s_storage_status_label, "");  /* 재스캔 중(부팅/재연결 직후 잠깐) */
         return;
     }
-    uint64_t sd_total = snap.sd_total, sd_free = snap.sd_free;
-    uint64_t picture_budget = sd_total * 9 / 10;
-    uint64_t measure_budget = sd_total / 10;
-    uint64_t picture_used = snap.pic_used;
-    uint64_t measure_used = snap.stats_used;
     /* 2026-09-10(임시 진단 — "지금 1주일치가 아니지, 몇시간 정도일 뿐이야" 정확한
      * 수치 확인용, 확인 후 제거) */
     {
-        uint64_t recs = measure_used / sizeof(stats_record_t);
+        uint64_t recs = snap.area[STORAGE_AREA_MEASURE].used / sizeof(stats_record_t);
         double hours = (double)recs / 4.0 * 30.0 / 3600.0;
         ESP_LOGD(TAG, "MEMDIAG stats_store: used=%llu bytes records=%llu (~%.2fh, assuming 30s/4ch)",
-                 (unsigned long long)measure_used, (unsigned long long)recs, hours);
+                 (unsigned long long)snap.area[STORAGE_AREA_MEASURE].used, (unsigned long long)recs, hours);
     }
-    uint64_t picture_used_clamped = (picture_used > picture_budget) ? picture_budget : picture_used;
-    uint64_t measure_used_clamped = (measure_used > measure_budget) ? measure_budget : measure_used;
-
-    uint32_t picture_pct = (uint32_t)(picture_used * 100 / picture_budget);
-    uint32_t measure_pct = (uint32_t)(measure_used * 100 / measure_budget);
-    uint32_t total_pct   = (uint32_t)((sd_total - sd_free) * 100 / sd_total);
-    uint32_t picture_remain_mb = (uint32_t)((picture_budget - picture_used_clamped) / (1024 * 1024));
-    uint32_t measure_remain_mb = (uint32_t)((measure_budget - measure_used_clamped) / (1024 * 1024));
-    uint32_t total_remain_mb   = (uint32_t)(sd_free / (1024 * 1024));
 
     /* 2026-09-11(사용자 지시 — 제목을 "SD:"로 통일) — 예전엔 이 정상상태 문구만 자체
      * 제목("Storage")을 갖고 있었음(STR_LABEL_STORAGE). 이제 set_storage_label_text()가
-     * 항상 "SD:"를 붙이므로, 여기선 그 뒤에 올 상세 내용만 만듦 */
-    char detail[128];
-    snprintf(detail, sizeof(detail), "%s %s %u(%u) / %s %u(%u) / %s %u(%u)",
-        ui_str(STR_LABEL_STORAGE_LEGEND),
-        ui_str(STR_LABEL_PICTURE), (unsigned)picture_pct, (unsigned)picture_remain_mb,
-        ui_str(STR_LABEL_MEASURE_SHORT), (unsigned)measure_pct, (unsigned)measure_remain_mb,
-        ui_str(STR_LABEL_TOTAL), (unsigned)total_pct, (unsigned)total_remain_mb);
+     * 항상 "SD:"를 붙이므로, 여기선 그 뒤에 올 상세 내용만 만듦.
+     * 2026-10-01(사용자 설계 — 할 일 T) — 영역 표(storage_mgr)를 따라 "이름 사용%(여유MB)"를 이어 붙이고 끝에 Total.
+     * 각 %는 자기 예산 대비, Total은 영역들의 합(영역 밖 파일은 안 셈). 여유는 실제 SD 빈 공간을 넘지 않음 */
+    char detail[160];
+    int len = snprintf(detail, sizeof(detail), "%s", ui_str(STR_LABEL_STORAGE_LEGEND));
+    for (int a = 0; a <= STORAGE_AREA_COUNT && len < (int)sizeof(detail); a++) {
+        const storage_area_usage_t *u = (a < STORAGE_AREA_COUNT) ? &snap.area[a] : &snap.total;
+        ui_str_id_t name = (a < STORAGE_AREA_COUNT) ? s_storage_area_name[a] : STR_LABEL_TOTAL;
+        unsigned pct = u->budget ? (unsigned)(u->used * 100 / u->budget) : 0;
+        len += snprintf(detail + len, sizeof(detail) - len, "%s%s %u(%u)", a == 0 ? " " : " / ", ui_str(name), pct,
+                        (unsigned)(u->remain / (1024 * 1024)));
+    }
     set_storage_label_text(detail, false);
 }
 
@@ -2352,8 +2331,10 @@ static void update_list_info_label(void)
     char info_buf[32];
     storage_mgr_snapshot_t snap;
     storage_mgr_get_snapshot(&snap);  /* 2026-09-26 — SD 직접 조회 대신 RAM 값 */
-    if (sd_storage_is_mounted() && snap.valid && snap.sd_total > 0) {
-        unsigned pct = (unsigned)((snap.sd_total - snap.sd_free) * 100 / snap.sd_total);
+    if (sd_storage_is_mounted() && snap.valid && snap.area[STORAGE_AREA_PICTURE].budget > 0) {
+        /* 2026-10-01(할 일 T) — 사진 영역 사용률(요약의 Picture와 같은 값). 예전엔 SD 전체 사용률이었음 */
+        const storage_area_usage_t *pic = &snap.area[STORAGE_AREA_PICTURE];
+        unsigned pct = (unsigned)(pic->used * 100 / pic->budget);
         snprintf(info_buf, sizeof(info_buf), en ? "%u Pics  %u%%" : "%u개  %u%%", (unsigned)total_count, pct);
     } else {
         snprintf(info_buf, sizeof(info_buf), en ? "%u Pics" : "%u개", (unsigned)total_count);
@@ -4815,10 +4796,11 @@ static void refresh_dashboard(lv_timer_t *t)
     /* 2026-09-26 — 정리는 파일처리 태스크(storage_mgr)에서 일어나고, 안내 팝업만 여기(LVGL
      * 태스크)서 띄움(test-and-clear) */
     {
-        uint32_t pic_deleted = 0, stats_deleted = 0;
-        if (storage_mgr_take_cleanup(&pic_deleted, &stats_deleted)) {
-            if (stats_deleted > 0) show_storage_cleanup_popup(ui_str(STR_LABEL_MEASURE_SHORT), stats_deleted);
-            if (pic_deleted > 0) show_storage_cleanup_popup(ui_str(STR_LABEL_PICTURE), pic_deleted);
+        uint32_t deleted[STORAGE_AREA_COUNT] = { 0 };
+        if (storage_mgr_take_cleanup(deleted)) {
+            for (int a = 0; a < STORAGE_AREA_COUNT; a++) {
+                if (deleted[a] > 0) show_storage_cleanup_popup(ui_str(s_storage_area_name[a]), deleted[a]);
+            }
         }
     }
     /* 2026-09-07(임시 진단 — 내부RAM 서서히 감소 원인 추적) — 10초마다(이 틱이 1초 주기라
@@ -4953,9 +4935,10 @@ static void refresh_dashboard(lv_timer_t *t)
         /* 2026-09-18 — getter는 이제 미설정이어도 항상 유효한 값(디폴트)을 반환하므로,
          * "명시적으로 설정했는가"는 별도 is_set()으로 확인(interval_sec>0으로는 더 이상
          * 구분 불가 — 디폴트도 항상 0보다 큼) */
+        /* 2026-10-01(사용자 지시 — "기본값도 표시") — 예전엔 직접 설정한 센서만 표시해서, 한 번도 안 바꾼 센서(SHT45)는
+         * 측정 주기가 안 보였음. 기본값(15초)은 센스 펌웨어 기본값과 같아 실제 동작과 어긋나지 않음 */
         uint32_t interval_sec = device_config_get_sens_sample_interval_sec(s_sensor_dash_row_macs[i]);
-        bool interval_explicit = device_config_sens_sample_interval_is_set(s_sensor_dash_row_macs[i]);
-        if (interval_explicit && n > 0 && (size_t)n < sizeof(buf)) {
+        if (n > 0 && (size_t)n < sizeof(buf)) {
             n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s %us",
                           ui_str(STR_LABEL_MEASURE_TINY), (unsigned)interval_sec);
         }

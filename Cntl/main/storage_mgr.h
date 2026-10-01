@@ -22,12 +22,26 @@
 extern "C" {
 #endif
 
+/* 2026-10-01(사용자 설계 — 할 일 T) — 관리 영역(폴더). 영역별 예산 비율·사용량·정리·재스캔은 storage_mgr.c의 표 한 곳에
+ * 있음. 영역을 더하려면 여기 하나 + 그 표에 한 줄(예산 비율 합 100) + ui_main.c의 영역 이름 표에 한 줄 */
+typedef enum {
+    STORAGE_AREA_PICTURE = 0,  /* /sdcard/photos — 예산 90% */
+    STORAGE_AREA_MEASURE,      /* /sdcard/stats(원시+집계) — 예산 10% */
+    STORAGE_AREA_COUNT
+} storage_area_t;
+
+typedef struct {
+    uint64_t used;           /* 그 폴더 파일 크기 합(RAM 합계) */
+    uint64_t budget;         /* SD 전체 × 예산 비율 */
+    uint64_t remain;         /* 예산 − 사용(0 미만은 0), 실제 SD 빈 공간을 넘지 않게 자름 */
+} storage_area_usage_t;
+
 typedef struct {
     bool     valid;          /* 재스캔이 끝나 아래 값들을 믿을 수 있는지 */
     uint64_t sd_total;       /* 바이트 */
     uint64_t sd_free;        /* 바이트(FAT 빈 공간, esp_vfs_fat_info — FSINFO 캐시라 빠름) */
-    uint64_t pic_used;       /* 사진 폴더 파일 크기 합(RAM 합계) */
-    uint64_t stats_used;     /* 측정값(원시+집계) 파일 크기 합(RAM 합계) */
+    storage_area_usage_t area[STORAGE_AREA_COUNT];
+    storage_area_usage_t total;  /* 영역들의 합(SD 전체 기준 아님 — 영역 밖 파일은 안 셈). remain도 SD 빈 공간을 넘지 않음 */
     uint32_t bad_entries;    /* 마지막 재스캔에서 합계/정리 대상에서 뺀 손상 의심 항목 수 */
 } storage_mgr_snapshot_t;
 
@@ -46,7 +60,7 @@ void storage_mgr_get_snapshot(storage_mgr_snapshot_t *out);
 
 /* UI용 test-and-clear — 정리가 실제로 지운 게 있으면 true(개수 채움, 이후 0으로 리셋).
  * 정리는 파일처리 태스크에서 일어나지만 안내 팝업은 LVGL 태스크에서만 띄워야 해서 이렇게 넘김 */
-bool storage_mgr_take_cleanup(uint32_t *out_pic_deleted, uint32_t *out_stats_deleted);
+bool storage_mgr_take_cleanup(uint32_t out_deleted[STORAGE_AREA_COUNT]);
 
 #ifdef __cplusplus
 }

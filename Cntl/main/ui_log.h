@@ -25,19 +25,10 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
  * 그대로 나옴, 나중에 코드만 보고 뭔지 바로 알아볼 용도(2026-08-01, 사용자 지시 — 엄격한
  * 규칙은 없고 개수가 적어서 앞자리로만 대충 구분: 1xxx 메모리 할당, 2xxx 통신 전송,
  * 3xxx 사진 수신/표시, 4xxx CAM 응답 실패, 5xxx 폰트/시스템 초기화, 9xxx 테스트용) */
-#define UI_ERR_CACHE_TOO_BIG        1001  /* 사진이 캐시 슬롯 고정 용량보다 큼 */
-#define UI_ERR_CACHE_NO_BUF         1002  /* 캐시 슬롯 버퍼가 없음(초기 할당 실패) */
 #define UI_ERR_RECV_BUF_ALLOC       1003  /* 수신 버퍼 초기 할당 실패 */
-#define UI_ERR_CACHE_SLOT_ALLOC     1004  /* 캐시 슬롯 초기 할당 실패 */
 #define UI_ERR_PANEL_BUF_ALLOC      1005  /* 판넬 디코드 버퍼 초기 할당 실패 */
 #define UI_ERR_STA_CRED_ALLOC       1006  /* STA 자격증명 슬롯 배열 PSRAM 할당 실패 */
 
-#define UI_ERR_SEND_PHOTO_REQ       2001  /* 사진 요청(PHOTO_REQUEST) 전송 실패 */
-#define UI_ERR_SEND_CAPTURE_REQ     2002  /* 지금촬영 요청 전송 실패 */
-#define UI_ERR_SEND_LIST_REQ        2003  /* 목록 요청 전송 실패 */
-#define UI_ERR_SEND_DELETE_REQ      2004  /* 삭제 요청 전송 실패 */
-#define UI_ERR_SEND_DELETE_ALL_REQ  2005  /* 전체삭제 요청 전송 실패 */
-#define UI_ERR_REQUEST_BUSY         2006  /* 이미 수신 중이라 새 요청 무시됨 */
 #define UI_ERR_NOT_PAIRED           2007  /* 요청 시점에 이미 언페어링 상태(desync 포함) —
                                              전송 자체를 안 하고 재연결을 시도함 */
 /* 2008: 예전 UI_ERR_SLEEP_NOW_FAILED — 2026-08-25 CASK 재설계로 SLEEP_NOW_REQUEST
@@ -46,34 +37,12 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
                                              못 해보고 버려짐(2026-08-26) — 예전엔 ESP_LOGW만
                                              남기고 화면엔 안 보였음(node_request.c 참고) */
 
-#define UI_ERR_META_TOO_BIG         3001  /* CAM이 보낸 사진이 고정 수신 버퍼보다 큼 */
 #define UI_ERR_CHUNK_MISSING        3002  /* 청크 누락 — 재조립 실패 */
 #define UI_ERR_CRC_MISMATCH         3003  /* CRC 불일치 — 재조립 실패 */
 #define UI_ERR_DECODE_FAIL          3004  /* JPEG 디코드 실패(사진 표시 불가) */
-#define UI_ERR_LIST_COUNT_MISMATCH  3005  /* 목록 항목 일부 유실 — 재요청/포기 */
-#define UI_ERR_FETCH_NORESPONSE     3006  /* 사진 가져오기 요청 후 CAM 무응답(진행 정체) */
-#define UI_ERR_LIST_NORESPONSE      3007  /* 목록 갱신 요청 후 CAM 무응답(타임아웃) */
-#define UI_ERR_PHOTO_SELECTION_STALE 3008 /* 도착한 사진의 file_id가 지금 선택된 항목과 다름
-                                             — 이전에 밀려난(대체된) 요청의 뒤늦은 응답.
-                                             화면에는 안 그리고 지금 선택된 항목을 재요청함
-                                             (2026-08-05, 선택-도착 불일치 경쟁 상태 방지용
-                                             방어장치 — 정상적으론 거의 안 떠야 함, 뜨면
-                                             모달 차단이 뚫린 것이므로 실제 버그로 취급) */
 
-#define UI_ERR_DELETE_FAILED        4001  /* CAM이 삭제 실패로 응답 */
-#define UI_ERR_DELETE_ALL_FAILED    4002  /* CAM이 전체삭제 실패로 응답 */
 #define UI_ERR_CAPTURE_FAILED       4003  /* CAM이 촬영 실패로 응답 */
 #define UI_ERR_CAPTURE_NORESPONSE   4004  /* 지금촬영 요청 후 CAM 무응답 */
-#define UI_ERR_CONFIG_NORESPONSE    4005  /* 설정(CAM_CONFIG_SET) 적용 요청 후 CAM 무응답 */
-#define UI_ERR_DELETE_ALL_NORESPONSE 4006 /* 전체삭제 요청 후 CAM 접수 확인(RECEIVED) 자체가
-                                             안 옴 — 통신 끊김 또는 CAM이 요청을 못 받음
-                                             (2026-08-21) */
-#define UI_ERR_DELETE_ALL_STOPPED   4007  /* 전체삭제 접수(RECEIVED)는 확인됐지만, 개수 기준
-                                             예산 안에 완료 ACK가 안 옴 — CAM이 삭제 도중
-                                             멈췄거나(크래시/행) 통신이 끊긴 것으로 추정
-                                             (2026-08-21) */
-#define UI_ERR_SET_TIME_NORESPONSE  4008  /* SET_TIME 요청 후 CAM/Sens 무응답(2026-08-21,
-                                             raw send에서 reliable stack 전환하며 추가) */
 
 #define UI_ERR_FONT_FILE_MISSING    5001  /* 폰트 파일 없음(stat 실패) */
 #define UI_ERR_FONT_BUF_ALLOC       5002  /* 폰트 파일 로드용 PSRAM 할당 실패 */

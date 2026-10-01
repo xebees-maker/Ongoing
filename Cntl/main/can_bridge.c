@@ -563,7 +563,11 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     s_data_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA);
     s_ctrl_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL);
     /* 2026-09-26(설계 6단계) — 브 생존 확인(코어 1 — CAN 송신은 코어 1에서) */
-    xTaskCreatePinnedToCore(bridge_ping_task, "bridge_ping", 3072, NULL, 5, NULL, 1);
+    /* 2026-10-01(사용자 지시 — 메모리 검토 N) — 다른 CAN 태스크처럼 스택을 PSRAM에(예전엔 이것만 내부 RAM 3KB).
+     * XiP from PSRAM이라 플래시 쓰기 중에도 캐시가 꺼지지 않아 PSRAM 스택 제약 없음(ESP-IDF 외부 RAM 문서) */
+    static StaticTask_t s_bridge_ping_tcb;
+    StackType_t *bridge_ping_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
+    xTaskCreateStaticPinnedToCore(bridge_ping_task, "bridge_ping", 3072 / sizeof(StackType_t), NULL, 5, bridge_ping_stack, &s_bridge_ping_tcb, 1);
 
     static StaticTask_t s_can_rx_tcb, s_can_consume_tcb, s_ctrl_consume_tcb, s_can_status_tcb;
     StackType_t *can_rx_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);

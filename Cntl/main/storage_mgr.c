@@ -26,20 +26,38 @@ static const char *TAG = "SYS";
 static TaskHandle_t s_task = NULL;
 static portMUX_TYPE s_snap_lock = portMUX_INITIALIZER_UNLOCKED;
 static storage_mgr_snapshot_t s_snap;
-static uint32_t s_pending_pic_deleted = 0;
-static uint32_t s_pending_stats_deleted = 0;
+static uint32_t s_pending_deleted[STORAGE_AREA_COUNT];
+
+/* 2026-10-01(사용자 설계 — 할 일 T "관리 폴더 표") — 영역별 예산 비율과 그 영역의 사용량/정리/재스캔 함수. 예산 판단·정리·
+ * 재스캔·화면 표시가 모두 이 표를 따라 돎(예전엔 사진 9 : 측정 1이 여기와 ui_main.c에 따로 적혀 있었음). 비율 합 = 100 */
+typedef struct {
+    uint8_t  budget_pct;
+    uint64_t (*used_bytes)(void);
+    uint32_t (*trim_to)(uint64_t target_bytes);
+    void     (*rescan)(uint64_t sd_total, uint32_t *out_bad_entries);
+} area_def_t;
+
+static const area_def_t s_areas[STORAGE_AREA_COUNT] = {
+    [STORAGE_AREA_PICTURE] = { 90, photo_storage_get_used_bytes, photo_storage_trim_to, photo_storage_rescan },
+    [STORAGE_AREA_MEASURE] = { 10, stats_store_get_used_bytes,   stats_store_trim_to,   stats_store_rescan   },
+};
 
 static void publish_snapshot(bool valid, uint64_t total, uint64_t free_bytes, uint32_t bad_entries)
 {
-    uint64_t pic = photo_storage_get_used_bytes();
-    uint64_t st = stats_store_get_used_bytes();
+    storage_mgr_snapshot_t snap = { .valid = valid, .sd_total = total, .sd_free = free_bytes, .bad_entries = bad_entries };
+    for (int a = 0; a < STORAGE_AREA_COUNT; a++) {
+        storage_area_usage_t *u = &snap.area[a];
+        u->used = s_areas[a].used_bytes();
+        u->budget = total * s_areas[a].budget_pct / 100;
+        u->remain = (u->used < u->budget) ? (u->budget - u->used) : 0;
+        if (u->remain > free_bytes) u->remain = free_bytes;  /* 영역 밖 파일이 빈 공간을 먹었을 수 있음 */
+        snap.total.used += u->used;
+        snap.total.budget += u->budget;
+        snap.total.remain += u->remain;
+    }
+    if (snap.total.remain > free_bytes) snap.total.remain = free_bytes;
     taskENTER_CRITICAL(&s_snap_lock);
-    s_snap.valid = valid;
-    s_snap.sd_total = total;
-    s_snap.sd_free = free_bytes;
-    s_snap.pic_used = pic;
-    s_snap.stats_used = st;
-    s_snap.bad_entries = bad_entries;
+    s_snap = snap;
     taskEXIT_CRITICAL(&s_snap_lock);
 }
 
@@ -66,38 +84,29 @@ static void storage_task(void *arg)
         }
 
         if ((bits & EVT_RESCAN) || !indexes_ready) {
-            uint32_t pic_bad = 0, stats_bad = 0;
-            photo_storage_rescan(total, &pic_bad);
-            stats_store_rescan(total, &stats_bad);
-            bad_entries = pic_bad + stats_bad;
+            bad_entries = 0;
+            for (int a = 0; a < STORAGE_AREA_COUNT; a++) {
+                uint32_t bad = 0;
+                s_areas[a].rescan(total, &bad);
+                bad_entries += bad;
+            }
             indexes_ready = true;
             ESP_LOGI(TAG, "Rescan done: photos %lluKB, measurements %lluKB, suspect %u",
-                     (unsigned long long)(photo_storage_get_used_bytes() / 1024),
-                     (unsigned long long)(stats_store_get_used_bytes() / 1024), (unsigned)bad_entries);
+                     (unsigned long long)(s_areas[STORAGE_AREA_PICTURE].used_bytes() / 1024),
+                     (unsigned long long)(s_areas[STORAGE_AREA_MEASURE].used_bytes() / 1024), (unsigned)bad_entries);
             if (bad_entries > 0) {
                 ui_log_add_warn(UI_WARN_SD_BAD_ENTRY, "SD: %u damaged entries skipped", (unsigned)bad_entries);
             }
         }
 
-        /* 예산 판단 — 사용량이 바뀐 직후(또는 재스캔 직후)에만 여기 옴 */
-        uint64_t pic_budget = total * 9 / 10;
-        uint64_t stats_budget = total / 10;
-        uint64_t pic_used = photo_storage_get_used_bytes();
-        uint64_t stats_used = stats_store_get_used_bytes();
-
-        if (stats_budget > 0 && stats_used * 100 / stats_budget >= TRIM_START_PCT) {
-            uint32_t deleted = stats_store_trim_to(stats_budget * TRIM_TARGET_PCT / 100);
+        /* 예산 판단 — 사용량이 바뀐 직후(또는 재스캔 직후)에만 여기 옴. 영역마다 자기 예산의 90% 이상이면 80%까지 정리 */
+        for (int a = 0; a < STORAGE_AREA_COUNT; a++) {
+            uint64_t budget = total * s_areas[a].budget_pct / 100;
+            if (budget == 0 || s_areas[a].used_bytes() * 100 / budget < TRIM_START_PCT) continue;
+            uint32_t deleted = s_areas[a].trim_to(budget * TRIM_TARGET_PCT / 100);
             if (deleted > 0) {
                 taskENTER_CRITICAL(&s_snap_lock);
-                s_pending_stats_deleted += deleted;
-                taskEXIT_CRITICAL(&s_snap_lock);
-            }
-        }
-        if (pic_budget > 0 && pic_used * 100 / pic_budget >= TRIM_START_PCT) {
-            uint32_t deleted = photo_storage_trim_to(pic_budget * TRIM_TARGET_PCT / 100);
-            if (deleted > 0) {
-                taskENTER_CRITICAL(&s_snap_lock);
-                s_pending_pic_deleted += deleted;
+                s_pending_deleted[a] += deleted;
                 taskEXIT_CRITICAL(&s_snap_lock);
             }
         }
@@ -143,14 +152,15 @@ void storage_mgr_get_snapshot(storage_mgr_snapshot_t *out)
     taskEXIT_CRITICAL(&s_snap_lock);
 }
 
-bool storage_mgr_take_cleanup(uint32_t *out_pic_deleted, uint32_t *out_stats_deleted)
+bool storage_mgr_take_cleanup(uint32_t out_deleted[STORAGE_AREA_COUNT])
 {
+    bool any = false;
     taskENTER_CRITICAL(&s_snap_lock);
-    uint32_t p = s_pending_pic_deleted, s = s_pending_stats_deleted;
-    s_pending_pic_deleted = 0;
-    s_pending_stats_deleted = 0;
+    for (int a = 0; a < STORAGE_AREA_COUNT; a++) {
+        out_deleted[a] = s_pending_deleted[a];
+        s_pending_deleted[a] = 0;
+        if (out_deleted[a] > 0) any = true;
+    }
     taskEXIT_CRITICAL(&s_snap_lock);
-    if (out_pic_deleted) *out_pic_deleted = p;
-    if (out_stats_deleted) *out_stats_deleted = s;
-    return (p > 0) || (s > 0);
+    return any;
 }
