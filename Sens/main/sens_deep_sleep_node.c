@@ -347,6 +347,9 @@ static void ws2812_blink(ws2812_color_t color, uint32_t on_ms, int times)
  * 라이트슬립)가 켜져 있어서, SCD41 측정 폴링 중(vTaskDelay 사이사이) 라이트슬립에 들어갔다
  * 나왔다 하면서 I2C 상태가 깨질 가능성 — 측정 시작~완료까지는 라이트슬립 자체를 못 하게
  * 락을 잡음(이 락은 esp_deep_sleep_start()의 진짜 딥슬립과는 무관, 자동 라이트슬립만 막음) */
+/* 2026-10-01(할 일 E) — 09-27 sdkconfig를 defaults 기준으로 바꾸며 CONFIG_PM_ENABLE이 꺼졌음. 그 빌드에선 자동 라이트슬립
+ * 자체가 없어 막을 게 없고, esp_pm_lock_create()가 매번 실패해 측정마다 경고만 찍혔음 → PM이 켜진 빌드에서만 락을 씀 */
+#if CONFIG_PM_ENABLE
 static esp_pm_lock_handle_t s_no_light_sleep_lock = NULL;
 
 static void pm_lock_no_light_sleep_acquire(void)
@@ -364,6 +367,10 @@ static void pm_lock_no_light_sleep_release(void)
 {
     if (s_no_light_sleep_lock) esp_pm_lock_release(s_no_light_sleep_lock);
 }
+#else
+static void pm_lock_no_light_sleep_acquire(void) {}
+static void pm_lock_no_light_sleep_release(void) {}
+#endif
 
 #if CONFIG_SENS_SENSOR_SCD41
 /* SCD41 single-shot 판독 — 트리거 후 최대 SCD41_MEASURE_TIMEOUT_MS까지 블로킹 폴링.
