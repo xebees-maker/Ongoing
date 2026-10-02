@@ -95,7 +95,8 @@ esp_err_t ch422g_read_di(bool *out_di0, bool *out_di1);
  * @brief 절연 출력 DO0/DO1(SSR 구동용) 중 지정한 비트를 켜거나 끔 — OD 뱅크, IO뱅크와
  *        완전히 독립적이라 백라이트/SD_CS 등에 영향 없음.
  * @param bits CH422G_OD_* 비트마스크(여러 개 OR 가능)
- * @param level true=high(1, 통전), false=low(0)
+ * @param level true=High(1), false=Low(0). 주의(2026-10-02 회로도 확인): OC가 Low일 때 절연 출력 DOUT이 켜짐(통전) —
+ *              포토커플러 LED가 3V3→510R→OC 방향이라 Low가 켜짐. 부팅 기본은 전부 High(꺼짐)
  */
 esp_err_t ch422g_set_do(uint8_t bits, bool level);
 

@@ -8,16 +8,16 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
-#include "driver/gpio.h"
+#include "ch422g.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "RELAY";
 
-/* 2026-09-16 — 실제 배선 전까지의 자리표시 핀. SSR-DK25DA 제어입력(3-32VDC, 2선)을 직접
- * 구동하기엔 3.3V 로직레벨 전류가 부족할 수 있어 실제 배선 시 트랜지스터/옵토 드라이버
- * 단계가 필요할 수 있음 — 물리 배선 전에 반드시 재확인할 것(TODO, 확정 아님) */
-static const gpio_num_t s_relay_gpio[POWER_RELAY_COUNT] = { GPIO_NUM_NC, GPIO_NUM_NC };
+/* 2026-10-02(SSR 연결) — 릴레이 출력 = 보드 절연 출력 DOUT0/DOUT1(CH422G OC0/OC1 → 포토커플러 → NPN 오픈컬렉터).
+ * 예전 자리표시(GPIO_NUM_NC)를 대체. 배선(SSR마다): SSR 입력 + → 전압원, SSR 입력 − → DOUT. 출력은 GND로 당기기만
+ * 함(Waveshare 사양 5~36V, 450mA). CH422G OC가 Low일 때 켜짐(ch422g_set_do 주석) */
+static const uint8_t s_relay_do_bit[POWER_RELAY_COUNT] = { CH422G_OD_DO0, CH422G_OD_DO1 };
 
 #define POWER_RELAY_FILE_PATH   FS_MOUNT_POINT "/power_relay.bin"
 /* 2026-09-18(실기에서 발견된 버그 — "저장된 값이 아니라 오버라이드 문구가 뜬다") —
@@ -126,7 +126,7 @@ const power_relay_config_t *power_relay_get_config(int idx)
     return &s_relay_cfg[idx];
 }
 
-/* relay_set_gpio()/power_relay_command() 본문보다 앞에서 쓰여서 fwd 필요 */
+/* relay_set_output()/power_relay_command() 본문보다 앞에서 쓰여서 fwd 필요 */
 static void power_relay_apply_override_immediate(int idx);
 
 /* 2026-09-16(실기에서 발견된 잘못 — "Alias만 줬는데 재부팅") — 예전엔 여기서 무조건
@@ -158,13 +158,10 @@ bool power_relay_get_commanded_on(int idx)
     return s_commanded_on[idx];
 }
 
-static void relay_set_gpio(int idx, bool on)
+static void relay_set_output(int idx, bool on)
 {
-    if (s_relay_gpio[idx] == GPIO_NUM_NC) {
-        ESP_LOGW(TAG, "Relay%d: no GPIO assigned (placeholder) - state only, no pin output", idx);
-        return;
-    }
-    gpio_set_level(s_relay_gpio[idx], on ? 1 : 0);
+    esp_err_t err = ch422g_set_do(s_relay_do_bit[idx], !on);  /* Low = 켜짐 */
+    if (err != ESP_OK) ESP_LOGE(TAG, "Relay%d: DO write failed (%s)", idx, esp_err_to_name(err));
 }
 
 static void power_relay_command(int idx, bool on, uint32_t now_ms)
@@ -172,7 +169,7 @@ static void power_relay_command(int idx, bool on, uint32_t now_ms)
     if (s_commanded_on[idx] == on) return;
     s_commanded_on[idx] = on;
     s_last_transition_ms[idx] = now_ms;
-    relay_set_gpio(idx, on);
+    relay_set_output(idx, on);
     ESP_LOGI(TAG, "Relay%d(%s) -> %s", idx, s_relay_cfg[idx].alias, on ? "On" : "Off");
 }
 
@@ -363,18 +360,8 @@ void power_relay_start(void)
     /* 2026-09-16(사용자 지적 — "메모리 35K까지 줄었어, 위험해") — 태스크 생성이 실제로
      * 내부RAM을 얼마나 쓰는지 추측 대신 실측(기존 MEMDIAG 관례와 동일) */
     size_t before = MEMDIAG_HEAP();
-    for (int i = 0; i < POWER_RELAY_COUNT; i++) {
-        if (s_relay_gpio[i] == GPIO_NUM_NC) continue;
-        gpio_config_t io_conf = {
-            .pin_bit_mask = 1ULL << s_relay_gpio[i],
-            .mode = GPIO_MODE_OUTPUT,
-            .pull_up_en = GPIO_PULLUP_DISABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE,
-        };
-        gpio_config(&io_conf);
-        gpio_set_level(s_relay_gpio[i], 0);
-    }
+    /* 부팅 시 두 출력 모두 꺼짐으로 확정(CH422G 기본도 꺼짐 — 2026-10-02 실측: SSR LED 꺼짐) */
+    for (int i = 0; i < POWER_RELAY_COUNT; i++) relay_set_output(i, false);
     /* 2026-09-09 CNTL 태스크 우선순위 체계(project_cntl_task_priority_scheme) — 통신17/
      * SR제어15/파일처리10 중 SR제어 자리를 여기서 처음 실사용.
      * 2026-09-16(실기 크래시 조사) — evaluate_relay()가 ui_main_query_power_source_value()를

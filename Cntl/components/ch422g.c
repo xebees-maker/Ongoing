@@ -36,7 +36,14 @@ static SemaphoreHandle_t s_lock = NULL;
 static StaticSemaphore_t s_lock_buf;
 static void lock(void)   { if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY); }
 static void unlock(void) { if (s_lock) xSemaphoreGive(s_lock); }
-static uint8_t s_od_out_shadow = 0;
+/* 2026-10-02(SSR 연결) — OC0~3 출력 그림자. 회로상 OC가 Low일 때 절연 출력(DOUT)이 켜지므로(포토커플러 LED가 3V3→510R→OC로
+ * 흐름) 0x0F(전부 High = 꺼짐)로 시작 — 예전 초기값 0이면 DO0을 처음 쓸 때 DO1에도 Low가 같이 써져 SSR2가 켜졌음 */
+#define CH422G_OD_ALL_OFF 0x0F
+static uint8_t s_od_out_shadow = CH422G_OD_ALL_OFF;
+/* 2026-10-02 — 모드 레지스터는 IO_OE만 씀(set_io/set_do/read_di 복원 모두 같게). 예전 set_do는 0x04(CH422G_MODE_OD_EN)만 써서
+ * IO_OE를 지웠고(백라이트·SD_CS·LCD 리셋이 입력으로 바뀜), 0x04를 IO_OE와 함께 쓰자 GT911 터치 I2C 에러가 계속 났음(실측 25초 2,820회).
+ * OC는 기본(푸시풀)으로도 충분함: High=3.3V면 포토커플러 LED(3V3→510R→OC)가 꺼지고 Low면 켜짐 */
+static uint8_t mode_bits(bool io_out) { return io_out ? CH422G_MODE_IO_OE : 0; }
 
 static esp_err_t write_byte(i2c_master_dev_handle_t dev, uint8_t value)
 {
@@ -65,7 +72,7 @@ esp_err_t ch422g_init(i2c_master_bus_handle_t bus)
      * 트랜잭션이어야 함(Waveshare 공식 코드 순서 그대로 재현, 실기에서 이 순서를
      * 지켜야 터치가 응답한다는 게 확인됨 — 미리 다른 쓰기를 해두면 실패). */
     s_io_out_shadow = 0;
-    s_od_out_shadow = 0;
+    s_od_out_shadow = CH422G_OD_ALL_OFF;
     if (!s_lock) s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
 
     ESP_LOGI(TAG, "init OK (devices registered, no writes yet)");
@@ -99,8 +106,8 @@ esp_err_t ch422g_set_io(uint8_t bits, bool level)
      * IO_OE 단독값(0x01)으로 다시 씀 — OD_EN을 같이 켜두면(0x05) IO뱅크 쪽
      * 출력이 제대로 안 나가는 걸로 실기에서 확인됨(데이터시트 주석엔 OD_EN이
      * OC0~3에만 영향 준다지만 실제로는 IO뱅크 드라이브에도 영향 있는 듯).
-     * OD_EN은 ch422g_set_do()에서 그때그때 따로 켠다. */
-    esp_err_t err = write_byte(s_dev_mode, CH422G_MODE_IO_OE);
+     * 2026-10-02 — ch422g_set_do()도 OD_EN 없이 IO_OE만 씀(위 mode_bits 주석). */
+    esp_err_t err = write_byte(s_dev_mode, mode_bits(true));
     if (err == ESP_OK) err = write_byte(s_dev_io_out, s_io_out_shadow);
     unlock();
     return err;
@@ -113,7 +120,7 @@ esp_err_t ch422g_read_di(bool *out_di0, bool *out_di1)
     /* 뱅크 전체를 잠깐 입력모드로 — 이 사이 백라이트/LCD리셋/SD_CS도 하이임피던스가
      * 되므로 최대한 짧게 유지하고 바로 복원한다 */
     lock();
-    err = write_byte(s_dev_mode, 0);  /* IO_OE=0(입력) */
+    err = write_byte(s_dev_mode, mode_bits(false));  /* IO_OE=0(입력) */
     if (err != ESP_OK) {
         unlock();
         return err;
@@ -123,7 +130,7 @@ esp_err_t ch422g_read_di(bool *out_di0, bool *out_di1)
     err = i2c_master_receive(s_dev_io_in, &value, 1, CH422G_I2C_TIMEOUT_MS);
 
     /* 출력모드로 즉시 복원 후 이전 섀도우 값 재적용 */
-    esp_err_t restore_err = write_byte(s_dev_mode, CH422G_MODE_IO_OE);
+    esp_err_t restore_err = write_byte(s_dev_mode, mode_bits(true));
     esp_err_t rewrite_err = write_byte(s_dev_io_out, s_io_out_shadow);
     unlock();
     if (err == ESP_OK) {
@@ -150,7 +157,7 @@ esp_err_t ch422g_set_do(uint8_t bits, bool level)
     } else {
         s_od_out_shadow &= (uint8_t)~bits;
     }
-    esp_err_t err = write_byte(s_dev_mode, CH422G_MODE_OD_EN);
+    esp_err_t err = write_byte(s_dev_mode, mode_bits(true));
     if (err == ESP_OK) err = write_byte(s_dev_od_out, s_od_out_shadow);
     unlock();
     return err;
