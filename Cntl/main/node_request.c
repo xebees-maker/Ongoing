@@ -7,6 +7,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -157,10 +158,12 @@ static void tx_worker_task(void *arg)
             vTaskDelete(NULL);
         }
 
+        int64_t start_us = esp_timer_get_time();
         esp_err_t err = can_bridge_reliable_request(item.mac, item.req, item.req_len,
                                                      item.accept_reply_types, item.accept_reply_types_count,
                                                      item.timeout_ms, item.max_attempts,
                                                      NULL, 0, NULL);
+        unsigned elapsed_ms = (unsigned)((esp_timer_get_time() - start_us) / 1000);
         if (err != ESP_OK) {
             /* 2026-08-10 — 예전엔 여기서 무조건 UI_ERR_NOT_PAIRED(2007, "페어링 끊김")를
              * 찍었는데, 이 모듈은 어떤 요청이든 다 거쳐가는 범용 전송 스케줄러라 "페어링
@@ -171,9 +174,11 @@ static void tx_worker_task(void *arg)
              * 폴링에서 이미 처리)가 있으므로 여기서는 진단용 로그만 남기고 UI 에러는 안 띄움.
              * 자동 재연결(node_hub_pair)처럼 애초에 사용자에게 알릴 필요 없는 백그라운드
              * 요청도 있어서, 범용 계층에서 일괄 판단하는 게 애초에 무리였음 */
-            ESP_LOGW(TAG, "%s no response (%d tries)", item.what, item.max_attempts);
+            ESP_LOGW(TAG, "%s %02X%02X%02X no response (%d tries) %ums", item.what,
+                     item.mac[3], item.mac[4], item.mac[5], item.max_attempts, elapsed_ms);
         } else {
-            ESP_LOGD(TAG, "%s done", item.what);
+            ESP_LOGD(TAG, "%s %02X%02X%02X done %ums", item.what,
+                     item.mac[3], item.mac[4], item.mac[5], elapsed_ms);
         }
     }
 }

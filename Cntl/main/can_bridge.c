@@ -2,6 +2,7 @@
 #include "memdiag.h"
 #include "can_bridge_link.h"
 #include "photo_rx.h"
+#include "ui_log.h"
 
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
@@ -348,8 +349,34 @@ static void can_status_task(void *arg)
                      (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm, (unsigned)s_raw_drop,
                      (unsigned)s_rx_frames, (unsigned)s_tx_frames, (unsigned)s_bus_errs, (unsigned)s_state_changes);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
+
+            /* 2026-10-02(할 일 Q — 09-26 18번 앱 알림) — 송신 실패 자체는 호출부가 이미 정해진 시간 안에 받음
+             * (버스 오프 중 즉시, 막힘 중 300ms 중단). 여기선 사용자에게 한 번씩만 알림: 들어갈 때 에러, 풀리면 정보 로그 */
+            static bool s_bus_off_warned = false;
+            if (status.state == TWAI_ERROR_BUS_OFF && !s_bus_off_warned) {
+                ui_log_add_err(UI_ERR_CAN_BUS_OFF, "CAN bus off - recovering, sends fail until then");
+                s_bus_off_warned = true;
+            } else if (status.state == TWAI_ERROR_ACTIVE && s_bus_off_warned) {
+                ui_log_add("CAN bus recovered");
+                s_bus_off_warned = false;
+            }
+            /* 막힘 — 중단 수가 늘면 에러. 중단 없이 송신이 끝난 프레임이 생기면 풀린 것으로 봄 */
+            static bool s_stuck_warned = false;
+            static uint32_t s_last_aborts = 0, s_last_tx = 0;
+            uint32_t aborts = can_bridge_tx_pool_abort_count(), tx = s_tx_frames;
+            if (aborts != s_last_aborts) {
+                if (!s_stuck_warned) {
+                    ui_log_add_err(UI_ERR_CAN_TX_STUCK, "CAN send not acknowledged (bridge off?) - sends fail");
+                    s_stuck_warned = true;
+                }
+            } else if (s_stuck_warned && tx != s_last_tx) {
+                ui_log_add("CAN sends acknowledged again");
+                s_stuck_warned = false;
+            }
+            s_last_aborts = aborts;
+            s_last_tx = tx;
         }
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));  /* 5초 주기, 버스 오프면 즉시 */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));  /* 5초 주기, 버스 오프·막힘이면 즉시 */
     }
 }
 
@@ -573,7 +600,7 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     StackType_t *can_rx_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *can_consume_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
     StackType_t *ctrl_consume_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
-    StackType_t *can_status_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
+    StackType_t *can_status_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);  /* 10-02 — 화면 알림(ui_log_add_err) 추가로 3072→4096 */
     /* 2026-09-25(사용자 설계 — 통신/UI 코어 분리) — LVGL은 코어 0, CAN 통신은 코어 1에 고정.
      * 코어 1 안에서는 CAN(수신/소비)이 가장 높아야 함 — 통신 등급 17(project_cntl_task_priority_scheme),
      * power_relay(15)보다 위. can_status는 5초 주기 상태 로그뿐이라 낮은 5 유지 */
@@ -585,7 +612,8 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "data_consume", 4096 / sizeof(StackType_t), &s_data_complete_q, 15, can_consume_stack, &s_can_consume_tcb, 1);
     can_bridge_queue_set_notify_task(&s_data_complete_q, consume_task);
     xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
-    s_status_task = xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
+    s_status_task = xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 4096 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
+    can_bridge_tx_pool_set_abort_notify_task(s_status_task);
 
     ESP_LOGI(TAG, "Cntl CAN link started (TX=%d RX=%d %dbps)", CAN_BRIDGE_TX_GPIO, CAN_BRIDGE_RX_GPIO, CAN_BRIDGE_BITRATE);
 }

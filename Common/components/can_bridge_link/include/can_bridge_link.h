@@ -282,6 +282,11 @@ bool can_bridge_tx_pool_on_done_isr(const twai_tx_done_event_data_t *edata);
  * 프레임은 실패로 끝남). 안 하면 송신 권한이 영영 안 돌아와 이후 모든 송신이 타임아웃(실기: 브 bus_off 뒤
  * TX 고정, Relay fail ERR-TIMEOUT 연속). 반환값은 on_tx_done과 같음 */
 bool can_bridge_tx_pool_on_bus_off_isr(void);
+/* 2026-10-02(할 일 Q) — 상대 노드가 ACK를 안 해 송신 중단(막힘, 300ms)할 때마다 task를 깨움(xTaskNotifyGive).
+ * 콘이 화면 알림에 씀. 브는 설정 안 함 */
+void can_bridge_tx_pool_set_abort_notify_task(TaskHandle_t task);
+/* 지금까지 막힘으로 중단한 프레임 수 */
+uint32_t can_bridge_tx_pool_abort_count(void);
 
 can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id);
 /* CAN RX 콜백에서 PCI==FC인 프레임을 받으면, 그 프레임을 기다리고 있는 송신측 ctx에 대해

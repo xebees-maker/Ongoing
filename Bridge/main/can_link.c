@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -171,6 +172,7 @@ typedef struct {
     uint8_t  mac[6];
     uint8_t  req_type;
     uint16_t req_len;
+    int64_t  start_us;  /* 요청을 건 시각 — RL 로그에 걸린 시간(ms) */
 } proxy_ctx_t;
 
 /* 완료 콜백 — esp_now_reliable 서비스 태스크 문맥. 블로킹 금지: 결과 메시지를 만들어 큐에 넣기만 함 */
@@ -180,9 +182,10 @@ static void proxy_done_cb(void *cb_ctx, esp_err_t result, const uint8_t *reply, 
 
     /* 2026-09-23(사용자 지적) — RL(구 RLBL)은 실제로 무선(ESP-NOW)으로 캠과 주고받은 결과라 무선 창 */
     char m6[7]; ui_screen_mac6(p->mac, m6);
-    ui_screen_log_wireless("RL(%c/%s/%u/%s) %s", (result == ESP_OK) ? 'S' : 'F', m6,
+    unsigned elapsed_ms = (unsigned)((esp_timer_get_time() - p->start_us) / 1000);
+    ui_screen_log_wireless("RL(%c/%s/%u/%s) %s %ums", (result == ESP_OK) ? 'S' : 'F', m6,
                             (unsigned)p->req_len, ui_screen_result_code(result),
-                            ui_screen_msg_type_name(p->req_type));
+                            ui_screen_msg_type_name(p->req_type), elapsed_ms);
 
     /* 결과를 콘에 CAN으로 돌려줌 — app_header + result_hdr + (성공시)응답 페이로드 */
     size_t cap = CAN_BRIDGE_APP_HEADER_LEN + sizeof(can_bridge_reliable_result_hdr_t) + reply_len;
@@ -226,6 +229,7 @@ static void handle_reliable_send(const can_bridge_app_header_t *hdr, const uint8
     memcpy(p->mac, hdr->mac, 6);
     p->req_type = req[1];
     p->req_len = (uint16_t)req_len;
+    p->start_us = esp_timer_get_time();
 
     esp_err_t err = esp_now_reliable_request_async(hdr->mac, req, req_len,
                                                     send_hdr.accept_reply_types, send_hdr.accept_reply_types_count,

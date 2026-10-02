@@ -265,6 +265,8 @@ typedef enum {
     STR_ERR_DESC_SD_IO_FAIL,
     STR_ERR_DESC_TOUCH_INIT_FAIL,     /* 2026-10-01 — 5010, 예전엔 설명 매핑이 없어 "Unknown error"로 보였음 */
     STR_ERR_DESC_BRIDGE_NORESPONSE,   /* 2026-10-01 — 5011, 같은 이유 */
+    STR_ERR_DESC_CAN_BUS_OFF,         /* 2026-10-02 — 5012 */
+    STR_ERR_DESC_CAN_TX_STUCK,        /* 2026-10-02 — 5013 */
     STR_MSG_STATS_BLOCKED_SD_FAIL,
     /* 2026-09-11(에러목록 팝업 행별 재설계 — 지우기 버튼) */
     STR_BTN_DISMISS,

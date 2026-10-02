@@ -270,6 +270,19 @@ static int s_tx_core = -1;
 /* 2026-09-26(할 일 18-가) — s_inflight_slot을 드라이버에 넣은 시각. 너무 오래 안 끝나면(상대 노드 없음) 중단 */
 static volatile TickType_t s_inflight_since = 0;
 static void abort_if_stuck(void);
+/* 2026-10-02(할 일 Q — 앱 알림) — 막힘으로 중단한 횟수와, 중단 때 깨울 태스크(앱이 화면 알림에 씀, 없으면 안 깨움) */
+static volatile uint32_t s_abort_count = 0;
+static TaskHandle_t s_abort_notify_task = NULL;
+
+void can_bridge_tx_pool_set_abort_notify_task(TaskHandle_t task)
+{
+    s_abort_notify_task = task;
+}
+
+uint32_t can_bridge_tx_pool_abort_count(void)
+{
+    return s_abort_count;
+}
 
 void can_bridge_tx_pool_init(void)
 {
@@ -404,9 +417,10 @@ static void abort_if_stuck(void)
     TickType_t since = s_inflight_since;
     uint32_t id = cur ? cur->frame.header.id : 0;
     bool stuck = cur && (xTaskGetTickCount() - since) >= pdMS_TO_TICKS(TX_STUCK_MS);
-    if (stuck) note_drop_isr(id);
+    if (stuck) { note_drop_isr(id); s_abort_count++; }
     taskEXIT_CRITICAL(&s_tx_lock);
     if (!stuck) return;
+    if (s_abort_notify_task) xTaskNotifyGive(s_abort_notify_task);
     static TickType_t s_last_log = 0;
     TickType_t now = xTaskGetTickCount();
     if (now - s_last_log > pdMS_TO_TICKS(1000)) {

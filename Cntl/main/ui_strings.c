@@ -267,6 +267,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_ERR_DESC_SD_IO_FAIL]    = { "SD 읽기/쓰기 오류",               "SD read/write failure" },
     [STR_ERR_DESC_TOUCH_INIT_FAIL]    = { "터치/I2C 초기화 실패",           "Touch/I2C init failed" },
     [STR_ERR_DESC_BRIDGE_NORESPONSE]  = { "브릿지 응답 없음",               "Bridge not responding" },
+    [STR_ERR_DESC_CAN_BUS_OFF]        = { "CAN 버스 오프",                  "CAN bus off" },
+    [STR_ERR_DESC_CAN_TX_STUCK]       = { "CAN 송신 응답 없음",             "CAN send not acknowledged" },
     [STR_MSG_STATS_BLOCKED_SD_FAIL] = { "SD 불량으로 통계를 조회할 수 없습니다. 상태버튼을 눌러 조치하세요.",
                                         "Statistics can't be viewed because the SD card is faulty. Tap the status button to take action." },
     [STR_BTN_DISMISS]            = { "지우기",                         "Dismiss" },

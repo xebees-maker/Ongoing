@@ -1309,6 +1309,8 @@ static ui_str_id_t err_code_to_desc_str(int code)
         case UI_ERR_SD_IO_FAIL:            return STR_ERR_DESC_SD_IO_FAIL;
         case UI_ERR_TOUCH_INIT_FAIL:       return STR_ERR_DESC_TOUCH_INIT_FAIL;
         case UI_ERR_BRIDGE_NORESPONSE:     return STR_ERR_DESC_BRIDGE_NORESPONSE;
+        case UI_ERR_CAN_BUS_OFF:           return STR_ERR_DESC_CAN_BUS_OFF;
+        case UI_ERR_CAN_TX_STUCK:          return STR_ERR_DESC_CAN_TX_STUCK;
         default:                           return STR_ERR_DESC_UNKNOWN;
     }
 }
@@ -1653,8 +1655,8 @@ static void refresh_storage_status_label(void)
         return;
     }
     /* 2026-09-10(임시 진단 — "지금 1주일치가 아니지, 몇시간 정도일 뿐이야" 정확한
-     * 수치 확인용, 확인 후 제거) */
-    {
+     * 수치 확인용, 확인 후 제거). 2026-10-02 — D일 때만 계산(할 일 K) */
+    if (memdiag_enabled()) {
         uint64_t recs = snap.area[STORAGE_AREA_MEASURE].used / sizeof(stats_record_t);
         double hours = (double)recs / 4.0 * 30.0 / 3600.0;
         ESP_LOGD(TAG, "MEMDIAG stats_store: used=%llu bytes records=%llu (~%.2fh, assuming 30s/4ch)",
@@ -2434,7 +2436,7 @@ static void refresh_photo_list_ui(int select_index)
         return;
     }
 
-    size_t _rows_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t _rows_before = MEMDIAG_HEAP();
     for (int i = 0; i < s_current_list_count; i++) {
         lv_obj_t *row = lv_obj_create(s_photo_list);
         lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
@@ -2497,7 +2499,7 @@ static void refresh_photo_list_ui(int select_index)
             s_selected_row = row;
         }
     }
-    size_t _rows_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t _rows_after = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG photo list: %d rows: internal %u -> %u (used %d)", s_current_list_count,
              (unsigned)_rows_before, (unsigned)_rows_after, (int)_rows_before - (int)_rows_after);
 }
@@ -4484,7 +4486,7 @@ static void refresh_stats_page(lv_timer_t *t)
     /* 2026-09-15(사용자 설계) — 표가 별도 Record 팝업으로 분리되면서 refresh_stats_table()
      * 호출 제거(그 팝업 자체 생명주기/네비게이션 콜백이 직접 부름, 새 측정값이 기록될 때는
      * on_stats_appended()가 부름) */
-    size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t before = MEMDIAG_HEAP();
     uint32_t t0 = lv_tick_get();
     bool ok = refresh_stats_overview_panel();
     uint32_t t1 = lv_tick_get();
@@ -4495,7 +4497,7 @@ static void refresh_stats_page(lv_timer_t *t)
         ESP_LOGD(TAG, "MEMDIAG refresh_stats_page timing: overview=%ums graph=%ums total=%ums",
                  (unsigned)(t1 - t0), (unsigned)(t3 - t1), (unsigned)(t3 - t0));
     }
-    size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t after = MEMDIAG_HEAP();
     if (before != after) {
         ESP_LOGD(TAG, "MEMDIAG refresh_stats_page: internal %u -> %u (delta=%d)",
                  (unsigned)before, (unsigned)after, (int)before - (int)after);
@@ -5048,9 +5050,9 @@ static void refresh_dashboard(lv_timer_t *t)
          * 열려있는 동안 이 블록은 계속 매 틱 실행됨(폴링 자체를 없앤 게 아니라 "언제"만
          * 옮긴 것 — 사용자 지적). 열려있는 매 틱마다 실제로 메모리가 또 줄어드는지 직접
          * 추적 — 계속 줄면 진짜 누수, 한 번 줄고 멈추면 일회성 비용 */
-        size_t heap_before_scan = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        size_t heap_before_scan = MEMDIAG_HEAP();
         known_cam_count_raw = (int)photo_storage_list_camera_macs(known_cam_macs, NODE_HUB_MAX_NODES);
-        size_t heap_after_scan = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        size_t heap_after_scan = MEMDIAG_HEAP();
         ESP_LOGD(TAG, "MEMDIAG camera popup open (tick): internal %u -> %u (change %d bytes)",
                  (unsigned)heap_before_scan, (unsigned)heap_after_scan,
                  (int)heap_after_scan - (int)heap_before_scan);
@@ -7332,13 +7334,13 @@ static void cb_close_stats_popup(lv_event_t *e)
 
 static void teardown_stats_tab(void)
 {
-    size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_before_close = MEMDIAG_HEAP();
     if (s_stats_page_timer) { lv_timer_delete(s_stats_page_timer); s_stats_page_timer = NULL; }
     lv_obj_delete(s_stats_popup);
     s_stats_popup = NULL;
     s_stats_popup_title = NULL;
     s_stats_tab_built = false;
-    size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_after_close = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG stats popup close: internal %u -> %u (freed %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
@@ -7402,12 +7404,12 @@ static void cb_close_record_popup(lv_event_t *e)
 
 static void teardown_record_tab(void)
 {
-    size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_before_close = MEMDIAG_HEAP();
     lv_obj_delete(s_record_popup);
     s_record_popup = NULL;
     s_record_popup_title = NULL;
     s_record_tab_built = false;
-    size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_after_close = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG record popup close: internal %u -> %u (freed %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
@@ -7608,7 +7610,7 @@ static void build_stats_tab(void)
 
     /* 2026-09-07(임시 진단 — 사용자 지시: "통계탭에서 소모되는 메모리들을 측정해") — 어젯밤
      * 부팅단계별 프로파일링과 동일 기법, 이번엔 통계탭 위젯 생성 구간만 잘라서 측정 */
-    size_t heap_before_stats_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_before_stats_tab = MEMDIAG_HEAP();
 
     /* 2026-09-06(사용자 지시) — 일반로그/전력로그는 새 "로그" 탭(4번째)으로 이동함(아래
      * log_page 생성부 참고, 위젯/변수는 그대로 재사용). 이 탭은 이제 실제 시계열 통계 —
@@ -8030,7 +8032,7 @@ static void build_stats_tab(void)
      * 개별적으로 이미 SCROLLABLE을 빼고 있음(기존 코드) */
     disable_scroll_recursive(stats_page);
 
-    size_t heap_after_stats_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_after_stats_tab = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG stats tab widget cost: internal %u -> %u (used %d bytes)",
              (unsigned)heap_before_stats_tab, (unsigned)heap_after_stats_tab,
              (int)heap_before_stats_tab - (int)heap_after_stats_tab);
@@ -8077,7 +8079,7 @@ static void build_camera_tab(void)
      * 시작 시점의 internal free. 실제 known-camera 스캔/드롭다운/사진목록 채움은 이
      * 함수가 아니라 다음 refresh_dashboard() 틱에서 일어나므로(아래 known_cam_macs 관련
      * 주석 참고), 여기서는 시작점만 찍고 실제 변화는 refresh_dashboard() 쪽 로그로 추적 */
-    size_t heap_before_open = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_before_open = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG camera popup open: internal=%u (start)", (unsigned)heap_before_open);
 
     lv_obj_t *popup = create_page_popup();
@@ -8117,7 +8119,7 @@ static void build_camera_tab(void)
 static void teardown_camera_tab(void)
 {
     if (!s_camera_popup) return;
-    size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_before_close = MEMDIAG_HEAP();
 
     lv_obj_set_parent(s_camera_content, s_camera_box);
     lv_obj_set_parent(s_camera_split_row, s_camera_box);
@@ -8133,7 +8135,7 @@ static void teardown_camera_tab(void)
     s_camera_popup_msg = NULL;  /* 팝업의 자식이라 위에서 같이 지워짐 */
     refresh_photo_list_ui(-1);  /* 팝업이 닫혔으니 목록 행을 지움(선택 상태는 유지) */
 
-    size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_after_close = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG camera popup close: internal %u -> %u (freed %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
@@ -9698,12 +9700,12 @@ static void cb_power_dash_row_clicked(lv_event_t *e)
  * 이미 지워진 행을 계속 가리킬 수 있음 */
 static void teardown_option_tab(void)
 {
-    size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_before_close = MEMDIAG_HEAP();
     /* 2026-09-08(연결 기능 주화면 이관) — s_camera_list_timer/s_sensor_list_timer와 그
      * 대상(s_camera_list/s_sensor_list, 이제 "대기중" 목록)은 더 이상 이 팝업 소유가
      * 아니라 주화면에 상주(ui_init()에서 한 번만 생성, 여기서 손 안 댐) */
     lv_obj_clean(s_option_content);
-    size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_after_close = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG settings content cleared: internal %u -> %u (freed %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
@@ -9744,7 +9746,7 @@ static void build_option_tab(void)
 {
     /* 2026-09-07(임시 진단 — 사용자 지시: "메모리가 더 줄어든 것 같아") — 통계탭과 동일 기법,
      * 설정탭(카메라/센서/시스템 그룹박스 전체) 위젯 생성 구간만 잘라서 측정 */
-    size_t heap_before_option_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_before_option_tab = MEMDIAG_HEAP();
     lv_obj_t *option_page = s_option_content;
     lv_obj_set_style_pad_hor(option_page, 5, 0);
     /* dashboard_page와 같은 이유로 절반(10px) 축소(2026-08-09) — 그룹박스-화면 가장자리
@@ -10116,7 +10118,7 @@ static void build_option_tab(void)
      * 다른 버튼들과 같은 표준폭 하나로 줄임 */
     lv_obj_set_width(s_network_find_btn, s_action_btn_width);
 
-    size_t heap_after_option_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_after_option_tab = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG settings tab widget cost (net): internal %u -> %u (used %d bytes)",
              (unsigned)heap_before_option_tab, (unsigned)heap_after_option_tab,
              (int)heap_before_option_tab - (int)heap_after_option_tab);
@@ -10170,12 +10172,12 @@ static void cb_option_log_btn_tap(lv_event_t *e)
  * 컨테이너를 공유하므로 팝업 자체는 안 건드림) */
 static void teardown_log_tab(void)
 {
-    size_t heap_before_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_before_close = MEMDIAG_HEAP();
     if (s_dev_panel_timer) { lv_timer_delete(s_dev_panel_timer); s_dev_panel_timer = NULL; }
     if (s_log_box_timer) { lv_timer_delete(s_log_box_timer); s_log_box_timer = NULL; }
     lv_obj_clean(s_option_content);
     s_log_tab_built = false;
-    size_t heap_after_close = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_after_close = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG log tab leave: internal %u -> %u (freed %d bytes)",
              (unsigned)heap_before_close, (unsigned)heap_after_close,
              (int)heap_after_close - (int)heap_before_close);
@@ -10198,7 +10200,7 @@ static void build_log_tab(void)
 {
     s_log_tab_built = true;
 
-    size_t heap_before_log_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_before_log_tab = MEMDIAG_HEAP();
 
     /* 2026-09-08(재설계) — 설정 팝업 안 콘텐츠 바꿔치기로 진입(cb_option_log_btn_tap).
      * 기존 통계탭에 있던 일반로그+전력로그 판넬을 그대로 옮김(위젯 생성 코드 자체는
@@ -10350,7 +10352,7 @@ static void build_log_tab(void)
     s_dev_log_last_seq = UINT32_MAX;
     s_dev_panel_timer = lv_timer_create(refresh_dev_panel, 500, NULL);
 
-    size_t heap_after_log_tab = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_after_log_tab = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG log tab widget cost (net): internal %u -> %u (used %d bytes)",
              (unsigned)heap_before_log_tab, (unsigned)heap_after_log_tab,
              (int)heap_before_log_tab - (int)heap_after_log_tab);

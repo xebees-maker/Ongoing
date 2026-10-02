@@ -79,6 +79,8 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 
 #define UI_ERR_BRIDGE_NORESPONSE    5011  /* 2026-09-26(설계 6단계) — 브릿지 PONG 10초 넘게 없음. 콘이 RESET을 보냄.
                                              계속되면 전원 리셋(브 자체 워치독도 재부팅 시도) */
+#define UI_ERR_CAN_BUS_OFF          5012  /* 2026-10-02(할 일 Q) — CAN 버스 오프. 콘이 즉시 복구 시도, 그동안 송신 실패 */
+#define UI_ERR_CAN_TX_STUCK         5013  /* 2026-10-02(할 일 Q) — CAN 송신에 ACK 없음(브 꺼짐·재부팅 등), 300ms마다 중단돼 송신 실패 */
 
 void ui_log_add_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
