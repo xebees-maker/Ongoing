@@ -2,7 +2,7 @@
 #include "bridge_sr.h"
 #include "can_link.h"
 #include "can_bridge_link.h"
-#include "ui_screen.h"
+#include "bridge_log.h"
 
 #include "esp_now.h"
 #include "esp_now_reliable.h"
@@ -140,9 +140,9 @@ static void relay_task(void *arg)
 
                 /* RX 로그는 캠에서 받은 무선 프레임(RELAY)만 — 대행 결과(RELIABLE_RESULT)는 RL 로그가 이미 찍힘 */
                 if (hdr.msg_type == CAN_DATA_RELAY) {
-                    char m6[7]; ui_screen_mac6(hdr.mac, m6);
-                    const char *type_name = frame_len >= 2 ? ui_screen_msg_type_name(frame[1]) : "?";
-                    ui_screen_log_wireless("RX(%d/%s/%u) %s", (int8_t)hdr.flags, m6, (unsigned)frame_len, type_name);
+                    char m6[7]; bridge_log_mac6(hdr.mac, m6);
+                    const char *type_name = frame_len >= 2 ? bridge_log_msg_type_name(frame[1]) : "?";
+                    bridge_log_wireless("RX(%d/%s/%u) %s", (int8_t)hdr.flags, m6, (unsigned)frame_len, type_name);
                 }
 
                 /* 2026-09-26 — can_link_send()가 경로 분류로 Control/Data ctx를 고름. CAN 링크가 아직
@@ -157,9 +157,9 @@ static void relay_task(void *arg)
                     err = can_link_send(msg, len);
                 }
                 if (err == ESP_ERR_INVALID_STATE) {
-                    ui_screen_log_can("Relay dropped: not ready");
+                    bridge_log_can("Relay dropped: not ready");
                 } else if (err != ESP_OK) {
-                    ui_screen_log_can("Relay fail: %s", ui_screen_err_short(err));
+                    bridge_log_can("Relay fail: %s", bridge_log_err_short(err));
                 }
                 if (err != ESP_OK) {
                     /* 2026-09-27(3002 조사) — 버린 메시지를 시리얼에도 남김(예전엔 브 화면에만 있어 원격 확인 불가).
@@ -222,9 +222,9 @@ void bridge_esp_now_send_raw(const uint8_t mac[6], const uint8_t *data, uint16_t
 {
     add_peer_if_needed(mac);
     esp_now_send(mac, data, len);
-    char m6[7]; ui_screen_mac6(mac, m6);
-    const char *type_name = len >= 2 ? ui_screen_msg_type_name(data[1]) : "?";
-    ui_screen_log_wireless("TX(%s/%u) %s", m6, len, type_name);
+    char m6[7]; bridge_log_mac6(mac, m6);
+    const char *type_name = len >= 2 ? bridge_log_msg_type_name(data[1]) : "?";
+    bridge_log_wireless("TX(%s/%u) %s", m6, len, type_name);
 }
 
 static void wifi_bringup(void)

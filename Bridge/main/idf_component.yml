@@ -1,19 +1,4 @@
+# 2026-10-02 — 실물 브 보드(화면 없음)로 옮기며 LVGL/LCD 어댑터/GT911 터치/LittleFS/PCF85063A(RTC, 안 씀) 의존 제거
 dependencies:
   idf:
     version: ">=5.5.0"
-
-  lvgl/lvgl:
-    version: "^9"
-    public: true
-
-  espressif/esp_lvgl_adapter:
-    version: "^0.5.2"
-
-  espressif/esp_lcd_touch_gt911:
-    version: "^1"
-
-  joltwallet/littlefs:
-    version: ">=1.22.1"
-
-  waveshare/pcf85063a:
-    version: "^2.0.0"

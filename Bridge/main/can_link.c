@@ -1,6 +1,6 @@
 #include "can_link.h"
 #include "bridge_esp_now.h"
-#include "ui_screen.h"
+#include "bridge_log.h"
 
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
@@ -181,11 +181,11 @@ static void proxy_done_cb(void *cb_ctx, esp_err_t result, const uint8_t *reply, 
     proxy_ctx_t *p = (proxy_ctx_t *)cb_ctx;
 
     /* 2026-09-23(사용자 지적) — RL(구 RLBL)은 실제로 무선(ESP-NOW)으로 캠과 주고받은 결과라 무선 창 */
-    char m6[7]; ui_screen_mac6(p->mac, m6);
+    char m6[7]; bridge_log_mac6(p->mac, m6);
     unsigned elapsed_ms = (unsigned)((esp_timer_get_time() - p->start_us) / 1000);
-    ui_screen_log_wireless("RL(%c/%s/%u/%s) %s %ums", (result == ESP_OK) ? 'S' : 'F', m6,
-                            (unsigned)p->req_len, ui_screen_result_code(result),
-                            ui_screen_msg_type_name(p->req_type), elapsed_ms);
+    bridge_log_wireless("RL(%c/%s/%u/%s) %s %ums", (result == ESP_OK) ? 'S' : 'F', m6,
+                            (unsigned)p->req_len, bridge_log_result_code(result),
+                            bridge_log_msg_type_name(p->req_type), elapsed_ms);
 
     /* 결과를 콘에 CAN으로 돌려줌 — app_header + result_hdr + (성공시)응답 페이로드 */
     size_t cap = CAN_BRIDGE_APP_HEADER_LEN + sizeof(can_bridge_reliable_result_hdr_t) + reply_len;
@@ -266,9 +266,9 @@ static void can_consume_task(void *arg)
                      * bridge_esp_now_send_raw()가 무선 창에 "TX(...)"를 바로 이어서 찍어서
                      * 같은 이벤트가 두 창에 연달아 나오다 보니 헷갈린 것으로 보임(버그 아님) —
                      * 어차피 TX(...) 줄이 결과를 알려주므로 여기선 mac+len만 짧게 */
-                    char m6[7]; ui_screen_mac6(hdr.mac, m6);
-                    const char *type_name = body_len >= 2 ? ui_screen_msg_type_name(body[1]) : "?";
-                    ui_screen_log_can("DATA rx(%s/%u) %s", m6, (unsigned)body_len, type_name);
+                    char m6[7]; bridge_log_mac6(hdr.mac, m6);
+                    const char *type_name = body_len >= 2 ? bridge_log_msg_type_name(body[1]) : "?";
+                    bridge_log_can("DATA rx(%s/%u) %s", m6, (unsigned)body_len, type_name);
                     /* 콘이 CAM에 보내라고 준 원본 프레임 — 그대로 ESP-NOW로 내보냄(투명 릴레이) */
                     bridge_esp_now_send_raw(hdr.mac, body, (uint16_t)body_len);
                 } else if (hdr.msg_type == CAN_DATA_RELIABLE_SEND) {
@@ -279,7 +279,7 @@ static void can_consume_task(void *arg)
                     send_ctrl_to_cntl(CAN_CTRL_PONG, &pong, sizeof(pong));
                 } else if (hdr.msg_type == CAN_CTRL_RESET) {
                     ESP_LOGW(TAG, "RESET requested by Cntl - restarting");
-                    ui_screen_log_can("RESET by Cntl - restarting");
+                    bridge_log_can("RESET by Cntl - restarting");
                     vTaskDelay(pdMS_TO_TICKS(200));
                     esp_restart();
                 }

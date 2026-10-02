@@ -1,6 +1,6 @@
 #include "bridge_sr.h"
 #include "bridge_esp_now.h"
-#include "ui_screen.h"
+#include "bridge_log.h"
 #include "esp_now_link.h"
 #include "can_bridge_link.h"
 
@@ -194,8 +194,8 @@ static void on_meta(const uint8_t *mac, const uint8_t *data, int len)
     esp_now_photo_done_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_META_ACK };
     reply(mac, &ack, sizeof(ack));
 
-    char m6[7]; ui_screen_mac6(mac, m6);
-    ui_screen_log_wireless("SR META(%s) id=%u %u chunks", m6, (unsigned)meta.file_id, (unsigned)meta.total_chunks);
+    char m6[7]; bridge_log_mac6(mac, m6);
+    bridge_log_wireless("SR META(%s) id=%u %u chunks", m6, (unsigned)meta.file_id, (unsigned)meta.total_chunks);
 }
 
 static void on_chunk(const uint8_t *mac, const uint8_t *data, int len)
@@ -270,8 +270,8 @@ static void on_done(const uint8_t *mac)
     push_done(c, CAN_BRIDGE_SR_DONE_COMPLETE);
     c->active = false;
     c->completed = true;
-    char m6[7]; ui_screen_mac6(mac, m6);
-    ui_screen_log_wireless("SR DONE(%s) id=%u", m6, (unsigned)c->file_id);
+    char m6[7]; bridge_log_mac6(mac, m6);
+    bridge_log_wireless("SR DONE(%s) id=%u", m6, (unsigned)c->file_id);
 }
 
 /* ---- 공개 ---- */
