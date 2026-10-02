@@ -2,6 +2,12 @@
    + W6002 원인 확인 + 4시간 무인 로그 (원래 PC, 사용자 부재 중 진행) ==
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
+- 2026-10-02 저녁: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
+  메모리 변경 없음(claude_memory_2026-10-01.zip 최신).
+  git 밖 항목: 브 sdkconfig를 새 sdkconfig.defaults(LVGL 항목 빠짐)로 새로 만듦 — 다른 PC에선 브 sdkconfig를 defaults로 다시 만들 것
+  (브 build 폴더도 지우고 새로 구성 — 화면 컴포넌트가 빠져서). 콘·센스·캠 sdkconfig 변경 없음.
+  이 PC 포트: 콘 COM19, 브(새 보드 ESP32-S3-RS485-CAN) COM26, 센스 SHT45 COM21(켜져 있음), 나머지 노드는 꺼 둠.
+  하드웨어: 새 브 CAN 종단 점퍼 켬(버스 60Ω 확인). 콘 DOUT0에 SSR(I2C_VCC 3.3V → SSR+, DO0 → SSR−) 연결, 부하는 아직 없음.
 - 2026-10-01 밤: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리: claude_memory_2026-10-01.zip(이 날 추가: feedback_no_wifi_memory_tuning — 실패한 RAM 시도 재시도 금지, sdkconfig sed 금지).
   git 밖 항목: 콘 sdkconfig는 sdkconfig.defaults로 새로 만든 것(Wi-Fi IRAM 최적화 2개 끔 반영 — 다른 PC에선 sdkconfig를 defaults로
@@ -368,7 +374,7 @@ C9. 임시 테스트 API 4개 제거(capture_now, devlog, sdtest, statsfile — 
 C10. 할 일 T(101번) 화면 확인 — 요약 SD 줄(영역별 사용%(여유MB), Total = 두 영역 합)과 카메라 팝업 m%(= Picture). 예전 Total 3%는
      SD 전체 − 빈 공간이었고 두 폴더 합은 약 26MB라, 폴더 밖에 약 90MB가 있는 것으로 보임(정체 미확인).
 [조건: Cntl에 물리 릴레이를 실제로 붙일 때 — 사용자 10-01: 아직 릴레이 없음]
-C11. power_relay 기아(starvation) 확인 + 태스크 코어·우선순위 검토(예전 할 일 J). 통신 17 / SR 15 / 파일 10 — 사진 수신 등 통신이
+C11. [발동 10-02 — SSR 연결함] power_relay 기아(starvation) 확인 + 태스크 코어·우선순위 검토(예전 할 일 J). 통신 17 / SR 15 / 파일 10 — 사진 수신 등 통신이
      몰릴 때 릴레이 판단이 제때 도는지.
 [조건: 주화면 내부 RAM이 기준선(57K) 가까이 떨어지거나, 카메라 팝업·페어링 뒤 회복이 안 될 때 — 사용자 10-02]
 C12. 메모리 기록의 OPEN 두 건 — ① 카메라 팝업 약 20K(09-22, 09-28 팝업 열린 동안만 목록 행을 만들도록 바꿔 주화면은 해결,
@@ -569,6 +575,7 @@ C12. 메모리 기록의 OPEN 두 건 — ① 카메라 팝업 약 20K(09-22, 09
      - Blue(GPIO2, USB 켜짐/한 번도 측정 성공 못함 3번 깜빡임/잔량별 하트비트)와 GPIO1 감지는 없앰. 이유(사용자): 저항으론 USB 유무만 알고
        충전 중 잔량은 어차피 모름. 주의: GPIO1은 만충 전압 학습(maybe_learn_full_mv)에도 쓰임 — 빼면 학습 멈춤(고정값으로 갈지 결정).
      - 코드: sens_deep_sleep_node.c(vin_indicates_usb, Blue LED 분기), esp_now_node(_cask).c set_status_led, bsp_c3_pico.h 핀 정의.
+ AC. SSR 교류 부하 연결 시험(초록 LED 의미 확인 포함) + 릴레이 2(DO1) 배선.
  AB. [보류 — 사용자 10-02] 캠: 배터리를 꽂으면 바로 켜지게(센스와 같게). 펌웨어로는 불가(버튼 전엔 칩 전원 없음) — 납땜.
      회로도(C:\projects\documents\ESP32-S3-CAM-OVxxxx_Rev1.1.pdf, BAT 블록): Q2(AO3401)=배터리 스위치, R29 100K가 게이트를 VBAT로,
      Key2가 D5로 게이트를 GND로, 펌웨어 BAT_EN→T1(8050)이 유지. 추천: Q2 소스(핀2, VBAT)–드레인(핀3) 단락 — 추가 누설 0(계산값).
@@ -597,4 +604,18 @@ C12. 메모리 기록의 OPEN 두 건 — ① 카메라 팝업 약 20K(09-22, 09
      확인: 부팅 0.34초 경고 없음, CAN 에러 0, RL 349건 전부 성공(RL ms 시리얼에 보임), 사진 촬영·전송(사용자 확인).
      브 정지(다운로드 모드 25초) 시험: 콘이 12초에 "Bridge not responding - sending RESET", 풀자 응답 복귀 → 재부팅 감지 → 노드 상태
      초기화 → CAN error_active 복귀. (다운로드 모드라 브가 RESET을 받아 재시작하는 경로 자체는 안 돌았음 — 코드는 예전과 같음.)
-     장시간(2시간 무인) 시험 진행 중.
+     장시간 무인 시험: 43분에서 사용자 지시로 끊음(SSR 작업 때문에) — 콘·브 재부팅 0, CAN busErr 0·TEC/REC 0, RL 6,099건 실패 0,
+     콘 경고는 사용자가 끈 노드 2개의 연결 해제뿐.
+     Claude 잘못: 44be30c 커밋 때 git add가 무시 대상 경로(dependencies.lock) 때문에 통째로 실패한 걸 확인 안 해서 삭제분만 커밋됨
+     → a1d2d27로 나머지 커밋(푸시 전).
+115. SSR 연결(조건부 C11 발동 — 아래 C11). 산 것: FCGK 단일 채널 SSR 2개(10A, 25A — DA: DC 입력 3~32V, AC 출력).
+     콘 보드(4.3B) 절연 출력 DOUT0/1 = CH422G OC0/1 → 포토커플러 PC817 → NPN 오픈컬렉터(GND로 당기기만, 전압 안 냄).
+     Waveshare 사양 5~36V·450mA. 실제로는 보드 GND 기준(절연 아님). 콘을 USB 전원으로 쓰면 VIN 단자엔 전압 없음.
+     배선(사용자): I2C_VCC(3.3V, 사양 밖이지만 동작) → SSR+, DO0 → SSR−. 릴레이 1 = DO0, 릴레이 2 = DO1(사용자 지정).
+     코드: power_relay 출력을 CH422G DO로(OC Low = 켜짐), 부팅 시 둘 다 꺼짐. ch422g 드라이버 고침 — OD 그림자 초기값 0x0F(예전 0이면
+     DO0 쓸 때 DO1도 켜짐), set_do가 모드에 IO_OE 유지(예전엔 OD_EN만 써서 IO 뱅크 출력이 꺼짐), OD_EN 안 씀.
+     Claude 잘못: 처음엔 모드에 0x05(IO_OE+OD_EN)를 써서 GT911 터치 I2C 에러가 계속 남(25초 2,820회) — 기존 주석에 "0x05 안 됨"
+     실기 기록이 있었는데 안 읽음. 0x01로 고쳐 0건.
+     확인: 수동 조작 On/Off에 SSR 빨강 LED가 따라감(로그 Relay0 -> On/Off), 출력 단자 테스터 On 2kΩ / Off 무한대(트라이액이라
+     테스터 전류론 완전히 안 켜짐 — 실제 확인은 교류 부하로). 초록 LED는 늘 꺼짐(추측: 출력 통전 표시 — 부하 연결 때 확인).
+     SSR 입력 3.3V는 여유가 적음 — LED가 안 켜지거나 깜빡이면 5V 외부 전원(+ → SSR+, − → 콘 GND)으로.
