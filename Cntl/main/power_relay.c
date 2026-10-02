@@ -1,4 +1,5 @@
 #include "power_relay.h"
+#include "memdiag.h"
 #include "ui_main.h"
 #include "fs.h"
 
@@ -361,7 +362,7 @@ void power_relay_start(void)
     s_boot_ms_ref = (uint32_t)(esp_timer_get_time() / 1000);
     /* 2026-09-16(사용자 지적 — "메모리 35K까지 줄었어, 위험해") — 태스크 생성이 실제로
      * 내부RAM을 얼마나 쓰는지 추측 대신 실측(기존 MEMDIAG 관례와 동일) */
-    size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t before = MEMDIAG_HEAP();
     for (int i = 0; i < POWER_RELAY_COUNT; i++) {
         if (s_relay_gpio[i] == GPIO_NUM_NC) continue;
         gpio_config_t io_conf = {
@@ -396,7 +397,7 @@ void power_relay_start(void)
         ESP_LOGE(TAG, "SR task stack PSRAM alloc failed - falling back to internal RAM");
         xTaskCreatePinnedToCore(power_relay_task, "power_relay", 8192, NULL, 15, NULL, 1);
     }
-    size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t after = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG power_relay_start cost: internal %u -> %u (used %d bytes)",
              (unsigned)before, (unsigned)after, (int)before - (int)after);
 }

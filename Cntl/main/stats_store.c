@@ -24,6 +24,7 @@
  *          색인과 파일 조작은 전부 s_mutex 아래에서.
  */
 #include "stats_store.h"
+#include "memdiag.h"
 #include "sd_storage.h"
 #include "storage_mgr.h"
 
@@ -432,7 +433,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
      * 상태면 fopen 시도 자체를 안 함("I/O 실패"가 아니라 "애초에 시도 안 함") */
     if (!sd_storage_is_mounted()) return false;
 
-    size_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t before = MEMDIAG_HEAP();
     bool ok = true;
 
     lock();
@@ -486,7 +487,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
     if (total_written > 0 && s_appended_cb) s_appended_cb();  /* 잠금 밖에서 — 받는 쪽이 표를 다시 읽음 */
 
     s_stats_append_call_count++;
-    size_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t after = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG stats_store_append #%u (%u records): internal free %u -> %u (delta=%d)",
              (unsigned)s_stats_append_call_count, (unsigned)count, (unsigned)before, (unsigned)after,
              (int)before - (int)after);

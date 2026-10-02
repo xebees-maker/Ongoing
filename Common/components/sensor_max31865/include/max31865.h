@@ -42,5 +42,3 @@ bool max31865_init(spi_host_device_t host, gpio_num_t sclk, gpio_num_t mosi, gpi
  */
 max31865_result_t max31865_read(float *temp_c, uint8_t *fault_status);
 
-/** @brief 마지막으로 읽은 15비트 RTD 코드(저항 = 코드 × 430 / 32768) — 로그·진단용 */
-uint16_t max31865_last_code(void);

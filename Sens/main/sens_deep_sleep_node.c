@@ -809,10 +809,6 @@ void app_main(void)
         uint32_t live_now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         uint32_t live_awake_elapsed_sec = (live_now_ms - live_awake_baseline_ms) / 1000;
         uint32_t live_measure_period_sec = esp_now_node_get_sample_interval_sec();
-        /* 2026-09-30(임시 진단 — PT100 보드에서 측정이 몇 분씩 멈춤, 원인 확인 후 제거) */
-        ESP_LOGI(TAG, "LIVECHK since=%u awake=%u period=%u measID=%u",
-                 (unsigned)s_seconds_since_last_measurement, (unsigned)live_awake_elapsed_sec,
-                 (unsigned)live_measure_period_sec, (unsigned)s_measurement_id);
         if (s_seconds_since_last_measurement + live_awake_elapsed_sec >= live_measure_period_sec) {
             float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
             if (attempt_one_measurement(fresh_vals, &measurement_elapsed_ms)) {
@@ -821,16 +817,6 @@ void app_main(void)
                 s_measurement_id++;
                 s_seconds_since_last_measurement = 0;
                 live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
-                {   /* 2026-09-30(임시 진단) — Live 재측정 성공도 값과 함께 남김 */
-                    int v_x100 = (int)(s_cached_vals[0] * 100.0f + (s_cached_vals[0] < 0 ? -0.5f : 0.5f));
-#if CONFIG_SENS_SENSOR_PT100
-                    unsigned raw = max31865_last_code();
-#else
-                    unsigned raw = 0;
-#endif
-                    ESP_LOGI(TAG, "LIVEMEAS ok measID=%u ch0=%s%d.%02d raw=%u", (unsigned)s_measurement_id,
-                             v_x100 < 0 ? "-" : "", abs(v_x100) / 100, abs(v_x100) % 100, raw);
-                }
             } else {
                 ESP_LOGW(TAG, "Sensor read failed (Live re-measure) - reusing cached value (measID=%u)",
                          (unsigned)s_measurement_id);

@@ -1,4 +1,5 @@
 #include <assert.h>
+#include "memdiag.h"
 
 #include "esp_log.h"
 #include "esp_lv_adapter.h"
@@ -975,9 +976,9 @@ void app_main(void)
      * 위젯 자체 비용(ui_main.c의 MEMDIAG 로그)은 10.5KB로 이미 확인됐는데, 이거보다 훨씬
      * 큰 차이가 나서 여기(SD/SPI DMA 마운트, ui_init()보다 먼저라 그 측정 범위 밖) 비용도
      * 별도로 재봄 */
-    size_t heap_before_sd = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_before_sd = MEMDIAG_HEAP();
     esp_err_t sd_err = sd_storage_init();
-    size_t heap_after_sd = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t heap_after_sd = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG SD mount cost: internal %u -> %u (used %d bytes)",
              (unsigned)heap_before_sd, (unsigned)heap_after_sd,
              (int)heap_before_sd - (int)heap_after_sd);

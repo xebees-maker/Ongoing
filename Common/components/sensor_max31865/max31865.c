@@ -47,9 +47,6 @@ static gpio_num_t s_cs = GPIO_NUM_NC;
  * 이 모듈은 CS가 레벨시프터를 거침. 직접 제어로 바꾼 뒤 1MHz, SDO 풀업 없이 정상 */
 #define CS_SETUP_US      10
 static uint8_t s_base_cfg = 0;   /* 바이어스·1-shot 없는 기본 설정(3선 비트, 60Hz) */
-static uint16_t s_last_code = 0; /* 마지막으로 읽은 15비트 RTD 코드(로그용) */
-
-uint16_t max31865_last_code(void) { return s_last_code; }
 
 static bool write_reg(uint8_t reg, uint8_t val)
 {
@@ -189,7 +186,6 @@ max31865_result_t max31865_read(float *temp_c, uint8_t *fault_status)
     }
 
     uint16_t code = (uint16_t)(((uint16_t)rtd[0] << 8 | rtd[1]) >> 1);  /* 15비트 ADC 코드 */
-    s_last_code = code;
     float r = (float)code * RREF_OHM / 32768.0f;
     *temp_c = rtd_to_celsius(r);
     return MAX31865_OK;

@@ -1,4 +1,5 @@
 #include "node_hub.h"
+#include "memdiag.h"
 #include <stdlib.h>
 #include "photo_rx.h"
 #include "can_bridge.h"
@@ -669,15 +670,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * 준다", 원인 미확인) — 최초 페어링 시퀀스의 각 단계 전후 internal free를
              * 찍어서 정확히 어느 호출이 큰 메모리를 먹는지 실기로 특정. 원인 확정되면
              * 이 로그들은 제거할 것 */
-            size_t m0 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            size_t m0 = MEMDIAG_HEAP();
             fire_connect_event();  /* 2026-09-04 — 웹/앱 대기자 통지 */
-            size_t m1 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            size_t m1 = MEMDIAG_HEAP();
             ESP_LOGI(TAG, "Paired: %s", name_copy);
             /* 2026-09-08(사용자 설계 — 연결 기능 주화면 이관) — 이 mac을 "알고 있는 장치"로
              * 영구 기록(이미 있으면 손 안 댐, alias 보존) — auto_connect_known 판단 근거이자
              * Alias 슬롯 그 자체 */
             device_config_mark_known_device(info->src_addr);
-            size_t m2 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            size_t m2 = MEMDIAG_HEAP();
             /* 2026-08-10 — "최초 페어링"과 "단순 생존확인 재페어링"을 구분(사용자 지적으로
              * 재설계). 처음엔 모든 became_paired에서 이 리셋을 했는데, 그러면 페어링(=CAM이
              * "할 일 있어요?" 확인하러 온 것뿐, 진짜 사용자 조작 아님) 자체가 매 사이클
@@ -687,7 +688,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
              * 노드와 정말 처음 붙는 순간)에만 리셋해서 최초 연결 직후엔 반응시간을 주고,
              * 그 이후 순수 생존확인 사이클은 리셋 안 해서 할 일 없으면 곧바로 재울 수 있게 함 */
             if (first_ever_pairing) node_hub_note_user_action();
-            size_t m3 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            size_t m3 = MEMDIAG_HEAP();
             /* 2026-08-25(CASK 재설계) — 예전엔 여기서 SET_TIME을 별도 reliable 요청으로
              * 보냈는데, 그 unix_time을 이제 push_cam_config_to()의 CAM_CONFIG_SET에 실어
              * 보냄(esp_now_link.h의 esp_now_cam_config_t.unix_time 참고) — CAM/Sens는 자체
@@ -701,7 +702,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             } else if (kind_copy == HUB_NODE_KIND_SENS) {
                 push_sens_config_to(info->src_addr);
             }
-            size_t m4 = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            size_t m4 = MEMDIAG_HEAP();
             ESP_LOGD(TAG, "MEMDIAG pairing(%s): m0=%u fire_connect_event->%u(d=%d) "
                      "mark_known->%u(d=%d) note_user_action->%u(d=%d) push_config->%u(d=%d)",
                      name_copy, (unsigned)m0, (unsigned)m1, (int)m0 - (int)m1,
@@ -893,15 +894,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 rec_count++;
             }
             if (rec_count > 0) {
-                bool stored = stats_store_append_batch(recs, rec_count);
-                /* 2026-09-30(임시 진단 — PT100 값이 테이블에 안 들어오는 구간 확인, 원인 확인 후 제거) */
-                int v_x100 = (int)(n->chan_val[0] * 100.0f + (n->chan_val[0] < 0 ? -0.5f : 0.5f));
-                ESP_LOGI(TAG, "SENSREC %s measID=%lu ch0=%s%d.%02d recs=%u stored=%d", n->name,
-                         (unsigned long)hello->measurement_id, v_x100 < 0 ? "-" : "", abs(v_x100) / 100,
-                         abs(v_x100) % 100, (unsigned)rec_count, stored ? 1 : 0);
-            } else {
-                ESP_LOGI(TAG, "SENSREC %s measID=%lu no valid channel (ok=%u)", n->name,
-                         (unsigned long)hello->measurement_id, (unsigned)n->chan_ok[0]);
+                stats_store_append_batch(recs, rec_count);
             }
         }
 
