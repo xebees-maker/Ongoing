@@ -2,6 +2,11 @@
    + W6002 원인 확인 + 4시간 무인 로그 (원래 PC, 사용자 부재 중 진행) ==
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
+- 2026-10-03 저녁: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
+  메모리 변경 없음(claude_memory_2026-10-01.zip 최신). sdkconfig 변경 없음.
+  git 밖 항목(콘 LittleFS — 전체 플래시하면 지워짐): app.html.gz(Cntl/web에서 python build_web.py → out/app.html.gz를 /admin/upload),
+  notify.cfg, web_auth.bin(웹 비밀번호 해시·로그인 토큰 — 지워지면 웹이 인증 없이 열리고 POST /api/password로 다시 정해야 함).
+  개발 도구(curl)는 로그인 쿠키가 필요(POST /api/login 본문 = 비밀번호, -c 쿠키파일).
 - 2026-10-03 오전: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리 변경 없음(claude_memory_2026-10-01.zip 최신). sdkconfig 변경 없음(10-02 저녁 기록 그대로 — 브만 defaults로 다시 만들 것).
   git 밖 항목(콘 LittleFS, 콘을 다시 전체 플래시하면 지워짐): app.html.gz(원본 Cntl/web/app.html을 gzip -9로 압축해 /admin/upload),
@@ -638,6 +643,8 @@ C12. 메모리 기록의 OPEN 두 건 — ① 카메라 팝업 약 20K(09-22, 09
        성장률 계산(새로 난 것·수확된 것 구분), 이력은 콘 SD.
      - 크기 단위: 픽셀이면 % 변화, mm는 화면 안에 크기를 아는 기준 표시 필요(결정 필요).
      - 첫 단계: 양송이가 있는 실제 캠 사진으로 PC에서 처리 시험 → 잘 잡히면 캠으로 옮김(사진 준비: 사용자).
+ AD 진행(10-03 저녁): 주화면·장치·릴레이·카메라 팝업 완료(아래 116). 남은 웹: 에러·경고 목록, 통계·기록, 설정(웹 전용 설정·비밀번호
+     변경 포함), 알림 보낼 이벤트, WebSocket. 그다음 2·3단계.
  AB. [보류 — 사용자 10-02] 캠: 배터리를 꽂으면 바로 켜지게(센스와 같게). 펌웨어로는 불가(버튼 전엔 칩 전원 없음) — 납땜.
      회로도(C:\projects\documents\ESP32-S3-CAM-OVxxxx_Rev1.1.pdf, BAT 블록): Q2(AO3401)=배터리 스위치, R29 100K가 게이트를 VBAT로,
      Key2가 D5로 게이트를 GND로, 펌웨어 BAT_EN→T1(8050)이 유지. 추천: Q2 소스(핀2, VBAT)–드레인(핀3) 단락 — 추가 누설 0(계산값).
@@ -657,6 +664,19 @@ C12. 메모리 기록의 OPEN 두 건 — ① 카메라 팝업 약 20K(09-22, 09
      공통 can_bridge_link에 막힘 중단 수·알림 태스크 추가(브는 안 씀). 브 플래시(재부팅) 중 5013 뜨는 것 사용자 확인.
      Claude 잘못: can_status 스택을 4096으로 바꾸며 치환이 ctrl_tx 쪽 malloc에 걸려 can_status가 3072 버퍼에 4096 스택 →
      힙 손상으로 콘 부팅 반복. 바로 고쳐 다시 플래시.
+116. 웹 SPA(할 일 AD) — 로그인(비밀번호 해시+1년 토큰), 웹 세션(웹 접속 중 콘 잠금 화면 + "웹 연결 끊고 사용", 409·다시 연결),
+     주화면(/api/dashboard: 상태·메모리·SD·릴레이·센서·카메라, 저장 공간 정리 안내), 장치 팝업(/api/device), 릴레이 팝업(/api/relay —
+     선택값→설정 계산을 relay_apply_choices로 떼어 콘·웹 공용, 수동 강제), 카메라 팝업(/api/cam/list·photos·photo·capture·delete,
+     웹 전용 전체 화면 확대). 웹 쓰기는 ui_main_run_web_op로 LVGL 태스크에서 콘과 같은 모델 함수 실행. 웹 접속 시 콘의 장치·릴레이·
+     카메라 팝업은 닫힘. SPA 문구는 build_web.py가 ui_strings.c 표 통째로 넣음(없는 키·JS 문법 검사).
+     사용자 결정: 문장은 언어별 어순(요약 틀 STR_FMT_RELAY_SUMMARY), 입력 칸은 같은 배치(동작/항목/조건, 조건 칸 오른쪽 정렬),
+     한국어 켬/끔·이상/이하·강제 켬/끔, 온도 값 0~90·오차 0~5.9(콘도 같은 표), 웹 값 입력은 롤러, 뒤로 가기 = 팝업 닫기.
+     iPhone(Chrome): 입력칸 16px, 세로 스크롤만, 배율 1 자동 복원(원인 미확정 — 1.07배로 남던 현상).
+     콘 Web 주소·QR = 바깥 주소(notify.cfg click=).
+     무선 속도: 오전 LittleFS 100KB 3~8초 → 저녁 20~33초(ping 평균 111ms), 사진 101KB 46초. 원인 모름(Wi-Fi 설정은 안 건드림).
+     Claude 잘못: 확인을 사용자에게 계속 넘김(사용자 지적 후 헤드리스 브라우저로 직접 검증), 문구 키 실수(STR_BTN_OK), heredoc이
+     '
+'을 줄바꿈으로 바꿔 깨진 JS 업로드(1분), iOS 선택 상자가 휠로 뜬다고 잘못 말함.
 114. 브 실물 보드로 교체 — Waveshare ESP32-S3-RS485-CAN(ESP32-S3R8: Octal PSRAM 8MB, 16MB 플래시, 화면·터치 없음, 상시 전원,
      외장 안테나). COM26. CAN은 절연 트랜시버(TJA1051 + π163E31), 핀은 예전과 같은 IO15/16. RS485·RTC 안 씀.
      코드: 화면(LCD/LVGL/터치/CH422G/화면 끄기) 전부 제거, 화면 로그는 시리얼만(bridge_log.h, 태그 wireless/can_ui D).

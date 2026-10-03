@@ -931,8 +931,8 @@ void web_dashboard_start(void)
     /* 2026-08-30 — URI 핸들러가 계속 늘어나서(root/photo/admin 2개 + API) 기본
      * max_uri_handlers(8)를 넘을 수 있어 여유있게 확대 */
     /* 2026-09-27 — capture_now/devlog 추가로 16을 채움, 여유. 10-03 — nodes/notify_test로 20을 채워 24,
-     * login/password/logout_all/session_claim 4개 추가로 28, 웹 화면 API(dashboard 등) 여유 포함 40 */
-    config.max_uri_handlers = 40;
+     * login/password/logout_all/session_claim 4개 추가로 28, 웹 화면 API(장치·릴레이·카메라 등 18개) 여유 포함 48 */
+    config.max_uri_handlers = 48;
     /* 2026-10-03(할 일 AD — 웹 접속은 한 곳) — 동시 연결 3개(브라우저 한 대가 여는 연결 몇 개), 넘치면 가장 오래 쉰 연결을 닫음.
      * 웹 전송 하나가 내부 RAM 약 20K를 잠깐 씀(10-01 실측) — 연결 수를 묶어 그 이상 커지지 않게 */
     config.max_open_sockets = 3;

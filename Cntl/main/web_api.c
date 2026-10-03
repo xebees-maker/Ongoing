@@ -9,6 +9,7 @@
 #include "rtc_sync.h"
 #include "wifi_sta.h"
 #include "ui_main.h"
+#include "photo_storage.h"
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -546,8 +547,137 @@ static esp_err_t api_relay_override_post_handler(httpd_req_t *req)
     return send_simple(req, ok ? NULL : "400 Bad Request", ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
+/* ── 카메라 팝업 ── */
+#define WEB_PHOTO_PAGE_SIZE 20            /* 콘 PHOTO_LIST_PAGE_SIZE와 같음 */
+#define WEB_PHOTO_BUF_CAP   (1024 * 1024) /* 콘 PHOTO_RAW_BUF_CAP과 같음 */
+
+/* GET /api/cam/list — 카메라 선택지: 지금 연결된 캠 + 사진 폴더가 있는 캠(콘 카메라 팝업 드롭다운과 같은 기준) */
+static esp_err_t api_cam_list_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    const size_t cap = 2048;
+    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
+    node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    uint8_t (*known)[6] = heap_caps_malloc(6 * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    if (!b.p || !nodes || !known) { heap_caps_free(b.p); heap_caps_free(nodes); heap_caps_free(known); httpd_resp_send_500(req); return ESP_FAIL; }
+    int n = node_hub_get_nodes(HUB_NODE_KIND_CAM, nodes, NODE_HUB_MAX_NODES);
+    int nk = (int)photo_storage_list_camera_macs(known, NODE_HUB_MAX_NODES);
+    jb_printf(&b, "{\"cams\":[");
+    int out = 0;
+    for (int i = 0; i < n; i++) {   /* 연결된 캠(연결 대기 제외 — 콘 주화면과 같음) */
+        hub_conn_state_t cs = node_hub_get_conn_state(nodes[i].mac);
+        if (cs == HUB_CONN_STATE_WAITING) continue;
+        jb_printf(&b, "%s{\"mac\":", out++ ? "," : "");
+        jb_mac(&b, nodes[i].mac);
+        jb_printf(&b, ",\"name\":");
+        const char *alias = device_config_get_alias(nodes[i].mac);
+        jb_str(&b, alias[0] ? alias : nodes[i].name);
+        jb_printf(&b, ",\"status\":\"%s\",\"count\":%lu}", conn_code(cs), (unsigned long)photo_storage_get_count(nodes[i].mac));
+    }
+    for (int k = 0; k < nk; k++) {  /* 사진 이력만 있는 캠 */
+        bool listed = false;
+        for (int i = 0; i < n && !listed; i++) {
+            listed = memcmp(nodes[i].mac, known[k], 6) == 0 && node_hub_get_conn_state(nodes[i].mac) != HUB_CONN_STATE_WAITING;
+        }
+        if (listed) continue;
+        jb_printf(&b, "%s{\"mac\":", out++ ? "," : "");
+        jb_mac(&b, known[k]);
+        const char *alias = device_config_get_alias(known[k]);
+        jb_printf(&b, ",\"name\":");
+        if (alias[0]) jb_str(&b, alias);
+        else jb_printf(&b, "\"C%02X%02X%02X\"", known[k][3], known[k][4], known[k][5]);
+        jb_printf(&b, ",\"status\":\"offline\",\"count\":%lu}", (unsigned long)photo_storage_get_count(known[k]));
+    }
+    jb_printf(&b, "]}");
+    heap_caps_free(nodes);
+    heap_caps_free(known);
+    esp_err_t ret = send_jbuf(req, &b);
+    heap_caps_free(b.p);
+    return ret;
+}
+
+/* GET /api/cam/photos?mac=&page= — 사진 목록 한 페이지(0 = 최신, 콘과 같은 20장) */
+static esp_err_t api_cam_photos_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    uint8_t mac[6];
+    if (!hex_to_mac(s_w->mac_hex, mac)) return send_simple(req, "400 Bad Request", "{\"error\":\"mac\"}");
+    int page = query_int(s_w->query, "page", 0);
+    if (page < 0) page = 0;
+    photo_storage_item_t *items = heap_caps_malloc(sizeof(photo_storage_item_t) * WEB_PHOTO_PAGE_SIZE, MALLOC_CAP_SPIRAM);
+    const size_t cap = 3072;
+    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
+    if (!items || !b.p) { heap_caps_free(items); heap_caps_free(b.p); httpd_resp_send_500(req); return ESP_FAIL; }
+    uint32_t total = photo_storage_get_count(mac);
+    uint32_t n = photo_storage_read_page(mac, (uint32_t)page, WEB_PHOTO_PAGE_SIZE, items, WEB_PHOTO_PAGE_SIZE);
+    jb_printf(&b, "{\"count\":%lu,\"page\":%d,\"page_size\":%d,\"items\":[", (unsigned long)total, page, WEB_PHOTO_PAGE_SIZE);
+    for (uint32_t i = 0; i < n; i++) {
+        jb_printf(&b, "%s{\"kind\":\"%c\",\"seq\":%lu,\"t\":%lld,\"size\":%u}", i ? "," : "", items[i].kind,
+                  (unsigned long)items[i].seq, (long long)items[i].mtime, (unsigned)items[i].file_size);
+    }
+    jb_printf(&b, "]}");
+    heap_caps_free(items);
+    esp_err_t ret = send_jbuf(req, &b);
+    heap_caps_free(b.p);
+    return ret;
+}
+
+/* GET /api/cam/photo?mac=&kind=&seq= — 원본 JPEG(브라우저가 줄여서 보여 줌). 사진 번호는 바뀌지 않으므로 하루 캐시 */
+static esp_err_t api_cam_photo_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    uint8_t mac[6];
+    if (!hex_to_mac(s_w->mac_hex, mac)) return send_simple(req, "400 Bad Request", "{\"error\":\"mac\"}");
+    char kind = (char)query_int(s_w->query, "kind", 'M');
+    uint32_t seq = (uint32_t)query_int(s_w->query, "seq", -1);
+    uint8_t *buf = heap_caps_malloc(WEB_PHOTO_BUF_CAP, MALLOC_CAP_SPIRAM);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    size_t len = 0;
+    if (!photo_storage_read_file(mac, (uint8_t)kind, seq, buf, WEB_PHOTO_BUF_CAP, &len)) {
+        heap_caps_free(buf);
+        return send_simple(req, "404 Not Found", "{\"error\":\"photo\"}");
+    }
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Cache-Control", "private, max-age=86400");
+    esp_err_t ret = httpd_resp_send(req, (const char *)buf, len);
+    heap_caps_free(buf);
+    return ret;
+}
+
+/* POST /api/cam/capture?mac=, /api/cam/delete?mac=&kind=&seq=, /api/cam/delete_all?mac= — 콘 카메라 팝업 버튼과 같은 모델 함수 */
+static esp_err_t cam_op(httpd_req_t *req, ui_web_op_type_t type)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    ui_web_op_t *op = &s_w->op;
+    memset(op, 0, sizeof(*op));
+    if (!hex_to_mac(s_w->mac_hex, op->mac)) return send_simple(req, "400 Bad Request", "{\"ok\":false,\"error\":\"mac\"}");
+    op->type = type;
+    op->kind = (uint8_t)query_int(s_w->query, "kind", 'M');
+    op->seq = (uint32_t)query_int(s_w->query, "seq", -1);
+    bool ok = ui_main_run_web_op(op, 3000);
+    return send_simple(req, ok ? NULL : "409 Conflict", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+static esp_err_t api_cam_capture_post_handler(httpd_req_t *req)    { return cam_op(req, UI_WEB_OP_CAPTURE); }
+static esp_err_t api_cam_delete_post_handler(httpd_req_t *req)     { return cam_op(req, UI_WEB_OP_PHOTO_DELETE); }
+static esp_err_t api_cam_delete_all_post_handler(httpd_req_t *req) { return cam_op(req, UI_WEB_OP_PHOTO_DELETE_ALL); }
+
 void web_api_register_handlers(httpd_handle_t server)
 {
+    static const httpd_uri_t cam_list_uri = { .uri = "/api/cam/list", .method = HTTP_GET, .handler = api_cam_list_get_handler };
+    static const httpd_uri_t cam_photos_uri = { .uri = "/api/cam/photos", .method = HTTP_GET, .handler = api_cam_photos_get_handler };
+    static const httpd_uri_t cam_photo_uri = { .uri = "/api/cam/photo", .method = HTTP_GET, .handler = api_cam_photo_get_handler };
+    static const httpd_uri_t cam_capture_uri = { .uri = "/api/cam/capture", .method = HTTP_POST, .handler = api_cam_capture_post_handler };
+    static const httpd_uri_t cam_delete_uri = { .uri = "/api/cam/delete", .method = HTTP_POST, .handler = api_cam_delete_post_handler };
+    static const httpd_uri_t cam_delete_all_uri = { .uri = "/api/cam/delete_all", .method = HTTP_POST, .handler = api_cam_delete_all_post_handler };
+    httpd_register_uri_handler(server, &cam_list_uri);
+    httpd_register_uri_handler(server, &cam_photos_uri);
+    httpd_register_uri_handler(server, &cam_photo_uri);
+    httpd_register_uri_handler(server, &cam_capture_uri);
+    httpd_register_uri_handler(server, &cam_delete_uri);
+    httpd_register_uri_handler(server, &cam_delete_all_uri);
     static const httpd_uri_t relay_uri = { .uri = "/api/relay", .method = HTTP_GET, .handler = api_relay_get_handler };
     static const httpd_uri_t relay_apply_uri = { .uri = "/api/relay/apply", .method = HTTP_POST, .handler = api_relay_apply_post_handler };
     static const httpd_uri_t relay_alias_uri = { .uri = "/api/relay/alias", .method = HTTP_POST, .handler = api_relay_alias_post_handler };

@@ -917,6 +917,7 @@ static void web_lock_apply(void *arg)
         /* 콘에 열려 있던 설정 팝업은 닫음 — 팝업은 열 때 모델을 복사해 두므로, 웹이 바꾼 뒤 넘겨받으면 옛 값으로 덮어쓸 수 있음 */
         if (s_device_popup) teardown_device_popup();
         if (s_relay_popup) teardown_relay_popup();
+        if (s_camera_popup) teardown_camera_tab();
     }
     if (!locked) {
         if (s_web_lock_overlay) lv_obj_add_flag(s_web_lock_overlay, LV_OBJ_FLAG_HIDDEN);
@@ -9499,6 +9500,7 @@ static void build_relay_popup(int idx)
     lv_obj_t *cond_lbl = lv_label_create(sentence_row);
     lv_label_set_text(cond_lbl, ui_str(STR_LABEL_RELAY_CONDITION));
     lv_obj_set_style_text_font(cond_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_flex_grow(cond_lbl, 1);  /* 10-03(사용자 지시) — 조건 뒤 칸들은 오른쪽 정렬 */
 
     s_relay_action_word_dd = lv_dropdown_create(act_group);
     lv_obj_set_style_pad_ver(s_relay_action_word_dd, 7, 0);
@@ -10580,6 +10582,15 @@ static bool web_op_execute(const ui_web_op_t *op)
         case UI_WEB_OP_RELAY_OVERRIDE:
             if (op->idx < 0 || op->idx >= POWER_RELAY_COUNT) return false;
             relay_apply_override(op->idx, op->value != 0);   /* 전원 아이콘 확인 팝업 Yes와 같음 */
+            return true;
+        case UI_WEB_OP_PHOTO_DELETE:     /* cb_photo_delete_confirm과 같음 */
+            return photo_storage_delete(op->mac, op->kind, op->seq);
+        case UI_WEB_OP_PHOTO_DELETE_ALL: /* cb_delete_all_confirmed와 같음 */
+            photo_storage_delete_all(op->mac);
+            return true;
+        case UI_WEB_OP_CAPTURE:          /* cb_capture_now와 같음 — 통신 중(ACTIVE)인 캠만 */
+            if (node_hub_get_conn_state(op->mac) != HUB_CONN_STATE_ACTIVE) return false;
+            photo_rx_capture_now(op->mac);
             return true;
         default:
             return false;

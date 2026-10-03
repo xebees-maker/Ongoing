@@ -44,6 +44,9 @@ typedef enum {
     UI_WEB_OP_RELAY_ALIAS,     /* idx, text — 콘 릴레이 팝업 별명 Apply와 같음 */
     UI_WEB_OP_RELAY_APPLY,     /* idx, relay — 콘 릴레이 팝업 본 Apply와 같음(선택값 → 설정 계산은 콘과 같은 함수) */
     UI_WEB_OP_RELAY_OVERRIDE,  /* idx, value = 0/1 — 수동 조작(전원 아이콘 확인 팝업 Yes와 같음) */
+    UI_WEB_OP_PHOTO_DELETE,    /* mac, kind, seq — 콘 사진 행 삭제와 같음 */
+    UI_WEB_OP_PHOTO_DELETE_ALL,/* mac — 콘 Delete all과 같음 */
+    UI_WEB_OP_CAPTURE,         /* mac — 콘 Manual shot과 같음(통신 중인 캠만) */
 } ui_web_op_type_t;
 
 /* 릴레이 팝업의 사용자 선택값(화면 위젯이 나타내는 값 그대로). relay_apply_choices()가 이걸 설정 구조체로 바꿈 —
@@ -72,6 +75,8 @@ typedef struct {
     uint32_t value;
     char     text[32];
     int      idx;                      /* 릴레이 번호(0..) */
+    uint8_t  kind;                     /* 사진 종류('M'/'T') */
+    uint32_t seq;                      /* 사진 번호 */
     ui_web_relay_choices_t relay;
 } ui_web_op_t;
 
