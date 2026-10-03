@@ -1,0 +1,119 @@
+<!doctype html>
+<!--
+  2026-10-03(할 일 AD 1단계) — 콘 웹앱(SPA) 뼈대. 콘 = 모델 + JSON API, 이 페이지 = 화면.
+  원칙: 요청은 전부 상대 경로(중계 서비스가 경로 접두어를 붙여도 동작), 실시간 갱신은 주기 조회가 기본
+  (WebSocket은 나중에 붙이되 안 되면 이 조회로 넘어감). 화면 문구는 영문(콘 화면과 같은 원칙).
+  배포: gzip -9 → /admin/upload?file=app.html.gz (원본은 git의 Cntl/web/app.html)
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cntl</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --text:#1c1e21; --muted:#6b7280; --ok:#16a34a; --wait:#d97706; --off:#9ca3af; --err:#dc2626; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111317; --card:#1b1e24; --text:#e5e7eb; --muted:#9ca3af; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.4 -apple-system, system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; }
+  header h1 { font-size:18px; margin:0; }
+  #conn { font-size:13px; color:var(--muted); }
+  #conn.bad { color:var(--err); }
+  main { padding:0 16px 24px; max-width:640px; margin:0 auto; }
+  section { background:var(--card); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+  section h2 { font-size:14px; margin:0 0 8px; color:var(--muted); font-weight:600; }
+  .row { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-top:1px solid rgba(127,127,127,.15); }
+  .row:first-of-type { border-top:none; }
+  .name { font-weight:600; }
+  .mac { font-size:12px; color:var(--muted); }
+  .st { font-size:13px; }
+  .st.active { color:var(--ok); } .st.waiting { color:var(--wait); } .st.paired { color:var(--off); }
+  .empty { color:var(--muted); font-size:13px; }
+  button { font:inherit; padding:8px 14px; border-radius:8px; border:1px solid rgba(127,127,127,.4); background:transparent; color:var(--text); }
+  #notifyResult { font-size:13px; color:var(--muted); margin-left:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cntl</h1>
+  <span id="conn">Connecting...</span>
+</header>
+<main>
+  <section>
+    <h2>Cameras</h2>
+    <div id="cams"><div class="empty">-</div></div>
+  </section>
+  <section>
+    <h2>Sensors</h2>
+    <div id="sens"><div class="empty">-</div></div>
+  </section>
+  <section>
+    <h2>Notification</h2>
+    <button id="notifyBtn">Send test notification</button><span id="notifyResult"></span>
+  </section>
+</main>
+<script>
+(function () {
+  'use strict';
+  var POLL_MS = 5000;
+  var timer = null;
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function macShort(mac) { return mac.slice(6).toUpperCase(); }
+
+  function renderList(el, nodes) {
+    if (!nodes.length) { el.innerHTML = '<div class="empty">None</div>'; return; }
+    el.innerHTML = nodes.map(function (n) {
+      return '<div class="row"><div><div class="name">' + esc(n.name || macShort(n.mac)) +
+        '</div><div class="mac">' + esc(macShort(n.mac)) + '</div></div>' +
+        '<div class="st ' + esc(n.status) + '">' + esc(n.status_msg) + '</div></div>';
+    }).join('');
+  }
+
+  function setConn(text, bad) {
+    var el = document.getElementById('conn');
+    el.textContent = text;
+    el.className = bad ? 'bad' : '';
+  }
+
+  function poll() {
+    fetch('api/nodes', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (d) {
+        var nodes = d.nodes || [];
+        renderList(document.getElementById('cams'), nodes.filter(function (n) { return n.kind === 'cam'; }));
+        renderList(document.getElementById('sens'), nodes.filter(function (n) { return n.kind === 'sens'; }));
+        setConn('Updated ' + new Date().toLocaleTimeString(), false);
+      })
+      .catch(function (e) { setConn('Offline (' + e.message + ')', true); })
+      .then(schedule);
+  }
+
+  function schedule() {
+    clearTimeout(timer);
+    if (!document.hidden) timer = setTimeout(poll, POLL_MS);
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) clearTimeout(timer); else poll();
+  });
+
+  document.getElementById('notifyBtn').addEventListener('click', function () {
+    var out = document.getElementById('notifyResult');
+    out.textContent = 'Sending...';
+    fetch('api/notify_test', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { out.textContent = d.ok ? 'Queued' : 'Failed'; })
+      .catch(function () { out.textContent = 'Failed'; });
+  });
+
+  poll();
+})();
+</script>
+</body>
+</html>

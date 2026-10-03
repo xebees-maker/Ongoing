@@ -28,6 +28,7 @@
 #include "stats_store.h"
 #include "power_relay.h"
 #include "sens_kind_store.h"
+#include "notify.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -59,7 +60,8 @@ static void touch_activity_event_cb(lv_event_t *e)
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "/app");
+    /* 2026-10-03(할 일 AD) — 상대 경로: 앞에 중계 서비스가 경로 접두어를 붙여도 그대로 동작 */
+    httpd_resp_set_hdr(req, "Location", "app");
     return httpd_resp_send(req, NULL, 0);
 }
 
@@ -668,30 +670,121 @@ static esp_err_t api_photo_fetch_get_handler(httpd_req_t *req)
 }
 
 /* 2026-08-30 — 정적 프론트엔드(assets에 업로드된 app.html)를 깔끔한 URL로 서빙. 파일이
- * 아직 없으면(최초 배포 전) 404 — /admin/upload?file=app.html로 올리면 그때부터 동작 */
+ * 아직 없으면(최초 배포 전) 404 — /admin/upload?file=app.html로 올리면 그때부터 동작
+ * 2026-10-03(할 일 AD — SPA) — app.html.gz가 있으면 그걸 gzip 그대로 보냄(전송량 감소). ETag(크기+수정시각)로
+ * 브라우저가 가진 것과 같으면 304 — 첫 접속 뒤로는 본문을 다시 안 보냄(Cache-Control: no-cache = 매번 확인만) */
 static esp_err_t app_get_handler(httpd_req_t *req)
 {
-    FILE *f = fopen(FS_MOUNT_POINT "/app.html", "rb");
-    if (!f) {
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "app.html not uploaded yet");
-        return ESP_FAIL;
+    const char *path = FS_MOUNT_POINT "/app.html.gz";
+    bool gz = true;
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        path = FS_MOUNT_POINT "/app.html";
+        gz = false;
+        if (stat(path, &st) != 0) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "app.html not uploaded yet");
+            return ESP_FAIL;
+        }
     }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = heap_caps_malloc((size_t)size, MALLOC_CAP_SPIRAM);
-    if (!buf) {
-        fclose(f);
+    /* ETag·If-None-Match 문자열은 PSRAM(스택에 두지 않음). ETag 헤더는 응답을 보낼 때까지 살아 있어야 해서 끝에 해제 */
+    char *etag = heap_caps_calloc(1, 80, MALLOC_CAP_SPIRAM);
+    if (!etag) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
-    size_t rd = fread(buf, 1, (size_t)size, f);
+    char *inm = etag + 40;
+    snprintf(etag, 40, "\"%lx-%llx%s\"", (unsigned long)st.st_size, (unsigned long long)st.st_mtime, gz ? "g" : "");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "ETag", etag);
+    if (httpd_req_get_hdr_value_str(req, "If-None-Match", inm, 40) == ESP_OK && strcmp(inm, etag) == 0) {
+        httpd_resp_set_status(req, "304 Not Modified");
+        esp_err_t r304 = httpd_resp_send(req, NULL, 0);
+        heap_caps_free(etag);
+        return r304;
+    }
+
+    FILE *f = fopen(path, "rb");
+    char *buf = f ? heap_caps_malloc((size_t)st.st_size, MALLOC_CAP_SPIRAM) : NULL;
+    if (!buf) {
+        if (f) fclose(f);
+        heap_caps_free(etag);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    size_t rd = fread(buf, 1, (size_t)st.st_size, f);
     fclose(f);
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    if (gz) httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     esp_err_t ret = httpd_resp_send(req, buf, rd);
     heap_caps_free(buf);
+    heap_caps_free(etag);
     return ret;
+}
+
+/* 2026-10-03(할 일 AD — SPA 모델 API) — 노드 전체(캠·센스) 목록과 연결 상태. 읽기 전용. kind=cam|sens, status는
+ * /api/devices와 같은 코드(waiting/active/paired), status_msg는 콘 화면 문구(ui_str) 그대로 */
+static esp_err_t api_nodes_get_handler(httpd_req_t *req)
+{
+    /* 노드 배열(구조체가 큼)과 본문은 PSRAM — 스택에 두지 않음 */
+    node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    const size_t cap = 4096;
+    char *body = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (!nodes || !body) {
+        heap_caps_free(nodes);
+        heap_caps_free(body);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    int n = node_hub_get_nodes(HUB_NODE_KIND_UNKNOWN, nodes, NODE_HUB_MAX_NODES);
+    int len = snprintf(body, cap, "{\"nodes\":[");
+    for (int i = 0; i < n && len < (int)cap - 200; i++) {
+        hub_conn_state_t cs = node_hub_get_conn_state(nodes[i].mac);
+        const char *status = (cs == HUB_CONN_STATE_WAITING) ? "waiting"
+                            : (cs == HUB_CONN_STATE_ACTIVE)  ? "active" : "paired";
+        const char *status_msg = (cs == HUB_CONN_STATE_WAITING) ? ui_str(STR_STATUS_CONNECTING)
+                                : (cs == HUB_CONN_STATE_ACTIVE)  ? ui_str(STR_STATUS_ACTIVE)
+                                                                  : ui_str(STR_STATUS_PAIRED);
+        const char *kind = (nodes[i].kind == HUB_NODE_KIND_CAM) ? "cam"
+                         : (nodes[i].kind == HUB_NODE_KIND_SENS) ? "sens" : "unknown";
+        len += snprintf(body + len, cap - len,
+                        "%s{\"mac\":\"%02x%02x%02x%02x%02x%02x\",\"name\":\"%s\",\"kind\":\"%s\",\"status\":\"%s\","
+                        "\"status_msg\":\"%s\",\"paired\":%s}",
+                        i == 0 ? "" : ",",
+                        nodes[i].mac[0], nodes[i].mac[1], nodes[i].mac[2],
+                        nodes[i].mac[3], nodes[i].mac[4], nodes[i].mac[5],
+                        nodes[i].name, kind, status, status_msg,
+                        nodes[i].conn_state == NODE_CONN_PAIRED ? "true" : "false");
+    }
+    len += snprintf(body + len, cap - len, "],\"time\":%lu}", (unsigned long)rtc_sync_get_unix_time());
+    heap_caps_free(nodes);
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t ret = httpd_resp_send(req, body, len);
+    heap_caps_free(body);
+    return ret;
+}
+
+/* 2026-10-03(할 일 AD 1단계 — 시험용, 상용화 때 제거: 조건부 C9) — 휴대폰 알림 시험. msg=로 본문 지정(없으면 기본 문구).
+ * 큐에 넣기만 하고 바로 응답(실제 전송 결과는 시리얼 NOTIFY 로그) */
+static esp_err_t api_notify_test_get_handler(httpd_req_t *req)
+{
+    /* query·msg는 PSRAM(스택에 두지 않음) */
+    char *query = heap_caps_calloc(1, 160 + 128, MALLOC_CAP_SPIRAM);
+    if (!query) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    char *msg = query + 160;
+    snprintf(msg, 128, "Test notification from Cntl");
+    if (httpd_req_get_url_query_str(req, query, 160) == ESP_OK) {
+        httpd_query_key_value(query, "msg", msg, 128);
+    }
+    bool ok = notify_send("Cntl test", msg);
+    heap_caps_free(query);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    return httpd_resp_sendstr(req, ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
 /* 2026-08-30(사용자 지시: "PC쪽에 파일을 나누고, 각 파일을 복사하는 개념으로 콘의 assets
@@ -818,7 +911,11 @@ void web_dashboard_start(void)
     config.stack_size = 8192;
     /* 2026-08-30 — URI 핸들러가 계속 늘어나서(root/photo/admin 2개 + API) 기본
      * max_uri_handlers(8)를 넘을 수 있어 여유있게 확대 */
-    config.max_uri_handlers = 20;  /* 2026-09-27 — capture_now/devlog 추가로 16을 채움, 여유 */
+    config.max_uri_handlers = 24;  /* 2026-09-27 — capture_now/devlog 추가로 16을 채움, 여유. 10-03 — nodes/notify_test로 20을 채워 24 */
+    /* 2026-10-03(할 일 AD — 웹 접속은 한 곳) — 동시 연결 3개(브라우저 한 대가 여는 연결 몇 개), 넘치면 가장 오래 쉰 연결을 닫음.
+     * 웹 전송 하나가 내부 RAM 약 20K를 잠깐 씀(10-01 실측) — 연결 수를 묶어 그 이상 커지지 않게 */
+    config.max_open_sockets = 3;
+    config.lru_purge_enable = true;
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
     if (err != ESP_OK) {
@@ -890,6 +987,11 @@ void web_dashboard_start(void)
     ESP_LOGD(TAG, "Web: API endpoints registered");
     static const httpd_uri_t app_uri = { .uri = "/app", .method = HTTP_GET, .handler = app_get_handler };
     httpd_register_uri_handler(server, &app_uri);
+    static const httpd_uri_t api_nodes_uri = { .uri = "/api/nodes", .method = HTTP_GET, .handler = api_nodes_get_handler };
+    httpd_register_uri_handler(server, &api_nodes_uri);
+    static const httpd_uri_t api_notify_test_uri = { .uri = "/api/notify_test", .method = HTTP_GET,
+                                                       .handler = api_notify_test_get_handler };
+    httpd_register_uri_handler(server, &api_notify_test_uri);
     /* 2026-08-21 — 성공할 때도 같은 여유메모리를 남김(사용자 지시) — 실패할 때만 찍으면
      * "언제부터 빠듯해지기 시작했는지" 추세를 못 봄. 5005는 이 시점 내부RAM이 간당간당할
      * 때만 뜨는 경계선 증상이라, 성공한 부팅들의 수치도 같이 쌓여야 나중에 진짜 임계점을
@@ -941,6 +1043,7 @@ void app_main(void)
     /* LittleFS "assets" 파티션 마운트 — LCD/I2C와 무관해서 최대한 먼저: 언어 설정
      * (/assets/settings.bin)과 RTC 시드값(/assets/time_sync.txt) 둘 다 이 안에 있음 */
     ESP_ERROR_CHECK(fs_init());
+    notify_init();  /* 2026-10-03(할 일 AD) — 휴대폰 알림 보내기 태스크(설정 notify.cfg는 LittleFS) */
     /* 2026-09-27(로그 정리) — 개발 로그: ESP_LOG 가로채기 시작 + 저장 문턱 적용(설정은 /assets/devlog.cfg라 fs 뒤) */
     dev_log_init();
 

@@ -20,6 +20,7 @@ idf_component_register(
         "power_relay.c"
         "sens_kind_store.c"
         "can_bridge.c"
+        "notify.c"
 
         "../components/waveshare_rgb_lcd_port.c"
         "../components/ch422g.c"
@@ -32,6 +33,7 @@ idf_component_register(
         esp_event
         esp_netif
         esp_http_server
+        esp_http_client
         esp_now_link
         esp_timer
         waveshare__pcf85063a
