@@ -73,3 +73,7 @@ CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 # Wi-Fi 처리량은 줄 수 있음 — 콘의 Wi-Fi는 웹 접속용)
 # CONFIG_ESP_WIFI_IRAM_OPT is not set
 # CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
+
+# 2026-10-03(사용자 지시 — 웹 사진 전송 속도 시험) — TCP 송신 버퍼 5760 → 23040(4배). 내부 RAM을 전송 중 그만큼 더 씀.
+# 효과는 사용자가 측정. Wi-Fi/lwIP 쪽 변경은 이 한 줄만(feedback_no_wifi_memory_tuning — 사용자가 이 시험을 직접 지시)
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=23040

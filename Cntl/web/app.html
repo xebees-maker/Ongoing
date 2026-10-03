@@ -126,6 +126,12 @@
   .prow.sel { background:rgba(37,99,235,.15); }
   .prow .grow { font-size:14px; }
   .pager { display:flex; justify-content:center; align-items:center; gap:6px; padding:12px 14px; }
+  /* 오래 걸리는 작업 오버레이(10-03 사용자 요청): 진행률(%)과 경과 시간 */
+  .busy { position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.45); display:flex; align-items:center; justify-content:center; }
+  .busy .bbox { background:var(--card); border-radius:12px; padding:18px 22px; min-width:220px; text-align:center; }
+  .busy .bar { height:6px; background:var(--bar); border-radius:3px; margin-top:12px; overflow:hidden; }
+  .busy .bar i { display:block; height:100%; width:0; background:var(--blue); }
+  .busy .btxt { font-variant-numeric:tabular-nums; }
   .viewer { position:fixed; inset:0; z-index:50; background:#000; overflow:hidden; touch-action:none; }
   .viewer img { position:absolute; left:50%; top:50%; max-width:100vw; max-height:100vh; transform-origin:center center; user-select:none; -webkit-user-drag:none; }
   .viewer .vx { position:absolute; top:10px; right:10px; z-index:2; color:#fff; border:none; font-size:26px; background:rgba(0,0,0,.4); }
@@ -195,6 +201,7 @@
 <div id="sheet" class="sheet hidden"><div class="sbody" id="sheetBody"></div></div>
 <div id="toast" class="toast hidden"></div>
 <div id="modal" class="modal hidden"><div class="mbox" id="modalBox"></div></div>
+<div id="busy" class="busy hidden"><div class="bbox"><div id="busyTxt" class="btxt"></div><div class="bar" id="busyBar"><i id="busyFill"></i></div></div></div>
 <div id="viewer" class="viewer hidden"><button class="vx" id="viewerX" aria-label="close">&#x2715;</button><img id="viewerImg" alt=""></div>
 
 <script>
@@ -208,7 +215,9 @@
   var W = {
     PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'],
     LOCAL_IN_USE: ['콘에서 사용 중입니다', 'Cntl is being used on its screen'], RECONNECT: ['다시 연결', 'Reconnect'],
-    OFFLINE: ['연결 끊김', 'Offline'], LANG: ['EN', '한국어']
+    OFFLINE: ['연결 끊김', 'Offline'], LANG: ['EN', '한국어'],
+    LOADING: ['받는 중', 'Loading'], CAPTURING: ['촬영 중', 'Capturing'], NO_PHOTO: ['사진이 오지 않았습니다', 'No photo arrived'],
+    SEC: ['초', 's']
   };
   /* 센서 채널 종류(esp_now_link.h SENSOR_CHAN_*) → 콘 주화면과 같은 글자·단위 */
   var CHAN = { 1: ['T', 'STR_CHAN_UNIT_TEMP_C'], 2: ['H', 'STR_CHAN_UNIT_HUMI_PCT'], 3: ['C', 'STR_CHAN_UNIT_CO2_PPM'], 4: ['A', 'STR_CHAN_UNIT_NH3_PPM'] };
@@ -474,14 +483,24 @@
     toastTimer = setTimeout(function () { el.classList.add('hidden'); }, 2500);
   }
   var sheetRender = null;   /* 언어가 바뀌면 다시 그리기 */
-  /* 10-03(사용자 지시 — 뒤로 가기를 누르면 화면이 깨짐) — 팝업을 열 때 브라우저 기록에 한 칸을 쌓아, 뒤로 가기는 페이지를 떠나지 않고
-   * 팝업만 닫게 함(휴대폰 앱과 같은 동작). 닫기(X)도 같은 경로(history.back → popstate)로 닫아 기록이 꼬이지 않게 */
-  var sheetInHistory = false;
+  /* 10-03(사용자 지시 — 주화면과 모든 팝업에서 뒤로·앞으로 이동 막기) — 브라우저 기록 맨 위에 늘 "막이" 한 칸을 둠.
+   * 뒤로 가기를 누르면 그 칸이 빠지며 popstate가 오는데, 그때 떠 있는 것(전체 화면 보기 > 확인창·롤러 > 팝업) 하나만 닫고
+   * 막이 칸을 다시 쌓음 — 페이지는 떠나지 않음. 다시 쌓으면 앞쪽 기록이 지워져 앞으로 가기도 할 곳이 없음 */
+  history.replaceState({ base: 1 }, '');
+  history.pushState({ guard: 1 }, '');
+  window.addEventListener('popstate', function () {
+    if (!$('viewer').classList.contains('hidden')) { $('viewer').classList.add('hidden'); $('viewerImg').src = ''; }
+    else if (!$('modal').classList.contains('hidden')) {
+      var no = $('modalBox').querySelector('[data-m="no"]');   /* 확인창·롤러는 "아니오/취소"와 같게 닫음 */
+      if (no) no.click(); else $('modal').classList.add('hidden');
+    }
+    else if (sheetRender) realCloseSheet();
+    history.pushState({ guard: 1 }, '');
+  });
   function openSheet(renderFn) {
     sheetRender = renderFn;
     $('sheet').classList.remove('hidden');
     renderFn();
-    if (!sheetInHistory) { history.pushState({ sheet: 1 }, ''); sheetInHistory = true; }
   }
   function realCloseSheet() {
     sheetRender = null;
@@ -494,15 +513,7 @@
     poll();
     setTimeout(fixZoom, 100);
   }
-  function closeSheet() {
-    if (sheetInHistory) history.back();   /* popstate가 실제로 닫음 */
-    else realCloseSheet();
-  }
-  window.addEventListener('popstate', function () {
-    if (!sheetInHistory) return;
-    sheetInHistory = false;
-    realCloseSheet();
-  });
+  function closeSheet() { realCloseSheet(); }
   function sheetHead(titleKey) {
     return '<div class="shead"><h3>' + esc(S(titleKey)) + '</h3><button class="xbtn" data-act="close" aria-label="close">&#x2715;</button></div>';
   }
@@ -767,6 +778,56 @@
     });
   }
 
+  /* ── 오래 걸리는 작업 오버레이: busyStart(라벨) → busySet(0~1 또는 null) → busyEnd(). 0.3초 안에 끝나면 안 보임 ── */
+  var busy = null;
+  function busyDraw() {
+    if (!busy) return;
+    var sec = Math.floor((Date.now() - busy.t0) / 1000);
+    $('busyTxt').textContent = Wt(busy.label) + (busy.pct !== null ? ' ' + Math.floor(busy.pct * 100) + '%' : '') + ' \u00b7 ' + sec + Wt('SEC');
+    $('busyBar').style.display = busy.pct !== null ? '' : 'none';
+    $('busyFill').style.width = busy.pct !== null ? (busy.pct * 100) + '%' : '0';
+  }
+  function busyStart(label) {
+    busyEnd();
+    busy = { label: label, pct: null, t0: Date.now() };
+    busy.show = setTimeout(function () { $('busy').classList.remove('hidden'); busyDraw(); }, 300);
+    busy.tick = setInterval(busyDraw, 500);
+  }
+  function busySet(pct) { if (busy) { busy.pct = pct; busyDraw(); } }
+  function busyEnd() {
+    if (!busy) return;
+    clearTimeout(busy.show); clearInterval(busy.tick);
+    busy = null;
+    $('busy').classList.add('hidden');
+  }
+
+  /* 사진 받기(진행률) — 콘이 Content-Length를 주므로 받은 양으로 %. 받은 사진은 blob URL로 기억(다시 보면 바로) */
+  var photoBlobs = {};
+  function loadPhoto(url) {
+    if (photoBlobs[url]) return Promise.resolve(photoBlobs[url]);
+    busyStart('LOADING');
+    return fetch(url, { credentials: 'same-origin' }).then(function (r) {
+      if (r.status === 401) { show('login'); throw { handled: true }; }
+      if (r.status === 409) { show('local'); throw { handled: true }; }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      var total = +r.headers.get('Content-Length') || 0;
+      if (!r.body || !r.body.getReader) return r.blob();
+      var reader = r.body.getReader(), chunks = [], got = 0;
+      function pump() {
+        return reader.read().then(function (x) {
+          if (x.done) return new Blob(chunks, { type: 'image/jpeg' });
+          chunks.push(x.value); got += x.value.length;
+          if (total) busySet(Math.min(1, got / total));
+          return pump();
+        });
+      }
+      return pump();
+    }).then(function (b) {
+      busyEnd();
+      return (photoBlobs[url] = URL.createObjectURL(b));
+    }, function (e) { busyEnd(); throw e; });
+  }
+
   /* ── 카메라 팝업(콘 build_camera_tab과 같은 기능): 카메라 선택, 지금촬영·목록갱신·모두 지우기, 사진 목록(20장씩), 미리보기,
    *    웹 전용 전체 화면 보기. 미리보기는 원본 JPEG을 브라우저가 줄여서 보여 줌(썸네일 파일 없음 — 사용자 결정) ── */
   var cam = null, camTimer = null;
@@ -804,7 +865,7 @@
     }).join('') + '</select><span class="sub">' + esc(cur && cur.status !== 'offline' ? S(STATUS_KEY[cur.status] || 'STR_STATUS_PAIRED') : '') + '</span></div>';
     h += '<div class="btnrow"><button id="camShot" class="primary"' + (cur && cur.status === 'active' ? '' : ' disabled') + '>' + esc(S('STR_BTN_CAPTURE_NOW')) +
          '</button><button id="camRenew">' + esc(S('STR_BTN_RENEW_LIST')) + '</button><button id="camDelAll" class="danger">' + esc(S('STR_BTN_DELETE_ALL')) + '</button></div>';
-    h += '<div class="prev">' + (cam.sel ? '<img id="camPrev" src="' + photoUrl(cam.sel) + '" alt=""><div class="sub">' + esc(photoName(cam.sel) + '  ' + fmtTime(cam.sel.t)) + '</div>'
+    h += '<div class="prev">' + (cam.sel ? '<img id="camPrev" alt=""><div class="sub">' + esc(photoName(cam.sel) + '  ' + fmtTime(cam.sel.t)) + '</div>'
                                           : '<span class="sub">' + esc(S('STR_PANEL_NO_PHOTO_YET')) + '</span>') + '</div>';
     var d = cam.data;
     h += '<div class="field"><strong>' + esc(S('STR_PANEL_LIST')) + '</strong><span class="sub">' + (d ? d.count : '') + '</span></div>';
@@ -823,6 +884,13 @@
     }
     $('sheetBody').innerHTML = h;
     bindCamera();
+    if (cam.sel) {
+      var want = photoUrl(cam.sel);
+      loadPhoto(want).then(function (src) {
+        var img = $('camPrev');
+        if (img && cam.sel && photoUrl(cam.sel) === want) img.src = src;
+      }).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+    }
   }
   function findItem(code) { return (cam.data ? cam.data.items : []).filter(function (it) { return it.kind + it.seq === code; })[0]; }
   function bindCamera() {
@@ -830,11 +898,18 @@
     on('camSel', function () { cam.mac = this.value; cam.page = 0; cam.sel = null; cam.data = null; renderCamera(); loadPhotos(); });
     on('camRenew', function () { loadPhotos(); });
     on('camShot', function () {
+      var before = cam.data ? cam.data.count : 0;
       post('api/cam/capture?mac=' + cam.mac).then(function () {
-        toast(S('STR_BTN_CAPTURE_NOW') + ' \u2713');
-        /* 사진은 캠이 콘으로 바로 보냄 — 30초 동안 5초마다 목록을 다시 받아 새 사진을 보여 줌 */
-        var n = 0; clearInterval(camTimer);
-        camTimer = setInterval(function () { if (sheetRender !== renderCamera || ++n > 6) { clearInterval(camTimer); return; } cam.page = 0; cam.sel = null; loadPhotos(); }, 5000);
+        /* 사진은 캠이 콘으로 바로 보냄 — 경과 시간을 띄우고 3초마다 목록 수를 확인, 늘면 닫고 새 사진을 보여 줌(30초 넘으면 알림) */
+        busyStart('CAPTURING');
+        var t0 = Date.now(); clearInterval(camTimer);
+        camTimer = setInterval(function () {
+          if (sheetRender !== renderCamera) { clearInterval(camTimer); busyEnd(); return; }
+          api('api/cam/photos?mac=' + cam.mac + '&page=0').then(function (d) {
+            if (d.count > before) { clearInterval(camTimer); busyEnd(); cam.page = 0; cam.sel = null; cam.data = d; loadPhotos(); }
+            else if (Date.now() - t0 > 30000) { clearInterval(camTimer); busyEnd(); toast(Wt('NO_PHOTO')); }
+          }).catch(function () {});
+        }, 3000);
       }).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
     });
     on('camDelAll', function () {
@@ -842,7 +917,7 @@
       post('api/cam/delete_all?mac=' + cam.mac).then(function () { cam.page = 0; cam.sel = null; loadPhotos(); })
         .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
     });
-    on('camPrev', function () { openViewer(photoUrl(cam.sel)); });
+    on('camPrev', function () { var u = photoUrl(cam.sel); loadPhoto(u).then(openViewer).catch(function () {}); });
     $('sheetBody').querySelectorAll('[data-ph]').forEach(function (row) {
       row.addEventListener('click', function (ev) {
         var del = ev.target.closest('[data-del]');
