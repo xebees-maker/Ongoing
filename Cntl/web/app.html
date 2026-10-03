@@ -1,118 +1,787 @@
 <!doctype html>
 <!--
-  2026-10-03(할 일 AD 1단계) — 콘 웹앱(SPA) 뼈대. 콘 = 모델 + JSON API, 이 페이지 = 화면.
-  원칙: 요청은 전부 상대 경로(중계 서비스가 경로 접두어를 붙여도 동작), 실시간 갱신은 주기 조회가 기본
-  (WebSocket은 나중에 붙이되 안 되면 이 조회로 넘어감). 화면 문구는 영문(콘 화면과 같은 원칙).
-  배포: gzip -9 → /admin/upload?file=app.html.gz (원본은 git의 Cntl/web/app.html)
+  2026-10-03(할 일 AD) — 콘 웹앱(SPA). 콘 = 모델 + JSON API, 이 페이지 = 화면.
+  설계(Docs 한일 AD):
+  - 콘과 같은 UI. 세로 휴대폰 배치 기준(판넬을 콘 순서대로 쌓음), 가로는 넓은 화면에서 2열.
+  - 요청은 전부 상대 경로(중계 서비스가 경로 접두어를 붙여도 동작). 실시간 갱신은 주기 조회가 기본.
+  - API는 코드만 주고 문구는 여기서 한/영으로. 콘 문구 표(ui_strings.c)는 build_web.py가 아래 STRINGS 자리에 통째로 넣음
+    (키 = 콘 STR_ 이름, 값 = [한, 영]). 웹 전용 문구는 W 표. 언어는 브라우저(localStorage)에 저장.
+  - 로그인: 401이면 로그인 화면. 성공하면 콘이 1년짜리 토큰 쿠키를 줌. 아이디 칸은 휴대폰 비밀번호 관리자용 고정값.
+  - 웹 세션: 화면 API가 409 {"error":"local"}이면 콘에서 넘겨받은 것 — "다시 연결"로 바로 가져옴.
+  - 웹에서 뺀 것(사용자 결정): 화면 끄기, 네트워크 조작(상태 표시만), Summary의 Web 주소, 웹 접속 QR, Wi-Fi 팝업.
+  빌드·배포: python build_web.py → out/app.html.gz → /admin/upload?file=app.html.gz
 -->
-<html lang="en">
+<html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cntl</title>
+<!-- 10-03 — iPhone이 확대(VW 366)된 채 남고 좌우 이동을 막은 뒤엔 되돌릴 수도 없었음 → 배율 1로 고정 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>FlexFarm</title>
 <style>
-  :root { --bg:#f4f5f7; --card:#fff; --text:#1c1e21; --muted:#6b7280; --ok:#16a34a; --wait:#d97706; --off:#9ca3af; --err:#dc2626; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#111317; --card:#1b1e24; --text:#e5e7eb; --muted:#9ca3af; } }
-  * { box-sizing: border-box; }
-  body { margin:0; font:15px/1.4 -apple-system, system-ui, sans-serif; background:var(--bg); color:var(--text); }
-  header { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; }
-  header h1 { font-size:18px; margin:0; }
-  #conn { font-size:13px; color:var(--muted); }
-  #conn.bad { color:var(--err); }
-  main { padding:0 16px 24px; max-width:640px; margin:0 auto; }
-  section { background:var(--card); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
-  section h2 { font-size:14px; margin:0 0 8px; color:var(--muted); font-weight:600; }
-  .row { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-top:1px solid rgba(127,127,127,.15); }
-  .row:first-of-type { border-top:none; }
-  .name { font-weight:600; }
-  .mac { font-size:12px; color:var(--muted); }
-  .st { font-size:13px; }
-  .st.active { color:var(--ok); } .st.waiting { color:var(--wait); } .st.paired { color:var(--off); }
-  .empty { color:var(--muted); font-size:13px; }
+  :root { --bg:#e5e7eb; --card:#fff; --text:#1c1e21; --muted:#6b7280; --line:rgba(127,127,127,.18);
+          --green:#16a34a; --blue:#2563eb; --red:#dc2626; --amber:#f5b400; --grey:#9ca3af; --bar:#d1d5db; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --card:#1b1e24; --text:#e5e7eb; --muted:#9ca3af; --bar:#374151; } }
+  * { box-sizing:border-box; }
+  /* 휴대폰 폭에 맞춤(10-03 — iPhone 13 Pro에서 좌우로 밀렸음): 항목이 줄어들고 긴 글자는 줄바꿈, 그래도 넘치면 페이지가 밀리지 않게 */
+  html, body { max-width:100%; overflow-x:hidden; }
+  /* 10-03(사용자 지시) — 좌우 스와이프로 화면이 움직이며 VW가 366이 됨 → 세로 스크롤만 허용, 좌우 튕김도 끔.
+   * 두 손가락 확대도 같이 막힘 — 사진 전체 화면 보기는 그 화면에서만 따로 허용할 것 */
+  html, body { touch-action:pan-y; overscroll-behavior-x:none; }
+  body { margin:0; font:15px/1.4 -apple-system, system-ui, sans-serif; background:var(--bg); color:var(--text);
+         -webkit-text-size-adjust:100%; }
+  header { position:sticky; top:0; z-index:5; display:flex; align-items:center; justify-content:space-between; gap:8px;
+           padding:10px 12px; background:var(--card); border-bottom:1px solid var(--line); }
+  header h1 { font-size:20px; margin:0; font-weight:700; white-space:nowrap; flex-shrink:0; }
+  .hright { display:flex; align-items:center; gap:6px; min-width:0; }
+  .inv { background:#4b5563; color:#fff; padding:3px 8px; font-size:13px; font-variant-numeric:tabular-nums; flex-shrink:0;
+         overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #net { max-width:110px; flex-shrink:1; min-width:0; }
+  .sicon { width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; }
+  #conn { font-size:12px; color:var(--muted); text-align:center; padding:4px 0 0; min-height:20px; }
+  #conn.bad { color:var(--red); }
+  main { padding:6px 8px 24px; max-width:1100px; margin:0 auto; display:grid; grid-template-columns:1fr; gap:8px; }
+  @media (orientation: landscape) and (min-width: 700px) { main { grid-template-columns:1fr 1fr; } }
+  section { background:var(--card); border-radius:10px; padding:10px 12px; min-width:0; overflow-wrap:anywhere; }
+  section h2 { font-size:15px; margin:0 0 6px; font-weight:700; }
+  .row { display:flex; align-items:center; gap:8px; padding:9px 0; border-top:1px solid var(--line); }
+  .row:first-child { border-top:none; }
+  .grow { flex:1; min-width:0; }
+  .sub { font-size:13px; color:var(--muted); }
+  .val { font-size:14px; font-variant-numeric:tabular-nums; }
+  .empty { color:var(--muted); font-size:14px; padding:6px 0; }
+  .chev { color:var(--muted); }
+  .sig { display:inline-flex; align-items:flex-end; gap:2px; height:16px; }
+  .sig i { display:block; width:4px; background:var(--bar); border-radius:1px; }
+  .pw { font-size:20px; line-height:1; }
+  .red { color:var(--red); }
   button { font:inherit; padding:8px 14px; border-radius:8px; border:1px solid rgba(127,127,127,.4); background:transparent; color:var(--text); }
-  #notifyResult { font-size:13px; color:var(--muted); margin-left:8px; }
+  button.primary { background:var(--blue); border-color:var(--blue); color:#fff; }
+  .small { font-size:13px; padding:3px 8px; }
+  .center { display:flex; flex-direction:column; align-items:center; gap:14px; padding:48px 16px; text-align:center; }
+  input { font:inherit; padding:10px 12px; border-radius:8px; border:1px solid rgba(127,127,127,.4); background:var(--card); color:var(--text); width:240px; }
+  .pwwrap { position:relative; }
+  .pwwrap input { padding-right:44px; }
+  .eye { position:absolute; right:4px; top:50%; transform:translateY(-50%); border:none; padding:6px; color:var(--muted); line-height:0; }
+  .msg { font-size:13px; color:var(--red); min-height:18px; }
+  .hidden { display:none !important; }
+  /* 팝업 = 전체 화면 시트(콘 규칙: 닫기는 오른쪽 위 X, 선택지는 아래 버튼) */
+  .sheet { position:fixed; inset:0; z-index:20; background:var(--bg); overflow-y:auto; -webkit-overflow-scrolling:touch;
+           overflow-x:hidden; touch-action:pan-y; overscroll-behavior:contain; }   /* 10-03 — 팝업도 세로만(자체 스크롤 영역이라 따로) */
+  @media (min-width: 700px) { .sheet { background:rgba(0,0,0,.45); display:flex; align-items:flex-start; justify-content:center; padding:40px 16px; }
+    .sheet > .sbody { width:520px; border-radius:12px; } }
+  .sbody { background:var(--card); min-height:100%; }
+  .shead { position:sticky; top:0; display:flex; align-items:center; justify-content:space-between; padding:12px 14px;
+           background:var(--card); border-bottom:1px solid var(--line); }
+  .shead h3 { margin:0; font-size:17px; }
+  .xbtn { border:none; font-size:22px; line-height:1; padding:4px 8px; }
+  .field { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; padding:12px 14px; border-bottom:1px solid var(--line); }
+  .field select { max-width:100%; }
+  .field label { flex:1; }
+  .field input[type=text] { width:auto; flex:1; min-width:0; }
+  /* iPhone Safari는 16px 미만 입력칸을 누르면 화면을 확대하고 그대로 남겨 둠(10-03 실기: VW 366, 좌우 이동) → 입력칸은 16px */
+  input, select, textarea { font-size:16px !important; }
+  select { font:inherit; padding:8px; border-radius:8px; border:1px solid rgba(127,127,127,.4); background:var(--card); color:var(--text); }
+  .tg { position:relative; width:46px; height:28px; flex:0 0 46px !important; }
+  button:disabled { opacity:.4; }
+  .tg input { opacity:0; width:0; height:0; }
+  .tg span { position:absolute; inset:0; background:var(--bar); border-radius:14px; transition:.15s; }
+  .tg span:before { content:''; position:absolute; width:22px; height:22px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.15s; }
+  .tg input:checked + span { background:var(--blue); }
+  .tg input:checked + span:before { transform:translateX(18px); }
+  .sfoot { padding:16px 14px; display:flex; justify-content:flex-end; gap:10px; }
+  .danger { color:var(--red); border-color:var(--red); }
+  .toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); z-index:30; background:#111827; color:#fff; padding:8px 14px;
+           border-radius:8px; font-size:14px; max-width:90vw; }
+  .tap { cursor:pointer; }
+  .sent { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:12px 14px; border-bottom:1px solid var(--line); }
+  .sent input[type=number] { width:90px; }
+  /* 값 버튼 + 롤러(콘 open_value_roller_popup과 같은 열 나눔) — 기본 스크롤 + 칸 맞춤이라 관성은 휴대폰 스크롤 그대로 */
+  .vbtn { min-width:64px; padding:8px 10px; font-variant-numeric:tabular-nums; }
+  .roll { position:relative; display:flex; justify-content:center; align-items:center; gap:2px; padding:8px 14px; }
+  .roll .band { position:absolute; left:14px; right:14px; top:50%; height:44px; margin-top:-22px; pointer-events:none;
+                border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:rgba(127,127,127,.08); }
+  .rcol { height:220px; width:56px; overflow-y:scroll; scroll-snap-type:y mandatory; -webkit-overflow-scrolling:touch;
+          scrollbar-width:none; touch-action:pan-y; overscroll-behavior:contain; }
+  .rcol::-webkit-scrollbar { display:none; }
+  .rcol .sp { height:88px; }
+  .rcol .it { height:44px; line-height:44px; text-align:center; font-size:24px; scroll-snap-align:center; opacity:.35;
+              font-variant-numeric:tabular-nums; }
+  .rcol .it.on { opacity:1; font-weight:600; }
+  .rfix { font-size:24px; }
+  .grayp { background:rgba(127,127,127,.08); }
+  .grayp.off { opacity:.45; pointer-events:none; }
+  .modal { position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.5); display:flex; align-items:center; justify-content:center; padding:16px;
+           touch-action:pan-y; overflow-x:hidden; }
+  .mbox { background:var(--card); border-radius:12px; width:100%; max-width:380px; overflow:hidden; }
+  .mtitle { padding:10px 14px; font-weight:700; background:var(--amber); color:#111; }
+  .mtext { padding:14px; }
+  .choice { padding:6px 14px; border-radius:8px; border:2px solid transparent; }
+  .choice.sel { border-color:var(--blue); }
+  .tap:active { background:rgba(127,127,127,.12); }
 </style>
 </head>
 <body>
 <header>
-  <h1>Cntl</h1>
-  <span id="conn">Connecting...</span>
+  <h1 data-s="STR_LOGO_TITLE"></h1>
+  <div class="hright">
+    <span id="clock" class="inv"></span>
+    <span id="net" class="inv"></span>
+    <span id="sicon" class="sicon"></span>
+    <button id="langBtn" class="small"></button>
+  </div>
 </header>
-<main>
-  <section>
-    <h2>Cameras</h2>
-    <div id="cams"><div class="empty">-</div></div>
-  </section>
-  <section>
-    <h2>Sensors</h2>
-    <div id="sens"><div class="empty">-</div></div>
-  </section>
-  <section>
-    <h2>Notification</h2>
-    <button id="notifyBtn">Send test notification</button><span id="notifyResult"></span>
-  </section>
-</main>
+
+<!-- 로그인 -->
+<form id="loginView" class="center hidden" autocomplete="on">
+  <input type="text" name="username" autocomplete="username" value="cntl" class="hidden" readonly>
+  <div class="pwwrap">
+    <input id="pw" type="password" name="password" autocomplete="current-password" data-w-ph="PASSWORD">
+    <button id="pwEye" type="button" class="eye" aria-label="show password">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>
+        <line id="pwEyeSlash" x1="3" y1="21" x2="21" y2="3"/>
+      </svg>
+    </button>
+  </div>
+  <button type="submit" class="primary" data-w="LOGIN"></button>
+  <div id="loginMsg" class="msg"></div>
+</form>
+
+<!-- 콘에서 넘겨받음 -->
+<div id="localView" class="center hidden">
+  <div data-w="LOCAL_IN_USE"></div>
+  <button id="reclaimBtn" class="primary" data-w="RECONNECT"></button>
+</div>
+
+<!-- 주화면 — 콘 판넬 순서: Summary → Power Control → Sensor → Camera -->
+<div id="mainView" class="hidden">
+  <div id="conn"></div>
+  <main>
+    <section>
+      <h2 data-s="STR_PANEL_SUMMARY"></h2>
+      <div id="sumMem" class="val"></div>
+      <div id="sumSd" class="val"></div>
+    </section>
+    <section>
+      <h2 data-s="STR_PANEL_POWER_CONTROL"></h2>
+      <div id="relays"></div>
+    </section>
+    <section>
+      <h2 data-s="STR_GROUP_SENSOR"></h2>
+      <div id="sens"></div>
+    </section>
+    <section>
+      <h2 data-s="STR_GROUP_CAMERA"></h2>
+      <div id="cams"></div>
+    </section>
+  </main>
+  <!-- 10-03 진단 — 휴대폰에서 주소 입력 대신 누르기(링크로 ?debug=1 페이지 열기) -->
+  <div style="text-align:center;padding:8px 0 20px"><a href="?debug=1" style="font-size:12px;color:var(--muted)">debug</a></div>
+</div>
+
+<div id="sheet" class="sheet hidden"><div class="sbody" id="sheetBody"></div></div>
+<div id="toast" class="toast hidden"></div>
+<div id="modal" class="modal hidden"><div class="mbox" id="modalBox"></div></div>
+
 <script>
 (function () {
   'use strict';
   var POLL_MS = 5000;
-  var timer = null;
 
-  function esc(s) {
-    return String(s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  /* 콘 문구 표 — build_web.py가 채움: { STR_X: [한, 영] } */
+  var STR = /*@STRINGS@*/;
+  /* 웹 전용 문구 */
+  var W = {
+    PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'],
+    LOCAL_IN_USE: ['콘에서 사용 중입니다', 'Cntl is being used on its screen'], RECONNECT: ['다시 연결', 'Reconnect'],
+    OFFLINE: ['연결 끊김', 'Offline'], LANG: ['EN', '한국어']
+  };
+  /* 센서 채널 종류(esp_now_link.h SENSOR_CHAN_*) → 콘 주화면과 같은 글자·단위 */
+  var CHAN = { 1: ['T', 'STR_CHAN_UNIT_TEMP_C'], 2: ['H', 'STR_CHAN_UNIT_HUMI_PCT'], 3: ['C', 'STR_CHAN_UNIT_CO2_PPM'], 4: ['A', 'STR_CHAN_UNIT_NH3_PPM'] };
+  var CHAN_CO2 = 3;
+  var STATUS_KEY = { waiting: 'STR_STATUS_CONNECTING', active: 'STR_STATUS_ACTIVE', paired: 'STR_STATUS_PAIRED' };
+
+  var lang = 'ko';
+  try { lang = localStorage.getItem('lang') || ((navigator.language || '').toLowerCase().indexOf('ko') === 0 ? 'ko' : 'en'); } catch (e) {}
+  function li() { return lang === 'ko' ? 0 : 1; }
+  function S(k) { var v = STR[k]; return v ? v[li()] : k; }
+  function Wt(k) { var v = W[k]; return v ? v[li()] : k; }
+  function fmt(s) { var a = arguments, i = 1; return s.replace(/%d|%s|%u/g, function () { return a[i++]; }); }
+
+  var timer = null, view = '', last = null;
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  function applyTexts() {
+    document.documentElement.lang = lang;
+    document.title = S('STR_LOGO_TITLE');
+    [].forEach.call(document.querySelectorAll('[data-s]'), function (el) { el.textContent = S(el.getAttribute('data-s')); });
+    [].forEach.call(document.querySelectorAll('[data-w]'), function (el) { el.textContent = Wt(el.getAttribute('data-w')); });
+    [].forEach.call(document.querySelectorAll('[data-w-ph]'), function (el) { el.placeholder = Wt(el.getAttribute('data-w-ph')); });
+    $('langBtn').textContent = Wt('LANG');
+    if (last) render(last);
+    if (sheetRender) sheetRender();
+  }
+
+  function show(v) {
+    view = v;
+    $('loginView').classList.toggle('hidden', v !== 'login');
+    $('localView').classList.toggle('hidden', v !== 'local');
+    $('mainView').classList.toggle('hidden', v !== 'main');
+    if (v !== 'main') clearTimeout(timer);
+    if (v === 'login') setTimeout(function () { $('pw').focus(); }, 0);
+  }
+
+  /* 공통 요청 — 401이면 로그인, 409(local)면 넘겨받음 화면 */
+  function api(path, opts) {
+    opts = opts || {};
+    opts.cache = 'no-store';
+    opts.credentials = 'same-origin';
+    return fetch(path, opts).then(function (r) {
+      if (r.status === 401) { show('login'); throw { handled: true }; }
+      if (r.status === 409) { show('local'); throw { handled: true }; }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
     });
   }
 
-  function macShort(mac) { return mac.slice(6).toUpperCase(); }
+  /* ── 표시 규칙(콘 ui_main.c와 같게) ── */
+  function bytesHuman(b) { return b >= 1048576 ? (b / 1048576).toFixed(2) + 'MB' : (b / 1024).toFixed(1) + 'KB'; }
+  function signalHtml(n) {
+    /* update_signal_widget: RSSI → 칸 수, 색 = 곧 끊김 빨강 / 통신 중 파랑 / 페어됨 초록 */
+    var r = n.rssi, f = (r === undefined) ? 0 : r >= -45 ? 5 : r >= -55 ? 4 : r >= -65 ? 3 : r >= -75 ? 2 : r >= -85 ? 1 : 0;
+    var c = n.near_orphan ? 'var(--red)' : n.status === 'active' ? 'var(--blue)' : 'var(--green)';
+    var h = '<span class="sig">';
+    for (var i = 0; i < 5; i++) h += '<i style="height:' + (4 + i * 3) + 'px;' + (i < f ? 'background:' + c : '') + '"></i>';
+    return h + '</span>';
+  }
+  function nodeName(n) { return n.alias || n.name; }
 
-  function renderList(el, nodes) {
-    if (!nodes.length) { el.innerHTML = '<div class="empty">None</div>'; return; }
-    el.innerHTML = nodes.map(function (n) {
-      return '<div class="row"><div><div class="name">' + esc(n.name || macShort(n.mac)) +
-        '</div><div class="mac">' + esc(macShort(n.mac)) + '</div></div>' +
-        '<div class="st ' + esc(n.status) + '">' + esc(n.status_msg) + '</div></div>';
+  function renderSummary(d) {
+    $('sumMem').textContent = S('STR_LABEL_MEMORY') + ': I = ' + bytesHuman(d.mem.i) + ' / P = ' + bytesHuman(d.mem.p);
+    var sd = d.sd || {}, el = $('sumSd');
+    el.className = 'val';
+    if (sd.state === 'io_error') { el.textContent = 'SD: ' + S('STR_STATUS_SD_IO_ERROR_MSG'); el.className = 'val red'; return; }
+    if (sd.state === 'unmounted') { el.textContent = 'SD: ' + S('STR_STATUS_SD_UNMOUNTED'); el.className = 'val red'; return; }
+    if (sd.state !== 'ok') { el.textContent = ''; return; }
+    var names = { picture: 'STR_LABEL_PICTURE', measure: 'STR_LABEL_MEASURE_SHORT', total: 'STR_LABEL_TOTAL' };
+    el.textContent = 'SD: ' + S('STR_LABEL_STORAGE_LEGEND') + ' ' + sd.areas.map(function (a) {
+      return S(names[a.id]) + ' ' + a.pct + '(' + a.remain_mb + ')';
+    }).join(' / ');
+  }
+
+  function relaySummary(r) {
+    /* refresh_power_control_panel과 같은 문장 — 언어별 어순 틀(STR_FMT_RELAY_SUMMARY, 콘 fill_relay_summary와 같은 규칙) */
+    if (r.override) return S(r.override_on ? 'STR_MSG_OVERRIDE_ON_SUMMARY' : 'STR_MSG_OVERRIDE_OFF_SUMMARY');
+    if (!r.configured) return S('STR_RELAY_NOT_CONFIGURED');
+    var num = r.center === null ? '-' : (r.chan === CHAN_CO2 ? String(Math.round(r.center)) : Number(r.center).toFixed(1));
+    var parts = { act: S(r.turns_on ? 'STR_STATUS_RELAY_ON' : 'STR_STATUS_RELAY_OFF'),
+                  item: S(r.chan === CHAN_CO2 ? 'STR_CHANNEL_NAME_CO2' : 'STR_CHANNEL_NAME_TEMP'),
+                  dir: S(r.rises ? 'STR_DIRECTION_NAME_UPTO' : 'STR_DIRECTION_NAME_BELOW'), value: num };
+    return S('STR_FMT_RELAY_SUMMARY').replace(/\{(act|item|dir|value)\}/g, function (m, k) { return parts[k]; });
+  }
+
+  function renderRelays(list) {
+    $('relays').innerHTML = list.map(function (r) {
+      var name = r.alias || fmt(S('STR_RELAY_DEFAULT_NAME_FMT'), r.idx + 1);
+      return '<div class="row tap" data-relay="' + r.idx + '"><span class="pw" data-ovr="' + r.idx + '" style="color:' + (r.on ? 'var(--green)' : 'var(--grey)') + ';padding:4px 8px">&#x23FB;</span>' +
+        '<span>' + esc(name) + '</span><span class="grow val" style="text-align:right">' + esc(relaySummary(r)) + '</span>' +
+        '<span class="chev">&gt;</span></div>';
     }).join('');
   }
 
-  function setConn(text, bad) {
-    var el = document.getElementById('conn');
-    el.textContent = text;
-    el.className = bad ? 'bad' : '';
+  function sensorValues(n) {
+    if (!n.chans) return '';
+    return n.chans.filter(function (c) { return CHAN[c.type]; }).map(function (c) {
+      var tag = CHAN[c.type][0];
+      if (!c.ok) return tag + ':' + S('STR_SENSOR_VALUE_PENDING');
+      if (c.invalid) return tag + ':' + S('STR_SENSOR_VALUE_INVALID');
+      return tag + ': ' + (c.val === null ? '-' : Number(c.val).toFixed(2)) + S(CHAN[c.type][1]);
+    }).join(' ');
+  }
+
+  /* 촬영 주기 — 콘 format_capture_interval과 같게(값 목록 = ui_main.c s_capture_interval_values, 문구 = STR_OPT_CAPTURE_INTERVAL_LIST) */
+  var CAPTURE_VALUES = [0, 10, 30, 1800, 3600, 10800, 36000];
+  function captureText(sec) {
+    var i = CAPTURE_VALUES.indexOf(sec);
+    if (i < 0) return sec + 's';
+    return S('STR_OPT_CAPTURE_INTERVAL_LIST').split('\n')[i] || (sec + 's');
+  }
+
+  function renderSensors(nodes) {
+    var list = nodes.filter(function (n) { return n.kind === 'sens' && n.status !== 'waiting'; });
+    if (!list.length) { $('sens').innerHTML = '<div class="empty">' + esc(S('STR_PANEL_NO_SENSOR')) + '</div>'; return; }
+    $('sens').innerHTML = list.map(function (n) {
+      var head = nodeName(n) + ' / ' + S('STR_LABEL_MEASURE_TINY') + ' ' + n.interval_s + 's';
+      if (n.battery !== undefined) head += ' / ' + S('STR_LABEL_BATTERY_TINY') + ' ' + n.battery + '%';
+      var v = sensorValues(n);
+      return '<div class="row tap" data-dev="' + esc(n.mac) + '">' + signalHtml(n) + '<div class="grow"><div>' + esc(head) + '</div>' +
+        (v ? '<div class="val">' + esc(v) + '</div>' : '') + '</div><span class="chev">&gt;</span></div>';
+    }).join('');
+  }
+
+  function renderCams(nodes) {
+    var list = nodes.filter(function (n) { return n.kind === 'cam' && n.status !== 'waiting'; });
+    if (!list.length) { $('cams').innerHTML = '<div class="empty">' + esc(S('STR_PANEL_NO_CAMERA')) + '</div>'; return; }
+    /* 콘 주화면 카메라 행과 같게: "이름 / P 촬영주기 / Bat% / AGC / AEC"(AGC·AEC는 켜졌을 때만), 상태는 신호 색으로만 */
+    $('cams').innerHTML = list.map(function (n) {
+      var t = nodeName(n) + ' / ' + S('STR_LABEL_CAPTURE_TINY') + ' ' + captureText(n.capture_s);
+      if (n.battery !== undefined) t += ' / ' + S('STR_LABEL_BATTERY_TINY') + ' ' + n.battery + '%';
+      if (n.agc) t += ' / ' + S('STR_LABEL_AGC_TINY');
+      if (n.aec) t += ' / ' + S('STR_LABEL_AEC_TINY');
+      return '<div class="row tap" data-dev="' + esc(n.mac) + '">' + signalHtml(n) + '<div class="grow">' + esc(t) + '</div><span class="chev">&gt;</span></div>';
+    }).join('');
+  }
+
+  function renderHeader(d) {
+    /* 콘 시계는 현지 시각을 그대로 초로 셈(타임존 없음) — UTC로 풀어야 콘 화면과 같은 값 */
+    $('clock').textContent = new Date(d.time * 1000).toISOString().substr(11, 8);
+    $('net').textContent = (d.net.mode === 'ap' ? 'AP' : 'STA') + (d.net.ssid ? ' ' + d.net.ssid : '');
+    var col = d.status === 'error' ? 'var(--red)' : d.status === 'warning' ? 'var(--amber)' : 'var(--green)';
+    /* 정상 = 초록 원 안의 체크(사용자 선택 10-03), 경고·에러 = 노랑·빨강 삼각형 */
+    $('sicon').innerHTML = d.status === 'normal'
+      ? '<svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="11" fill="' + col + '"/><path d="M6.5 12.5l3.5 3.5 7.5-8" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2 1 21h22z" fill="' + col + '"/><path d="M12 9v5M12 17v.5" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg>';
+  }
+
+  /* 저장 공간 정리 안내 — 처음 받은 번호는 기준으로만 삼고, 그 뒤 번호가 바뀌면 콘 팝업과 같은 문구로 알림 */
+  var cleanupSeq = null;
+  function checkCleanup(c) {
+    if (!c) return;
+    if (cleanupSeq !== null && c.seq !== cleanupSeq) {
+      var names = ['STR_LABEL_PICTURE', 'STR_LABEL_MEASURE_SHORT'];
+      c.deleted.forEach(function (n, a) {
+        if (n > 0) alert(S('STR_TITLE_NOTICE') + '\n\n' + fmt(S('STR_MSG_STORAGE_CLEANUP'), S(names[a]), n));
+      });
+    }
+    cleanupSeq = c.seq;
+  }
+
+  function render(d) {
+    checkCleanup(d.cleanup);
+    renderHeader(d);
+    renderSummary(d);
+    renderRelays(d.relays || []);
+    renderSensors(d.nodes || []);
+    renderCams(d.nodes || []);
   }
 
   function poll() {
-    fetch('api/nodes', { cache: 'no-store' })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    api('api/dashboard')
       .then(function (d) {
-        var nodes = d.nodes || [];
-        renderList(document.getElementById('cams'), nodes.filter(function (n) { return n.kind === 'cam'; }));
-        renderList(document.getElementById('sens'), nodes.filter(function (n) { return n.kind === 'sens'; }));
-        setConn('Updated ' + new Date().toLocaleTimeString(), false);
+        if (view !== 'main') show('main');
+        last = d;
+        render(d);
+        $('conn').textContent = '';
+        $('conn').className = '';
+        schedule();
       })
-      .catch(function (e) { setConn('Offline (' + e.message + ')', true); })
-      .then(schedule);
+      .catch(function (e) {
+        if (e && e.handled) return;
+        $('conn').textContent = Wt('OFFLINE');
+        $('conn').className = 'bad';
+        schedule();
+      });
   }
 
   function schedule() {
     clearTimeout(timer);
-    if (!document.hidden) timer = setTimeout(poll, POLL_MS);
+    if (!document.hidden && view === 'main') timer = setTimeout(poll, POLL_MS);
   }
 
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) clearTimeout(timer); else poll();
+    if (document.hidden) clearTimeout(timer);
+    else if (view === 'main' || view === '') poll();
   });
 
-  document.getElementById('notifyBtn').addEventListener('click', function () {
-    var out = document.getElementById('notifyResult');
-    out.textContent = 'Sending...';
-    fetch('api/notify_test', { cache: 'no-store' })
-      .then(function (r) { return r.json(); })
-      .then(function (d) { out.textContent = d.ok ? 'Queued' : 'Failed'; })
-      .catch(function () { out.textContent = 'Failed'; });
+  $('loginView').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    $('loginMsg').textContent = '';
+    fetch('api/login', { method: 'POST', body: $('pw').value, credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'text/plain' } })
+      .then(function (r) {
+        if (!r.ok) throw new Error('login');
+        $('pw').value = '';
+        $('pw').type = 'password';
+        $('pwEyeSlash').style.display = '';
+        show('main');
+        poll();
+      })
+      .catch(function () { $('loginMsg').textContent = Wt('LOGIN_FAILED'); });
   });
 
+  /* 비밀번호 보기/숨기기(눈 아이콘) — 사선이 있으면 숨김 상태 */
+  $('pwEye').addEventListener('click', function () {
+    var shown = $('pw').type === 'password';
+    $('pw').type = shown ? 'text' : 'password';
+    $('pwEyeSlash').style.display = shown ? 'none' : '';
+    $('pw').focus();
+  });
+
+  $('reclaimBtn').addEventListener('click', function () {
+    api('api/session/claim', { method: 'POST' }).then(function () { show('main'); poll(); }).catch(function () {});
+  });
+
+  $('langBtn').addEventListener('click', function () {
+    lang = (lang === 'ko') ? 'en' : 'ko';
+    try { localStorage.setItem('lang', lang); } catch (e) {}
+    applyTexts();
+  });
+
+  /* 진단(10-03 — 한국어에서만 휴대폰 폭을 넘음): 주소에 ?debug=1이면 화면 밖으로 나간 요소를 위에 띄움. 배치는 안 바꿈 */
+  if (/[?&]debug=1/.test(location.search)) {
+    var dbg = document.createElement('pre');
+    dbg.style.cssText = 'position:fixed;left:0;bottom:0;z-index:99;margin:0;padding:6px;max-height:45vh;overflow:auto;' +
+                        'background:rgba(0,0,0,.85);color:#0f0;font:11px/1.3 monospace;white-space:pre-wrap;width:100vw;';
+    document.body.appendChild(dbg);
+    setInterval(function () {
+      var iw = document.documentElement.clientWidth;
+      var vv = window.visualViewport;
+      var lines = ['vw=' + window.innerWidth + ' cw=' + iw + ' sw=' + document.documentElement.scrollWidth + ' lang=' + lang +
+                   (vv ? ' scale=' + vv.scale.toFixed(3) + ' offX=' + Math.round(vv.offsetLeft) + ' vvw=' + Math.round(vv.width) : '')];
+      [].forEach.call(document.querySelectorAll('body *'), function (e) {
+        if (e === dbg || dbg.contains(e)) return;
+        var r = e.getBoundingClientRect();
+        if (r.width && r.right > iw + 0.5) {
+          lines.push(e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + (e.className && typeof e.className === 'string' ? '.' + e.className.replace(/ /g, '.') : '') +
+                     ' R=' + Math.round(r.right) + ' W=' + Math.round(r.width) + ' "' + (e.textContent || '').trim().slice(0, 24) + '"');
+        }
+      });
+      dbg.textContent = lines.slice(0, 20).join('\n');
+    }, 1500);
+  }
+
+  /* ── 공통: 토스트, 시트 ── */
+  var toastTimer = null;
+  function toast(msg) {
+    var el = $('toast');
+    el.textContent = msg;
+    el.classList.remove('hidden');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.add('hidden'); }, 2500);
+  }
+  var sheetRender = null;   /* 언어가 바뀌면 다시 그리기 */
+  /* 10-03(사용자 지시 — 뒤로 가기를 누르면 화면이 깨짐) — 팝업을 열 때 브라우저 기록에 한 칸을 쌓아, 뒤로 가기는 페이지를 떠나지 않고
+   * 팝업만 닫게 함(휴대폰 앱과 같은 동작). 닫기(X)도 같은 경로(history.back → popstate)로 닫아 기록이 꼬이지 않게 */
+  var sheetInHistory = false;
+  function openSheet(renderFn) {
+    sheetRender = renderFn;
+    $('sheet').classList.remove('hidden');
+    renderFn();
+    if (!sheetInHistory) { history.pushState({ sheet: 1 }, ''); sheetInHistory = true; }
+  }
+  function realCloseSheet() {
+    sheetRender = null;
+    $('sheet').classList.add('hidden');
+    $('sheetBody').innerHTML = '';
+    $('modal').classList.add('hidden');   /* 팝업 위의 확인창·롤러도 같이 닫음 */
+    $('modal').onclick = null;
+    poll();
+    setTimeout(fixZoom, 100);
+  }
+  function closeSheet() {
+    if (sheetInHistory) history.back();   /* popstate가 실제로 닫음 */
+    else realCloseSheet();
+  }
+  window.addEventListener('popstate', function () {
+    if (!sheetInHistory) return;
+    sheetInHistory = false;
+    realCloseSheet();
+  });
+  function sheetHead(titleKey) {
+    return '<div class="shead"><h3>' + esc(S(titleKey)) + '</h3><button class="xbtn" data-act="close" aria-label="close">&#x2715;</button></div>';
+  }
+  function optionsHtml(listKey, values, current) {
+    var labels = S(listKey).split('\n');
+    return values.map(function (v, i) {
+      return '<option value="' + v + '"' + (v === current ? ' selected' : '') + '>' + esc(labels[i] || String(v)) + '</option>';
+    }).join('');
+  }
+  function toggleHtml(id, on) {
+    return '<label class="tg"><input type="checkbox" id="' + id + '"' + (on ? ' checked' : '') + '><span></span></label>';
+  }
+  function post(path, body) {
+    return api(path, { method: 'POST', body: body || '', headers: { 'Content-Type': 'text/plain' } });
+  }
+
+  /* ── 장치 팝업(콘 build_device_popup과 같은 항목). 선택지는 바꾸는 즉시 저장, 별명만 Apply(콘 규칙) ── */
+  var dev = null;
+  function openDevice(mac) {
+    api('api/device?mac=' + mac).then(function (d) { dev = d; openSheet(renderDevice); }).catch(function () {});
+  }
+  function renderDevice() {
+    var d = dev, cam = d.kind === 'cam';
+    var h = sheetHead(cam ? 'STR_GROUP_CAMERA' : 'STR_GROUP_SENSOR');
+    h += '<div class="field"><span class="sub">' + esc(d.name) + '</span></div>';
+    h += '<div class="field"><label for="dAlias">' + esc(S('STR_LABEL_ALIAS')) + '</label>' +
+         '<input type="text" id="dAlias" maxlength="' + d.alias_max + '" value="' + esc(d.alias) + '">' +
+         '<button id="dAliasApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
+    if (cam) {
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_CAPTURE_INTERVAL')) + '</label><select id="dCapture">' +
+           optionsHtml('STR_OPT_CAPTURE_INTERVAL_LIST', d.opt_capture, d.capture_s) + '</select></div>';
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_AGC')) + '</label>' + toggleHtml('dAgc', d.agc) + '</div>';
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_AEC')) + '</label>' + toggleHtml('dAec', d.aec) + '</div>';
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_XCLK')) + '</label><select id="dXclk">' +
+           optionsHtml('STR_OPT_XCLK_LIST', d.opt_xclk, d.xclk) + '</select></div>';
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_LIGHT_TEST')) + '</label>' + toggleHtml('dLight', false) + '</div>';
+    } else {
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_SENS_MEASURE_INTERVAL')) + '</label><select id="dInterval">' +
+           optionsHtml('STR_OPT_SENS_MEASURE_INTERVAL_LIST', d.opt_interval, d.interval_s) + '</select></div>';
+    }
+    h += '<div class="sfoot"><button id="dUnpair" class="danger">' + esc(S('STR_BTN_DISCONNECT')) + '</button></div>';
+    $('sheetBody').innerHTML = h;
+
+    function setKey(key, val) {
+      return post('api/device/set?mac=' + d.mac + '&key=' + key + '&val=' + val)
+        .then(function () { toast(S('STR_BTN_APPLY') + ' \u2713'); })
+        .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+    }
+    var alias = $('dAlias'), apply = $('dAliasApply');
+    alias.addEventListener('input', function () { apply.disabled = (alias.value === d.alias); });
+    apply.addEventListener('click', function () {
+      post('api/device/set?mac=' + d.mac + '&key=alias', alias.value)
+        .then(function () { d.alias = alias.value; apply.disabled = true; toast(S('STR_BTN_APPLY') + ' \u2713'); })
+        .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+    });
+    if (cam) {
+      $('dCapture').addEventListener('change', function () { d.capture_s = +this.value; setKey('capture', this.value); });
+      $('dAgc').addEventListener('change', function () { d.agc = this.checked; setKey('agc', this.checked ? 1 : 0); });
+      $('dAec').addEventListener('change', function () { d.aec = this.checked; setKey('aec', this.checked ? 1 : 0); });
+      $('dXclk').addEventListener('change', function () { d.xclk = +this.value; setKey('xclk', this.value); });
+      $('dLight').addEventListener('change', function () { setKey('light', this.checked ? 1 : 0); });
+    } else {
+      $('dInterval').addEventListener('change', function () { d.interval_s = +this.value; setKey('interval', this.value); });
+    }
+    $('dUnpair').addEventListener('click', function () {
+      if (!confirm((d.alias || d.name) + '\n' + S('STR_MSG_UNPAIR_CONFIRM'))) return;
+      post('api/device/unpair?mac=' + d.mac).then(closeSheet).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+    });
+  }
+
+  /* ── 수동 조작 확인(콘 show_override_confirm_popup과 같은 문장: 경고 + "~할까요, [On] 또는 [Off]" + 예/아니오) ── */
+  function confirmOverride(idx, onDone, onCancel) {
+    var sel = true;
+    function draw() {
+      /* 경고문(언어별 문장) 아래에 선택 칸만(언어와 상관없이 같은 배치) — 콘 show_override_confirm_popup과 같음 */
+      $('modalBox').innerHTML = '<div class="mtitle">' + esc(S('STR_TITLE_WARNING')) + '</div><div class="mtext">' +
+        esc(S('STR_MSG_OVERRIDE_WARNING')) + '<div style="display:flex;gap:12px;justify-content:center;margin-top:14px">' +
+        '<button class="choice' + (sel ? ' sel' : '') + '" data-c="1">' + esc(S('STR_STATUS_RELAY_ON')) + '</button>' +
+        '<button class="choice' + (sel ? '' : ' sel') + '" data-c="0">' + esc(S('STR_STATUS_RELAY_OFF')) + '</button></div></div>' +
+        '<div class="sfoot"><button data-m="no">' + esc(S('STR_BTN_NO')) + '</button><button class="primary" data-m="yes">' + esc(S('STR_BTN_YES')) + '</button></div>';
+    }
+    draw();
+    $('modal').classList.remove('hidden');
+    $('modal').onclick = function (ev) {
+      var c = ev.target.closest('[data-c]'), m = ev.target.closest('[data-m]');
+      if (c) { sel = c.getAttribute('data-c') === '1'; draw(); return; }
+      if (!m) return;
+      $('modal').classList.add('hidden');
+      if (m.getAttribute('data-m') === 'yes') {
+        post('api/relay/override?idx=' + idx + '&on=' + (sel ? 1 : 0))
+          .then(function () { if (onDone) onDone(); poll(); })
+          .catch(function (e) { if (!(e && e.handled)) toast('Error'); if (onCancel) onCancel(); });
+      } else if (onCancel) onCancel();
+    };
+  }
+
+  /* ── 릴레이 팝업(콘 build_relay_popup과 같은 항목·규칙) — 본 설정은 Apply(값이 바뀌었을 때만 켜짐), 별명은 따로 Apply,
+   *    Manual 켜기는 확인 팝업에서 방향까지 정하고 바로 적용, Manual 끄기는 Apply로 ── */
+  var rl = null, rlSnap = null;
+  function rlForm() {   /* 화면 선택값 → 서버로 보낼 본문 */
+    var f = rl.form;
+    return ['chan=' + f.chan, 'y=' + (f.y ? 1 : 0), 'z=' + (f.z ? 1 : 0), 'center=' + f.center, 'margin=' + f.margin,
+            'ai=' + (f.ai ? 1 : 0), 'manual=' + (f.manual ? 1 : 0), 'src=' + f.src, 'gc=' + f.gc, 'dev=' + (f.dev || ''),
+            'stat=' + f.stat, 'trend=' + (f.trend ? 1 : 0), 'ts=' + f.ts, 'hold=' + f.hold].join('&');
+  }
+  function rlChan(type) { return rl.data.chans.filter(function (c) { return c.type === type; })[0] || rl.data.chans[0]; }
+  function rlSpec() {   /* 값 범위 — 온도 그룹이면 기본/정밀 선택대로, 장치면 정밀(서버가 실제 센서 사양으로 다시 자름) */
+    var f = rl.form, ch = rlChan(f.chan);
+    var fine = f.src === 1 ? true : (f.chan === 1 && f.gc === 1);
+    return ch.spec[fine ? 1 : 0];
+  }
+  function openRelay(idx) {
+    api('api/relay?idx=' + idx).then(function (d) {
+      var devs = rlChanDevices(d, d.chan);
+      rl = { data: d, form: { chan: d.chan, y: d.y, z: d.z, center: d.center, margin: d.margin, ai: d.ai, manual: d.manual, src: d.src,
+                              gc: d.gc, dev: devs.some(function (x) { return x.mac === d.dev; }) ? d.dev : (devs[0] ? devs[0].mac : ''),
+                              stat: d.stat, trend: d.trend, ts: d.ts, hold: d.hold }, alias: d.alias };
+      rlSnap = rlForm();
+      openSheet(renderRelay);
+    }).catch(function () {});
+  }
+  function rlChanDevices(d, type) { var c = d.chans.filter(function (x) { return x.type === type; })[0]; return c ? c.devices : []; }
+  function sel(id, listKey, values, cur, extra) {
+    var labels = S(listKey).split('\n');
+    return '<select id="' + id + '"' + (extra || '') + '>' + values.map(function (v, i) {
+      return '<option value="' + v + '"' + (v === cur ? ' selected' : '') + '>' + esc(labels[i] || String(v)) + '</option>';
+    }).join('') + '</select>';
+  }
+  function renderRelay() {
+    var d = rl.data, f = rl.form, sp = rlSpec(), dec = sp[3];
+    var unit = S(f.chan === 3 ? 'STR_UNIT_CO2' : 'STR_UNIT_TEMP');
+    var name = d.alias || fmt(S('STR_RELAY_DEFAULT_NAME_FMT'), d.idx + 1);
+    var h = sheetHead('STR_PANEL_POWER_CONTROL');
+    h += '<div class="field"><label for="rAlias">' + esc(S('STR_LABEL_ALIAS')) + '</label><input type="text" id="rAlias" maxlength="' + d.alias_max +
+         '" value="' + esc(rl.alias) + '" placeholder="' + esc(name) + '"><button id="rAliasApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
+    h += '<div class="field"><label>' + esc(S('STR_LABEL_AI_MODE').replace(':', '')) + '</label>' + toggleHtml('rAi', f.ai) +
+         '<label style="text-align:right">' + esc(S('STR_LABEL_MANUAL_MODE')) + '</label>' + toggleHtml('rManual', f.manual) + '</div>';
+    h += '<div class="grayp' + (f.manual ? ' off' : '') + '">';
+    /* 입력 칸은 언어와 상관없이 같은 배치(사용자 결정): 동작 / 항목 / 조건 */
+    h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ACTION')) + '</label>' + sel('rZ', 'STR_OPT_TURN_ACTION_LIST', [1, 0], f.z ? 1 : 0) + '</div>';
+    h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ITEM')) + '</label>' +
+         sel('rChan', 'STR_OPT_CHAN_TYPE_LIST', d.chans.map(function (c) { return c.type; }), f.chan) + '</div>';
+    h += '<div class="sent">' + esc(S('STR_LABEL_RELAY_CONDITION')) + ' ' + sel('rY', 'STR_OPT_RISE_FALL_LIST', [1, 0], f.y ? 1 : 0) +
+         '<button class="vbtn" data-roll="center">' + Number(f.center).toFixed(dec) + '</button>' + esc(S('STR_SENTENCE_PLUSMINUS')) +
+         '<button class="vbtn" data-roll="margin">' + Number(f.margin).toFixed(dec) + '</button>' + esc(unit) + '</div>';
+    if (!f.ai) {
+      var devs = rlChanDevices(d, f.chan);
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_BASED_ON')) + '</label>' + sel('rSrc', 'STR_OPT_BASEDON_LIST', [0, 1], f.src);
+      if (f.src === 0 && f.chan === 1) h += sel('rGc', 'STR_OPT_GROUP_CHOICE_TEMP_LIST', [0, 1, 2], f.gc);
+      if (f.src === 1) {
+        h += devs.length ? '<select id="rDev">' + devs.map(function (x) {
+          return '<option value="' + x.mac + '"' + (x.mac === f.dev ? ' selected' : '') + '>' + esc(x.name) + '</option>';
+        }).join('') + '</select>' : '<span class="sub">' + esc(S('STR_MSG_NO_SOURCE_DEVICE')) + '</span>';
+      }
+      h += sel('rStat', 'STR_OPT_SOURCE_STAT_LIST', [0, 1, 2], f.stat) + '</div>';
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_TREND_ENABLE')) + '</label>' + toggleHtml('rTrend', f.trend) +
+           '<label style="text-align:right">' + esc(S('STR_LABEL_TREND_WINDOW')) + '</label>' +
+           sel('rTs', 'STR_OPT_TREND_SAMPLE_LIST', d.opt_ts, f.ts, f.trend ? '' : ' disabled') + '</div>';
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_MIN_HOLD')) + '</label>' + sel('rHold', 'STR_OPT_MIN_HOLD_LIST', d.opt_hold, f.hold) + '</div>';
+    }
+    h += '</div><div class="sfoot"><button id="rApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
+    $('sheetBody').innerHTML = h;
+    bindRelay();
+    rlDirty();
+  }
+  /* 롤러 — 콘 open_value_roller_popup과 같은 나눔: 온도(소수 1자리) = [정수] . [0~9], CO2(10 단위) = [천][백][십] + "0".
+   * 범위는 콘과 같은 표(서버 spec: [최소, 최대, 단위, 소수 자리, 오차 최대]) — 오차는 0~오차 최대 */
+  var ROW = 44;
+  function rollCol(id, a, b, cur) {
+    var h = '<div class="rcol" id="' + id + '"><div class="sp"></div>';
+    for (var i = a; i <= b; i++) h += '<div class="it" data-v="' + i + '">' + i + '</div>';
+    return { html: h + '<div class="sp"></div></div>', a: a, cur: Math.min(b, Math.max(a, cur)) };
+  }
+  function colValue(id, a) { var c = $(id); return a + Math.round(c.scrollTop / ROW); }
+  function markCol(id) {
+    var c = $(id), k = Math.round(c.scrollTop / ROW);
+    [].forEach.call(c.querySelectorAll('.it'), function (e, i) { e.classList.toggle('on', i === k); });
+  }
+  function openRoller(key, onOk) {
+    var sp = rlSpec(), f = rl.form, isMargin = key === 'margin';
+    var lo = isMargin ? 0 : sp[0], hi = isMargin ? sp[4] : sp[1], v = f[key];
+    var unit = S(f.chan === 3 ? 'STR_UNIT_CO2' : 'STR_UNIT_TEMP');
+    var cols = [], h = '';
+    if (sp[3] > 0) {
+      var whole = Math.floor(v + 1e-6), frac = Math.round((v - whole) * 10);
+      if (frac > 9) { frac = 0; whole += 1; }
+      var c1 = rollCol('rcI', Math.floor(lo), Math.floor(hi), whole), c2 = rollCol('rcF', 0, 9, frac);
+      cols = [['rcI', c1], ['rcF', c2]];
+      h = c1.html + '<span class="rfix">.</span>' + c2.html + '<span class="rfix">' + esc(unit) + '</span>';
+    } else {
+      var t = Math.max(0, Math.round(v)), maxTh = Math.round(hi / 1000);
+      var a1 = rollCol('rcT', 0, maxTh, Math.floor(t / 1000)), a2 = rollCol('rcH', 0, 9, Math.floor(t / 100) % 10),
+          a3 = rollCol('rcE', 0, 9, Math.floor(t / 10) % 10);
+      cols = [['rcT', a1], ['rcH', a2], ['rcE', a3]];
+      h = a1.html + a2.html + a3.html + '<span class="rfix">0 ' + esc(unit) + '</span>';
+    }
+    $('modalBox').innerHTML = '<div class="mtitle" style="background:var(--blue);color:#fff">' + esc(S('STR_TITLE_SETTING')) + '</div>' +
+      '<div class="roll"><div class="band"></div>' + h + '</div>' +
+      '<div class="sfoot"><button data-m="no">' + esc(S('STR_BTN_CANCEL')) + '</button><button class="primary" data-m="yes">' + esc(S('STR_BTN_CONFIRM')) + '</button></div>';
+    $('modal').classList.remove('hidden');
+    cols.forEach(function (c) {
+      var el = $(c[0]);
+      el.scrollTop = (c[1].cur - c[1].a) * ROW;
+      markCol(c[0]);
+      el.addEventListener('scroll', function () { markCol(c[0]); }, { passive: true });
+    });
+    $('modal').onclick = function (ev) {
+      var m = ev.target.closest('[data-m]');
+      if (!m) return;
+      if (m.getAttribute('data-m') === 'yes') {
+        var nv = sp[3] > 0 ? colValue('rcI', cols[0][1].a) + colValue('rcF', 0) / 10
+                           : colValue('rcT', 0) * 1000 + colValue('rcH', 0) * 100 + colValue('rcE', 0) * 10;
+        if (nv > hi || nv < lo) { nv = Math.min(hi, Math.max(lo, nv)); toast(S('STR_MSG_RELAY_VALUE_CLAMPED')); }
+        onOk(Number(nv.toFixed(sp[3])));
+      }
+      $('modal').classList.add('hidden');
+      $('modal').onclick = null;
+    };
+  }
+
+  function rlDirty() { var b = $('rApply'); if (b) b.disabled = (rlForm() === rlSnap); }
+  function bindRelay() {
+    var f = rl.form, d = rl.data;
+    function on(id, ev, fn) { var el = $(id); if (el) el.addEventListener(ev, fn); }
+    on('rAlias', 'input', function () { $('rAliasApply').disabled = (this.value === rl.alias); });
+    on('rAliasApply', 'click', function () {
+      var v = $('rAlias').value;
+      post('api/relay/alias?idx=' + d.idx, v).then(function () { rl.alias = v; $('rAliasApply').disabled = true; toast(S('STR_BTN_APPLY') + ' \u2713'); })
+        .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+    });
+    on('rAi', 'change', function () { f.ai = this.checked; if (f.ai) f.manual = false; renderRelay(); });
+    on('rManual', 'change', function () {
+      if (this.checked) {
+        confirmOverride(d.idx, function () { closeSheet(); }, function () { renderRelay(); });
+      } else { f.manual = false; renderRelay(); }
+    });
+    on('rZ', 'change', function () { f.z = this.value === '1'; rlDirty(); });
+    on('rY', 'change', function () { f.y = this.value === '1'; rlDirty(); });
+    on('rChan', 'change', function () {
+      f.chan = +this.value;
+      var def = rlChan(f.chan).def; f.center = def[0]; f.margin = def[1];   /* 채널을 바꾸면 그 채널 기본값(콘과 같음) */
+      var devs = rlChanDevices(d, f.chan); f.dev = devs[0] ? devs[0].mac : '';
+      renderRelay();
+    });
+    /* 값 버튼 → 롤러(확인하면 값 반영, 적용 버튼으로 저장) */
+    [].forEach.call(document.querySelectorAll('[data-roll]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var key = btn.getAttribute('data-roll');
+        openRoller(key, function (nv) { f[key] = nv; renderRelay(); });
+      });
+    });
+    on('rSrc', 'change', function () { f.src = +this.value; renderRelay(); });
+    on('rGc', 'change', function () { f.gc = +this.value; renderRelay(); });
+    on('rDev', 'change', function () { f.dev = this.value; rlDirty(); });
+    on('rStat', 'change', function () { f.stat = +this.value; rlDirty(); });
+    on('rTrend', 'change', function () { f.trend = this.checked; renderRelay(); });
+    on('rTs', 'change', function () { f.ts = +this.value; rlDirty(); });
+    on('rHold', 'change', function () { f.hold = +this.value; rlDirty(); });
+    on('rApply', 'click', function () {
+      post('api/relay/apply?idx=' + d.idx, rlForm()).then(function () { rlSnap = rlForm(); rlDirty(); toast(S('STR_BTN_APPLY') + ' \u2713'); })
+        .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+    });
+  }
+
+  /* 시트 닫기(X), 행 탭 → 장치 팝업 */
+  $('sheet').addEventListener('click', function (ev) {
+    var t = ev.target.closest('[data-act]');
+    if (t && t.getAttribute('data-act') === 'close') closeSheet();
+  });
+  $('mainView').addEventListener('click', function (ev) {
+    var ovr = ev.target.closest('[data-ovr]');
+    if (ovr) { confirmOverride(+ovr.getAttribute('data-ovr')); return; }   /* 전원 아이콘 → 수동 조작 확인(콘과 같음) */
+    var rrow = ev.target.closest('[data-relay]');
+    if (rrow) { openRelay(+rrow.getAttribute('data-relay')); return; }
+    var row = ev.target.closest('[data-dev]');
+    if (row) openDevice(row.getAttribute('data-dev'));
+  });
+
+  /* 10-03 — iPhone(Chrome)에서 배율이 1.07로 남아 왼쪽이 비고 오른쪽이 잘림(원인 미확정). 배율이 1이 아니면 viewport 설정을
+   * 다시 적용해 1배로 되돌리고 가로 위치도 0으로. 열 때·크기 바뀔 때·입력 마칠 때·팝업 닫을 때 확인 */
+  var vpMeta = document.querySelector('meta[name=viewport]');
+  var VP = 'width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover';
+  function fixZoom() {
+    var vv = window.visualViewport;
+    if (!vv || Math.abs(vv.scale - 1) < 0.005) { if (window.scrollX) window.scrollTo(0, window.scrollY); return; }
+    vpMeta.setAttribute('content', VP + ', minimum-scale=1');   /* 설정을 바꿨다가 */
+    setTimeout(function () { vpMeta.setAttribute('content', VP); window.scrollTo(0, window.scrollY); }, 50);  /* 되돌려 다시 계산시킴 */
+  }
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', function () { setTimeout(fixZoom, 300); });
+  document.addEventListener('focusout', function () { setTimeout(fixZoom, 300); });
+  window.addEventListener('pageshow', function () { setTimeout(fixZoom, 300); });
+
+  applyTexts();
   poll();
+  setTimeout(fixZoom, 500);
 })();
 </script>
 </body>

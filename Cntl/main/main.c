@@ -29,6 +29,9 @@
 #include "power_relay.h"
 #include "sens_kind_store.h"
 #include "notify.h"
+#include "web_auth.h"
+#include "web_session.h"
+#include "web_api.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -104,6 +107,7 @@ static void format_file_tag(char kind, uint32_t seq, char *out, size_t out_size)
  * 일치하는지 확인해서, 그 사이 다른 선택으로 바뀌었으면 엉뚱한 사진을 내려주지 않고 404 */
 static esp_err_t photo_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[32] = { 0 };
     char kind_str[4] = { 0 }, seq_str[16] = { 0 };
     bool has_kind = false, has_seq = false;
@@ -136,6 +140,7 @@ static esp_err_t photo_get_handler(httpd_req_t *req)
  * 호출") — assets에 업로드될 정적 HTML/JS(app.html)가 이 API들을 fetch()로 호출해서 화면을 그림 */
 static esp_err_t api_devices_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     node_hub_node_t cams[NODE_HUB_MAX_NODES];
     int n = node_hub_get_nodes(HUB_NODE_KIND_CAM, cams, NODE_HUB_MAX_NODES);
 
@@ -171,6 +176,7 @@ static esp_err_t api_devices_get_handler(httpd_req_t *req)
 
 static esp_err_t api_connect_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[32] = { 0 };
     char mac_hex[16] = { 0 };
     uint8_t mac[6];
@@ -204,6 +210,7 @@ static esp_err_t api_connect_get_handler(httpd_req_t *req)
  * api_connect_get_handler와 동일 패턴, 센스 전용 합성 함수만 다름 */
 static esp_err_t api_connect_sensor_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[32] = { 0 };
     char mac_hex[16] = { 0 };
     uint8_t mac[6];
@@ -233,6 +240,7 @@ static esp_err_t api_connect_sensor_get_handler(httpd_req_t *req)
 /* 2026-09-27(3002 조사 — 사용자 지시) — 수동 촬영 합성. 결과는 합성 성공 여부만(촬영/수신 결과는 로그로 봄) */
 static esp_err_t api_capture_now_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[32] = { 0 };
     char mac_hex[16] = { 0 };
     uint8_t mac[6];
@@ -253,6 +261,7 @@ static esp_err_t api_capture_now_get_handler(httpd_req_t *req)
  * (dev_log_set_save_level — 파일에도 저장됨). 로그 창이 열려 있으면 드롭다운 표시는 다음에 열 때 맞춰짐 */
 static esp_err_t api_devlog_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[16] = { 0 };
     char v[4] = { 0 };
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -277,6 +286,7 @@ static esp_err_t api_devlog_get_handler(httpd_req_t *req)
  * 텍스트로 돌려줌. SD 에러 등이 났을 때 재부팅/플래시 전에 먼저 받아 둠(조건부 할 일 C5) */
 static esp_err_t api_devlog_dump_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     const size_t cap = 400 * 150;
     char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
     if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
@@ -447,6 +457,7 @@ static void sdtest_par_reader(void *arg)
 
 static esp_err_t api_sdtest_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[48] = { 0 };
     char v[12] = { 0 };
     httpd_req_get_url_query_str(req, query, sizeof(query));
@@ -486,6 +497,7 @@ static esp_err_t api_sdtest_get_handler(httpd_req_t *req)
  * name=파일이면 그 파일 원본을 그대로 내려줌. 측정값 기록과 겹치지 않게 stats_store_io_suspend 아래에서 읽음 */
 static esp_err_t api_statsfile_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[64] = { 0 };
     char name[32] = { 0 };
     httpd_req_get_url_query_str(req, query, sizeof(query));
@@ -530,6 +542,7 @@ static esp_err_t api_statsfile_get_handler(httpd_req_t *req)
 
 static esp_err_t api_set_response_interval_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[32] = { 0 };
     char sec_str[8] = { 0 };
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -557,6 +570,7 @@ static esp_err_t api_set_response_interval_get_handler(httpd_req_t *req)
  * 원래 설계(실제 UI 경로 그대로 타기) 그대로 유지 — 상황 해결되면 이 분기는 제거 예정 */
 static esp_err_t api_delete_stats_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[16] = { 0 };
     bool force = (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
                   strstr(query, "force=1") != NULL);
@@ -569,6 +583,7 @@ static esp_err_t api_delete_stats_get_handler(httpd_req_t *req)
 
 static esp_err_t api_disconnect_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[32] = { 0 };
     char mac_hex[16] = { 0 };
     uint8_t mac[6];
@@ -591,6 +606,7 @@ static esp_err_t api_disconnect_get_handler(httpd_req_t *req)
 
 static esp_err_t api_photos_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     node_hub_node_t cams[NODE_HUB_MAX_NODES];
     int n = node_hub_get_nodes(HUB_NODE_KIND_CAM, cams, NODE_HUB_MAX_NODES);
     int cam_idx = -1;
@@ -647,6 +663,7 @@ static esp_err_t api_photos_get_handler(httpd_req_t *req)
  * 불필요해짐(그건 CAM 응답을 기다려야 했던 시절 설계) */
 static esp_err_t api_photo_fetch_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[32] = { 0 };
     char kind_str[4] = { 0 }, seq_str[16] = { 0 };
     bool has_kind = false, has_seq = false;
@@ -723,9 +740,10 @@ static esp_err_t app_get_handler(httpd_req_t *req)
 }
 
 /* 2026-10-03(할 일 AD — SPA 모델 API) — 노드 전체(캠·센스) 목록과 연결 상태. 읽기 전용. kind=cam|sens, status는
- * /api/devices와 같은 코드(waiting/active/paired), status_msg는 콘 화면 문구(ui_str) 그대로 */
+ * /api/devices와 같은 코드(waiting/active/paired). 문구는 안 보냄 — SPA가 코드를 한/영 문구로 바꿈(설계) */
 static esp_err_t api_nodes_get_handler(httpd_req_t *req)
 {
+    WEB_SCREEN_API_BEGIN(req);  /* 10-03 — 인증 + 웹 세션(콘 잠금) */
     /* 노드 배열(구조체가 큼)과 본문은 PSRAM — 스택에 두지 않음 */
     node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
     const size_t cap = 4096;
@@ -742,18 +760,15 @@ static esp_err_t api_nodes_get_handler(httpd_req_t *req)
         hub_conn_state_t cs = node_hub_get_conn_state(nodes[i].mac);
         const char *status = (cs == HUB_CONN_STATE_WAITING) ? "waiting"
                             : (cs == HUB_CONN_STATE_ACTIVE)  ? "active" : "paired";
-        const char *status_msg = (cs == HUB_CONN_STATE_WAITING) ? ui_str(STR_STATUS_CONNECTING)
-                                : (cs == HUB_CONN_STATE_ACTIVE)  ? ui_str(STR_STATUS_ACTIVE)
-                                                                  : ui_str(STR_STATUS_PAIRED);
         const char *kind = (nodes[i].kind == HUB_NODE_KIND_CAM) ? "cam"
                          : (nodes[i].kind == HUB_NODE_KIND_SENS) ? "sens" : "unknown";
         len += snprintf(body + len, cap - len,
                         "%s{\"mac\":\"%02x%02x%02x%02x%02x%02x\",\"name\":\"%s\",\"kind\":\"%s\",\"status\":\"%s\","
-                        "\"status_msg\":\"%s\",\"paired\":%s}",
+                        "\"paired\":%s}",
                         i == 0 ? "" : ",",
                         nodes[i].mac[0], nodes[i].mac[1], nodes[i].mac[2],
                         nodes[i].mac[3], nodes[i].mac[4], nodes[i].mac[5],
-                        nodes[i].name, kind, status, status_msg,
+                        nodes[i].name, kind, status,
                         nodes[i].conn_state == NODE_CONN_PAIRED ? "true" : "false");
     }
     len += snprintf(body + len, cap - len, "],\"time\":%lu}", (unsigned long)rtc_sync_get_unix_time());
@@ -770,6 +785,7 @@ static esp_err_t api_nodes_get_handler(httpd_req_t *req)
  * 큐에 넣기만 하고 바로 응답(실제 전송 결과는 시리얼 NOTIFY 로그) */
 static esp_err_t api_notify_test_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     /* query·msg는 PSRAM(스택에 두지 않음) */
     char *query = heap_caps_calloc(1, 160 + 128, MALLOC_CAP_SPIRAM);
     if (!query) {
@@ -802,6 +818,7 @@ static bool is_safe_asset_filename(const char *name)
 
 static esp_err_t admin_upload_post_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[64] = { 0 };
     char filename[64] = { 0 };
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -843,6 +860,7 @@ static esp_err_t admin_upload_post_handler(httpd_req_t *req)
     fwrite(buf, 1, received, f);
     fclose(f);
     heap_caps_free(buf);
+    if (strcmp(filename, "notify.cfg") == 0) notify_reload_cfg();  /* 10-03 — 콘 화면 Web 주소·QR 바로 반영 */
 
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
@@ -850,6 +868,7 @@ static esp_err_t admin_upload_post_handler(httpd_req_t *req)
 
 static esp_err_t admin_download_get_handler(httpd_req_t *req)
 {
+    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     char query[64] = { 0 };
     char filename[64] = { 0 };
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -911,7 +930,9 @@ void web_dashboard_start(void)
     config.stack_size = 8192;
     /* 2026-08-30 — URI 핸들러가 계속 늘어나서(root/photo/admin 2개 + API) 기본
      * max_uri_handlers(8)를 넘을 수 있어 여유있게 확대 */
-    config.max_uri_handlers = 24;  /* 2026-09-27 — capture_now/devlog 추가로 16을 채움, 여유. 10-03 — nodes/notify_test로 20을 채워 24 */
+    /* 2026-09-27 — capture_now/devlog 추가로 16을 채움, 여유. 10-03 — nodes/notify_test로 20을 채워 24,
+     * login/password/logout_all/session_claim 4개 추가로 28, 웹 화면 API(dashboard 등) 여유 포함 40 */
+    config.max_uri_handlers = 40;
     /* 2026-10-03(할 일 AD — 웹 접속은 한 곳) — 동시 연결 3개(브라우저 한 대가 여는 연결 몇 개), 넘치면 가장 오래 쉰 연결을 닫음.
      * 웹 전송 하나가 내부 RAM 약 20K를 잠깐 씀(10-01 실측) — 연결 수를 묶어 그 이상 커지지 않게 */
     config.max_open_sockets = 3;
@@ -992,6 +1013,9 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_notify_test_uri = { .uri = "/api/notify_test", .method = HTTP_GET,
                                                        .handler = api_notify_test_get_handler };
     httpd_register_uri_handler(server, &api_notify_test_uri);
+    web_auth_register_handlers(server);
+    web_session_register_handlers(server);
+    web_api_register_handlers(server);
     /* 2026-08-21 — 성공할 때도 같은 여유메모리를 남김(사용자 지시) — 실패할 때만 찍으면
      * "언제부터 빠듯해지기 시작했는지" 추세를 못 봄. 5005는 이 시점 내부RAM이 간당간당할
      * 때만 뜨는 경계선 증상이라, 성공한 부팅들의 수치도 같이 쌓여야 나중에 진짜 임계점을
@@ -1044,6 +1068,7 @@ void app_main(void)
      * (/assets/settings.bin)과 RTC 시드값(/assets/time_sync.txt) 둘 다 이 안에 있음 */
     ESP_ERROR_CHECK(fs_init());
     notify_init();  /* 2026-10-03(할 일 AD) — 휴대폰 알림 보내기 태스크(설정 notify.cfg는 LittleFS) */
+    web_auth_init();  /* 2026-10-03(할 일 AD) — 웹 로그인(web_auth.bin) */
     /* 2026-09-27(로그 정리) — 개발 로그: ESP_LOG 가로채기 시작 + 저장 문턱 적용(설정은 /assets/devlog.cfg라 fs 뒤) */
     dev_log_init();
 
@@ -1158,6 +1183,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Starting Cntl UI");
     if (esp_lv_adapter_lock(-1) == ESP_OK) {
         ui_init();
+        web_session_init(ui_main_on_web_session_lock);  /* 2026-10-03(할 일 AD) — 웹 접속 중 콘 잠금 */
         esp_lv_adapter_unlock();
     }
 

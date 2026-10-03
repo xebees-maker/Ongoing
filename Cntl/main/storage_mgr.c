@@ -27,6 +27,10 @@ static TaskHandle_t s_task = NULL;
 static portMUX_TYPE s_snap_lock = portMUX_INITIALIZER_UNLOCKED;
 static storage_mgr_snapshot_t s_snap;
 static uint32_t s_pending_deleted[STORAGE_AREA_COUNT];
+/* 2026-10-03(할 일 AD — 웹 주화면) — 웹은 콘 화면처럼 "가져가며 지우기"를 못 함(콘 화면이 먼저 가져감). 정리 때마다 번호를
+ * 올리고 마지막 정리의 영역별 개수를 남겨 둠 — 웹은 번호가 바뀌면 안내를 띄움 */
+static uint32_t s_cleanup_seq = 0;
+static uint32_t s_last_deleted[STORAGE_AREA_COUNT];
 
 /* 2026-10-01(사용자 설계 — 할 일 T "관리 폴더 표") — 영역별 예산 비율과 그 영역의 사용량/정리/재스캔 함수. 예산 판단·정리·
  * 재스캔·화면 표시가 모두 이 표를 따라 돎(예전엔 사진 9 : 측정 1이 여기와 ui_main.c에 따로 적혀 있었음). 비율 합 = 100 */
@@ -107,6 +111,8 @@ static void storage_task(void *arg)
             if (deleted > 0) {
                 taskENTER_CRITICAL(&s_snap_lock);
                 s_pending_deleted[a] += deleted;
+                for (int k = 0; k < STORAGE_AREA_COUNT; k++) s_last_deleted[k] = (k == a) ? deleted : 0;
+                s_cleanup_seq++;
                 taskEXIT_CRITICAL(&s_snap_lock);
             }
         }
@@ -150,6 +156,15 @@ void storage_mgr_get_snapshot(storage_mgr_snapshot_t *out)
     taskENTER_CRITICAL(&s_snap_lock);
     *out = s_snap;
     taskEXIT_CRITICAL(&s_snap_lock);
+}
+
+uint32_t storage_mgr_get_cleanup_event(uint32_t out_last_deleted[STORAGE_AREA_COUNT])
+{
+    taskENTER_CRITICAL(&s_snap_lock);
+    uint32_t seq = s_cleanup_seq;
+    for (int a = 0; a < STORAGE_AREA_COUNT; a++) out_last_deleted[a] = s_last_deleted[a];
+    taskEXIT_CRITICAL(&s_snap_lock);
+    return seq;
 }
 
 bool storage_mgr_take_cleanup(uint32_t out_deleted[STORAGE_AREA_COUNT])

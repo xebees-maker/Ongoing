@@ -62,6 +62,9 @@ void storage_mgr_get_snapshot(storage_mgr_snapshot_t *out);
  * 정리는 파일처리 태스크에서 일어나지만 안내 팝업은 LVGL 태스크에서만 띄워야 해서 이렇게 넘김 */
 bool storage_mgr_take_cleanup(uint32_t out_deleted[STORAGE_AREA_COUNT]);
 
+/* 2026-10-03(할 일 AD) — 정리 이벤트 번호(정리할 때마다 1 증가, 부팅 때 0)와 마지막 정리의 영역별 삭제 개수. 읽기만(웹 안내용) */
+uint32_t storage_mgr_get_cleanup_event(uint32_t out_last_deleted[STORAGE_AREA_COUNT]);
+
 #ifdef __cplusplus
 }
 #endif

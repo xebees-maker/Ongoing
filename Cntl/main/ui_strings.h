@@ -267,6 +267,8 @@ typedef enum {
     STR_ERR_DESC_BRIDGE_NORESPONSE,   /* 2026-10-01 — 5011, 같은 이유 */
     STR_ERR_DESC_CAN_BUS_OFF,         /* 2026-10-02 — 5012 */
     STR_ERR_DESC_CAN_TX_STUCK,        /* 2026-10-02 — 5013 */
+    STR_WEB_LOCK_MSG,                 /* 2026-10-03(할 일 AD) — 웹 접속 중 콘 잠금 화면 */
+    STR_WEB_LOCK_TAKEOVER,
     STR_MSG_STATS_BLOCKED_SD_FAIL,
     /* 2026-09-11(에러목록 팝업 행별 재설계 — 지우기 버튼) */
     STR_BTN_DISMISS,
@@ -315,10 +317,8 @@ typedef enum {
     STR_LABEL_MANUAL_MODE,       /* Manual On/Off 스위치 라벨(2026-09-18): "수동" / "Manual" */
     STR_TITLE_WARNING,           /* Override 확인팝업 제목(2026-09-18, 노란색): "경고" / "Warning" */
     STR_MSG_OVERRIDE_WARNING,    /* Override 확인팝업 경고문 1행(2026-09-18) */
-    /* 2026-09-18(사용자 지시 — "Do you want to override as (On아이콘)On or (Off아이콘)Off?")
-     * — 문장 중간에 아이콘이 끼어들어가므로 문구를 조각냄. STR_STATUS_RELAY_ON/OFF 재사용 */
-    STR_MSG_OVERRIDE_PREFIX,     /* "오버라이드할까요, " / "Do you want to override as " */
-    STR_MSG_OVERRIDE_OR,         /* " 또는 " / " or " */
+    /* 2026-10-03(사용자 결정 — 문장은 언어별 어순, 입력 칸은 같게) — 예전 "Do you want to override as [On] or [Off]?" 조각
+     * (PREFIX/OR)은 선택 칸이 문장 안에 끼어 어순을 못 맞춰서 없앰. 경고문 아래에 [켬][끔] 선택 칸만 둠 */
     STR_MSG_OVERRIDE_ON_SUMMARY, /* 주화면 요약: "On by manual override" (2026-09-18) */
     STR_MSG_OVERRIDE_OFF_SUMMARY, /* 주화면 요약: "Off by manual override" (2026-09-18) */
     STR_LABEL_CHAN_TYPE,         /* "측정 항목:" / "Channel:" */
@@ -346,7 +346,6 @@ typedef enum {
     STR_LABEL_AI_MODE,           /* "AI:" / "AI:" */
     STR_OPT_RISE_FALL_LIST,      /* 문장 골격 Y칸: "오르면\n내리면" / "Rises\nFalls" */
     STR_OPT_TURN_ACTION_LIST,    /* 문장 골격 Z칸: "켜\n꺼" / "Turns On\nTurns Off" */
-    STR_SENTENCE_IF,             /* 문장 맨 앞: "만약" / "If" */
     STR_SENTENCE_ARROW,          /* Y칸과 Z칸 사이: "→" / "→" */
     STR_LABEL_CENTER,            /* "기준값:" / "Center:" */
     STR_LABEL_MARGIN,            /* "오차(±):" / "Margin (±):" */
@@ -358,7 +357,13 @@ typedef enum {
     STR_LABEL_TREND_WINDOW,      /* "판단횟수:" / "Trend samples:" (2026-09-17: 초 대신 측정횟수 기준) */
 
     /* 2026-09-17(사용자 재작성 — "Turn On if Temperature Up to [값] +/- [오차] [단위]") */
-    STR_SENTENCE_TURN,           /* 문장 맨 앞, Action 드랍다운 앞: "" / "Turn" */
+    /* 2026-10-03(사용자 결정) — 릴레이 팝업 입력 칸은 언어와 상관없이 같은 배치(줄 이름 + 칸): 동작 / 항목 / 조건.
+     * 예전 문장형("Turn [On] if [Temperature] [Up to] ...")은 한국어 어순과 안 맞아 없앰(TURN/IF 문구 제거) */
+    STR_LABEL_RELAY_ACTION,      /* "동작:" / "Action:" */
+    STR_LABEL_RELAY_ITEM,        /* "항목:" / "Item:" */
+    STR_LABEL_RELAY_CONDITION,   /* "조건:" / "Condition:" */
+    /* 주화면 요약 문장 — 언어별 어순 틀. {act} {item} {dir} {value}를 채움(콘·웹 공용) */
+    STR_FMT_RELAY_SUMMARY,
     STR_SENTENCE_PLUSMINUS,      /* Center/Margin 값 사이: "+/-" / "+/-" */
     STR_UNIT_HUMI,                /* 습도 단위(향후 채널 추가용): "%" / "%" */
     /* 2026-09-17(주화면 Power Control 행 요약용 — "Turn On if Temperature Up to 30.0") —

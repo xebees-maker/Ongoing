@@ -34,14 +34,17 @@ static StaticQueue_t s_q_struct;
 static notify_item_t *s_item = NULL;      /* 보내기 태스크 수신 버퍼 */
 static notify_item_t *s_staging = NULL;   /* notify_send 공용 조립 버퍼(s_send_mutex로 보호) */
 static SemaphoreHandle_t s_send_mutex = NULL;
-static notify_cfg_t *s_cfg = NULL;
+static notify_cfg_t *s_cfg = NULL;        /* 파일에서 읽은 값(s_cfg_mutex로 보호) */
+static notify_cfg_t *s_send_cfg = NULL;   /* 보내기 태스크가 보낼 동안 쓰는 복사본(잠금 없이) */
+/* s_cfg·s_line 보호 — 보내기 태스크·웹서버·LVGL 태스크가 같이 씀. 잡는 구간은 파일 읽기·복사뿐(네트워크 대기 없음) */
+static SemaphoreHandle_t s_cfg_mutex = NULL;
 static char *s_url = NULL;
 static char *s_line = NULL;               /* notify.cfg 한 줄(보내기 태스크 전용) */
 #define NOTIFY_LINE_LEN 200
 #define NOTIFY_URL_LEN (sizeof(NOTIFY_SERVER) + sizeof(((notify_cfg_t *)0)->topic))
 
-/* notify.cfg를 읽어 s_cfg에 채움 — topic이 없으면 false. 줄 끝 공백·CR 제거 */
-static bool load_cfg(void)
+/* notify.cfg를 읽어 s_cfg에 채움(s_cfg_mutex 안에서) — topic이 없으면 false. 줄 끝 공백·CR 제거 */
+static bool load_cfg_locked(void)
 {
     memset(s_cfg, 0, sizeof(*s_cfg));
     FILE *f = fopen(NOTIFY_CFG_PATH, "r");
@@ -62,11 +65,15 @@ static bool load_cfg(void)
 
 static void send_one(const notify_item_t *it)
 {
-    if (!load_cfg()) {
+    xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);
+    bool have_topic = load_cfg_locked();
+    *s_send_cfg = *s_cfg;
+    xSemaphoreGive(s_cfg_mutex);
+    if (!have_topic) {
         ESP_LOGW(TAG, "No topic in notify.cfg - not sent: %s", it->title);
         return;
     }
-    snprintf(s_url, NOTIFY_URL_LEN, NOTIFY_SERVER "%s", s_cfg->topic);
+    snprintf(s_url, NOTIFY_URL_LEN, NOTIFY_SERVER "%s", s_send_cfg->topic);
     esp_http_client_config_t hc = {
         .url = s_url,
         .method = HTTP_METHOD_POST,
@@ -79,7 +86,7 @@ static void send_one(const notify_item_t *it)
     }
     esp_http_client_set_header(client, "Content-Type", "text/plain");
     if (it->title[0]) esp_http_client_set_header(client, "Title", it->title);
-    if (s_cfg->click[0]) esp_http_client_set_header(client, "Click", s_cfg->click);
+    if (s_send_cfg->click[0]) esp_http_client_set_header(client, "Click", s_send_cfg->click);
     esp_http_client_set_post_field(client, it->msg, (int)strlen(it->msg));
     esp_err_t err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
@@ -106,13 +113,16 @@ void notify_init(void)
     s_item = heap_caps_malloc(sizeof(notify_item_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_staging = heap_caps_malloc(sizeof(notify_item_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_send_mutex = xSemaphoreCreateMutex();
-    s_cfg = heap_caps_malloc(sizeof(notify_cfg_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_cfg = heap_caps_calloc(1, sizeof(notify_cfg_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_send_cfg = heap_caps_calloc(1, sizeof(notify_cfg_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_cfg_mutex = xSemaphoreCreateMutex();
     s_url = heap_caps_malloc(NOTIFY_URL_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_line = heap_caps_malloc(NOTIFY_LINE_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!q_storage || !s_item || !s_staging || !s_send_mutex || !s_cfg || !s_url || !s_line) {
+    if (!q_storage || !s_item || !s_staging || !s_send_mutex || !s_cfg || !s_send_cfg || !s_cfg_mutex || !s_url || !s_line) {
         ESP_LOGE(TAG, "alloc failed - notifications disabled");
         return;
     }
+    notify_reload_cfg();  /* 콘 화면 Web 주소·QR용 바깥 주소를 처음 한 번 읽어 둠 */
     s_q = xQueueCreateStatic(NOTIFY_Q_DEPTH, sizeof(notify_item_t), q_storage, &s_q_struct);
     /* 우선순위 5(통신 17·SR 15·파일 10보다 낮음 — 알림은 늦어도 됨), 스택 PSRAM */
     if (xTaskCreatePinnedToCoreWithCaps(notify_task, "notify", 6144, NULL, 5, NULL, 1, MALLOC_CAP_SPIRAM) != pdPASS) {
@@ -133,4 +143,23 @@ bool notify_send(const char *title, const char *msg)
     if (!ok) ESP_LOGW(TAG, "Queue full - dropped: %s", s_staging->title);
     xSemaphoreGive(s_send_mutex);
     return ok;
+}
+
+void notify_reload_cfg(void)
+{
+    if (!s_cfg_mutex) return;
+    xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);
+    load_cfg_locked();
+    xSemaphoreGive(s_cfg_mutex);
+}
+
+bool notify_copy_public_url(char *out, size_t cap)
+{
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    if (!s_cfg_mutex) return false;
+    xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);
+    snprintf(out, cap, "%s", s_cfg->click);
+    xSemaphoreGive(s_cfg_mutex);
+    return out[0] != '\0';
 }

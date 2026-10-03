@@ -269,6 +269,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_ERR_DESC_BRIDGE_NORESPONSE]  = { "브릿지 응답 없음",               "Bridge not responding" },
     [STR_ERR_DESC_CAN_BUS_OFF]        = { "CAN 버스 오프",                  "CAN bus off" },
     [STR_ERR_DESC_CAN_TX_STUCK]       = { "CAN 송신 응답 없음",             "CAN send not acknowledged" },
+    [STR_WEB_LOCK_MSG]                = { "웹에서 사용 중입니다",           "Web access in use" },
+    [STR_WEB_LOCK_TAKEOVER]           = { "웹 연결 끊고 사용",              "Disconnect web and use" },
     [STR_MSG_STATS_BLOCKED_SD_FAIL] = { "SD 불량으로 통계를 조회할 수 없습니다. 상태버튼을 눌러 조치하세요.",
                                         "Statistics can't be viewed because the SD card is faulty. Tap the status button to take action." },
     [STR_BTN_DISMISS]            = { "지우기",                         "Dismiss" },
@@ -299,18 +301,16 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     /* 2026-09-16(SR/Power Control) */
     [STR_PANEL_POWER_CONTROL]  = { "전원제어", "Power Control" },
     [STR_RELAY_DEFAULT_NAME_FMT] = { "릴레이 %d", "Relay %d" },
-    [STR_STATUS_RELAY_ON]      = { "On", "On" },
-    [STR_STATUS_RELAY_OFF]     = { "Off", "Off" },
+    [STR_STATUS_RELAY_ON]      = { "켬", "On" },     /* 2026-10-03(사용자 결정) — 한국어 켬/끔 */
+    [STR_STATUS_RELAY_OFF]     = { "끔", "Off" },
     [STR_RELAY_NOT_CONFIGURED] = { "아직 설정 전", "Not configured yet" },
     [STR_MSG_RELAY_VALUE_CLAMPED] = { "값이 센서 범위를 벗어나 자동 조정됐습니다", "Value adjusted to fit sensor range" },
     [STR_LABEL_MANUAL_MODE] = { "수동", "Manual" },
     [STR_TITLE_WARNING] = { "경고", "Warning" },
-    [STR_MSG_OVERRIDE_WARNING] = { "오버라이드하면 설정을 무시합니다.",
+    [STR_MSG_OVERRIDE_WARNING] = { "설정을 무시하고 강제로 켜거나 끕니다.",
                                     "Override ignores configuration." },
-    [STR_MSG_OVERRIDE_PREFIX] = { "오버라이드할까요, ", "Do you want to override as " },
-    [STR_MSG_OVERRIDE_OR]     = { " 또는 ", " or " },
-    [STR_MSG_OVERRIDE_ON_SUMMARY] = { "On by manual override", "On by manual override" },
-    [STR_MSG_OVERRIDE_OFF_SUMMARY] = { "Off by manual override", "Off by manual override" },
+    [STR_MSG_OVERRIDE_ON_SUMMARY] = { "강제 켬", "On by manual override" },
+    [STR_MSG_OVERRIDE_OFF_SUMMARY] = { "강제 끔", "Off by manual override" },
     [STR_LABEL_CHAN_TYPE]      = { "측정 항목:", "Channel:" },
     [STR_OPT_CHAN_TYPE_LIST]   = { "온도\n이산화탄소", "Temperature\nCO2" },
     [STR_LABEL_SOURCE_KIND]    = { "기준 소스:", "Source:" },
@@ -334,9 +334,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     /* 2026-09-16(SR 팝업 재설계) */
     [STR_LABEL_AI_MODE]        = { "AI:", "AI:" },
     /* 2026-09-17(사용자 최종 문구 — "Turn On if Temperature Up to") */
-    [STR_OPT_RISE_FALL_LIST]   = { "도달\n미만", "Up to\nBelow" },
-    [STR_OPT_TURN_ACTION_LIST] = { "켜짐\n꺼짐", "On\nOff" },
-    [STR_SENTENCE_IF]          = { "만약", "if" },
+    [STR_OPT_RISE_FALL_LIST]   = { "이상\n이하", "Up to\nBelow" },
+    [STR_OPT_TURN_ACTION_LIST] = { "켬\n끔", "On\nOff" },
     /* 2026-09-16(사용자 지적 — "글 깨짐이 있고") — 비트맵 폰트(Montserrat, 영문 ASCII만)에
      * 없는 특수기호(→/±/°)를 썼다가 미싱글리프로 깨져 보였던 문제, 순수 ASCII로 교체 */
     [STR_SENTENCE_ARROW]       = { "->", "->" },
@@ -350,13 +349,16 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LABEL_TREND_WINDOW]   = { "판단횟수:", "Trend samples:" },
 
     /* 2026-09-17(사용자 재작성 — "Turn On if Temperature Up to [값] +/- [오차] [단위]") */
-    [STR_SENTENCE_TURN]        = { "", "Turn" },
+    [STR_LABEL_RELAY_ACTION]    = { "동작:", "Action:" },
+    [STR_LABEL_RELAY_ITEM]      = { "항목:", "Item:" },
+    [STR_LABEL_RELAY_CONDITION] = { "조건:", "Condition:" },
+    [STR_FMT_RELAY_SUMMARY]     = { "{item} {value} {dir}이면 {act}", "Turn {act} if {item} {dir} {value}" },
     [STR_SENTENCE_PLUSMINUS]   = { "+/-", "+/-" },
     [STR_UNIT_HUMI]            = { "%", "%" },
     [STR_CHANNEL_NAME_TEMP]    = { "온도", "Temperature" },
     [STR_CHANNEL_NAME_CO2]     = { "이산화탄소", "CO2" },
-    [STR_DIRECTION_NAME_UPTO]  = { "도달", "Up to" },
-    [STR_DIRECTION_NAME_BELOW] = { "미만", "Below" },
+    [STR_DIRECTION_NAME_UPTO]  = { "이상", "Up to" },
+    [STR_DIRECTION_NAME_BELOW] = { "이하", "Below" },
 
     [STR_TITLE_CONFIRM]  = { "확인", "Confirm" },
     [STR_TITLE_SETTING]  = { "설정", "Setting" },

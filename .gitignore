@@ -29,3 +29,6 @@ __pycache__/
 # Build/flash logs
 build_log.txt
 flash_log.txt
+
+# 웹앱 빌드 결과(Cntl/web/build_web.py)
+Cntl/web/out/

@@ -21,6 +21,9 @@ idf_component_register(
         "sens_kind_store.c"
         "can_bridge.c"
         "notify.c"
+        "web_auth.c"
+        "web_session.c"
+        "web_api.c"
 
         "../components/waveshare_rgb_lcd_port.c"
         "../components/ch422g.c"
@@ -34,6 +37,7 @@ idf_component_register(
         esp_netif
         esp_http_server
         esp_http_client
+        mbedtls
         esp_now_link
         esp_timer
         waveshare__pcf85063a

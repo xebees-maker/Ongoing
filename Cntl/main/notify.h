@@ -12,6 +12,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /* 보내기 태스크 시작 — 부팅 때 한 번(LittleFS 마운트 뒤) */
 void notify_init(void);
@@ -19,3 +20,10 @@ void notify_init(void);
 /* 알림 하나를 큐에 넣고 바로 반환(네트워크 대기 없음). title·msg는 ASCII(화면 영문 원칙과 같음).
  * 큐가 가득 차거나 init 전이면 false */
 bool notify_send(const char *title, const char *msg);
+
+/* 2026-10-03(사용자 지시) — 웹앱 바깥 주소(notify.cfg의 click=, 알림 클릭 주소와 같은 값)를 out에 복사. 콘 화면 Summary의 Web
+ * 주소·웹 접속 QR이 씀(하드코딩 안 함). 설정 안 됐으면 false(out은 빈 문자열). 어느 태스크에서든 불러도 됨 */
+bool notify_copy_public_url(char *out, size_t cap);
+
+/* notify.cfg를 다시 읽음 — /admin/upload로 notify.cfg를 바꾼 직후 */
+void notify_reload_cfg(void);
