@@ -2,6 +2,11 @@
    + W6002 원인 확인 + 4시간 무인 로그 (원래 PC, 사용자 부재 중 진행) ==
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
+- 2026-10-03 오전: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
+  메모리 변경 없음(claude_memory_2026-10-01.zip 최신). sdkconfig 변경 없음(10-02 저녁 기록 그대로 — 브만 defaults로 다시 만들 것).
+  git 밖 항목(콘 LittleFS, 콘을 다시 전체 플래시하면 지워짐): app.html.gz(원본 Cntl/web/app.html을 gzip -9로 압축해 /admin/upload),
+  notify.cfg(topic=cntl-test-549414062, click=http://FlexFarm.iptime.org:8080/app). 집 ipTIME: DDNS FlexFarm.iptime.org,
+  포트포워딩 외부 8080 → 192.168.0.19:80, 콘 IP 고정(E8:F6:0A:8E:86:68). 휴대폰 ntfy 앱이 위 주제 구독.
 - 2026-10-02 저녁: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리 변경 없음(claude_memory_2026-10-01.zip 최신).
   git 밖 항목: 브 sdkconfig를 새 sdkconfig.defaults(LVGL 항목 빠짐)로 새로 만듦 — 다른 PC에선 브 sdkconfig를 defaults로 다시 만들 것
@@ -368,6 +373,7 @@ C8. f417d1a(09-29) 확인 — 실패 원인(명령 NACK/데이터 준비 안 됨
     풀리면 데이터시트 마지막 단계(SCD41 전원 차단)가 필요 — 이 보드는 3.3V 직결이라 하드웨어 변경(MOSFET 스위칭 등) 검토.
 [조건: 개발 완료 후 상용화할 때 — 사용자 10-01: 그때 제거]
 C9. 임시 테스트 API 4개 제거(capture_now, devlog, sdtest, statsfile — 예전 할 일 F). /api/devlog_dump는 C5 확보용이라 대상 아님.
+    + 시험용 API /api/notify_test(10-03, 할 일 AD 1단계 알림 시험용) 제거.
     + 할 일 P(10-02) 진단 로그 보강 제거 검토 — 브 RL 줄 끝 걸린 시간(ms, can_link.c proxy_ctx_t.start_us), 콘 node_request의
     done/no response 줄의 MAC 뒤 3바이트와 걸린 시간(ms). 개발 중 지연 구간 나누기용(콘 전체 − 브 무선 = CAN·콘 대기).
 [조건: SD 사용량 표시가 이상해 보일 때 — 사용자 10-01: 지금은 채워진 게 없어 확인 불가, 문제 되면 알려줌]
@@ -576,6 +582,31 @@ C12. 메모리 기록의 OPEN 두 건 — ① 카메라 팝업 약 20K(09-22, 09
        충전 중 잔량은 어차피 모름. 주의: GPIO1은 만충 전압 학습(maybe_learn_full_mv)에도 쓰임 — 빼면 학습 멈춤(고정값으로 갈지 결정).
      - 코드: sens_deep_sleep_node.c(vin_indicates_usb, Blue LED 분기), esp_now_node(_cask).c set_status_led, bsp_c3_pico.h 핀 정의.
  AC. SSR 교류 부하 연결 시험(초록 LED 의미 확인 포함) + 릴레이 2(DO1) 배선.
+ AD. [계획 — 사용자 10-03] 콘 웹서버(SPA) + 휴대폰 푸시 + 외부 접속.
+     목표: 콘 = 모델 + JSON API, 화면 = 브라우저 SPA(MVC, 단일 접속). 웹이 닫히고 휴대폰이 잠겨 있어도 콘의 알림을 받고(앱 안 만듦,
+     iOS·Android 무료 서비스 — ntfy), 알림을 누르면 우리 웹앱이 열림. 바깥에서 콘 웹 접속.
+     SPA 원칙: 요청은 전부 상대 경로(주소 하드코딩 금지), 실시간 갱신은 WebSocket이 안 되면 주기 조회로 넘어감.
+     속도(10-03 측정): LittleFS 100KB 받기 13~31KB/s(보통 약 20KB/s), 콘 왕복 평균 78ms·RSSI -69 — 단일 접속 SPA엔 충분(사용자).
+     1단계 — ipTIME(집 유선, 공인 IP)으로 전체 동작 확인: 바깥에서 SPA 접속 + 콘 → 바깥 휴대폰 알림.
+       Claude: SPA 뼈대, 모델 JSON API, 정적 파일(LittleFS, gzip, 캐시 헤더), 단일 접속 제한, ntfy 알림 보내기(주제·Click 주소 설정은 파일).
+       진행(10-03): 알림 모듈 notify.c(ntfy, 설정 LittleFS notify.cfg: topic=/click=, 보낼 때마다 읽음, 큐+PSRAM 태스크),
+         /api/nodes(캠·센스 목록·상태, 읽기 전용), /api/notify_test(시험용 — C9), /app이 app.html.gz를 gzip+ETag(304)로 서빙,
+         / → app 상대 리다이렉트, 웹 동시 연결 3개(LRU). SPA 원본 Cntl/web/app.html(gzip 2.2KB, 5초 조회, 화면 숨으면 멈춤).
+         확인: 집 안에서 /app·api/nodes·304 정상, 알림이 ntfy 서버까지 도착(주제 cntl-test-549414062, Click=http://192.168.0.19/app).
+         웹서버 시작 시 내부 RAM 100.5K. WebSocket은 아직(주기 조회로 동작).
+         1단계 확인 완료(10-03, 사용자): ipTIME DDNS FlexFarm.iptime.org(공인 125.138.199.147), 포트포워딩 외부 8080 → 192.168.0.19:80
+         (외부 80은 공유기 자신이 받아서 안 됨), 콘 IP 고정(MAC E8:F6:0A:8E:86:68). 휴대폰 ntfy 앱(설정에 ntfy.sh 사용자 계정이 있으면
+         "not authorized" — 지우니 됨) 구독, 휴대폰 잠금 상태 알림 수신 + 알림 눌러 LTE로 바깥에서 SPA 열림.
+         notify.cfg: topic=cntl-test-549414062(시험용), click=http://FlexFarm.iptime.org:8080/app.
+         주의: 8080이 열려 있는 동안 /admin/upload·시험 API도 바깥에 열려 있음(인증 없음).
+       사용자: ipTIME DDNS(<이름>.iptime.org) 등록, 포트포워딩(외부 포트 → 콘 192.168.0.19:80), 콘 IP 고정(DHCP 예약),
+               휴대폰에 ntfy 앱 설치 + 주제 구독(주제 이름은 남이 못 맞히게), 알림 보낼 이벤트 결정, 바깥 확인은 휴대폰 Wi-Fi 끄고 LTE로.
+     2단계 — KT IoT 망으로 상용 동작 확인(통신사 사설 IP(CGNAT)라 DDNS·포트포워딩 안 됨).
+       사용자: 셀룰러 공유기(LTE, KT 밴드, Tailscale 내장 또는 OpenWrt — 예: GL.iNet LTE 모델) 구입, KT IoT SIM(데이터 용량 고려),
+               Tailscale 계정 + 휴대폰 Tailscale 앱.
+       Claude: 공유기 경유 접속·알림 확인, 속도·데이터 사용량 측정, 경로 접두어·WebSocket 통과 여부 대응.
+     3단계 — 상용 서비스 적용: 외부 접속 방식 확정(Tailscale / 제조사 클라우드 중계(예: Teltonika RMS, 유료) / 공인 고정 IP 부가서비스).
+       사용자: 서비스·회선 계약. Claude: 상용 전 정리(웹 인증, 시험용 API 제거 — 조건부 C9).
  AB. [보류 — 사용자 10-02] 캠: 배터리를 꽂으면 바로 켜지게(센스와 같게). 펌웨어로는 불가(버튼 전엔 칩 전원 없음) — 납땜.
      회로도(C:\projects\documents\ESP32-S3-CAM-OVxxxx_Rev1.1.pdf, BAT 블록): Q2(AO3401)=배터리 스위치, R29 100K가 게이트를 VBAT로,
      Key2가 D5로 게이트를 GND로, 펌웨어 BAT_EN→T1(8050)이 유지. 추천: Q2 소스(핀2, VBAT)–드레인(핀3) 단락 — 추가 누설 0(계산값).
