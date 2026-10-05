@@ -2,7 +2,7 @@
    + W6002 원인 확인 + 4시간 무인 로그 (원래 PC, 사용자 부재 중 진행) ==
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
-- 2026-10-05 저녁: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시: (아래 기록 참고).
+- 2026-10-05 저녁: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리: claude_memory_2026-10-05.zip(이 날 추가: project_cntl_wifi_stuck_after_ap_off_2026_10_05 — Wi-Fi 멈춤 재발 시 재시작 금지).
   git 밖 항목: 콘 sdkconfig를 defaults로 새로 만듦(TCP 송신 버퍼 46080, HTTPD WebSocket + 연결 전 콜백) — 다른 PC에선 콘 sdkconfig를
   defaults로 다시 만들 것(sed 금지). 브·센스·캠 sdkconfig 변경 없음.
