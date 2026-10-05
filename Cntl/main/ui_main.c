@@ -3936,8 +3936,9 @@ static bool refresh_stats_table(void)
              * (lv_table.c 확인: CROP이면 행높이를 글꼴 line-height 하나로 못박음) */
             /* 2026-09-15 — 아이템 열 폭이 130->160으로 늘어난 만큼(+30) 잘림 여유도 같이 늘림 */
             trim_to_width(item_buf, ui_font_get(UI_FONT_SIZE_18), 125);
-            uint32_t row = i / 2;
-            uint32_t col_base = (i % 2 == 0) ? 0 : 3;
+            /* 2026-10-05(사용자 선호 — 왼쪽이 꽉 차면 오른쪽이 차는 형태) — 예전엔 왼쪽·오른쪽이 번갈아 찼음 */
+            uint32_t row = (i < table_rows) ? i : i - table_rows;
+            uint32_t col_base = (i < table_rows) ? 0 : 3;
             lv_table_set_cell_value(s_stats_table, row, col_base + 0, item_buf);
             lv_table_set_cell_value(s_stats_table, row, col_base + 1, value_buf);
             lv_table_set_cell_value(s_stats_table, row, col_base + 2, time_buf);

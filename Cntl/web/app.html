@@ -79,8 +79,7 @@
   /* 팝업 = 전체 화면 시트(콘 규칙: 닫기는 오른쪽 위 X, 선택지는 아래 버튼) */
   .sheet { position:fixed; inset:0; z-index:20; background:var(--bg); overflow-y:auto; -webkit-overflow-scrolling:touch;
            overflow-x:hidden; touch-action:pan-y; overscroll-behavior:contain; }   /* 10-03 — 팝업도 세로만(자체 스크롤 영역이라 따로) */
-  @media (min-width: 700px) { .sheet { background:rgba(0,0,0,.45); display:flex; align-items:flex-start; justify-content:center; padding:40px 16px; }
-    .sheet > .sbody { width:520px; border-radius:12px; } }
+  /* 10-05(사용자 결정) — 팝업은 가로·세로 모두 전체 화면 */
   .sbody { background:var(--card); min-height:100%; }
   .shead { position:sticky; top:0; display:flex; align-items:center; justify-content:space-between; padding:12px 14px;
            background:var(--card); border-bottom:1px solid var(--line); }
@@ -134,6 +133,22 @@
   .btnrow { display:flex; flex-wrap:wrap; gap:8px; padding:12px 14px; border-bottom:1px solid var(--line); }
   .prev { padding:12px 14px; border-bottom:1px solid var(--line); text-align:center; }
   .prev img { max-width:100%; max-height:45vh; border-radius:6px; cursor:zoom-in; }
+  /* 10-05(사용자 지시) — 목록이 길어 페이지가 늘어짐 → 팝업 높이 안에서 위쪽(선택·버튼·미리보기)은 고정, 목록만 스크롤.
+   * 세로 = 미리보기 아래 목록, 가로 = 왼쪽 목록 | 오른쪽 미리보기(콘과 같음) */
+  .sbody.cam { height:100%; min-height:0; display:flex; flex-direction:column; }
+  .camsplit { flex:1; min-height:0; display:flex; flex-direction:column; }
+  .camlist { flex:1; min-height:0; display:flex; flex-direction:column; }
+  .plist { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; touch-action:pan-y; }
+  .camlist .pager { border-top:1px solid var(--line); padding:8px 14px; }
+  .prev img { max-height:38vh; }
+  @media (orientation: landscape) {
+    .camsplit { flex-direction:row; }
+    .camsplit > .prev { flex:1; min-width:0; min-height:0; border-bottom:none; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+    .camsplit > .prev img { flex:0 1 auto; min-height:0; max-height:100%; object-fit:contain; }
+    /* 10-05(사용자 지시) — 콘처럼 왼쪽 목록 | 오른쪽 사진 */
+    .camsplit > .prev { order:2; }
+    .camlist { order:1; flex:1; min-width:0; border-right:1px solid var(--line); }
+  }
   .prow { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; }
   .prow.sel { background:rgba(37,99,235,.15); }
   .prow .grow { font-size:14px; }
@@ -167,6 +182,9 @@
   .rtable { width:100%; border-collapse:collapse; table-layout:fixed; font-size:14px; font-variant-numeric:tabular-nums; }
   .rtable th, .rtable td { padding:7px 8px; border-bottom:1px solid var(--line); text-align:left; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .rtable th:first-child, .rtable td:first-child { padding-left:14px; width:46%; }
+  .rtable.two th:first-child, .rtable.two td:first-child { width:22%; }
+  .rtable.two th:nth-child(4), .rtable.two td:nth-child(4) { width:22%; padding-left:14px; }
+  .rtable.two th:nth-child(3), .rtable.two td.rsep:nth-child(3) { border-right:1px solid var(--line); }
   .tap:active { background:rgba(127,127,127,.12); }
 </style>
 </head>
@@ -530,6 +548,7 @@
   });
   function openSheet(renderFn) {
     sheetRender = renderFn;
+    $('sheetBody').className = 'sbody';   /* 팝업마다 배치가 다를 수 있음(카메라 = cam) */
     $('sheet').classList.remove('hidden');
     renderFn();
   }
@@ -886,27 +905,35 @@
     }).catch(function () {});
   }
   function renderCamera() {
+    /* 10-05 — 다시 그릴 때 새 사진을 받는 동안은 이전 사진을 그대로(비워 두면 세로에서 미리보기 높이가 0이 되어 목록이 화면을 채움) */
+    var oldImg = $('camPrev'), oldSrc = oldImg ? oldImg.getAttribute('src') : null;
+    /* 같은 쪽을 다시 그릴 때(사진 선택 등)는 목록 스크롤 위치를 유지 */
+    var oldList = document.querySelector('#sheetBody .plist');
+    var keepTop = (oldList && cam.shownPage === cam.page) ? oldList.scrollTop : 0;
+    cam.shownPage = cam.page;
+    $('sheetBody').className = 'sbody cam';
     var h = sheetHead('STR_GROUP_CAMERA');
     if (!cam.list.length) {
       $('sheetBody').innerHTML = h + '<div class="field"><span class="sub">' + esc(S('STR_PANEL_NO_CAMERA')) + '</span></div>';
       return;
     }
     var cur = cam.list.filter(function (c) { return c.mac === cam.mac; })[0];
-    h += '<div class="field"><select id="camSel">' + cam.list.map(function (c) {
+    /* 10-05 — 카메라 선택과 버튼을 한 줄에(가로 화면에서 목록 높이 확보). 폭이 모자라면 줄바꿈 */
+    h += '<div class="btnrow" style="align-items:center"><select id="camSel">' + cam.list.map(function (c) {
       return '<option value="' + c.mac + '"' + (c.mac === cam.mac ? ' selected' : '') + '>' + esc(c.name) + '</option>';
-    }).join('') + '</select><span class="sub">' + esc(cur && cur.status !== 'offline' ? S(STATUS_KEY[cur.status] || 'STR_STATUS_PAIRED') : '') + '</span></div>';
-    h += '<div class="btnrow"><button id="camShot" class="primary"' + (cur && cur.status === 'active' ? '' : ' disabled') + '>' + esc(S('STR_BTN_CAPTURE_NOW')) +
+    }).join('') + '</select>' + (cur && cur.status !== 'offline' ? '<span class="sub">' + esc(S(STATUS_KEY[cur.status] || 'STR_STATUS_PAIRED')) + '</span>' : '');
+    h += '<button id="camShot" class="primary"' + (cur && cur.status === 'active' ? '' : ' disabled') + '>' + esc(S('STR_BTN_CAPTURE_NOW')) +
          '</button><button id="camRenew">' + esc(S('STR_BTN_RENEW_LIST')) + '</button><button id="camDelAll" class="danger">' + esc(S('STR_BTN_DELETE_ALL')) + '</button></div>';
-    h += '<div class="prev">' + (cam.sel ? '<img id="camPrev" alt=""><div class="sub">' + esc(photoName(cam.sel) + '  ' + fmtTime(cam.sel.t)) + '</div>'
+    h += '<div class="camsplit"><div class="prev">' + (cam.sel ? '<img id="camPrev" alt=""><div class="sub">' + esc(photoName(cam.sel) + '  ' + fmtTime(cam.sel.t)) + '</div>'
                                           : '<span class="sub">' + esc(S('STR_PANEL_NO_PHOTO_YET')) + '</span>') + '</div>';
     var d = cam.data;
-    h += '<div class="field"><strong>' + esc(S('STR_PANEL_LIST')) + '</strong><span class="sub">' + (d ? d.count : '') + '</span></div>';
+    h += '<div class="camlist"><div class="field"><strong>' + esc(S('STR_PANEL_LIST')) + '</strong><span class="sub">' + (d ? d.count : '') + '</span></div>';
     if (d && d.items.length) {
-      h += d.items.map(function (it) {
+      h += '<div class="plist">' + d.items.map(function (it) {
         var on = cam.sel && cam.sel.kind === it.kind && cam.sel.seq === it.seq;
         return '<div class="prow tap' + (on ? ' sel' : '') + '" data-ph="' + it.kind + it.seq + '"><span class="grow">' + esc(photoName(it) + '  ' + fmtTime(it.t) +
                ' (' + Math.round(it.size / 1024) + 'KB)') + '</span><button class="small danger" data-del="' + it.kind + it.seq + '">&#x1F5D1;</button></div>';
-      }).join('');
+      }).join('') + '</div>';
       var pages = Math.max(1, Math.ceil(d.count / d.page_size));
       h += '<div class="pager"><button class="small" data-pg="-10">' + esc(S('STR_BTN_JUMP_PREV10')) + '</button><button class="small" data-pg="-1">&lt;</button>' +
            '<span class="sub">' + (cam.page + 1) + ' / ' + pages + '</span><button class="small" data-pg="1">&gt;</button><button class="small" data-pg="10">' +
@@ -914,10 +941,14 @@
     } else if (d) {
       h += '<div class="field"><span class="sub">' + esc(S('STR_LIST_EMPTY')) + '</span></div>';
     }
+    h += '</div></div>';   /* .camlist, .camsplit */
     $('sheetBody').innerHTML = h;
+    var newList = document.querySelector('#sheetBody .plist');
+    if (newList) newList.scrollTop = keepTop;
     bindCamera();
     if (cam.sel) {
       var want = photoUrl(cam.sel);
+      if ($('camPrev')) $('camPrev').src = photoBlobs[want] || oldSrc || '';
       loadPhoto(want).then(function (src) {
         var img = $('camPrev');
         if (img && cam.sel && photoUrl(cam.sel) === want) img.src = src;
@@ -1225,7 +1256,10 @@
       if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) statsPan(dx > 0);
     }, { passive: true });
   }
-  window.addEventListener('resize', function () { if (sheetRender === renderStats) drawStats(); });
+  window.addEventListener('resize', function () {
+    if (sheetRender === renderStats) drawStats();
+    if (sheetRender === renderRecord && rec.data) renderRecord();   /* 가로·세로가 바뀌면 한 벌 <-> 두 벌 */
+  });
 
   /* ── 기록 팝업(콘 build_record_tab): 최신이 위, 28개씩, << 10 / < = 더 오래된 쪽, 전체 삭제(확인) ── */
   var rec = { page: 0, data: null };
@@ -1254,14 +1288,20 @@
             '</button><button class="xbtn" id="recBack" aria-label="close">&#x2715;</button></div>';
     var d = rec.data;
     if (d) {
-      h += '<table class="rtable"><thead><tr><th>' + esc(S('STR_STATS_TABLE_HEADER_ITEM')) + '</th><th>' + esc(S('STR_STATS_TABLE_HEADER_VALUE')) + '</th><th>' +
-           esc(S('STR_STATS_TABLE_HEADER_TIME')) + '</th></tr></thead><tbody>';
-      if (!d.items.length) h += '<tr><td colspan="3">' + esc(S('STR_STATS_TABLE_EMPTY')) + '</td></tr>';
-      h += d.items.map(function (it) {
+      /* 10-05(사용자 지시) — 가로면 콘처럼 두 벌. 채우는 순서는 왼쪽 열이 다 찬 뒤 오른쪽 열(최신 = 왼쪽 맨 위) */
+      var two = window.matchMedia('(orientation: landscape)').matches, sets = two ? 2 : 1;
+      var head = '<th>' + esc(S('STR_STATS_TABLE_HEADER_ITEM')) + '</th><th>' + esc(S('STR_STATS_TABLE_HEADER_VALUE')) + '</th><th>' + esc(S('STR_STATS_TABLE_HEADER_TIME')) + '</th>';
+      function cells(it) {
+        if (!it) return '<td></td><td></td><td class="rsep"></td>';
         var cs = CHAN_STR[it.chan];
-        return '<tr><td>' + esc(it.name + (cs ? ' ' + S(cs[0]) : '')) + '</td><td>' + esc(fmtCapped(it.v) + (cs ? S(cs[1]) : '')) + '</td><td>' +
-               new Date(it.t * 1000).toISOString().substr(11, 8) + '</td></tr>';
-      }).join('') + '</tbody></table>';
+        return '<td>' + esc(it.name + (cs ? ' ' + S(cs[0]) : '')) + '</td><td>' + esc(fmtCapped(it.v) + (cs ? S(cs[1]) : '')) + '</td><td class="rsep">' +
+               new Date(it.t * 1000).toISOString().substr(11, 8) + '</td>';
+      }
+      h += '<table class="rtable' + (two ? ' two' : '') + '"><thead><tr>' + head + (two ? head : '') + '</tr></thead><tbody>';
+      if (!d.items.length) h += '<tr><td colspan="' + 3 * sets + '">' + esc(S('STR_STATS_TABLE_EMPTY')) + '</td></tr>';
+      var rows = Math.ceil(d.items.length / sets);
+      for (var r = 0; r < rows; r++) h += '<tr>' + cells(d.items[r]) + (two ? cells(d.items[r + rows]) : '') + '</tr>';
+      h += '</tbody></table>';
       var pages = Math.max(1, Math.ceil(d.count / d.page_size)), older = rec.page + 1 < pages, newer = rec.page > 0;
       h += '<div class="pager"><button class="small" data-rpg="10"' + (older ? '' : ' disabled') + '>' + esc(S('STR_BTN_JUMP_PREV10')) + '</button><button class="small" data-rpg="1"' +
            (older ? '' : ' disabled') + '>&lt;</button><span class="sub">' + (rec.page + 1) + ' / ' + pages + '</span><button class="small" data-rpg="-1"' + (newer ? '' : ' disabled') +
