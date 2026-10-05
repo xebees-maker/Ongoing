@@ -5708,6 +5708,10 @@ static void refresh_clock(lv_timer_t *t)
             /* 2026-09-08(사용자 지시 — "AP라면 SSID가 뭔지도 표기") */
             snprintf(net_buf, sizeof(net_buf), "AP - %s CH%u", wifi_sta_get_ap_ssid(),
                      (unsigned)wifi_sta_get_channel());
+        } else if (wifi_sta_get_own_ip_str()[0] == '\0') {
+            /* 2026-10-05(사용자 지시) — 저장된 SSID가 아니라 실제 상태: IP가 없으면(끊김·재연결 중) "No connection".
+             * 예전엔 끊겨 있어도 SSID를 그대로 보여 줘서 연결된 것처럼 보였음(10-05 2.4G 끔 시험) */
+            snprintf(net_buf, sizeof(net_buf), "STA - %s", ui_str(STR_STATUS_NO_CONNECTION));
         } else {
             /* 2026-09-08(사용자 지시 — "자리가 충분하면 SSID도") — 채널도 계속 같이 표기
              * (2026-08-02 지시: 공유기 자동채널선택 변경을 알아채기 위함, 계속 유효) */

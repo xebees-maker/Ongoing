@@ -48,6 +48,8 @@
   .inv { background:#4b5563; color:#fff; padding:3px 8px; font-size:13px; font-variant-numeric:tabular-nums; flex-shrink:0;
          overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #net { max-width:110px; flex-shrink:1; min-width:0; }
+  /* 10-05(사용자 지시) — 누를 수 없는 정보라 역상이 아닌 흐린 글자(역상은 버튼처럼 보였음) */
+  .netinfo { font-size:13px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .sicon { width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; }
   #conn { font-size:12px; color:var(--muted); text-align:center; padding:4px 0 0; min-height:20px; }
   #conn.bad { color:var(--red); }
@@ -103,6 +105,9 @@
   .danger { color:var(--red); border-color:var(--red); }
   .toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); z-index:30; background:#111827; color:#fff; padding:8px 14px;
            border-radius:8px; font-size:14px; max-width:90vw; }
+  /* 10-05(사용자 지시) — 새 알림 토스트는 화면 가운데, 다른 배경색 */
+  .toast.alarm { top:50%; bottom:auto; transform:translate(-50%,-50%); background:var(--blue); font-size:15px; padding:14px 18px; text-align:center; width:max-content; max-width:86vw;
+                 box-shadow:0 4px 16px rgba(0,0,0,.3); }
   .tap { cursor:pointer; }
   .sent { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:12px 14px; border-bottom:1px solid var(--line); }
   .sent input[type=number] { width:90px; }
@@ -167,9 +172,6 @@
   #alarmBtn { position:relative; padding:3px 6px; line-height:0; }
   #alarmCnt { position:absolute; top:-6px; right:-6px; min-width:17px; height:17px; padding:0 4px; border-radius:9px; background:var(--red);
               color:#fff; font-size:11px; line-height:17px; text-align:center; font-variant-numeric:tabular-nums; }
-  .banner { position:fixed; left:8px; right:8px; top:8px; z-index:45; background:#111827; color:#fff; border-radius:10px; padding:12px 14px;
-            font-size:14px; box-shadow:0 4px 16px rgba(0,0,0,.3); cursor:pointer; }
-  .banner .bt { font-size:12px; opacity:.75; margin-bottom:2px; }
   .arow { padding:10px 14px; border-bottom:1px solid var(--line); font-size:14px; overflow-wrap:anywhere; }
   .arow.unread { font-weight:700; background:rgba(37,99,235,.08); }
   .arow .sub { font-weight:400; }
@@ -218,7 +220,7 @@
 <header>
   <h1 data-s="STR_LOGO_TITLE"></h1>
   <div class="hright">
-    <span id="net" class="inv"></span>
+    <span id="net" class="netinfo"></span>
     <span id="sicon" class="sicon tap" role="button" aria-label="status"></span>
     <button id="alarmBtn" class="small" aria-label="notifications"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span id="alarmCnt" class="hidden"></span></button>
     <button id="setBtn" class="small" aria-label="settings"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
@@ -275,7 +277,6 @@
 
 <div id="sheet" class="sheet hidden"><div class="sbody" id="sheetBody"></div></div>
 <div id="toast" class="toast hidden"></div>
-<div id="banner" class="banner hidden"></div>
 <div id="modal" class="modal hidden"><div class="mbox" id="modalBox"></div></div>
 <div id="busy" class="busy hidden"><div class="bbox"><div id="busyTxt" class="btxt"></div><div class="bar" id="busyBar"><i id="busyFill"></i></div></div></div>
 <div id="viewer" class="viewer hidden"><button class="vx" id="viewerX" aria-label="close">&#x2715;</button><img id="viewerImg" alt=""></div>
@@ -576,7 +577,6 @@
   $('setBtn').addEventListener('click', function () { if (view === 'main') openSettings(); });
   $('alarmBtn').addEventListener('click', function () { if (view === 'main') openAlarms(); });
   $('sicon').addEventListener('click', function () { if (view === 'main') openErrors(); });   /* 콘: 상태 아이콘 → 에러·경고 목록 */
-  $('banner').addEventListener('click', function () { hideBanner(); if (view === 'main') openAlarms(); });
 
   function setLang(l) {
     lang = l;
@@ -609,12 +609,13 @@
 
   /* ── 공통: 토스트, 시트 ── */
   var toastTimer = null;
-  function toast(msg) {
+  function toast(msg, alarm) {
     var el = $('toast');
     el.textContent = msg;
+    el.classList.toggle('alarm', !!alarm);
     el.classList.remove('hidden');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { el.classList.add('hidden'); }, 2500);
+    toastTimer = setTimeout(function () { el.classList.add('hidden'); }, alarm ? 4000 : 2500);
   }
   var sheetRender = null;   /* 언어가 바뀌면 다시 그리기 */
   /* 10-03(사용자 지시 — 주화면과 모든 팝업에서 뒤로·앞으로 이동 막기) — 브라우저 기록 맨 위에 늘 "막이" 한 칸을 둠.
@@ -1155,8 +1156,8 @@
   }
 
   /* ── 알림(할 일 AD 5단계): 콘 알림 기록이 기준. 안 본 개수 = 콘 마지막 번호 - 이 브라우저가 본 번호(브라우저마다 따로).
-   *    웹앱이 열려 있는 동안 생긴 보낼 대상은 콘이 주화면 조회 응답(alarm.new)에 실어 줌 → 배너. 누르면 알림 기록 ── */
-  var ALARM_MAX = 500, alarmSeen = null, alarmLast = 0, bannerTimer = null, bannerMax = 0;
+   *    웹앱이 열려 있는 동안 생긴 보낼 대상은 콘이 주화면 내용(alarm.new)에 실어 줌 → 토스트 ── */
+  var ALARM_MAX = 500, alarmSeen = null, alarmLast = 0, shownMax = 0;
   try { var sv = localStorage.getItem('alarmSeen'); if (sv !== null && sv !== '') alarmSeen = +sv; } catch (e) {}
   function setAlarmSeen(v) { alarmSeen = v; try { localStorage.setItem('alarmSeen', String(v)); } catch (e) {} }
   function typeLabel(t) { var x = W.N_TYPES[t]; return x ? x[li()] : ''; }
@@ -1171,22 +1172,14 @@
     if (alarmSeen === null || a.last < alarmSeen) setAlarmSeen(a.last);
     alarmLast = a.last;
     renderAlarmBadge();
-    var fresh = (a.new || []).filter(function (it) { return it.id > bannerMax; });
+    var fresh = (a.new || []).filter(function (it) { return it.id > shownMax; });
     if (fresh.length) {
-      showBanner(fresh);
-      bannerMax = fresh[fresh.length - 1].id;
-      post('api/alarms/ack?id=' + bannerMax).catch(function () {});
+      var it = fresh[fresh.length - 1];
+      toast(typeLabel(it.type) + ' \u00b7 ' + it.msg + (fresh.length > 1 ? ' (+' + (fresh.length - 1) + ')' : ''), true);   /* 10-05 — 배너 대신 토스트(사용자 지시), 기록은 종 버튼 */
+      shownMax = it.id;
+      post('api/alarms/ack?id=' + shownMax).catch(function () {});
     }
   }
-  function showBanner(list) {
-    var it = list[list.length - 1];
-    $('banner').innerHTML = '<div class="bt">' + esc(typeLabel(it.type) + '  ' + fmtTime(it.t)) + '</div><div>' + esc(it.msg) +
-                            (list.length > 1 ? ' (+' + (list.length - 1) + ')' : '') + '</div>';
-    $('banner').classList.remove('hidden');
-    clearTimeout(bannerTimer);
-    bannerTimer = setTimeout(hideBanner, 8000);
-  }
-  function hideBanner() { clearTimeout(bannerTimer); $('banner').classList.add('hidden'); }
 
   var al = { page: 0, data: null, seenAtOpen: 0 };
   function openAlarms() {

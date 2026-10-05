@@ -9,6 +9,9 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 /* 2026-09-26 — node_hub.c(구 esp_now_hub.c)에서 분리(사용자 지시: ESP-NOW/노드 관리와 무관한
  * Wi-Fi 네트워크 기능이라 별도 파일·이름으로). 코드는 옮기기만 하고 동작은 그대로 —
@@ -79,9 +82,15 @@ const char *wifi_sta_get_ap_ssid(void)
  * s_sta_test_active일 때만 아래 wifi_event_handler가 정상 재연결 루프 대신 이 분기를 탐 */
 static bool                     s_sta_reconnect_paused = false;
 
+static void sta_resume_reconnect(void);  /* 아래 — 진행 중 시도·IP 유무를 보고 다시 연결 */
+
 void wifi_sta_set_reconnect_paused(bool paused)
 {
+    bool was = s_sta_reconnect_paused;
     s_sta_reconnect_paused = paused;
+    /* 2026-10-05(결함 수정, 사용자 지시) — 예전엔 멈춤만 풀고 연결을 다시 걸지 않아서, 찾기 창이 열린 동안 끊겼으면
+     * 창을 닫아도 영영 다시 붙지 않았음(재연결은 끊김 이벤트가 올 때마다 거는 방식이라 이벤트가 더 안 옴) */
+    if (was && !paused) sta_resume_reconnect();
 }
 
 /* 2026-08-30(사용자 지시: 부팅 후 아직 한 번도 연결된 적 없는 상태에서만 — "찾기"로 이미
@@ -117,10 +126,28 @@ bool wifi_sta_boot_giveup(void)
  * 스스로 추적 — "연결됐거나 연결 시도 중"을 타이머/추측 없이 이벤트로 정확히 앎 */
 static bool s_sta_conn_in_flight = false;
 
+/* 2026-10-05(진단 — 2.4G를 껐다 켠 뒤 상단바는 연결, IP는 없음, 연결을 눌러도 아무 기록이 없던 상태. 재현 안 됨,
+ * project_cntl_wifi_stuck_after_ap_off_2026_10_05) — 다시 생기면 웹 없이 시리얼만으로 볼 수 있게 남기는 값들 */
+static esp_err_t s_diag_last_connect_err = ESP_OK;
+static int64_t   s_diag_last_connect_us = 0;
+static int64_t   s_diag_last_event_us = 0;
+static int32_t   s_diag_last_event_id = -1;
+static volatile int64_t s_diag_esp_timer_tick_us = 0;
+static esp_timer_handle_t s_connect_retry_timer = NULL;
+
 static void sta_do_connect(void)
 {
     s_sta_conn_in_flight = true;
-    esp_wifi_connect();
+    esp_err_t err = esp_wifi_connect();
+    s_diag_last_connect_err = err;
+    s_diag_last_connect_us = esp_timer_get_time();
+    /* 2026-10-05(결함 수정, 사용자 지시) — 거절되면(예: 스캔 중 ESP_ERR_WIFI_STATE) 드라이버가 아무 일도 안 해서 다음 끊김
+     * 이벤트가 오지 않음 → 이벤트로 도는 재연결이 아무 기록 없이 멈췄음. 2초 뒤 다시 요청(조건은 아래 콜백에서) */
+    if (err != ESP_OK) {
+        s_sta_conn_in_flight = false;
+        ESP_LOGW(TAG, "esp_wifi_connect rejected: %s - retry in 2s", esp_err_to_name(err));
+        if (s_connect_retry_timer) esp_timer_start_once(s_connect_retry_timer, 2000 * 1000);
+    }
 }
 
 static bool                     s_sta_test_active = false;
@@ -233,6 +260,8 @@ void wifi_sta_test_connect(const char *ssid, const char *password,
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg;
+    s_diag_last_event_us = esp_timer_get_time();
+    s_diag_last_event_id = (event_base == IP_EVENT) ? 1000 + event_id : event_id;  /* 1000+ = IP 이벤트 */
     if (s_wifi_if == WIFI_IF_STA) {
         if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
             if (!s_sta_ever_connected && !s_sta_boot_giveup_timer) {
@@ -294,8 +323,65 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     }
 }
 
+/* 재연결을 다시 걸 때의 조건 — 끊김 이벤트 처리(wifi_event_handler)와 같음: 수동 연결 시도 중이면 그쪽이, 아니면 멈춤·부팅
+ * 포기가 아닐 때만. 이미 연결됐거나(IP) 시도 중이면 안 함 */
+static void sta_resume_reconnect(void)
+{
+    if (s_wifi_if != WIFI_IF_STA || s_own_ip_str[0] != '\0' || s_sta_conn_in_flight) return;
+    if (s_sta_test_active || (!s_sta_reconnect_paused && !s_sta_boot_giveup)) sta_do_connect();
+}
+
+static void connect_retry_cb(void *arg)
+{
+    (void)arg;
+    sta_resume_reconnect();
+}
+
+/* esp_timer 태스크가 도는지 — 1초마다 시각만 찍음(진단 태스크가 나이를 봄) */
+static void diag_esp_timer_tick_cb(void *arg)
+{
+    (void)arg;
+    s_diag_esp_timer_tick_us = esp_timer_get_time();
+}
+
+/* IP가 없는 동안 10초마다 Wi-Fi 상태 한 줄. esp_timer가 아닌 별도 태스크(타이머가 막혀도 찍히게), 스택 PSRAM */
+static void wifi_diag_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        if (s_wifi_if != WIFI_IF_STA || s_own_ip_str[0] != '\0') continue;
+        int64_t now = esp_timer_get_time();
+        wifi_ap_record_t ap;
+        esp_err_t ap_err = esp_wifi_sta_get_ap_info(&ap);
+        ESP_LOGW(TAG, "WIFIDIAG no IP: test_active=%d phase=%d in_flight=%d paused=%d giveup=%d ever=%d drv=%s "
+                      "last_connect=%s %llds ago, last_event=%ld %llds ago, esp_timer_tick %llds ago",
+                 s_sta_test_active, (int)s_sta_test_phase, s_sta_conn_in_flight, s_sta_reconnect_paused, s_sta_boot_giveup,
+                 s_sta_ever_connected, ap_err == ESP_OK ? "assoc" : esp_err_to_name(ap_err),
+                 esp_err_to_name(s_diag_last_connect_err),
+                 s_diag_last_connect_us ? (long long)((now - s_diag_last_connect_us) / 1000000) : -1LL,
+                 (long)s_diag_last_event_id,
+                 s_diag_last_event_us ? (long long)((now - s_diag_last_event_us) / 1000000) : -1LL,
+                 s_diag_esp_timer_tick_us ? (long long)((now - s_diag_esp_timer_tick_us) / 1000000) : -1LL);
+    }
+}
+
+static void wifi_diag_start(void)
+{
+    static bool started = false;
+    if (started) return;
+    started = true;
+    const esp_timer_create_args_t ra = { .callback = connect_retry_cb, .name = "sta_retry" };
+    esp_timer_create(&ra, &s_connect_retry_timer);
+    const esp_timer_create_args_t ta = { .callback = diag_esp_timer_tick_cb, .name = "wifi_diag_tick" };
+    esp_timer_handle_t t;
+    if (esp_timer_create(&ta, &t) == ESP_OK) esp_timer_start_periodic(t, 1000 * 1000);
+    xTaskCreatePinnedToCoreWithCaps(wifi_diag_task, "wifi_diag", 3072, NULL, 3, NULL, 0, MALLOC_CAP_SPIRAM);
+}
+
 static void wifi_bringup(void)
 {
+    wifi_diag_start();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 

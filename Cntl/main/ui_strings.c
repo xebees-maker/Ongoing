@@ -165,6 +165,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_MSG_WIFI_STAGE_AUTHENTICATING] = { "인증 시도 중...",         "Authenticating..." },
     [STR_STATUS_NOT_CONNECTED]        = { "아직 연결된 네트워크 없음", "Not connected yet" },
     [STR_STATUS_NO_AP]                = { "AP 없음",                  "No AP" },
+    [STR_STATUS_NO_CONNECTION]        = { "연결 안 됨",               "No connection" },
     [STR_TAG_WIFI_CONNECTED]          = { "[연결됨] ",                "[Connected] " },
     [STR_BTN_RESCAN]                  = { "다시 찾기",                 "Rescan" },
     [STR_BTN_CLOSE]                   = { "닫기",                     "Close" },
