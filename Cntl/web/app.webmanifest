@@ -1,0 +1,10 @@
+{
+  "name": "FlexFarm",
+  "short_name": "FlexFarm",
+  "start_url": "app",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#e5e7eb",
+  "theme_color": "#ffffff",
+  "icons": [{ "src": "app_icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }]
+}

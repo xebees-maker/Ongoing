@@ -17,6 +17,15 @@
 <!-- 10-03 — iPhone이 확대(VW 366)된 채 남고 좌우 이동을 막은 뒤엔 되돌릴 수도 없었음 → 배율 1로 고정 -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>FlexFarm</title>
+<!-- 10-05(사용자 요청) — 홈 화면에 추가해 열면 브라우저 상·하단 없이 앱처럼(standalone). 탭 안에서는 페이지가 막대를 숨길 방법이 없음 -->
+<link rel="manifest" href="app.webmanifest">
+<link rel="apple-touch-icon" href="app_icon.png">
+<link rel="icon" href="app_icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="FlexFarm">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#ffffff">
 <style>
   :root { --bg:#e5e7eb; --card:#fff; --text:#1c1e21; --muted:#6b7280; --line:rgba(127,127,127,.18);
           --green:#16a34a; --blue:#2563eb; --red:#dc2626; --amber:#f5b400; --grey:#9ca3af; --bar:#d1d5db; }
@@ -27,6 +36,9 @@
   /* 10-03(사용자 지시) — 좌우 스와이프로 화면이 움직이며 VW가 366이 됨 → 세로 스크롤만 허용, 좌우 튕김도 끔.
    * 두 손가락 확대도 같이 막힘 — 사진 전체 화면 보기는 그 화면에서만 따로 허용할 것 */
   html, body { touch-action:pan-y; overscroll-behavior-x:none; }
+  /* 앱처럼 열면(viewport-fit=cover) 가로일 때 노치 쪽·아래 홈 막대 자리를 비움 — 브라우저 탭에선 0 */
+  body { padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right); padding-bottom:env(safe-area-inset-bottom); }
+  .sheet { padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right); padding-bottom:env(safe-area-inset-bottom); }
   body { margin:0; font:15px/1.4 -apple-system, system-ui, sans-serif; background:var(--bg); color:var(--text);
          -webkit-text-size-adjust:100%; }
   header { position:sticky; top:0; z-index:5; display:flex; align-items:center; justify-content:space-between; gap:8px;
@@ -136,6 +148,25 @@
   .viewer img { position:absolute; left:50%; top:50%; max-width:100vw; max-height:100vh; transform-origin:center center; user-select:none; -webkit-user-drag:none; }
   .viewer .vx { position:absolute; top:10px; right:10px; z-index:2; color:#fff; border:none; font-size:26px; background:rgba(0,0,0,.4); }
   .choice.sel { border-color:var(--blue); }
+  /* 통계 팝업 */
+  .ovgrid { display:grid; grid-template-columns:1fr; padding:4px 0 8px; border-bottom:1px solid var(--line); }
+  @media (min-width: 700px) { .ovgrid { grid-template-columns:1fr 1fr; } }
+  .ovrow { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:5px 14px; font-size:14px; font-variant-numeric:tabular-nums; }
+  .badge { background:var(--text); color:var(--card); padding:2px 6px; border-radius:4px; }
+  .grp { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:10px 14px 4px; }
+  .grp button.on { background:var(--blue); border-color:var(--blue); color:#fff; }
+  .slots { display:flex; flex-wrap:wrap; gap:4px 14px; padding:6px 14px; font-size:14px; }
+  .slot { display:inline-flex; align-items:center; gap:6px; }
+  .slot i { display:inline-block; width:18px; height:18px; border:2px solid; border-radius:4px; cursor:pointer; }
+  .mmrow { display:flex; flex-wrap:wrap; gap:2px 12px; padding:0 14px; min-height:18px; font-size:12px; font-variant-numeric:tabular-nums; }
+  .chartwrap { position:relative; margin:2px 14px; }
+  #stChart { display:block; width:100%; height:240px; touch-action:pan-y; }
+  .tip { position:absolute; background:#fef9c3; color:#111; padding:2px 6px; border-radius:4px; font-size:13px; white-space:nowrap; pointer-events:none; }
+  .xax { position:relative; height:20px; margin:0 20px 10px; font-size:12px; color:var(--muted); }
+  .xax span { position:absolute; top:2px; transform:translateX(-50%); white-space:nowrap; }
+  .rtable { width:100%; border-collapse:collapse; table-layout:fixed; font-size:14px; font-variant-numeric:tabular-nums; }
+  .rtable th, .rtable td { padding:7px 8px; border-bottom:1px solid var(--line); text-align:left; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rtable th:first-child, .rtable td:first-child { padding-left:14px; width:46%; }
   .tap:active { background:rgba(127,127,127,.12); }
 </style>
 </head>
@@ -186,7 +217,7 @@
       <div id="relays"></div>
     </section>
     <section>
-      <h2 data-s="STR_GROUP_SENSOR"></h2>
+      <h2 data-s="STR_GROUP_SENSOR" data-statspop="1" class="tap"></h2>
       <div id="sens"></div>
     </section>
     <section>
@@ -510,6 +541,7 @@
     $('modal').onclick = null;
     $('viewer').classList.add('hidden');  /* 전체 화면 보기도 같이 */
     clearInterval(camTimer);
+    clearInterval(statsTimer);
     poll();
     setTimeout(fixZoom, 100);
   }
@@ -944,6 +976,312 @@
     });
   }
 
+  /* ── 통계 팝업(콘 build_stats_tab과 같은 기능): 개괄(기간, 공기 T/H 정밀·간이 탭 전환, Agar 혼합→슬롯 순환), 그래프(그룹, 슬롯
+   *    표시·숨김, 공기 슬롯 글자 탭 = 정밀·간이, << >> 또는 좌우 밀기 = 이전·다음 창, 탭 = 그 칸의 실측값), 기록 팝업(28개씩, 전체 삭제).
+   *    칸 값·추세·저신뢰·개괄 계산은 전부 콘(/api/stats, 콘 화면과 같은 함수) — 여기는 정규화(0~100)와 그리기만 ── */
+  var SCALE_SEC = [3600, 43200, 86400, 259200, 604800];
+  var XSTEP_SEC = [600, 3600, 7200, 43200, 86400];     /* 콘 s_stats_xaxis_interval_sec */
+  var GAP_REF = [70, 60, 50, 40];                       /* 콘 s_stats_gap_ref_height — 창에 실측이 없을 때의 점선 높이 */
+  var CHAN_STR = { 1: ['STR_CHAN_LABEL_TEMP_C', 'STR_CHAN_UNIT_TEMP_C'], 2: ['STR_CHAN_LABEL_HUMI_PCT', 'STR_CHAN_UNIT_HUMI_PCT'],
+                   3: ['STR_CHAN_LABEL_CO2_PPM', 'STR_CHAN_UNIT_CO2_PPM'], 4: ['STR_CHAN_LABEL_NH3_PPM', 'STR_CHAN_UNIT_NH3_PPM'] };
+  var GROUP_KEYS = ['STR_VIEW_GROUP_AIR', 'STR_VIEW_GROUP_AGAR', 'STR_VIEW_GROUP_GAS'];
+  var st = null, statsTimer = null, stSeq = 0;
+  function slotColor(i) { return i === 2 ? getComputedStyle(document.body).color : ['#f44336', '#2196f3', '', '#fbc02d'][i]; }  /* 콘: 빨강·파랑·검정·짙은 노랑 */
+  function prec(p) { return S(p ? 'STR_PRECISION_PRECISE' : 'STR_PRECISION_BASIC'); }
+  function f2(v) { return Number(v).toFixed(2); }
+  function f1(v) { return Number(v).toFixed(1); }
+  function statsBlockedSd(e) { return e && e.message === 'HTTP 503'; }
+
+  function openStats() {
+    if (last && last.sd && last.sd.state === 'io_error') { alert(S('STR_MSG_STATS_BLOCKED_SD_FAIL')); return; }   /* 콘 cb_stats_btn_tap과 같음 */
+    st = st || { scale: 0, group: 0, tp: true, hp: true, ovT: true, ovH: true, agar: 0, show: [true, true, true, true] };
+    st.offset = 0;
+    st.data = null;
+    openSheet(renderStats);
+    loadStats(true);
+    startStatsTimer();
+  }
+  /* 콘처럼 1분마다 다시 받음(가장 짧은 그래프 칸이 1분) */
+  function startStatsTimer() {
+    clearInterval(statsTimer);
+    statsTimer = setInterval(function () { if (sheetRender === renderStats) loadStats(false); }, 60000);
+  }
+  function loadStats(withBusy) {
+    var seq = ++stSeq;
+    if (withBusy) busyStart('LOADING');
+    api('api/stats?scale=' + st.scale + '&offset=' + st.offset + '&group=' + st.group + '&tp=' + (st.tp ? 1 : 0) + '&hp=' + (st.hp ? 1 : 0))
+      .then(function (d) {
+        if (seq !== stSeq) return;
+        busyEnd();
+        st.data = d;
+        if (sheetRender === renderStats) renderStats();
+      })
+      .catch(function (e) {
+        if (seq !== stSeq) return;
+        busyEnd();
+        if (e && e.handled) return;
+        if (statsBlockedSd(e)) { alert(S('STR_MSG_STATS_BLOCKED_SD_FAIL')); closeSheet(); return; }
+        toast('Error');
+      });
+  }
+
+  /* 개괄 한 줄 — 탭 가능한 줄은 "라벨[단위]:"가 역상(콘과 같음). 값 = 최대 / 최소 / 평균 */
+  function ovRow(key, label, unitKey, m) {
+    if (!key && !m) return '<div class="ovrow"><span>' + esc(label + ': ' + S('STR_STATS_OVERVIEW_NO_DATA')) + '</span></div>';
+    var head = label + '[' + S(unitKey) + ']:';
+    var val = m ? f2(m[0]) + ' / ' + f2(m[1]) + ' / ' + f2(m[2]) : S('STR_STATS_OVERVIEW_NO_DATA');
+    return '<div class="ovrow' + (key ? ' tap" data-ov="' + key : '') + '">' + (key ? '<span class="badge">' + esc(head) + '</span>' : '<span>' + esc(head) + '</span>') +
+           '<span>' + esc(val) + '</span></div>';
+  }
+  function slotLabel(sl, i) {
+    if (st.data.group === 0) return S(i === 0 ? 'STR_OVERVIEW_AIR_TEMP' : 'STR_OVERVIEW_AIR_HUMI') + '(' + prec(i === 0 ? st.data.tp : st.data.hp) + ')';
+    if (st.data.group === 1) return (sl.name || fmt(S('STR_AGAR_SLOT_FMT'), i + 1)) + ' ' + S('STR_CHAN_LABEL_TEMP_C');
+    return (sl.name ? sl.name + ' ' : '') + S(CHAN_STR[sl.chan][0]);
+  }
+
+  function renderStats() {
+    var h = '<div class="shead"><h3 class="grow">' + esc(S('STR_TAB_STATISTICS')) + '</h3><button class="small" id="stRec">' + esc(S('STR_BTN_RECORD')) +
+            '</button><button class="xbtn" data-act="close" aria-label="close">&#x2715;</button></div>';
+    h += '<div class="field"><strong>' + esc(S('STR_PANEL_STATS_OVERVIEW')) + '</strong><span>' + esc(S('STR_LABEL_PERIOD')) + ' <select id="stScale">' +
+         S('STR_STATS_SCALE_OPTIONS').split('\n').map(function (t, i) { return '<option value="' + i + '"' + (i === st.scale ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('') +
+         '</select></span></div>';
+    var d = st.data;
+    if (!d) { $('sheetBody').innerHTML = h; bindStats(); return; }
+    var ov = d.ov, ai = st.agar % 4, agarLabel, agarVal;
+    if (ai === 0) { agarLabel = S('STR_OVERVIEW_AGAR_TEMP'); agarVal = ov.agar_all; }
+    else { agarLabel = (ov.agar[ai - 1].name || fmt(S('STR_AGAR_SLOT_FMT'), ai)) + ' ' + S('STR_CHAN_LABEL_TEMP_C'); agarVal = ov.agar[ai - 1].v; }
+    /* 콘 줄 순서(왼쪽 T·CO2·Agar, 오른쪽 H·NH3)를 줄 단위로: 넓으면 2열, 세로 휴대폰은 1열 */
+    h += '<div class="ovgrid">' +
+         ovRow('t', S('STR_OVERVIEW_AIR_TEMP') + '(' + prec(st.ovT) + ')', 'STR_CHAN_UNIT_TEMP_C', ov.air_t[st.ovT ? 1 : 0]) +
+         ovRow('h', S('STR_OVERVIEW_AIR_HUMI') + '(' + prec(st.ovH) + ')', 'STR_CHAN_UNIT_HUMI_PCT', ov.air_h[st.ovH ? 1 : 0]) +
+         ovRow('', S('STR_CHAN_LABEL_CO2_PPM'), 'STR_CHAN_UNIT_CO2_PPM', ov.co2) +
+         ovRow('', S('STR_CHAN_LABEL_NH3_PPM'), 'STR_CHAN_UNIT_NH3_PPM', ov.nh3) +
+         ovRow('a', agarLabel, 'STR_CHAN_UNIT_TEMP_C', agarVal) + '</div>';
+    /* 그래프 */
+    h += '<div class="grp">' + GROUP_KEYS.map(function (k, g) {
+      return '<button class="small' + (g === st.group ? ' on' : '') + '" data-grp="' + g + '">' + esc(S(k)) + '</button>';
+    }).join('') + '<span class="grow"></span><button class="small" data-pan="1">&lt;&lt;</button><button class="small" data-pan="-1"' +
+         (st.offset === 0 ? ' disabled' : '') + '>&gt;&gt;</button></div>';
+    var mx = '', mn = '';
+    h += '<div class="slots">' + d.slots.map(function (sl, i) {
+      var c = slotColor(i), on = st.show[i];
+      if (on && sl.min !== undefined) {
+        var u = S(CHAN_STR[sl.chan][1]);
+        mx += '<span style="color:' + c + '">' + esc(f1(sl.max) + u) + '</span>';
+        mn += '<span style="color:' + c + '">' + esc(f1(sl.min) + u) + '</span>';
+      }
+      return '<span class="slot"><i data-sbox="' + i + '" style="border-color:' + c + ';background:' + (on ? c : 'transparent') + '"></i><span class="tap" data-slab="' + i + '">' +
+             esc(slotLabel(sl, i)) + '</span></span>';
+    }).join('') + '</div>';
+    h += '<div class="mmrow">' + mx + '</div><div class="chartwrap"><canvas id="stChart"></canvas><div id="stTip" class="tip hidden"></div></div>' +
+         '<div class="mmrow">' + mn + '</div><div class="xax" id="stXax"></div>';
+    $('sheetBody').innerHTML = h;
+    bindStats();
+    drawStats();
+  }
+
+  /* 콘 refresh_stats_graph의 그리기 부분: 계열마다 창 안 최소~최대를 0~100으로, 실선/점선은 칸마다 배타적으로 배정하되
+   * 저신뢰와 맞닿은 칸은 양쪽에 넣어 이어 붙임. 창에 실측이 하나도 없으면 고정 높이 점선 */
+  var SP = 6;
+  function drawStats() {
+    var cv = $('stChart');
+    if (!cv || !st.data) return;
+    var w = cv.clientWidth, h = cv.clientHeight, dpr = window.devicePixelRatio || 1, N = 60;
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+    var g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    function X(i) { return SP + (w - 2 * SP) * i / (N - 1); }
+    function Y(n) { return SP + (h - 2 * SP) * (1 - n / 100); }
+    g.setLineDash([]);
+    g.lineWidth = 1;
+    g.strokeStyle = 'rgba(127,127,127,.25)';
+    for (var k = 0; k <= 4; k++) { g.beginPath(); g.moveTo(SP, Math.round(Y(k * 25)) + 0.5); g.lineTo(w - SP, Math.round(Y(k * 25)) + 0.5); g.stroke(); }
+    st.pts = [];
+    function line(a, dash) {
+      g.setLineDash(dash);
+      g.beginPath();
+      var on = false;
+      for (var i = 0; i < N; i++) {
+        if (a[i] === null) { on = false; continue; }
+        if (on) g.lineTo(X(i), Y(a[i])); else { g.moveTo(X(i), Y(a[i])); on = true; }
+      }
+      g.stroke();
+    }
+    st.data.slots.forEach(function (sl, s) {
+      st.pts[s] = null;
+      if (!st.show[s]) return;
+      var span = (sl.min !== undefined && sl.max > sl.min) ? sl.max - sl.min : 0;
+      var norm = sl.tr.map(function (t) {
+        if (t === null) return null;
+        var n = span > 0 ? Math.floor((t - sl.min) / span * 100 + 0.5) : 50;
+        return Math.max(0, Math.min(100, n));
+      });
+      function lo(i) { return sl.lo.charAt(i) === '1'; }
+      var solid = [], dashed = [];
+      for (var i = 0; i < N; i++) {
+        if (norm[i] === null) { solid[i] = null; dashed[i] = GAP_REF[s]; continue; }
+        var nb = (i > 0 && lo(i - 1) && norm[i - 1] !== null) || (i + 1 < N && lo(i + 1) && norm[i + 1] !== null);
+        solid[i] = lo(i) ? null : norm[i];
+        dashed[i] = (lo(i) || nb) ? norm[i] : null;
+      }
+      st.pts[s] = norm;
+      g.strokeStyle = slotColor(s);
+      g.lineWidth = 2;
+      line(solid, []);
+      line(dashed, [4, 4]);
+    });
+    /* X축: 오른쪽 끝 = 이 창의 끝, 라벨 = 지금부터 얼마나 전(콘 refresh_stats_graph_x_labels) */
+    var sec = SCALE_SEC[st.data.scale], step = XSTEP_SEC[st.data.scale], cnt = Math.min(sec / step + 1, 13), xs = '';
+    /* 휴대폰 폭에선 라벨이 겹침 — 라벨 사이가 34px보다 좁으면 오른쪽(0)부터 k칸마다 하나씩만 */
+    var kx = Math.max(1, Math.ceil(34 * (cnt - 1) / Math.max(1, $('stXax').clientWidth)));
+    for (var i = 0; i < cnt; i += kx) {
+      var inW = i * step, ago = inW + st.data.offset * sec, frac = 1 - inW / sec, t;
+      if (ago === 0) t = '0';
+      else if (step % 86400 === 0) t = '-' + Math.floor(ago / 86400) + 'd';
+      else if (step % 3600 === 0) t = '-' + Math.floor(ago / 3600) + 'h';
+      else t = '-' + Math.floor(ago / 60) + 'm';
+      xs += '<span style="left:' + (frac * 100) + '%' + (frac >= 1 ? ';transform:translateX(-100%)' : frac <= 0 ? ';transform:none' : '') + '">' + t + '</span>';
+    }
+    $('stXax').innerHTML = xs;
+    st.geom = { w: w, h: h, X: X, Y: Y };
+  }
+
+  /* 그래프 탭 — 가장 가까운 칸에서 실측값이 있는 계열 중 탭 높이에 가장 가까운 것(콘 cb_stats_chart_tap) */
+  function statsTap(ev) {
+    var gm = st.geom, d = st.data;
+    if (!gm || !d) return;
+    var r = $('stChart').getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
+    var i = Math.max(0, Math.min(59, Math.round((x - SP) / (gm.w - 2 * SP) * 59)));
+    var best = -1, bd = 1e9;
+    d.slots.forEach(function (sl, s) {
+      if (!st.pts[s] || sl.v[i] === null || st.pts[s][i] === null) return;
+      var dd = Math.abs(gm.Y(st.pts[s][i]) - y);
+      if (dd < bd) { bd = dd; best = s; }
+    });
+    var tip = $('stTip');
+    if (best < 0) { tip.classList.add('hidden'); return; }
+    var sl = d.slots[best];
+    tip.textContent = S(CHAN_STR[sl.chan][0]) + ': ' + f2(sl.v[i]) + S(CHAN_STR[sl.chan][1]);
+    tip.classList.remove('hidden');
+    var px = gm.X(i), py = gm.Y(st.pts[best][i]), tw = tip.offsetWidth, th = tip.offsetHeight;
+    var tx = Math.max(0, Math.min(gm.w - tw, px - tw / 2)), ty = py - th - 6;
+    if (ty < 0) ty = py + 6;
+    tip.style.left = tx + 'px';
+    tip.style.top = Math.min(gm.h - th, ty) + 'px';
+  }
+
+  function statsPan(older) {
+    if (older) st.offset++;
+    else if (st.offset > 0) st.offset--;
+    else return;
+    loadStats(true);
+  }
+
+  function bindStats() {
+    var body = $('sheetBody');
+    var sc = $('stScale');
+    if (sc) sc.addEventListener('change', function () { st.scale = +this.value; st.offset = 0; loadStats(true); });   /* 콘: 기간을 바꾸면 지금 창으로 */
+    var rb = $('stRec');
+    if (rb) rb.addEventListener('click', openRecord);
+    body.querySelectorAll('[data-ov]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var k = el.getAttribute('data-ov');
+        if (k === 't') st.ovT = !st.ovT; else if (k === 'h') st.ovH = !st.ovH; else st.agar++;
+        renderStats();
+      });
+    });
+    body.querySelectorAll('[data-grp]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        st.group = +el.getAttribute('data-grp');
+        st.show = [true, true, true, true];   /* 콘: 새 그룹은 전부 보이는 채로 시작 */
+        loadStats(true);
+      });
+    });
+    body.querySelectorAll('[data-pan]').forEach(function (el) {
+      el.addEventListener('click', function () { statsPan(el.getAttribute('data-pan') === '1'); });
+    });
+    body.querySelectorAll('[data-sbox]').forEach(function (el) {
+      el.addEventListener('click', function () { var i = +el.getAttribute('data-sbox'); st.show[i] = !st.show[i]; renderStats(); });
+    });
+    /* 콘: 공기 슬롯은 글자를 누르면 정밀<->간이, 다른 그룹은 표시·숨김 */
+    body.querySelectorAll('[data-slab]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var i = +el.getAttribute('data-slab');
+        if (st.data && st.data.group === 0) { if (i === 0) st.tp = !st.tp; else st.hp = !st.hp; loadStats(true); }
+        else { st.show[i] = !st.show[i]; renderStats(); }
+      });
+    });
+    var cv = $('stChart');
+    if (!cv) return;
+    cv.addEventListener('click', statsTap);
+    var t0 = null;   /* 좌우로 밀기 = 이전·다음 창(오른쪽으로 밀면 과거) */
+    cv.addEventListener('touchstart', function (e) { t0 = e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null; }, { passive: true });
+    cv.addEventListener('touchend', function (e) {
+      if (!t0 || !e.changedTouches.length) return;
+      var dx = e.changedTouches[0].clientX - t0.x, dy = e.changedTouches[0].clientY - t0.y;
+      t0 = null;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) statsPan(dx > 0);
+    }, { passive: true });
+  }
+  window.addEventListener('resize', function () { if (sheetRender === renderStats) drawStats(); });
+
+  /* ── 기록 팝업(콘 build_record_tab): 최신이 위, 28개씩, << 10 / < = 더 오래된 쪽, 전체 삭제(확인) ── */
+  var rec = { page: 0, data: null };
+  function fmtCapped(v) { var a = Math.abs(v); return Number(v).toFixed(a < 100 ? 2 : a < 1000 ? 1 : 0); }   /* 콘 format_value_capped(총 4자리) */
+  function openRecord() {
+    rec.page = 0;
+    rec.data = null;
+    openSheet(renderRecord);
+    loadRecord();
+  }
+  function loadRecord() {
+    busyStart('LOADING');
+    api('api/stats/records?page=' + rec.page).then(function (d) {
+      busyEnd();
+      rec.data = d;
+      if (sheetRender === renderRecord) renderRecord();
+    }).catch(function (e) {
+      busyEnd();
+      if (e && e.handled) return;
+      if (statsBlockedSd(e)) { alert(S('STR_MSG_STATS_BLOCKED_SD_FAIL')); closeSheet(); return; }
+      toast('Error');
+    });
+  }
+  function renderRecord() {
+    var h = '<div class="shead"><h3 class="grow">' + esc(S('STR_TITLE_RECORD')) + '</h3><button class="small danger" id="recDel">' + esc(S('STR_BTN_DELETE_STATS')) +
+            '</button><button class="xbtn" id="recBack" aria-label="close">&#x2715;</button></div>';
+    var d = rec.data;
+    if (d) {
+      h += '<table class="rtable"><thead><tr><th>' + esc(S('STR_STATS_TABLE_HEADER_ITEM')) + '</th><th>' + esc(S('STR_STATS_TABLE_HEADER_VALUE')) + '</th><th>' +
+           esc(S('STR_STATS_TABLE_HEADER_TIME')) + '</th></tr></thead><tbody>';
+      if (!d.items.length) h += '<tr><td colspan="3">' + esc(S('STR_STATS_TABLE_EMPTY')) + '</td></tr>';
+      h += d.items.map(function (it) {
+        var cs = CHAN_STR[it.chan];
+        return '<tr><td>' + esc(it.name + (cs ? ' ' + S(cs[0]) : '')) + '</td><td>' + esc(fmtCapped(it.v) + (cs ? S(cs[1]) : '')) + '</td><td>' +
+               new Date(it.t * 1000).toISOString().substr(11, 8) + '</td></tr>';
+      }).join('') + '</tbody></table>';
+      var pages = Math.max(1, Math.ceil(d.count / d.page_size)), older = rec.page + 1 < pages, newer = rec.page > 0;
+      h += '<div class="pager"><button class="small" data-rpg="10"' + (older ? '' : ' disabled') + '>' + esc(S('STR_BTN_JUMP_PREV10')) + '</button><button class="small" data-rpg="1"' +
+           (older ? '' : ' disabled') + '>&lt;</button><span class="sub">' + (rec.page + 1) + ' / ' + pages + '</span><button class="small" data-rpg="-1"' + (newer ? '' : ' disabled') +
+           '>&gt;</button><button class="small" data-rpg="-10"' + (newer ? '' : ' disabled') + '>' + esc(S('STR_BTN_JUMP_NEXT10')) + '</button></div>';
+    }
+    $('sheetBody').innerHTML = h;
+    $('recBack').addEventListener('click', function () { openSheet(renderStats); startStatsTimer(); });   /* 콘: 기록 팝업을 닫으면 통계 팝업 */
+    $('recDel').addEventListener('click', function () {
+      if (!confirm(S('STR_CONFIRM_DELETE_STATS'))) return;
+      post('api/stats/delete_all').then(function () { rec.page = 0; loadRecord(); }).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+    });
+    $('sheetBody').querySelectorAll('[data-rpg]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var pages = Math.max(1, Math.ceil(rec.data.count / rec.data.page_size));
+        rec.page = Math.min(pages - 1, Math.max(0, rec.page + (+b.getAttribute('data-rpg'))));
+        loadRecord();
+      });
+    });
+  }
+
   /* ── 전체 화면 보기(웹 전용): 두 손가락 확대·이동, 두 번 탭 = 2배/원래대로. 페이지 확대는 막혀 있어 여기서 직접 처리 ── */
   var vz = { s: 1, x: 0, y: 0 };
   function vApply() { $('viewerImg').style.transform = 'translate(-50%,-50%) translate(' + vz.x + 'px,' + vz.y + 'px) scale(' + vz.s + ')'; }
@@ -981,7 +1319,8 @@
     if (t && t.getAttribute('data-act') === 'close') closeSheet();
   });
   $('mainView').addEventListener('click', function (ev) {
-    if (ev.target.closest('[data-campop]')) { openCamera(); return; }   /* 카메라 판넬 제목 → 카메라 팝업(콘과 같음) */
+    if (ev.target.closest('[data-campop]')) { openCamera(); return; }
+    if (ev.target.closest('[data-statspop]')) { openStats(); return; }     /* 센서 판넬 제목 → 통계 팝업(콘과 같음) */   /* 카메라 판넬 제목 → 카메라 팝업(콘과 같음) */
     var ovr = ev.target.closest('[data-ovr]');
     if (ovr) { confirmOverride(+ovr.getAttribute('data-ovr')); return; }   /* 전원 아이콘 → 수동 조작 확인(콘과 같음) */
     var rrow = ev.target.closest('[data-relay]');

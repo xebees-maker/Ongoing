@@ -918,6 +918,7 @@ static void web_lock_apply(void *arg)
         if (s_device_popup) teardown_device_popup();
         if (s_relay_popup) teardown_relay_popup();
         if (s_camera_popup) teardown_camera_tab();
+        if (s_stats_popup) teardown_stats_tab();
     }
     if (!locked) {
         if (s_web_lock_overlay) lv_obj_add_flag(s_web_lock_overlay, LV_OBJ_FLAG_HIDDEN);
@@ -3302,14 +3303,17 @@ static void format_value_capped(char *buf, size_t buf_size, float v)
  * 지금 노드 목록에서 못 찾으면(오래된 기록) mac 뒤 2바이트로 폴백 표시 */
 static void find_node_name_by_mac(const uint8_t mac[6], char *out, size_t out_cap)
 {
-    node_hub_node_t nodes[NODE_HUB_MAX_NODES];
-    int total = node_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, NODE_HUB_MAX_NODES);
+    /* 2026-10-03 — 노드 표는 PSRAM(웹 통계 API가 웹 요청 태스크에서도 부름 — 큰 배열은 스택에 두지 않음) */
+    node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    int total = nodes ? node_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, NODE_HUB_MAX_NODES) : 0;
     for (int i = 0; i < total; i++) {
         if (memcmp(nodes[i].mac, mac, 6) == 0) {
             snprintf(out, out_cap, "%s", nodes[i].name);
+            heap_caps_free(nodes);
             return;
         }
     }
+    heap_caps_free(nodes);
     snprintf(out, out_cap, "%02X%02X", mac[4], mac[5]);
 }
 
@@ -4120,64 +4124,99 @@ static void stats_graph_populate_slots_for_group(stats_view_group_t group)
     s_stats_active_group = group;
 }
 
-static void stats_graph_set_slot(int s, const stats_chain_t *chain, uint8_t chan_type)
-{
-    if (chain) s_stats_slot_chain[s] = *chain;
-    else s_stats_slot_chain[s].n = 0;
-    s_stats_slot_chan_type[s] = chan_type;
-}
-
 /* 사용자 결정(2026-09-28) — Air 온도·습도 슬롯과 CO2·암모니아 슬롯은 기록이 없어도 항상 있음(선택 UI가 사라지면
  * 토글을 못 누름). Agar는 창 안의 기기 사슬 + 지금 연결된 기기 */
-static void stats_graph_build_slots(const stats_window_t *w)
+/* 2026-10-03(웹 통계) — 그룹의 슬롯(기기 사슬, 채널) 구성만 따로 — 콘 그래프(아래 stats_graph_build_slots)와 웹
+ * (ui_main_stats_graph)이 같이 씀. 기록 없는 슬롯은 빈 사슬(n = 0). 반환: 슬롯 수 */
+static int stats_graph_slots(const stats_window_t *w, stats_view_group_t group, bool temp_precise, bool humi_precise,
+                             stats_chain_t chains[STATS_GRAPH_SERIES_COUNT], uint8_t chan[STATS_GRAPH_SERIES_COUNT])
 {
-    stats_chain_t chains[STATS_AGAR_MAX_SLOTS];
-    int n;
-    s_stats_slot_count = 0;
-
-    if (s_stats_active_group == STATS_VIEW_GROUP_AIR) {
-        n = stats_build_chains(w, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C, s_stats_air_temp_precise, chains, 1);
-        stats_graph_set_slot(s_stats_slot_count, n > 0 ? &chains[0] : NULL, SENSOR_CHAN_TEMP_C);
-        snprintf(s_stats_slot_label[s_stats_slot_count], sizeof(s_stats_slot_label[0]), "%s(%s)",
-                 ui_str(STR_OVERVIEW_AIR_TEMP),
-                 ui_str(s_stats_air_temp_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
-        s_stats_slot_count++;
-        n = stats_build_chains(w, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_HUMI_PCT, s_stats_air_humi_precise, chains, 1);
-        stats_graph_set_slot(s_stats_slot_count, n > 0 ? &chains[0] : NULL, SENSOR_CHAN_HUMI_PCT);
-        snprintf(s_stats_slot_label[s_stats_slot_count], sizeof(s_stats_slot_label[0]), "%s(%s)",
-                 ui_str(STR_OVERVIEW_AIR_HUMI),
-                 ui_str(s_stats_air_humi_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
-        s_stats_slot_count++;
-    } else if (s_stats_active_group == STATS_VIEW_GROUP_AGAR) {
-        n = stats_build_agar_slots(w, chains);  /* 항상 3슬롯 — 기기 없는 슬롯은 "Agar N T" 빈 그래프 */
-        for (int i = 0; i < n && i < STATS_GRAPH_SERIES_COUNT; i++) {
-            stats_graph_set_slot(i, &chains[i], SENSOR_CHAN_TEMP_C);
-            char slot_name[40];
-            stats_agar_slot_name(&chains[i], i, slot_name, sizeof(slot_name));
-            snprintf(s_stats_slot_label[i], sizeof(s_stats_slot_label[0]), "%s %s", slot_name,
-                     ui_str(STR_CHAN_LABEL_TEMP_C));
-            /* 2026-09-15(사용자 지시 — "기기명(Alias)이 길어지면 ...으로... 스케일, << >>
-             * 공간을 확보해야되") */
-            trim_to_width(s_stats_slot_label[i], ui_font_get(UI_FONT_SIZE_18), 90);
-            s_stats_slot_count++;
+    int count = 0;
+    if (group == STATS_VIEW_GROUP_AIR) {
+        static const uint8_t s_air_chan[2] = { SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT };
+        for (int a = 0; a < 2; a++) {
+            int n = stats_build_chains(w, STATS_VIEW_GROUP_AIR, s_air_chan[a], a == 0 ? temp_precise : humi_precise,
+                                       &chains[count], 1);
+            if (n == 0) chains[count].n = 0;
+            chan[count++] = s_air_chan[a];
         }
+    } else if (group == STATS_VIEW_GROUP_AGAR) {
+        int n = stats_build_agar_slots(w, chains);  /* 항상 3슬롯 — 기기 없는 슬롯은 "Agar N T" 빈 그래프 */
+        for (; count < n && count < STATS_GRAPH_SERIES_COUNT; count++) chan[count] = SENSOR_CHAN_TEMP_C;
     } else {  /* STATS_VIEW_GROUP_GAS — CO2, 암모니아 한 슬롯씩(상한 1대씩, 교체면 사슬) */
         static const uint8_t s_gas_chan[STATS_GAS_MAX_SLOTS] = { SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM };
-        static const ui_str_id_t s_gas_label[STATS_GAS_MAX_SLOTS] = { STR_CHAN_LABEL_CO2_PPM, STR_CHAN_LABEL_NH3_PPM };
         for (int g = 0; g < STATS_GAS_MAX_SLOTS; g++) {
-            n = stats_build_chains(w, STATS_VIEW_GROUP_GAS, s_gas_chan[g], false, chains, 1);
-            int s = s_stats_slot_count++;
-            stats_graph_set_slot(s, n > 0 ? &chains[0] : NULL, s_gas_chan[g]);
-            if (n > 0 && chains[0].n > 0) {
-                char chain_name[40];
-                stats_chain_label(&chains[0], chain_name, sizeof(chain_name));
-                snprintf(s_stats_slot_label[s], sizeof(s_stats_slot_label[0]), "%s %s", chain_name,
-                         ui_str(s_gas_label[g]));
-            } else {
-                snprintf(s_stats_slot_label[s], sizeof(s_stats_slot_label[0]), "%s", ui_str(s_gas_label[g]));
-            }
-            trim_to_width(s_stats_slot_label[s], ui_font_get(UI_FONT_SIZE_18), 90);
+            int n = stats_build_chains(w, STATS_VIEW_GROUP_GAS, s_gas_chan[g], false, &chains[count], 1);
+            if (n == 0) chains[count].n = 0;
+            chan[count++] = s_gas_chan[g];
         }
+    }
+    return count;
+}
+
+/* 2026-10-03(웹 통계) — 슬롯 하나의 칸 값·창 최소/최대·국소 추세·저신뢰 계산만 따로(refresh_stats_graph에서 꺼냄) —
+ * 콘 그래프와 웹이 같이 씀. 칸 위치는 창의 시작·칸 폭 기준 */
+static void stats_graph_series_compute(const stats_window_t *w, const stats_chain_t *ch, ui_stats_series_t *d)
+{
+    for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) { d->has[i] = false; d->vals[i] = 0.0f; }
+    for (uint32_t i = 0; i < w->nb; i++) {
+        if (w->b_series[i] == 0xFF) continue;
+        if (!stats_chain_has_series(ch, w->b_series[i])) continue;
+        long slot_l = ((long)w->b[i].bucket_start_unix - (long)w->start) / (long)w->bucket_width;
+        if (slot_l < 0 || slot_l >= STATS_GRAPH_POINT_COUNT) continue;
+        d->has[slot_l] = true;
+        d->vals[slot_l] = w->b[i].avg_value;
+    }
+    /* 2026-09-11 — 스와이프로 지금이 아닌 다른 창을 볼 수 있게 되면서, 항상 이 창에서 받아온 값들로 직접 min/max 계산 */
+    d->have_range = false;
+    d->mn = d->mx = 0.0f;
+    for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
+        if (!d->has[i]) continue;
+        if (!d->have_range) { d->mn = d->mx = d->vals[i]; d->have_range = true; }
+        else {
+            if (d->vals[i] < d->mn) d->mn = d->vals[i];
+            if (d->vals[i] > d->mx) d->mx = d->vals[i];
+        }
+    }
+    /* 슬롯마다 추세값/저신뢰 여부(근처 실측이 STATS_GRAPH_LOW_SUPPORT_SLOTS보다 멀면 저신뢰) */
+    for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
+        int nearest_dist = -1;
+        d->trend[i] = 0.0f;
+        d->trend_has[i] = stats_graph_local_trend(d->has, d->vals, STATS_GRAPH_POINT_COUNT, (int)i, &nearest_dist, &d->trend[i]);
+        d->low[i] = d->trend_has[i] && (nearest_dist > STATS_GRAPH_LOW_SUPPORT_SLOTS);
+    }
+}
+
+static void stats_graph_build_slots(const stats_window_t *w)
+{
+    uint8_t chan[STATS_GRAPH_SERIES_COUNT];
+    s_stats_slot_count = stats_graph_slots(w, s_stats_active_group, s_stats_air_temp_precise, s_stats_air_humi_precise,
+                                           s_stats_slot_chain, chan);
+    for (int s = 0; s < s_stats_slot_count; s++) {
+        s_stats_slot_chan_type[s] = chan[s];
+        char *lbl = s_stats_slot_label[s];
+        const size_t cap = sizeof(s_stats_slot_label[0]);
+        if (s_stats_active_group == STATS_VIEW_GROUP_AIR) {
+            bool precise = (s == 0) ? s_stats_air_temp_precise : s_stats_air_humi_precise;
+            snprintf(lbl, cap, "%s(%s)", ui_str(s == 0 ? STR_OVERVIEW_AIR_TEMP : STR_OVERVIEW_AIR_HUMI),
+                     ui_str(precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
+            continue;
+        }
+        char name[40];
+        if (s_stats_active_group == STATS_VIEW_GROUP_AGAR) {
+            stats_agar_slot_name(&s_stats_slot_chain[s], s, name, sizeof(name));
+            snprintf(lbl, cap, "%s %s", name, ui_str(STR_CHAN_LABEL_TEMP_C));
+        } else {
+            ui_str_id_t gas_label = (chan[s] == SENSOR_CHAN_CO2_PPM) ? STR_CHAN_LABEL_CO2_PPM : STR_CHAN_LABEL_NH3_PPM;
+            if (s_stats_slot_chain[s].n > 0) {
+                stats_chain_label(&s_stats_slot_chain[s], name, sizeof(name));
+                snprintf(lbl, cap, "%s %s", name, ui_str(gas_label));
+            } else {
+                snprintf(lbl, cap, "%s", ui_str(gas_label));
+            }
+        }
+        /* 2026-09-15(사용자 지시 — "기기명(Alias)이 길어지면 ...으로... 스케일, << >> 공간을 확보해야되") */
+        trim_to_width(lbl, ui_font_get(UI_FONT_SIZE_18), 90);
     }
 }
 /* 2026-09-10/11(재설계 — 라인그래프, 계열 4개 온도/습도/CO2/암모니아, 스케일별 사전집계
@@ -4230,6 +4269,9 @@ static bool refresh_stats_graph(void)
     static stats_window_t *s_graph_win = NULL;
     if (!s_graph_win) s_graph_win = stats_window_alloc();
     if (!s_graph_win) return true;
+    static ui_stats_series_t *s_graph_ser = NULL;  /* 2026-10-03 — 슬롯 하나 계산 결과(PSRAM, LVGL 태스크 전용) */
+    if (!s_graph_ser) s_graph_ser = heap_caps_calloc(1, sizeof(*s_graph_ser), MALLOC_CAP_SPIRAM);
+    if (!s_graph_ser) return true;
     if (!stats_window_load(s_graph_win, (uint8_t)idx, window_start, window_end)) return false;  /* SD 자체 문제 — 즉시 중단 */
     stats_graph_build_slots(s_graph_win);
     int64_t t_sdread_end_us = esp_timer_get_time();
@@ -4255,68 +4297,29 @@ static bool refresh_stats_graph(void)
     for (int s = 0; s < s_stats_slot_count; s++) {
         lv_obj_remove_flag(s_stats_chart_checkbox[s], LV_OBJ_FLAG_HIDDEN);
         lv_checkbox_set_text(s_stats_chart_checkbox[s], s_stats_slot_label[s]);
-        static bool has[STATS_GRAPH_POINT_COUNT];
-        static float vals[STATS_GRAPH_POINT_COUNT];
-        for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) has[i] = false;
 
-        for (uint32_t i = 0; i < s_graph_win->nb; i++) {
-            if (s_graph_win->b_series[i] == 0xFF) continue;
-            if (!stats_chain_has_series(&s_stats_slot_chain[s], s_graph_win->b_series[i])) continue;
-            long slot_l = ((long)s_graph_win->b[i].bucket_start_unix - (long)window_start) / (long)bucket_width;
-            if (slot_l < 0 || slot_l >= STATS_GRAPH_POINT_COUNT) continue;
-            uint32_t slot = (uint32_t)slot_l;
-            has[slot] = true;
-            vals[slot] = s_graph_win->b[i].avg_value;
-        }
-
-
-        /* 2026-09-11 — 스와이프로 지금이 아닌 다른 창을 볼 수 있게 되면서, "지금까지"
-         * 기준으로 미리 계산해둔 개괄판넬 min/max 캐시를 그대로 쓰면 안 맞을 수 있음
-         * (오프셋이 0이 아닐 때) — 항상 이 창에서 받아온 값들로 직접 min/max 계산 */
-        bool have_range = false;
-        float mn = 0.0f, mx = 0.0f;
-        for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
-            if (!has[i]) continue;
-            if (!have_range) { mn = mx = vals[i]; have_range = true; }
-            else {
-                if (vals[i] < mn) mn = vals[i];
-                if (vals[i] > mx) mx = vals[i];
-            }
-        }
-        float span = (have_range && mx > mn) ? (mx - mn) : 0.0f;
-
-        /* 2026-09-15 — 회귀 계산 구간만 따로 실측(사용자 요청: "연산 속도가 얼마나 걸릴 지도
-         * 모르겠고") — SD읽기~차트세팅 전체 실측(t_start_us, 아래)과는 별개로 이 부분만 */
+        /* 2026-09-15 — 회귀 계산 구간만 따로 실측(사용자 요청: "연산 속도가 얼마나 걸릴 지도 모르겠고").
+         * 2026-10-03 — 칸 값·최소/최대·추세·저신뢰는 웹과 같이 쓰는 stats_graph_series_compute()로 */
         int64_t t_regr_start_us = esp_timer_get_time();
+        const ui_stats_series_t *d = s_graph_ser;
+        stats_graph_series_compute(s_graph_win, &s_stats_slot_chain[s], s_graph_ser);
+        bool have_range = d->have_range;
+        float mn = d->mn, mx = d->mx;
+        float span = (have_range && mx > mn) ? (mx - mn) : 0.0f;
 
         int32_t norm_vals[STATS_GRAPH_POINT_COUNT];
         int32_t gap_vals[STATS_GRAPH_POINT_COUNT];
-        bool    slot_has_trend[STATS_GRAPH_POINT_COUNT];
-        bool    slot_low_conf[STATS_GRAPH_POINT_COUNT];
         int32_t slot_norm[STATS_GRAPH_POINT_COUNT];
 
-        /* 1차 패스 — 슬롯마다 추세값/저신뢰 여부만 구함(아직 어느 시리즈에 넣을지는 안 정함,
-         * 경계 슬롯 판단에 양옆 슬롯의 저신뢰 여부가 필요해서 2차 패스로 분리) */
+        /* 1차 패스 — 탭 표시용 실측값과 추세값의 정규화(0~100) */
         for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
-            if (has[i]) {
-                s_stats_chart_real_values[s][i] = vals[i];
-                s_stats_chart_has_value[s][i] = true;
-            } else {
-                s_stats_chart_has_value[s][i] = false;  /* 탭-값 표시는 실측일 때만(추세값 아님) */
-            }
-
-            int nearest_dist = -1;
-            float trend_val = 0.0f;
-            slot_has_trend[i] = stats_graph_local_trend(has, vals, STATS_GRAPH_POINT_COUNT,
-                                                          (int)i, &nearest_dist, &trend_val);
-            if (slot_has_trend[i]) {
-                int32_t n = (span > 0.0f) ? (int32_t)(((trend_val - mn) / span) * 100.0f + 0.5f) : 50;
+            s_stats_chart_has_value[s][i] = d->has[i];  /* 탭-값 표시는 실측일 때만(추세값 아님) */
+            if (d->has[i]) s_stats_chart_real_values[s][i] = d->vals[i];
+            if (d->trend_has[i]) {
+                int32_t n = (span > 0.0f) ? (int32_t)(((d->trend[i] - mn) / span) * 100.0f + 0.5f) : 50;
                 if (n < 0) n = 0;
                 if (n > 100) n = 100;
                 slot_norm[i] = n;
-                slot_low_conf[i] = (nearest_dist > STATS_GRAPH_LOW_SUPPORT_SLOTS);
-            } else {
-                slot_low_conf[i] = false;  /* 안 씀(그릴 값 자체가 없는 케이스) */
             }
         }
 
@@ -4326,16 +4329,16 @@ static bool refresh_stats_graph(void)
          * 저신뢰 구간과 맞닿는 "경계"의 확신 슬롯 하나는 양쪽 시리즈에 다 넣어서 실선<->점선이
          * 끊김 없이 이어붙게 함 */
         for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
-            if (!slot_has_trend[i]) {
+            if (!d->trend_has[i]) {
                 /* 이 창에 실측값이 하나도 없음 — 창 평균조차 없으니 옛 계열별 고정높이로 폴백 */
                 norm_vals[i] = LV_CHART_POINT_NONE;
                 gap_vals[i] = s_stats_gap_ref_height[s];
                 continue;
             }
-            bool neighbor_low = (i > 0 && slot_low_conf[i - 1] && slot_has_trend[i - 1]) ||
-                                 (i + 1 < STATS_GRAPH_POINT_COUNT && slot_low_conf[i + 1] && slot_has_trend[i + 1]);
-            bool on_dashed = slot_low_conf[i] || neighbor_low;
-            bool on_solid  = !slot_low_conf[i];
+            bool neighbor_low = (i > 0 && d->low[i - 1] && d->trend_has[i - 1]) ||
+                                 (i + 1 < STATS_GRAPH_POINT_COUNT && d->low[i + 1] && d->trend_has[i + 1]);
+            bool on_dashed = d->low[i] || neighbor_low;
+            bool on_solid  = !d->low[i];
             norm_vals[i] = on_solid  ? slot_norm[i] : LV_CHART_POINT_NONE;
             gap_vals[i]  = on_dashed ? slot_norm[i] : LV_CHART_POINT_NONE;
         }
@@ -10592,6 +10595,10 @@ static bool web_op_execute(const ui_web_op_t *op)
             if (node_hub_get_conn_state(op->mac) != HUB_CONN_STATE_ACTIVE) return false;
             photo_rx_capture_now(op->mac);
             return true;
+        case UI_WEB_OP_STATS_DELETE_ALL:  /* cb_delete_stats_confirmed와 같음 */
+            stats_store_delete_all();
+            s_stats_page_index = 0;
+            return true;
         default:
             return false;
     }
@@ -10697,4 +10704,92 @@ int ui_main_relay_chan_list(uint8_t *out, int cap)
         out[n++] = (uint8_t)s_relay_chan_type_values[i];
     }
     return n;
+}
+
+/* 2026-10-03(할 일 AD — 웹 통계) — 콘 통계 팝업과 같은 계산을 웹 요청 태스크에서. 창·사슬 버퍼는 콘 화면과 따로(PSRAM, 1회 할당,
+ * httpd는 태스크 하나라 요청이 겹치지 않음) */
+_Static_assert(UI_STATS_MAX_SLOTS == STATS_GRAPH_SERIES_COUNT, "web stats slot count");
+_Static_assert(UI_STATS_POINTS == STATS_GRAPH_POINT_COUNT, "web stats point count");
+
+bool ui_main_stats_graph(uint8_t scale, uint32_t offset, uint8_t group, bool temp_precise, bool humi_precise,
+                         ui_stats_graph_t *out)
+{
+    if (!out || scale >= STATS_SCALE_COUNT || group > STATS_VIEW_GROUP_GAS) return false;
+    static stats_window_t *s_web_win = NULL;
+    static stats_chain_t *s_web_chains = NULL;
+    if (!s_web_win) s_web_win = stats_window_alloc();
+    if (!s_web_chains) s_web_chains = heap_caps_calloc(STATS_GRAPH_SERIES_COUNT, sizeof(stats_chain_t), MALLOC_CAP_SPIRAM);
+    if (!s_web_win || !s_web_chains) return false;
+
+    /* refresh_stats_graph와 같은 창: 오른쪽 끝 = 지금 - offset x 스케일 */
+    uint32_t scale_sec = STATS_SCALE_SECONDS[scale];
+    uint32_t now = rtc_sync_get_unix_time();
+    uint64_t offset_sec = (uint64_t)offset * scale_sec;
+    uint32_t window_end = (now > offset_sec) ? (uint32_t)(now - offset_sec) : 0;
+    uint32_t window_start = (window_end > scale_sec) ? window_end - scale_sec : 0;
+    if (!stats_window_load(s_web_win, scale, window_start, window_end)) return false;
+
+    uint8_t chan[STATS_GRAPH_SERIES_COUNT];
+    out->window_end = window_end;
+    out->slot_count = stats_graph_slots(s_web_win, (stats_view_group_t)group, temp_precise, humi_precise, s_web_chains, chan);
+    for (int s = 0; s < out->slot_count; s++) {
+        ui_stats_slot_t *sl = &out->slot[s];
+        sl->chan_type = chan[s];
+        sl->name[0] = '\0';
+        if (s_web_chains[s].n > 0) stats_chain_label(&s_web_chains[s], sl->name, sizeof(sl->name));
+        stats_graph_series_compute(s_web_win, &s_web_chains[s], &sl->d);
+    }
+    return true;
+}
+
+/* refresh_stats_overview_panel과 같은 줄들 — 웹은 정밀/간이 토글과 Agar 순환을 받은 값에서 고르므로 전부 보냄 */
+bool ui_main_stats_overview(uint8_t scale, ui_stats_overview_t *out)
+{
+    if (!out || scale >= STATS_SCALE_COUNT) return false;
+    static stats_window_t *s_web_ov_win = NULL;
+    static stats_chain_t *s_web_ov_chains = NULL;
+    if (!s_web_ov_win) s_web_ov_win = stats_window_alloc();
+    if (!s_web_ov_chains) s_web_ov_chains = heap_caps_calloc(STATS_AGAR_MAX_SLOTS, sizeof(stats_chain_t), MALLOC_CAP_SPIRAM);
+    if (!s_web_ov_win || !s_web_ov_chains) return false;
+
+    uint32_t scale_sec = STATS_SCALE_SECONDS[scale];
+    uint32_t now = rtc_sync_get_unix_time();
+    uint32_t window_start = (now > scale_sec) ? now - scale_sec : 0;
+    if (!stats_window_load(s_web_ov_win, scale, window_start, now)) return false;
+    const stats_window_t *w = s_web_ov_win;
+    stats_chain_t *chains = s_web_ov_chains;
+    int n;
+    ui_stats_mma_t *m;
+
+    for (int p = 0; p < 2; p++) {
+        n = stats_build_chains(w, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C, p == 1, chains, 1);
+        m = &out->air_t[p];
+        m->have = (n > 0) && stats_blend_chains(w, chains, n, &m->mn, &m->mx, &m->avg);
+        n = stats_build_chains(w, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_HUMI_PCT, p == 1, chains, 1);
+        m = &out->air_h[p];
+        m->have = (n > 0) && stats_blend_chains(w, chains, n, &m->mn, &m->mx, &m->avg);
+    }
+    n = stats_build_agar_slots(w, chains);
+    m = &out->agar_all;
+    m->have = stats_blend_chains(w, chains, n, &m->mn, &m->mx, &m->avg);
+    for (int i = 0; i < STATS_AGAR_MAX_SLOTS; i++) {
+        m = &out->agar[i];
+        m->have = stats_chain_stat(w, &chains[i], &m->mn, &m->mx, &m->avg);
+        out->agar_name[i][0] = '\0';
+        if (chains[i].n > 0) stats_chain_label(&chains[i], out->agar_name[i], sizeof(out->agar_name[i]));
+    }
+    n = stats_build_chains(w, STATS_VIEW_GROUP_GAS, SENSOR_CHAN_CO2_PPM, false, chains, 1);
+    m = &out->co2;
+    m->have = (n > 0) && stats_blend_chains(w, chains, n, &m->mn, &m->mx, &m->avg);
+    n = stats_build_chains(w, STATS_VIEW_GROUP_GAS, SENSOR_CHAN_NH3_PPM, false, chains, 1);
+    m = &out->nh3;
+    m->have = (n > 0) && stats_blend_chains(w, chains, n, &m->mn, &m->mx, &m->avg);
+    return !stats_store_had_io_error();
+}
+
+void ui_main_stats_device_name(const uint8_t mac[6], char *out, size_t cap)
+{
+    const char *alias = device_config_get_alias(mac);  /* refresh_stats_table과 같음: Alias 우선 */
+    if (alias[0] != '\0') snprintf(out, cap, "%s", alias);
+    else find_node_name_by_mac(mac, out, cap);
 }

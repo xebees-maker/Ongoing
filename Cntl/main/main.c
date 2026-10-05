@@ -690,16 +690,28 @@ static esp_err_t api_photo_fetch_get_handler(httpd_req_t *req)
  * 아직 없으면(최초 배포 전) 404 — /admin/upload?file=app.html로 올리면 그때부터 동작
  * 2026-10-03(할 일 AD — SPA) — app.html.gz가 있으면 그걸 gzip 그대로 보냄(전송량 감소). ETag(크기+수정시각)로
  * 브라우저가 가진 것과 같으면 304 — 첫 접속 뒤로는 본문을 다시 안 보냄(Cache-Control: no-cache = 매번 확인만) */
+/* 2026-10-05(사용자 요청 — 브라우저 상·하단 없이) — 홈 화면에 추가해 앱처럼 열 때 필요한 manifest·아이콘도 같은 방식으로
+ * (LittleFS 파일, 로그인 없이 — 홈 화면 추가 때 휴대폰이 쿠키 없이 받아 감). 경로마다 user_ctx = 이 표의 한 줄 */
+typedef struct {
+    const char *gz_path;   /* 있으면 먼저(gzip 그대로), NULL = 없음 */
+    const char *path;
+    const char *type;
+} web_static_file_t;
+static const web_static_file_t s_static_app = { FS_MOUNT_POINT "/app.html.gz", FS_MOUNT_POINT "/app.html", "text/html; charset=utf-8" };
+static const web_static_file_t s_static_manifest = { NULL, FS_MOUNT_POINT "/app.webmanifest", "application/manifest+json" };
+static const web_static_file_t s_static_icon = { NULL, FS_MOUNT_POINT "/app_icon.png", "image/png" };
+
 static esp_err_t app_get_handler(httpd_req_t *req)
 {
-    const char *path = FS_MOUNT_POINT "/app.html.gz";
-    bool gz = true;
+    const web_static_file_t *sf = (const web_static_file_t *)req->user_ctx;
+    const char *path = sf->gz_path;
+    bool gz = (path != NULL);
     struct stat st;
-    if (stat(path, &st) != 0) {
-        path = FS_MOUNT_POINT "/app.html";
+    if (!gz || stat(path, &st) != 0) {
+        path = sf->path;
         gz = false;
         if (stat(path, &st) != 0) {
-            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "app.html not uploaded yet");
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not uploaded yet");
             return ESP_FAIL;
         }
     }
@@ -731,7 +743,7 @@ static esp_err_t app_get_handler(httpd_req_t *req)
     size_t rd = fread(buf, 1, (size_t)st.st_size, f);
     fclose(f);
 
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_type(req, sf->type);
     if (gz) httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     esp_err_t ret = httpd_resp_send(req, buf, rd);
     heap_caps_free(buf);
@@ -1006,8 +1018,14 @@ void web_dashboard_start(void)
                                                        .handler = api_photo_fetch_get_handler };
     httpd_register_uri_handler(server, &api_photo_fetch_uri);
     ESP_LOGD(TAG, "Web: API endpoints registered");
-    static const httpd_uri_t app_uri = { .uri = "/app", .method = HTTP_GET, .handler = app_get_handler };
+    static const httpd_uri_t app_uri = { .uri = "/app", .method = HTTP_GET, .handler = app_get_handler, .user_ctx = (void *)&s_static_app };
     httpd_register_uri_handler(server, &app_uri);
+    static const httpd_uri_t app_manifest_uri = { .uri = "/app.webmanifest", .method = HTTP_GET, .handler = app_get_handler,
+                                                  .user_ctx = (void *)&s_static_manifest };
+    httpd_register_uri_handler(server, &app_manifest_uri);
+    static const httpd_uri_t app_icon_uri = { .uri = "/app_icon.png", .method = HTTP_GET, .handler = app_get_handler,
+                                              .user_ctx = (void *)&s_static_icon };
+    httpd_register_uri_handler(server, &app_icon_uri);
     static const httpd_uri_t api_nodes_uri = { .uri = "/api/nodes", .method = HTTP_GET, .handler = api_nodes_get_handler };
     httpd_register_uri_handler(server, &api_nodes_uri);
     static const httpd_uri_t api_notify_test_uri = { .uri = "/api/notify_test", .method = HTTP_GET,

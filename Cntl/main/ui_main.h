@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include "power_relay.h"
 #include "photo_storage.h"
+#include "stats_store.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,6 +48,7 @@ typedef enum {
     UI_WEB_OP_PHOTO_DELETE,    /* mac, kind, seq — 콘 사진 행 삭제와 같음 */
     UI_WEB_OP_PHOTO_DELETE_ALL,/* mac — 콘 Delete all과 같음 */
     UI_WEB_OP_CAPTURE,         /* mac — 콘 Manual shot과 같음(통신 중인 캠만) */
+    UI_WEB_OP_STATS_DELETE_ALL,/* 콘 Record 팝업 Delete All 확인 Yes와 같음 */
 } ui_web_op_type_t;
 
 /* 릴레이 팝업의 사용자 선택값(화면 위젯이 나타내는 값 그대로). relay_apply_choices()가 이걸 설정 구조체로 바꿈 —
@@ -90,6 +92,43 @@ void ui_main_relay_defaults(uint8_t chan, float *center, float *margin);
 void ui_main_relay_spec(uint8_t chan, bool precise, float *min_v, float *max_v, float *step, int *decimals, float *margin_max);
 /* 릴레이 팝업 채널 선택지(SENSOR_CHAN_*) — 개수 반환 */
 int ui_main_relay_chan_list(uint8_t *out, int cap);
+
+/* 통계(웹) — 콘 통계 팝업과 같은 계산(창 읽기, 슬롯 = 기기 사슬, 국소 추세·저신뢰, 개괄 블렌딩)을 그대로 받음.
+ * 웹 요청 태스크에서 부름(창 버퍼는 콘 화면과 따로). false = SD 자체 오류 */
+#define UI_STATS_POINTS    STATS_AGG_POINTS_PER_SCALE
+#define UI_STATS_MAX_SLOTS 4
+typedef struct {
+    bool  has[UI_STATS_POINTS];        /* 실측 칸(값 = vals) */
+    float vals[UI_STATS_POINTS];
+    bool  trend_has[UI_STATS_POINTS];  /* 그리는 선 = 국소 추세값 */
+    float trend[UI_STATS_POINTS];
+    bool  low[UI_STATS_POINTS];        /* 저신뢰(점선) */
+    bool  have_range;                  /* 창 안 실측 최소·최대 */
+    float mn, mx;
+} ui_stats_series_t;
+typedef struct {
+    uint8_t chan_type;
+    char    name[40];                  /* 기기 사슬 이름("C->F", Alias 우선). 기기 없으면 "" */
+    ui_stats_series_t d;
+} ui_stats_slot_t;
+typedef struct {
+    uint32_t window_end;               /* 창 오른쪽 끝(콘 시각) */
+    int      slot_count;
+    ui_stats_slot_t slot[UI_STATS_MAX_SLOTS];
+} ui_stats_graph_t;
+typedef struct { bool have; float mn, mx, avg; } ui_stats_mma_t;
+typedef struct {
+    ui_stats_mma_t air_t[2], air_h[2]; /* [0] 간이, [1] 정밀 */
+    ui_stats_mma_t agar_all, agar[3];  /* 혼합, Agar 슬롯 1..3 */
+    char           agar_name[3][40];   /* 기기 없는 슬롯은 "" */
+    ui_stats_mma_t co2, nh3;
+} ui_stats_overview_t;
+/* group: 0 Air, 1 Agar, 2 Gas. offset: 0 = 지금 창, 1 = 한 창 앞 ... */
+bool ui_main_stats_graph(uint8_t scale, uint32_t offset, uint8_t group, bool temp_precise, bool humi_precise,
+                         ui_stats_graph_t *out);
+bool ui_main_stats_overview(uint8_t scale, ui_stats_overview_t *out);
+/* 통계 표의 기기 이름(Alias 우선, 콘 Record 표와 같음) */
+void ui_main_stats_device_name(const uint8_t mac[6], char *out, size_t cap);
 
 /* 2026-08-30(사용자 설계: "웹에 입력이 있으면, CNTL의 탭과 같은 입력 처리 과정을 거쳐야") —
  * 웹의 사진 가져오기도 온디바이스 탭과 같은 모델(s_selected_file_id)을 거치게 해서,

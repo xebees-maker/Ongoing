@@ -10,6 +10,7 @@
 #include "wifi_sta.h"
 #include "ui_main.h"
 #include "photo_storage.h"
+#include "stats_store.h"
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -664,8 +665,166 @@ static esp_err_t api_cam_capture_post_handler(httpd_req_t *req)    { return cam_
 static esp_err_t api_cam_delete_post_handler(httpd_req_t *req)     { return cam_op(req, UI_WEB_OP_PHOTO_DELETE); }
 static esp_err_t api_cam_delete_all_post_handler(httpd_req_t *req) { return cam_op(req, UI_WEB_OP_PHOTO_DELETE_ALL); }
 
+/* ── 통계(콘 통계 팝업·Record 팝업과 같은 계산은 ui_main_stats_*에서) ── */
+
+/* SD I/O 에러 중엔 콘처럼 통계를 열지 않음(cb_stats_btn_tap) — SPA가 STR_MSG_STATS_BLOCKED_SD_FAIL을 띄움 */
+static bool stats_sd_blocked(httpd_req_t *req)
+{
+    bool sd_fail = false;
+    ui_main_get_status_flags(NULL, NULL, &sd_fail);
+    if (sd_fail) send_simple(req, "503 Service Unavailable", "{\"error\":\"sd\"}");
+    return sd_fail;
+}
+
+static void jb_mma(jbuf_t *b, const ui_stats_mma_t *m)
+{
+    if (!m->have) { jb_printf(b, "null"); return; }
+    jb_printf(b, "[");
+    jb_float(b, m->mx);
+    jb_printf(b, ",");
+    jb_float(b, m->mn);
+    jb_printf(b, ",");
+    jb_float(b, m->avg);
+    jb_printf(b, "]");
+}
+
+/* GET /api/stats?scale=0..4&offset=N&group=0..2&tp=0|1&hp=0|1 — 개괄(지금까지 scale) + 그래프 한 창.
+ * 개괄 줄 = [max,min,avg] 또는 null. 슬롯: v = 실측 칸(없으면 null), tr = 추세값(선), lo = 저신뢰 칸 "0/1" 문자열 */
+static esp_err_t api_stats_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    if (stats_sd_blocked(req)) return ESP_OK;
+    int scale = query_int(s_w->query, "scale", 0);
+    int offset = query_int(s_w->query, "offset", 0);
+    int group = query_int(s_w->query, "group", 0);
+    if (scale < 0 || scale >= STATS_SCALE_COUNT || offset < 0 || offset > 100000 || group < 0 || group > 2) {
+        return send_simple(req, "400 Bad Request", "{\"error\":\"arg\"}");
+    }
+    bool tp = query_int(s_w->query, "tp", 1) != 0;
+    bool hp = query_int(s_w->query, "hp", 1) != 0;
+
+    ui_stats_graph_t *g = heap_caps_malloc(sizeof(*g), MALLOC_CAP_SPIRAM);
+    ui_stats_overview_t *ov = heap_caps_malloc(sizeof(*ov), MALLOC_CAP_SPIRAM);
+    const size_t cap = 16384;
+    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
+    if (!g || !ov || !b.p) { heap_caps_free(g); heap_caps_free(ov); heap_caps_free(b.p); httpd_resp_send_500(req); return ESP_FAIL; }
+    if (!ui_main_stats_overview((uint8_t)scale, ov) ||
+        !ui_main_stats_graph((uint8_t)scale, (uint32_t)offset, (uint8_t)group, tp, hp, g)) {
+        heap_caps_free(g); heap_caps_free(ov); heap_caps_free(b.p);
+        return send_simple(req, "503 Service Unavailable", "{\"error\":\"sd\"}");
+    }
+
+    jb_printf(&b, "{\"scale\":%d,\"offset\":%d,\"group\":%d,\"tp\":%d,\"hp\":%d,\"end\":%lu,\"ov\":{\"air_t\":[",
+              scale, offset, group, tp, hp, (unsigned long)g->window_end);
+    jb_mma(&b, &ov->air_t[0]); jb_printf(&b, ","); jb_mma(&b, &ov->air_t[1]);
+    jb_printf(&b, "],\"air_h\":[");
+    jb_mma(&b, &ov->air_h[0]); jb_printf(&b, ","); jb_mma(&b, &ov->air_h[1]);
+    jb_printf(&b, "],\"agar_all\":");
+    jb_mma(&b, &ov->agar_all);
+    jb_printf(&b, ",\"agar\":[");
+    for (int i = 0; i < 3; i++) {
+        jb_printf(&b, "%s{\"name\":", i ? "," : "");
+        jb_str(&b, ov->agar_name[i]);
+        jb_printf(&b, ",\"v\":");
+        jb_mma(&b, &ov->agar[i]);
+        jb_printf(&b, "}");
+    }
+    jb_printf(&b, "],\"co2\":");
+    jb_mma(&b, &ov->co2);
+    jb_printf(&b, ",\"nh3\":");
+    jb_mma(&b, &ov->nh3);
+    jb_printf(&b, "},\"slots\":[");
+    for (int sidx = 0; sidx < g->slot_count; sidx++) {
+        const ui_stats_slot_t *sl = &g->slot[sidx];
+        const ui_stats_series_t *d = &sl->d;
+        jb_printf(&b, "%s{\"chan\":%u,\"name\":", sidx ? "," : "", (unsigned)sl->chan_type);
+        jb_str(&b, sl->name);
+        if (d->have_range) {
+            jb_printf(&b, ",\"min\":");
+            jb_float(&b, d->mn);
+            jb_printf(&b, ",\"max\":");
+            jb_float(&b, d->mx);
+        }
+        jb_printf(&b, ",\"v\":[");
+        for (int i = 0; i < UI_STATS_POINTS; i++) {
+            if (i) jb_printf(&b, ",");
+            if (d->has[i]) jb_float(&b, d->vals[i]); else jb_printf(&b, "null");
+        }
+        jb_printf(&b, "],\"tr\":[");
+        for (int i = 0; i < UI_STATS_POINTS; i++) {
+            if (i) jb_printf(&b, ",");
+            if (d->trend_has[i]) jb_float(&b, d->trend[i]); else jb_printf(&b, "null");
+        }
+        jb_printf(&b, "],\"lo\":\"");
+        for (int i = 0; i < UI_STATS_POINTS; i++) jb_printf(&b, "%c", d->low[i] ? '1' : '0');
+        jb_printf(&b, "\"}");
+    }
+    jb_printf(&b, "]}");
+    heap_caps_free(g);
+    heap_caps_free(ov);
+    esp_err_t ret = send_jbuf(req, &b);
+    heap_caps_free(b.p);
+    return ret;
+}
+
+/* GET /api/stats/records?page= — 콘 Record 표 한 페이지(0 = 최신, 28개, 최신이 앞) */
+static esp_err_t api_stats_records_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    if (stats_sd_blocked(req)) return ESP_OK;
+    int page = query_int(s_w->query, "page", 0);
+    if (page < 0) page = 0;
+    stats_record_t *recs = heap_caps_malloc(sizeof(stats_record_t) * STATS_STORE_PAGE_SIZE, MALLOC_CAP_SPIRAM);
+    const size_t cap = 4096;
+    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
+    char *name = heap_caps_malloc(48, MALLOC_CAP_SPIRAM);
+    if (!recs || !b.p || !name) { heap_caps_free(recs); heap_caps_free(b.p); heap_caps_free(name); httpd_resp_send_500(req); return ESP_FAIL; }
+    uint32_t got = stats_store_read_page((uint32_t)page, STATS_STORE_PAGE_SIZE, recs, STATS_STORE_PAGE_SIZE);
+    uint32_t total = stats_store_get_count();
+    if ((got == 0 || total == 0) && stats_store_had_io_error()) {
+        heap_caps_free(recs); heap_caps_free(b.p); heap_caps_free(name);
+        return send_simple(req, "503 Service Unavailable", "{\"error\":\"sd\"}");
+    }
+    jb_printf(&b, "{\"count\":%lu,\"page\":%d,\"page_size\":%d,\"items\":[", (unsigned long)total, page, STATS_STORE_PAGE_SIZE);
+    for (uint32_t i = 0; i < got; i++) {
+        const stats_record_t *r = &recs[got - 1 - i];   /* 파일 순서(오래된 것부터) → 최신이 앞(콘 표와 같음) */
+        ui_main_stats_device_name(r->mac, name, 48);
+        jb_printf(&b, "%s{\"name\":", i ? "," : "");
+        jb_str(&b, name);
+        jb_printf(&b, ",\"chan\":%u,\"v\":", (unsigned)r->chan_type);
+        jb_float(&b, r->value);
+        jb_printf(&b, ",\"t\":%lu}", (unsigned long)r->unix_time);
+    }
+    jb_printf(&b, "]}");
+    heap_caps_free(recs);
+    heap_caps_free(name);
+    esp_err_t ret = send_jbuf(req, &b);
+    heap_caps_free(b.p);
+    return ret;
+}
+
+/* POST /api/stats/delete_all — 콘 Record 팝업 Delete All 확인 Yes와 같음 */
+static esp_err_t api_stats_delete_all_post_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    ui_web_op_t *op = &s_w->op;
+    memset(op, 0, sizeof(*op));
+    op->type = UI_WEB_OP_STATS_DELETE_ALL;
+    bool ok = ui_main_run_web_op(op, 5000);
+    return send_simple(req, ok ? NULL : "409 Conflict", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
 void web_api_register_handlers(httpd_handle_t server)
 {
+    static const httpd_uri_t stats_uri = { .uri = "/api/stats", .method = HTTP_GET, .handler = api_stats_get_handler };
+    static const httpd_uri_t stats_records_uri = { .uri = "/api/stats/records", .method = HTTP_GET, .handler = api_stats_records_get_handler };
+    static const httpd_uri_t stats_delete_all_uri = { .uri = "/api/stats/delete_all", .method = HTTP_POST, .handler = api_stats_delete_all_post_handler };
+    httpd_register_uri_handler(server, &stats_uri);
+    httpd_register_uri_handler(server, &stats_records_uri);
+    httpd_register_uri_handler(server, &stats_delete_all_uri);
     static const httpd_uri_t cam_list_uri = { .uri = "/api/cam/list", .method = HTTP_GET, .handler = api_cam_list_get_handler };
     static const httpd_uri_t cam_photos_uri = { .uri = "/api/cam/photos", .method = HTTP_GET, .handler = api_cam_photos_get_handler };
     static const httpd_uri_t cam_photo_uri = { .uri = "/api/cam/photo", .method = HTTP_GET, .handler = api_cam_photo_get_handler };
