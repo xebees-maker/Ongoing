@@ -11,6 +11,9 @@
 #include "ui_main.h"
 #include "photo_storage.h"
 #include "stats_store.h"
+#include "notify.h"
+#include "dev_log.h"
+#include "ui_log.h"
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -805,6 +808,142 @@ static esp_err_t api_stats_records_get_handler(httpd_req_t *req)
     return ret;
 }
 
+/* ── 설정(콘 설정 팝업·로그 탭과 같은 항목 + 웹 전용 알림 설정) ── */
+
+/* GET /api/settings — 설정 팝업 한 장분 */
+static esp_err_t api_settings_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    const size_t cap = 2048;
+    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
+    notify_settings_t *ns = heap_caps_malloc(sizeof(*ns), MALLOC_CAP_SPIRAM);
+    if (!b.p || !ns) { heap_caps_free(b.p); heap_caps_free(ns); httpd_resp_send_500(req); return ESP_FAIL; }
+    notify_get_settings(ns);
+    jb_printf(&b, "{\"auto_new\":%s,\"auto_known\":%s,\"resp\":%lu,\"resp_opts\":",
+              device_config_get_auto_connect_new() ? "true" : "false", device_config_get_auto_connect_known() ? "true" : "false",
+              (unsigned long)device_config_get_response_interval_sec());
+    jb_values(&b, 5);
+    jb_printf(&b, ",\"adapt\":%lu,\"adapt_opts\":", (unsigned long)device_config_get_adaptive_response_sec());
+    jb_values(&b, 6);
+    jb_printf(&b, ",\"time\":%lu,\"dev\":{\"save\":%u,\"mask\":%u,\"tag\":%u,\"tags\":[", (unsigned long)rtc_sync_get_unix_time(),
+              (unsigned)dev_log_get_save_level(), (unsigned)dev_log_get_view_mask(), (unsigned)dev_log_get_tag_filter());
+    for (int i = 0; i < DEV_LOG_TAG_COUNT; i++) {
+        if (i) jb_printf(&b, ",");
+        jb_str(&b, DEV_LOG_TAGS[i]);
+    }
+    jb_printf(&b, "]},\"notify\":{\"topic\":");
+    jb_str(&b, ns->topic);
+    jb_printf(&b, ",\"click\":");
+    jb_str(&b, ns->click);
+    jb_printf(&b, ",\"types\":%lu,\"count\":%d}}", (unsigned long)ns->types, NOTIFY_TYPE_COUNT);
+    heap_caps_free(ns);
+    esp_err_t ret = send_jbuf(req, &b);
+    heap_caps_free(b.p);
+    return ret;
+}
+
+/* POST /api/settings/set?key=auto_new|auto_known|resp|adapt|dev_save|dev_mask|dev_tag&val= — 고르는 즉시 저장(콘과 같음) */
+static esp_err_t api_settings_set_post_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    static const struct { const char *key; ui_web_op_type_t type; } map[] = {
+        { "auto_new", UI_WEB_OP_AUTO_NEW }, { "auto_known", UI_WEB_OP_AUTO_KNOWN }, { "resp", UI_WEB_OP_RESP_INTERVAL },
+        { "adapt", UI_WEB_OP_ADAPTIVE }, { "dev_save", UI_WEB_OP_DEV_SAVE }, { "dev_mask", UI_WEB_OP_DEV_VIEW_MASK },
+        { "dev_tag", UI_WEB_OP_DEV_TAG },
+    };
+    ui_web_op_t *op = &s_w->op;
+    memset(op, 0, sizeof(*op));
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        if (strcmp(s_w->key, map[i].key) == 0) op->type = map[i].type;
+    }
+    if (!op->type || s_w->val[0] == '\0') return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    op->value = (uint32_t)strtoul(s_w->val, NULL, 10);
+    bool ok = ui_main_run_web_op(op, 3000);
+    return send_simple(req, ok ? NULL : "409 Conflict", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+/* POST /api/time?t=YYYY-MM-DD%20HH:MM:SS — 콘 시각 설정(콘 현지 시각) */
+static esp_err_t api_time_post_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    ui_web_op_t *op = &s_w->op;
+    memset(op, 0, sizeof(*op));
+    op->type = UI_WEB_OP_SET_TIME;
+    if (httpd_query_key_value(s_w->query, "t", op->text, sizeof(op->text)) != ESP_OK) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    for (char *p = op->text; *p; p++) if (*p == '+') *p = ' ';   /* 쿼리의 공백 */
+    char *pc = strstr(op->text, "%20");
+    if (pc) { *pc = ' '; memmove(pc + 1, pc + 3, strlen(pc + 3) + 1); }
+    bool ok = ui_main_run_web_op(op, 3000);
+    return send_simple(req, ok ? NULL : "400 Bad Request", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+/* POST /api/restart — 콘 장치 재시작(확인은 웹에서) */
+static esp_err_t api_restart_post_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    ui_web_op_t *op = &s_w->op;
+    memset(op, 0, sizeof(*op));
+    op->type = UI_WEB_OP_RESTART;
+    bool ok = ui_main_run_web_op(op, 3000);
+    return send_simple(req, ok ? NULL : "409 Conflict", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+/* GET /api/logs?kind=gen|dev — 일반 로그 / 개발 로그(콘 화면과 같은 보기 설정으로 거른 줄), 줄바꿈 텍스트 */
+#define WEB_LOG_CAP 8192
+static esp_err_t api_logs_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    char *buf = heap_caps_malloc(WEB_LOG_CAP, MALLOC_CAP_SPIRAM);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    buf[0] = '\0';
+    httpd_query_key_value(s_w->query, "kind", s_w->key, sizeof(s_w->key));
+    size_t len;
+    if (strcmp(s_w->key, "dev") == 0) len = dev_log_render(buf, WEB_LOG_CAP);
+    else { ui_log_get_snapshot(buf, WEB_LOG_CAP); len = strlen(buf); }
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t ret = httpd_resp_send(req, buf, len);
+    heap_caps_free(buf);
+    return ret;
+}
+
+/* POST /api/notify/set — 본문 "topic\nclick\ntypes"(웹 전용 알림 설정, notify.cfg) */
+static esp_err_t api_notify_set_post_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    if (!read_body(req, s_w->query, sizeof(s_w->query))) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    notify_settings_t *ns = heap_caps_calloc(1, sizeof(*ns), MALLOC_CAP_SPIRAM);
+    if (!ns) { httpd_resp_send_500(req); return ESP_FAIL; }
+    char *topic = s_w->query, *click = strchr(topic, '\n'), *types = NULL;
+    bool ok = click != NULL;
+    if (ok) { *click++ = '\0'; types = strchr(click, '\n'); ok = types != NULL; }
+    if (ok) {
+        *types++ = '\0';
+        ok = strlen(topic) < sizeof(ns->topic) && strlen(click) < sizeof(ns->click);
+    }
+    if (ok) {
+        strcpy(ns->topic, topic);
+        strcpy(ns->click, click);
+        ns->types = (uint32_t)strtoul(types, NULL, 10);
+        ok = notify_set_settings(ns);
+    }
+    heap_caps_free(ns);
+    return send_simple(req, ok ? NULL : "400 Bad Request", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+/* POST /api/notify/test — 시험 알림 하나(제목·내용은 ASCII) */
+static esp_err_t api_notify_test_post_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    bool ok = notify_send("FlexFarm test", "Test notification from Cntl");
+    return send_simple(req, ok ? NULL : "503 Service Unavailable", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
 /* POST /api/stats/delete_all — 콘 Record 팝업 Delete All 확인 Yes와 같음 */
 static esp_err_t api_stats_delete_all_post_handler(httpd_req_t *req)
 {
@@ -825,6 +964,20 @@ void web_api_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &stats_uri);
     httpd_register_uri_handler(server, &stats_records_uri);
     httpd_register_uri_handler(server, &stats_delete_all_uri);
+    static const httpd_uri_t settings_uri = { .uri = "/api/settings", .method = HTTP_GET, .handler = api_settings_get_handler };
+    static const httpd_uri_t settings_set_uri = { .uri = "/api/settings/set", .method = HTTP_POST, .handler = api_settings_set_post_handler };
+    static const httpd_uri_t time_uri = { .uri = "/api/time", .method = HTTP_POST, .handler = api_time_post_handler };
+    static const httpd_uri_t restart_uri = { .uri = "/api/restart", .method = HTTP_POST, .handler = api_restart_post_handler };
+    static const httpd_uri_t logs_uri = { .uri = "/api/logs", .method = HTTP_GET, .handler = api_logs_get_handler };
+    static const httpd_uri_t notify_set_uri = { .uri = "/api/notify/set", .method = HTTP_POST, .handler = api_notify_set_post_handler };
+    static const httpd_uri_t notify_test_uri = { .uri = "/api/notify/test", .method = HTTP_POST, .handler = api_notify_test_post_handler };
+    httpd_register_uri_handler(server, &settings_uri);
+    httpd_register_uri_handler(server, &settings_set_uri);
+    httpd_register_uri_handler(server, &time_uri);
+    httpd_register_uri_handler(server, &restart_uri);
+    httpd_register_uri_handler(server, &logs_uri);
+    httpd_register_uri_handler(server, &notify_set_uri);
+    httpd_register_uri_handler(server, &notify_test_uri);
     static const httpd_uri_t cam_list_uri = { .uri = "/api/cam/list", .method = HTTP_GET, .handler = api_cam_list_get_handler };
     static const httpd_uri_t cam_photos_uri = { .uri = "/api/cam/photos", .method = HTTP_GET, .handler = api_cam_photos_get_handler };
     static const httpd_uri_t cam_photo_uri = { .uri = "/api/cam/photo", .method = HTTP_GET, .handler = api_cam_photo_get_handler };

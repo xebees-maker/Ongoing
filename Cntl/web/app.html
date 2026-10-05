@@ -163,6 +163,22 @@
   .viewer img { position:absolute; left:50%; top:50%; max-width:100vw; max-height:100vh; transform-origin:center center; user-select:none; -webkit-user-drag:none; }
   .viewer .vx { position:absolute; top:10px; right:10px; z-index:2; color:#fff; border:none; font-size:26px; background:rgba(0,0,0,.4); }
   .choice.sel { border-color:var(--blue); }
+  /* 설정 팝업 */
+  .gtitle { padding:16px 14px 6px; font-size:13px; font-weight:700; color:var(--muted); border-bottom:1px solid var(--line); }
+  .gsub { padding:12px 14px 4px 26px; font-size:12px; font-weight:600; color:var(--muted); border-bottom:1px solid var(--line); }
+  .seg button { padding:6px 12px; }
+  .seg button.on { background:var(--blue); border-color:var(--blue); color:#fff; }
+  .help { padding:0 14px 10px; font-size:13px; color:var(--muted); border-bottom:1px solid var(--line); }
+  .field.nb { border-bottom:none; }
+  .shead { z-index:3; }   /* 스크롤하면 토글(.tg, position:relative)이 제목줄 위로 올라오던 것 */
+  .field .ctl { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px; }
+  .field input[type=text], .field input[type=password] { width:100%; }
+  .tg input:disabled + span { opacity:.45; }
+  .logbox { margin:0 14px 10px; padding:8px; height:34vh; overflow:auto; background:rgba(127,127,127,.08); border-radius:6px;
+            font:12px/1.35 ui-monospace, Menlo, Consolas, monospace; white-space:pre-wrap; overflow-wrap:anywhere; touch-action:pan-y; overscroll-behavior:contain; }
+  .lvl { display:inline-flex; align-items:center; gap:3px; }
+  .lvl input { width:18px; height:18px; }
+  #setBtn { padding:3px 6px; line-height:0; }
   /* 통계 팝업 */
   .ovgrid { display:grid; grid-template-columns:1fr; padding:4px 0 8px; border-bottom:1px solid var(--line); }
   @media (min-width: 700px) { .ovgrid { grid-template-columns:1fr 1fr; } }
@@ -195,7 +211,7 @@
     <span id="clock" class="inv"></span>
     <span id="net" class="inv"></span>
     <span id="sicon" class="sicon"></span>
-    <button id="langBtn" class="small"></button>
+    <button id="setBtn" class="small" aria-label="settings"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   </div>
 </header>
 
@@ -264,9 +280,19 @@
   var W = {
     PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'],
     LOCAL_IN_USE: ['콘에서 사용 중입니다', 'Cntl is being used on its screen'], RECONNECT: ['다시 연결', 'Reconnect'],
-    OFFLINE: ['연결 끊김', 'Offline'], LANG: ['EN', '한국어'],
+    OFFLINE: ['연결 끊김', 'Offline'], WEB: ['웹', 'Web'],
     LOADING: ['받는 중', 'Loading'], CAPTURING: ['촬영 중', 'Capturing'], NO_PHOTO: ['사진이 오지 않았습니다', 'No photo arrived'],
-    SEC: ['초', 's']
+    SEC: ['초', 's'],
+    NOTIFY: ['알림', 'Notifications'], SECURITY: ['보안', 'Security'],
+    N_TYPES: [['에러', 'Errors'], ['경고', 'Warnings'], ['릴레이 켜짐·꺼짐', 'Relay on/off'], ['장치 연결 끊김', 'Device disconnected'],
+              ['SD 오류', 'SD error'], ['배터리 부족', 'Low battery'], ['CAN 버스 이상', 'CAN bus fault']],
+    TOPIC: ['ntfy 토픽', 'ntfy topic'], CLICK: ['알림을 누르면 열 주소', 'Click URL'], TEST_SEND: ['시험 알림 보내기', 'Send test'],
+    SENT: ['보냈습니다', 'Sent'], SAVED: ['저장했습니다', 'Saved'], INVALID: ['형식이 맞지 않습니다', 'Invalid format'],
+    TIME_PHONE: ['휴대폰 시각으로', 'Use phone time'], PW_OLD: ['지금 비밀번호', 'Current password'], PW_NEW: ['새 비밀번호', 'New password'],
+    PW_CHANGE: ['비밀번호 변경', 'Change password'], PW_CHANGED: ['비밀번호를 바꿨습니다', 'Password changed'],
+    PW_FAIL: ['비밀번호를 바꾸지 못했습니다', 'Password not changed'], LOGOUT_ALL: ['모든 기기 로그아웃', 'Log out all devices'],
+    LOGOUT_ALL_CONFIRM: ['모든 기기에서 로그아웃합니다. 이 기기도 다시 로그인해야 합니다.', 'All devices will be logged out, including this one.'],
+    RESTARTING: ['재시작합니다', 'Restarting']
   };
   /* 센서 채널 종류(esp_now_link.h SENSOR_CHAN_*) → 콘 주화면과 같은 글자·단위 */
   var CHAN = { 1: ['T', 'STR_CHAN_UNIT_TEMP_C'], 2: ['H', 'STR_CHAN_UNIT_HUMI_PCT'], 3: ['C', 'STR_CHAN_UNIT_CO2_PPM'], 4: ['A', 'STR_CHAN_UNIT_NH3_PPM'] };
@@ -290,7 +316,6 @@
     [].forEach.call(document.querySelectorAll('[data-s]'), function (el) { el.textContent = S(el.getAttribute('data-s')); });
     [].forEach.call(document.querySelectorAll('[data-w]'), function (el) { el.textContent = Wt(el.getAttribute('data-w')); });
     [].forEach.call(document.querySelectorAll('[data-w-ph]'), function (el) { el.placeholder = Wt(el.getAttribute('data-w-ph')); });
-    $('langBtn').textContent = Wt('LANG');
     if (last) render(last);
     if (sheetRender) sheetRender();
   }
@@ -493,11 +518,13 @@
     api('api/session/claim', { method: 'POST' }).then(function () { show('main'); poll(); }).catch(function () {});
   });
 
-  $('langBtn').addEventListener('click', function () {
-    lang = (lang === 'ko') ? 'en' : 'ko';
+  $('setBtn').addEventListener('click', function () { if (view === 'main') openSettings(); });
+
+  function setLang(l) {
+    lang = l;
     try { localStorage.setItem('lang', lang); } catch (e) {}
-    applyTexts();
-  });
+    applyTexts();   /* 떠 있는 팝업도 다시 그림 */
+  }
 
   /* 진단(10-03 — 한국어에서만 휴대폰 폭을 넘음): 주소에 ?debug=1이면 화면 밖으로 나간 요소를 위에 띄움. 배치는 안 바꿈 */
   if (/[?&]debug=1/.test(location.search)) {
@@ -561,6 +588,8 @@
     $('viewer').classList.add('hidden');  /* 전체 화면 보기도 같이 */
     clearInterval(camTimer);
     clearInterval(statsTimer);
+    clearInterval(setTimer);
+    clearInterval(logTimer);
     poll();
     setTimeout(fixZoom, 100);
   }
@@ -1005,6 +1034,232 @@
         loadPhotos();
       });
     });
+  }
+
+  /* ── 설정 팝업(콘 build_option_tab과 같은 항목 — 언어·네트워크·화면 끄기는 뺌(사용자 결정)) + 웹 전용 알림·보안.
+   *    선택지는 고르는 즉시 저장(콘과 같음), 글자 입력(토픽·주소·비밀번호)만 버튼으로 ── */
+  var cfg = null, setTimer = null, logTimer = null, clockOff = 0;
+  function fmtFull(t) { var d = new Date(t * 1000).toISOString(); return d.substr(0, 10) + ' ' + d.substr(11, 8); }   /* 콘 시각 = 현지값을 초로 */
+  function gtitle(t) { return '<div class="gtitle">' + esc(t) + '</div>'; }
+  function gsub(t) { return '<div class="gsub">' + esc(t) + '</div>'; }
+  function field(label, ctl, nb) { return '<div class="field' + (nb ? ' nb' : '') + '"><label>' + esc(label) + '</label><span class="ctl">' + ctl + '</span></div>'; }
+  function tgl(id, on, dis, attr) {
+    return '<label class="tg"><input type="checkbox" id="' + id + '"' + (on ? ' checked' : '') + (dis ? ' disabled' : '') + (attr || '') + '><span></span></label>';
+  }
+  function apiText(path) {
+    return fetch(path, { cache: 'no-store', credentials: 'same-origin' }).then(function (r) {
+      if (r.status === 401) { show('login'); throw { handled: true }; }
+      if (r.status === 409) { show('local'); throw { handled: true }; }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    });
+  }
+  function openSettings() {
+    api('api/settings').then(function (d) {
+      cfg = d;
+      clockOff = d.time - Date.now() / 1000;
+      openSheet(renderSettings);
+      clearInterval(setTimer);
+      setTimer = setInterval(function () { var c = $('stClock'); if (c) c.textContent = fmtFull(Math.floor(Date.now() / 1000 + clockOff)); }, 1000);
+    }).catch(function () {});
+  }
+  function renderSettings() {
+    var d = cfg, n = d.notify;
+    var h = sheetHead('STR_TAB_OPTION');
+    h += gtitle(S('STR_GROUP_CNTL'));
+    /* 콘: 신규 자동연결을 켜면 이전 연결 자동연결은 켜진 채 잠김 */
+    h += field(S('STR_LABEL_AUTO_CONNECT_NEW'), tgl('stAutoNew', d.auto_new));
+    h += field(S('STR_LABEL_AUTO_CONNECT_KNOWN'), tgl('stAutoKnown', d.auto_new || d.auto_known, d.auto_new));
+    h += field(S('STR_LABEL_RESTART_DEVICE'), '<button id="stRestart" class="danger">' + esc(S('STR_BTN_RESTART')) + '</button>');
+    h += gtitle(S('STR_GROUP_SYSTEM'));
+    var ri = d.resp_opts.indexOf(d.resp);
+    h += field(S('STR_LABEL_RESPONSE_INTERVAL'), '<select id="stResp">' + optionsHtml('STR_OPT_RESPONSE_INTERVAL_LIST', d.resp_opts, d.resp) + '</select>', true);
+    var RESP_HELP = ['STR_RESPONSE_HELP_0', 'STR_RESPONSE_HELP_1', 'STR_RESPONSE_HELP_2', 'STR_RESPONSE_HELP_3', 'STR_RESPONSE_HELP_4'];   /* 콘 update_response_help_text */
+    h += '<div class="help">' + esc(S(RESP_HELP[Math.max(0, ri)])) + '</div>';
+    h += field(S('STR_LABEL_ADAPTIVE_RESPONSE'), '<select id="stAdapt">' + optionsHtml('STR_OPT_ADAPTIVE_RESPONSE_LIST', d.adapt_opts, d.adapt) + '</select>', true);
+    h += '<div class="help">' + esc(S('STR_HELP_ADAPTIVE_RESPONSE')) + '</div>';
+    h += field(S('STR_LABEL_TIME'), '<span id="stClock" class="val">' + fmtFull(Math.floor(Date.now() / 1000 + clockOff)) + '</span><button id="stTime" class="small">' +
+               esc(S('STR_BTN_SET_TIME')) + '</button><button id="stTimePhone" class="small">' + esc(Wt('TIME_PHONE')) + '</button>');
+    h += field(S('STR_TAB_LOG'), '<button id="stLog" class="small">' + esc(S('STR_BTN_VIEW')) + '</button>');
+    /* 웹 묶음 — 콘 화면에 없는 웹 전용(언어는 이 브라우저에만 저장) */
+    h += gtitle(Wt('WEB'));
+    h += field(S('STR_LABEL_LANGUAGE'), '<span class="seg"><button class="small' + (lang === 'ko' ? ' on' : '') + '" data-lang="ko">한국어</button> ' +
+               '<button class="small' + (lang === 'en' ? ' on' : '') + '" data-lang="en">English</button></span>');
+    h += gsub(Wt('NOTIFY'));
+    W.N_TYPES.forEach(function (t, i) { h += field(t[li()], tgl('stNt' + i, (n.types >> i) & 1, false, ' data-nt="' + i + '"')); });
+    h += '<div class="field"><label>' + esc(Wt('TOPIC')) + '</label><input type="text" id="stTopic" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="63" value="' + esc(n.topic) + '"></div>';
+    h += '<div class="field"><label>' + esc(Wt('CLICK')) + '</label><input type="text" id="stClick" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="159" value="' + esc(n.click) + '"></div>';
+    h += '<div class="sfoot"><button id="stNtTest">' + esc(Wt('TEST_SEND')) + '</button><button id="stNtApply" class="primary">' + esc(S('STR_BTN_APPLY')) + '</button></div>';
+    h += gsub(Wt('SECURITY'));
+    h += '<div class="field"><label>' + esc(Wt('PW_OLD')) + '</label><input type="password" id="stPwOld" autocomplete="current-password"></div>';
+    h += '<div class="field"><label>' + esc(Wt('PW_NEW')) + '</label><input type="password" id="stPwNew" autocomplete="new-password"></div>';
+    h += '<div class="sfoot"><button id="stPwBtn" class="primary">' + esc(Wt('PW_CHANGE')) + '</button></div>';
+    h += '<div class="sfoot" style="border-top:1px solid var(--line)"><button id="stLogoutAll" class="danger">' + esc(Wt('LOGOUT_ALL')) + '</button></div>';
+    $('sheetBody').innerHTML = h;
+    bindSettings();
+  }
+  function setKeyVal(key, val) {
+    return post('api/settings/set?key=' + key + '&val=' + val).catch(function (e) { if (!(e && e.handled)) toast('Error'); throw e; });
+  }
+  function notifyTypes() {
+    var t = 0;
+    W.N_TYPES.forEach(function (x, i) { if ($('stNt' + i).checked) t |= 1 << i; });
+    return t;
+  }
+  function saveNotify(topic, click, types) {
+    return post('api/notify/set', topic + '\n' + click + '\n' + types).then(function () {
+      cfg.notify = { topic: topic, click: click, types: types };
+    });
+  }
+  function bindSettings() {
+    function on(id, ev, fn) { var el = $(id); if (el) el.addEventListener(ev, fn); }
+    on('stAutoNew', 'change', function () {
+      var v = this.checked;
+      setKeyVal('auto_new', v ? 1 : 0).then(function () { cfg.auto_new = v; renderSettings(); }).catch(function () { renderSettings(); });
+    });
+    on('stAutoKnown', 'change', function () {
+      var v = this.checked;
+      setKeyVal('auto_known', v ? 1 : 0).then(function () { cfg.auto_known = v; }).catch(function () { renderSettings(); });
+    });
+    on('stRestart', 'click', function () {
+      if (!confirm(S('STR_MSG_RESTART_CONFIRM'))) return;
+      post('api/restart').then(function () { closeSheet(); toast(Wt('RESTARTING')); }).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+    });
+    on('stResp', 'change', function () {
+      var v = +this.value;
+      setKeyVal('resp', v).then(function () { cfg.resp = v; renderSettings(); }).catch(function () { renderSettings(); });
+    });
+    on('stAdapt', 'change', function () {
+      var v = +this.value;
+      setKeyVal('adapt', v).then(function () { cfg.adapt = v; }).catch(function () { renderSettings(); });
+    });
+    on('stTime', 'click', openTimeRoller);
+    on('stTimePhone', 'click', function () {
+      var t = new Date();   /* 휴대폰의 현지 시각을 그대로(콘은 현지 시각) */
+      sendTime(t.getFullYear(), t.getMonth() + 1, t.getDate(), t.getHours(), t.getMinutes(), t.getSeconds());
+    });
+    on('stLog', 'click', openLogs);
+    $('sheetBody').querySelectorAll('[data-lang]').forEach(function (b) {
+      b.addEventListener('click', function () { if (b.getAttribute('data-lang') !== lang) setLang(b.getAttribute('data-lang')); });
+    });
+    $('sheetBody').querySelectorAll('[data-nt]').forEach(function (el) {
+      el.addEventListener('change', function () {
+        saveNotify(cfg.notify.topic, cfg.notify.click, notifyTypes()).catch(function (e) { if (!(e && e.handled)) toast('Error'); renderSettings(); });
+      });
+    });
+    on('stNtApply', 'click', function () {
+      saveNotify($('stTopic').value.trim(), $('stClick').value.trim(), notifyTypes()).then(function () { toast(Wt('SAVED')); })
+        .catch(function (e) { if (!(e && e.handled)) toast(Wt('INVALID')); });
+    });
+    on('stNtTest', 'click', function () {
+      post('api/notify/test').then(function () { toast(Wt('SENT')); }).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+    });
+    on('stPwBtn', 'click', function () {
+      var o = $('stPwOld').value, nw = $('stPwNew').value;
+      if (!o || !nw) return;
+      post('api/password', o + '\n' + nw).then(function () { $('stPwOld').value = ''; $('stPwNew').value = ''; toast(Wt('PW_CHANGED')); })
+        .catch(function (e) { if (!(e && e.handled)) toast(Wt('PW_FAIL')); });
+    });
+    on('stLogoutAll', 'click', function () {
+      if (!confirm(Wt('LOGOUT_ALL_CONFIRM'))) return;
+      post('api/logout_all').then(function () { realCloseSheet(); show('login'); }).catch(function () {});
+    });
+  }
+  function pad2(v) { return (v < 10 ? '0' : '') + v; }
+  function sendTime(y, mo, d, hh, mi, ss) {
+    var t = y + '-' + pad2(mo) + '-' + pad2(d) + '+' + pad2(hh) + ':' + pad2(mi) + ':' + pad2(ss);
+    post('api/time?t=' + t).then(function () {
+      clockOff = Date.UTC(y, mo - 1, d, hh, mi, ss) / 1000 - Date.now() / 1000;
+      var c = $('stClock'); if (c) c.textContent = fmtFull(Math.floor(Date.now() / 1000 + clockOff));
+      toast(Wt('SAVED'));
+    }).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+  }
+  /* 시각 설정 — 콘 show_settime_popup과 같은 칸(년·월·일·시·분, 연도는 올해 -2 ~ +8), 고르는 건 롤러 */
+  function openTimeRoller() {
+    var now = new Date(Date.now() + clockOff * 1000), y = now.getUTCFullYear();
+    var cols = [['tY', rollCol('tY', y - 2, y + 8, y)], ['tMo', rollCol('tMo', 1, 12, now.getUTCMonth() + 1)], ['tD', rollCol('tD', 1, 31, now.getUTCDate())],
+                ['tH', rollCol('tH', 0, 23, now.getUTCHours())], ['tMi', rollCol('tMi', 0, 59, now.getUTCMinutes())]];
+    var sep = ['-', '-', '&nbsp;', ':', ''];
+    var h = cols.map(function (c, i) { return c[1].html + (sep[i] ? '<span class="rfix">' + sep[i] + '</span>' : ''); }).join('');
+    $('modalBox').innerHTML = '<div class="mtitle" style="background:var(--blue);color:#fff">' + esc(S('STR_LABEL_TIME')) + '</div>' +
+      '<div class="roll"><div class="band"></div>' + h + '</div>' +
+      '<div class="sfoot"><button data-m="no">' + esc(S('STR_BTN_CANCEL')) + '</button><button class="primary" data-m="yes">' + esc(S('STR_BTN_CONFIRM')) + '</button></div>';
+    $('modal').classList.remove('hidden');
+    cols.forEach(function (c) {
+      var el = $(c[0]);
+      el.style.width = c[0] === 'tY' ? '72px' : '48px';
+      el.scrollTop = (c[1].cur - c[1].a) * ROW;
+      markCol(c[0]);
+      el.addEventListener('scroll', function () { markCol(c[0]); }, { passive: true });
+    });
+    $('modal').onclick = function (ev) {
+      var m = ev.target.closest('[data-m]');
+      if (!m) return;
+      if (m.getAttribute('data-m') === 'yes') {
+        var v = cols.map(function (c) { return colValue(c[0], c[1].a); });
+        var dim = new Date(Date.UTC(v[0], v[1], 0)).getUTCDate();   /* 그달의 마지막 날을 넘지 않게 */
+        sendTime(v[0], v[1], Math.min(v[2], dim), v[3], v[4], 0);
+      }
+      $('modal').classList.add('hidden');
+      $('modal').onclick = null;
+    };
+  }
+
+  /* ── 로그 팝업(콘 build_log_tab): 일반 로그 + Dev Log(일시멈춤, 저장 문턱, 레벨 보기, 태그). 닫으면 설정으로(콘과 같음) ── */
+  var logPaused = false;
+  function openLogs() {
+    logPaused = false;
+    openSheet(renderLogs);
+    clearInterval(setTimer);
+    loadLogs(true);
+    clearInterval(logTimer);
+    logTimer = setInterval(function () { if (sheetRender === renderLogs) loadLogs(false); }, 2000);
+  }
+  function renderLogs() {
+    var dv = cfg.dev, names = ['', 'E', 'W', 'I', 'D'];
+    var h = '<div class="shead"><h3>' + esc(S('STR_TAB_LOG')) + '</h3><button class="xbtn" id="logBack" aria-label="close">&#x2715;</button></div>';
+    h += gtitle(S('STR_PANEL_GENERAL_LOG')) + '<div class="logbox" id="logGen" style="margin-top:8px"></div>';
+    h += '<div class="gtitle" style="display:flex;justify-content:space-between;align-items:center"><span>' + esc(S('STR_PANEL_DEV_LOG')) +
+         '</span><button class="small" id="logPause">' + esc(S(logPaused ? 'STR_BTN_RESUME' : 'STR_BTN_PAUSE')) + '</button></div>';
+    h += '<div class="btnrow" style="align-items:center;border-bottom:none">Save <select id="devSave">' + [1, 2, 3, 4].map(function (l) {
+      return '<option value="' + l + '"' + (l === dv.save ? ' selected' : '') + '>' + names[l] + '</option>';
+    }).join('') + '</select>';
+    for (var l = 1; l <= 4; l++) {
+      h += '<label class="lvl"><input type="checkbox" data-lvl="' + l + '"' + ((dv.mask >> l) & 1 ? ' checked' : '') + (l > dv.save ? ' disabled' : '') + '>' + names[l] + '</label>';
+    }
+    h += '<select id="devTag">' + dv.tags.map(function (t, i) { return '<option value="' + i + '"' + (i === dv.tag ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('') + '</select></div>';
+    h += '<div class="logbox" id="logDev"></div>';
+    $('sheetBody').innerHTML = h;
+    $('logBack').addEventListener('click', function () { clearInterval(logTimer); openSettings(); });
+    $('logPause').addEventListener('click', function () { logPaused = !logPaused; this.textContent = S(logPaused ? 'STR_BTN_RESUME' : 'STR_BTN_PAUSE'); if (!logPaused) loadLogs(true); });
+    $('devSave').addEventListener('change', function () {
+      var v = +this.value;
+      setKeyVal('dev_save', v).then(function () { cfg.dev.save = v; renderLogs(); loadLogs(true); }).catch(function () {});
+    });
+    $('devTag').addEventListener('change', function () {
+      var v = +this.value;
+      setKeyVal('dev_tag', v).then(function () { cfg.dev.tag = v; loadLogs(true); }).catch(function () {});
+    });
+    $('sheetBody').querySelectorAll('[data-lvl]').forEach(function (el) {
+      el.addEventListener('change', function () {
+        var m = 0;
+        $('sheetBody').querySelectorAll('[data-lvl]').forEach(function (x) { if (x.checked) m |= 1 << +x.getAttribute('data-lvl'); });
+        setKeyVal('dev_mask', m).then(function () { cfg.dev.mask = m; loadLogs(true); }).catch(function () {});
+      });
+    });
+  }
+  /* 새 글이 오면 맨 아래로 — 사용자가 위로 올려 읽는 중이면 그대로 둠 */
+  function putLog(id, text, force) {
+    var el = $(id);
+    if (!el || el.textContent === text) return;
+    var atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
+    el.textContent = text;
+    if (force || atBottom) el.scrollTop = el.scrollHeight;
+  }
+  function loadLogs(force) {
+    apiText('api/logs?kind=gen').then(function (t) { putLog('logGen', t, force); }).catch(function () {});
+    if (logPaused) return;   /* 콘: 일시멈춤은 Dev Log 화면만 멈춤(줄은 계속 쌓임) */
+    apiText('api/logs?kind=dev').then(function (t) { putLog('logDev', t, force); }).catch(function () {});
   }
 
   /* ── 통계 팝업(콘 build_stats_tab과 같은 기능): 개괄(기간, 공기 T/H 정밀·간이 탭 전환, Agar 혼합→슬롯 순환), 그래프(그룹, 슬롯

@@ -2,6 +2,7 @@
 #include "fs.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -23,10 +24,7 @@ typedef struct {
     char msg[192];
 } notify_item_t;
 
-typedef struct {
-    char topic[64];
-    char click[160];
-} notify_cfg_t;
+typedef notify_settings_t notify_cfg_t;
 
 static QueueHandle_t s_q = NULL;
 static StaticQueue_t s_q_struct;
@@ -47,6 +45,7 @@ static char *s_line = NULL;               /* notify.cfg 한 줄(보내기 태스
 static bool load_cfg_locked(void)
 {
     memset(s_cfg, 0, sizeof(*s_cfg));
+    s_cfg->types = NOTIFY_TYPES_ALL;  /* types= 줄이 없으면 전부 켬 */
     FILE *f = fopen(NOTIFY_CFG_PATH, "r");
     if (!f) return false;
     char *line = s_line;
@@ -57,6 +56,8 @@ static bool load_cfg_locked(void)
             snprintf(s_cfg->topic, sizeof(s_cfg->topic), "%s", line + 6);
         } else if (strncmp(line, "click=", 6) == 0) {
             snprintf(s_cfg->click, sizeof(s_cfg->click), "%s", line + 6);
+        } else if (strncmp(line, "types=", 6) == 0) {
+            s_cfg->types = (uint32_t)strtoul(line + 6, NULL, 10) & NOTIFY_TYPES_ALL;
         }
     }
     fclose(f);
@@ -162,4 +163,49 @@ bool notify_copy_public_url(char *out, size_t cap)
     snprintf(out, cap, "%s", s_cfg->click);
     xSemaphoreGive(s_cfg_mutex);
     return out[0] != '\0';
+}
+
+void notify_get_settings(notify_settings_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->types = NOTIFY_TYPES_ALL;
+    if (!s_cfg_mutex) return;
+    xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);
+    *out = *s_cfg;
+    xSemaphoreGive(s_cfg_mutex);
+}
+
+static bool topic_ok(const char *t)
+{
+    for (; *t; t++) {
+        char c = *t;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
+    }
+    return true;
+}
+
+static bool click_ok(const char *u)
+{
+    for (; *u; u++) {
+        if ((unsigned char)*u <= 0x20 || (unsigned char)*u >= 0x7F) return false;  /* 헤더 주입·공백 막음 */
+    }
+    return true;
+}
+
+bool notify_set_settings(const notify_settings_t *in)
+{
+    if (!s_cfg_mutex || !in) return false;
+    if (strnlen(in->topic, sizeof(in->topic)) >= sizeof(in->topic) || strnlen(in->click, sizeof(in->click)) >= sizeof(in->click)) return false;
+    if (!topic_ok(in->topic) || !click_ok(in->click)) return false;
+    xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);
+    FILE *f = fopen(NOTIFY_CFG_PATH, "w");
+    bool ok = (f != NULL);
+    if (f) {
+        ok = fprintf(f, "topic=%s\nclick=%s\ntypes=%lu\n", in->topic, in->click, (unsigned long)(in->types & NOTIFY_TYPES_ALL)) > 0;
+        ok = (fclose(f) == 0) && ok;
+    }
+    load_cfg_locked();
+    xSemaphoreGive(s_cfg_mutex);
+    if (!ok) ESP_LOGE(TAG, "notify.cfg write failed");
+    return ok;
 }

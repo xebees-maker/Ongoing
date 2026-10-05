@@ -919,6 +919,15 @@ static void web_lock_apply(void *arg)
         if (s_relay_popup) teardown_relay_popup();
         if (s_camera_popup) teardown_camera_tab();
         if (s_stats_popup) teardown_stats_tab();
+        if (s_option_popup) {  /* 설정·로그 팝업(cb_close_option_popup과 같은 정리 — 로그를 보고 있었으면 로그부터) */
+            if (s_log_tab_built) teardown_log_tab();
+            else teardown_option_tab();
+            lv_obj_delete(s_option_popup);
+            s_option_popup = NULL;
+            s_option_content = NULL;
+            s_option_popup_title = NULL;
+            s_option_tab_built = false;
+        }
     }
     if (!locked) {
         if (s_web_lock_overlay) lv_obj_add_flag(s_web_lock_overlay, LV_OBJ_FLAG_HIDDEN);
@@ -10533,6 +10542,23 @@ static bool value_in(const uint32_t *vals, size_t n, uint32_t v)
 static bool web_relay_apply(int idx, const ui_web_relay_choices_t *in);
 
 /* LVGL 태스크에서 — 콘 화면 콜백(cb_cam_capture_changed 등)과 같은 모델 함수를 부름 */
+/* 2026-10-05 — 웹 재시작: 바로 esp_restart()하면 "됐음" 응답이 못 나감 → 1초 뒤 */
+static void web_restart_cb(void *arg)
+{
+    (void)arg;
+    esp_restart();
+}
+
+static void web_restart_later(void)
+{
+    static esp_timer_handle_t s_t = NULL;
+    if (!s_t) {
+        const esp_timer_create_args_t a = { .callback = web_restart_cb, .name = "web_restart" };
+        if (esp_timer_create(&a, &s_t) != ESP_OK) { esp_restart(); return; }
+    }
+    esp_timer_start_once(s_t, 1000 * 1000);
+}
+
 static bool web_op_execute(const ui_web_op_t *op)
 {
     switch (op->type) {
@@ -10599,6 +10625,48 @@ static bool web_op_execute(const ui_web_op_t *op)
         case UI_WEB_OP_STATS_DELETE_ALL:  /* cb_delete_stats_confirmed와 같음 */
             stats_store_delete_all();
             s_stats_page_index = 0;
+            return true;
+        case UI_WEB_OP_AUTO_NEW:          /* cb_auto_connect_new_changed와 같음(이전 연결 강제는 화면 표시만 — 웹이 그림) */
+            device_config_set_auto_connect_new(op->value != 0);
+            return true;
+        case UI_WEB_OP_AUTO_KNOWN:        /* cb_auto_connect_known_changed */
+            device_config_set_auto_connect_known(op->value != 0);
+            return true;
+        case UI_WEB_OP_RESP_INTERVAL:     /* cb_response_interval_changed */
+            if (!value_in(s_response_interval_values, sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0]), op->value)) return false;
+            node_hub_apply_response_interval_sec(op->value);
+            ui_log_add("Response interval saved (web) - applied on next CAM wake");
+            return true;
+        case UI_WEB_OP_ADAPTIVE:          /* cb_adaptive_response_changed */
+            if (!value_in(s_adaptive_response_values, sizeof(s_adaptive_response_values) / sizeof(s_adaptive_response_values[0]), op->value)) return false;
+            device_config_set_adaptive_response_sec(op->value);
+            return true;
+        case UI_WEB_OP_DEV_SAVE:          /* cb_dev_save_changed */
+            if (op->value < DEV_LOG_LVL_E || op->value > DEV_LOG_LVL_D) return false;
+            dev_log_set_save_level((uint8_t)op->value);
+            return true;
+        case UI_WEB_OP_DEV_VIEW_MASK:     /* cb_dev_lvl_cb_changed */
+            dev_log_set_view_mask((uint8_t)(op->value & (DEV_LOG_MASK(DEV_LOG_LVL_E) | DEV_LOG_MASK(DEV_LOG_LVL_W) |
+                                                         DEV_LOG_MASK(DEV_LOG_LVL_I) | DEV_LOG_MASK(DEV_LOG_LVL_D))));
+            return true;
+        case UI_WEB_OP_DEV_TAG:           /* cb_dev_tag_changed */
+            if (op->value >= DEV_LOG_TAG_COUNT) return false;
+            dev_log_set_tag_filter((uint8_t)op->value);
+            return true;
+        case UI_WEB_OP_SET_TIME: {        /* cb_settime_confirm과 같음(초까지 — 휴대폰 시각 맞추기) */
+            int y, mo, d, h, mi, sec;
+            if (sscanf(op->text, "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &sec) != 6) return false;
+            if (y < 2020 || y > 2099 || mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || h > 23 || mi < 0 || mi > 59 || sec < 0 || sec > 59) return false;
+            esp_err_t err = rtc_sync_set_datetime(y, mo, d, h, mi, sec);
+            if (err != ESP_OK) {
+                ui_log_add_err(UI_ERR_RTC_SET_FAILED, "RTC time set failed: %s", esp_err_to_name(err));
+                return false;
+            }
+            refresh_clock(NULL);
+            return true;
+        }
+        case UI_WEB_OP_RESTART:           /* cb_restart_confirmed — 웹 응답이 나간 뒤에 재시작 */
+            web_restart_later();
             return true;
         default:
             return false;
@@ -10681,6 +10749,8 @@ int ui_main_get_option_values(int which, const uint32_t **out)
         case 2: *out = s_xclk_values;                  return (int)(sizeof(s_xclk_values) / sizeof(s_xclk_values[0]));
         case 3: *out = s_relay_trend_sample_values;    return (int)(sizeof(s_relay_trend_sample_values) / sizeof(s_relay_trend_sample_values[0]));
         case 4: *out = s_relay_min_hold_values;        return (int)(sizeof(s_relay_min_hold_values) / sizeof(s_relay_min_hold_values[0]));
+        case 5: *out = s_response_interval_values;     return (int)(sizeof(s_response_interval_values) / sizeof(s_response_interval_values[0]));
+        case 6: *out = s_adaptive_response_values;     return (int)(sizeof(s_adaptive_response_values) / sizeof(s_adaptive_response_values[0]));
         default: *out = NULL; return 0;
     }
 }

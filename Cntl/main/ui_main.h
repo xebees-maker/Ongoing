@@ -49,6 +49,16 @@ typedef enum {
     UI_WEB_OP_PHOTO_DELETE_ALL,/* mac — 콘 Delete all과 같음 */
     UI_WEB_OP_CAPTURE,         /* mac — 콘 Manual shot과 같음(통신 중인 캠만) */
     UI_WEB_OP_STATS_DELETE_ALL,/* 콘 Record 팝업 Delete All 확인 Yes와 같음 */
+    /* 2026-10-05 — 설정 팝업(콘 build_option_tab·로그 탭과 같은 모델 함수) */
+    UI_WEB_OP_AUTO_NEW,        /* value = 0/1 */
+    UI_WEB_OP_AUTO_KNOWN,      /* value = 0/1 */
+    UI_WEB_OP_RESP_INTERVAL,   /* value = 초(선택지 값) */
+    UI_WEB_OP_ADAPTIVE,        /* value = 초(선택지 값) */
+    UI_WEB_OP_DEV_SAVE,        /* value = 저장 문턱 1~4(E/W/I/D) */
+    UI_WEB_OP_DEV_VIEW_MASK,   /* value = 보기 레벨 비트(DEV_LOG_MASK) */
+    UI_WEB_OP_DEV_TAG,         /* value = 태그 필터 번호 */
+    UI_WEB_OP_SET_TIME,        /* text = "YYYY-MM-DD HH:MM:SS"(콘 현지 시각) */
+    UI_WEB_OP_RESTART,         /* 응답이 나간 뒤 재시작(1초 뒤) */
 } ui_web_op_type_t;
 
 /* 릴레이 팝업의 사용자 선택값(화면 위젯이 나타내는 값 그대로). relay_apply_choices()가 이걸 설정 구조체로 바꿈 —
@@ -85,7 +95,7 @@ typedef struct {
 bool ui_main_run_web_op(const ui_web_op_t *op, uint32_t timeout_ms);
 
 /* 콘 화면 선택지 값 목록(웹이 같은 선택지를 보여 주려고) — which: 0 측정 주기(초), 1 촬영 주기(초), 2 XCLK(MHz). 개수 반환 */
-int ui_main_get_option_values(int which, const uint32_t **out);  /* 3 추세 샘플 수, 4 최소 유지(초) */
+int ui_main_get_option_values(int which, const uint32_t **out);  /* 3 추세 샘플 수, 4 최소 유지(초), 5 응답성(초), 6 적응형(초) */
 
 /* 릴레이 팝업 기본값·값 범위(콘 화면과 같은 표) — 웹 릴레이 팝업용 */
 void ui_main_relay_defaults(uint8_t chan, float *center, float *margin);
