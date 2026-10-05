@@ -12,6 +12,7 @@
 #include "photo_storage.h"
 #include "stats_store.h"
 #include "notify.h"
+#include "alarm.h"
 #include "dev_log.h"
 #include "ui_log.h"
 
@@ -208,8 +209,20 @@ static esp_err_t api_dashboard_get_handler(httpd_req_t *req)
         }
         jb_printf(&b, "}");
     }
-    jb_printf(&b, "]}");
+    jb_printf(&b, "]");
     heap_caps_free(nodes);
+
+    /* 2026-10-05(할 일 AD 5단계) — 알림: 마지막 번호(안 본 개수 계산용) + 웹앱에 아직 안 간 보낼 대상(웹앱이 띄움 — 받아 간 것으로 표시) */
+    alarm_rec_t *al = heap_caps_malloc(sizeof(alarm_rec_t) * 8, MALLOC_CAP_SPIRAM);
+    int an = al ? alarm_take_web_new(al, 8) : 0;
+    jb_printf(&b, ",\"alarm\":{\"last\":%lu,\"new\":[", (unsigned long)alarm_last_id());
+    for (int i = 0; i < an; i++) {
+        jb_printf(&b, "%s{\"id\":%lu,\"t\":%lu,\"type\":%u,\"msg\":", i ? "," : "", (unsigned long)al[i].id, (unsigned long)al[i].t, (unsigned)al[i].type);
+        jb_str(&b, al[i].msg);
+        jb_printf(&b, "}");
+    }
+    jb_printf(&b, "]}}");
+    heap_caps_free(al);
 
     esp_err_t ret = send_jbuf(req, &b);
     heap_caps_free(b.p);
@@ -944,6 +957,48 @@ static esp_err_t api_notify_test_post_handler(httpd_req_t *req)
     return send_simple(req, ok ? NULL : "503 Service Unavailable", ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
+/* GET /api/alarms?page= — 알림 기록 한 페이지(0 = 최신, 50개, 최신이 앞) */
+#define WEB_ALARM_PAGE 50
+static esp_err_t api_alarms_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    int page = query_int(s_w->query, "page", 0);
+    if (page < 0) page = 0;
+    alarm_rec_t *recs = heap_caps_malloc(sizeof(alarm_rec_t) * WEB_ALARM_PAGE, MALLOC_CAP_SPIRAM);
+    const size_t cap = 12288;
+    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
+    if (!recs || !b.p) { heap_caps_free(recs); heap_caps_free(b.p); httpd_resp_send_500(req); return ESP_FAIL; }
+    uint32_t last = alarm_last_id();
+    int n = alarm_read_page((uint32_t)page, WEB_ALARM_PAGE, recs);
+    uint32_t total = last < ALARM_HISTORY_MAX ? last : ALARM_HISTORY_MAX;
+    jb_printf(&b, "{\"last\":%lu,\"count\":%lu,\"page\":%d,\"page_size\":%d,\"items\":[", (unsigned long)last, (unsigned long)total, page, WEB_ALARM_PAGE);
+    for (int i = 0; i < n; i++) {
+        jb_printf(&b, "%s{\"id\":%lu,\"t\":%lu,\"type\":%u,\"push\":%s,\"msg\":", i ? "," : "", (unsigned long)recs[i].id, (unsigned long)recs[i].t,
+                  (unsigned)recs[i].type, (recs[i].flags & ALARM_F_PUSH) ? "true" : "false");
+        jb_str(&b, recs[i].msg);
+        jb_printf(&b, "}");
+    }
+    jb_printf(&b, "]}");
+    heap_caps_free(recs);
+    esp_err_t ret = send_jbuf(req, &b);
+    heap_caps_free(b.p);
+    return ret;
+}
+
+/* 시험용 — 출시 전 제거(조건부 C9). POST /api/alarm_sim?type=0..6 — 실제 사건과 같은 alarm_post로 넣음.
+ * 웹 세션은 건드리지 않음(로그인만 확인) — 세션 유무에 따른 받는 곳 나눔을 시험하려고 */
+static esp_err_t api_alarm_sim_post_handler(httpd_req_t *req)
+{
+    if (!web_auth_check(req)) return web_auth_reject(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    int type = query_int(s_w->query, "type", -1);
+    if (type < 0 || type >= NOTIFY_TYPE_COUNT) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    static const char *const names[NOTIFY_TYPE_COUNT] = { "Error", "Warning", "Relay", "Device disconnected", "SD error", "Low battery", "CAN bus fault" };
+    alarm_post((notify_type_t)type, names[type], "TEST %s (simulated)", names[type]);
+    return send_simple(req, NULL, "{\"ok\":true}");
+}
+
 /* POST /api/stats/delete_all — 콘 Record 팝업 Delete All 확인 Yes와 같음 */
 static esp_err_t api_stats_delete_all_post_handler(httpd_req_t *req)
 {
@@ -978,6 +1033,10 @@ void web_api_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &logs_uri);
     httpd_register_uri_handler(server, &notify_set_uri);
     httpd_register_uri_handler(server, &notify_test_uri);
+    static const httpd_uri_t alarms_uri = { .uri = "/api/alarms", .method = HTTP_GET, .handler = api_alarms_get_handler };
+    static const httpd_uri_t alarm_sim_uri = { .uri = "/api/alarm_sim", .method = HTTP_POST, .handler = api_alarm_sim_post_handler };
+    httpd_register_uri_handler(server, &alarms_uri);
+    httpd_register_uri_handler(server, &alarm_sim_uri);
     static const httpd_uri_t cam_list_uri = { .uri = "/api/cam/list", .method = HTTP_GET, .handler = api_cam_list_get_handler };
     static const httpd_uri_t cam_photos_uri = { .uri = "/api/cam/photos", .method = HTTP_GET, .handler = api_cam_photos_get_handler };
     static const httpd_uri_t cam_photo_uri = { .uri = "/api/cam/photo", .method = HTTP_GET, .handler = api_cam_photo_get_handler };

@@ -9,6 +9,7 @@
 #include "device_config.h"
 #include "sens_kind_store.h"
 #include "battery.h"
+#include "alarm.h"
 #include "stats_store.h"
 #include "main.h"
 
@@ -128,6 +129,26 @@ static esp_timer_handle_t s_liveness_sweep_timer = NULL;
  * 확인됨) — 여유를 두고 50ppm 미만이면 부적합으로 판정 */
 #define CO2_PPM_PLAUSIBLE_MIN 50.0f
 
+/* 2026-10-05(할 일 AD 5단계) — 알림에 쓸 장치 이름(Alias 우선). 노드 뮤텍스 안에서 불러도 됨(alarm_post는 큐에만 넣음) */
+static const char *alarm_name(const node_hub_node_t *n)
+{
+    const char *alias = device_config_get_alias(n->mac);
+    return alias[0] ? alias : n->name;
+}
+
+/* 배터리 잔량이 이 값 이하로 처음 내려가면 장치마다 한 번, ALARM_BATT_CLEAR_PCT 위로 오르면 다시 알릴 수 있음 */
+#define ALARM_BATT_LOW_PCT   20
+#define ALARM_BATT_CLEAR_PCT 30
+static void battery_alarm_check_locked(node_hub_node_t *n)
+{
+    if (!n->batt_low_alarmed && n->battery_pct <= ALARM_BATT_LOW_PCT) {
+        n->batt_low_alarmed = true;
+        alarm_post(NOTIFY_TYPE_BATTERY, "Low battery", "%s battery %u%%", alarm_name(n), (unsigned)n->battery_pct);
+    } else if (n->batt_low_alarmed && n->battery_pct > ALARM_BATT_CLEAR_PCT) {
+        n->batt_low_alarmed = false;
+    }
+}
+
 static void liveness_sweep_cb(void *arg)
 {
     (void)arg;
@@ -140,6 +161,7 @@ static void liveness_sweep_cb(void *arg)
         if (n->conn_state == NODE_CONN_PAIRED && now_ms - n->last_seen_ms > timeout_ms) {
             ESP_LOGW(TAG_LINK, "%s no response (%us+) - demoted from PAIRED", n->name, (unsigned)(timeout_ms / 1000));
             n->conn_state = NODE_CONN_ORPHAN;
+            alarm_post(NOTIFY_TYPE_DISCONNECT, "Device disconnected", "%s no response for %us", alarm_name(n), (unsigned)(timeout_ms / 1000));
         }
     }
     xSemaphoreGive(s_nodes_mutex);
@@ -750,6 +772,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         n->battery_adc_raw = hello->battery_adc_raw;
         n->battery_mv      = hello->battery_mv;
         n->battery_pct     = (uint8_t)battery_mv_to_pct(hello->battery_mv);
+        battery_alarm_check_locked(n);
         ESP_LOGD(TAG, "WAKE_HELLO <- %s: cycle#%lu wake=%u batt_raw=%u batt_mv=%u batt_pct=%u",
                  n->name, (unsigned long)n->ds_cycle_count, (unsigned)hello->wake_reason,
                  (unsigned)n->battery_adc_raw, (unsigned)n->battery_mv, (unsigned)n->battery_pct);
@@ -826,6 +849,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         n->battery_adc_raw = hello->battery_adc_raw;
         n->battery_mv      = hello->battery_mv;
         n->battery_pct     = (uint8_t)battery_mv_to_pct(hello->battery_mv);
+        battery_alarm_check_locked(n);
 
         /* 2026-09-29(사용자 지시 — SCD41이 밤새 측정을 못 했는데 원인을 알 수 없었음) — 센스의 측정 실패 원인.
          * 상태가 바뀔 때와, 실패가 이어지는 동안 40번마다(15초 주기면 약 10분) Dev Log에 남김 */

@@ -29,6 +29,7 @@
 #include "power_relay.h"
 #include "sens_kind_store.h"
 #include "notify.h"
+#include "alarm.h"
 #include "web_auth.h"
 #include "web_session.h"
 #include "web_api.h"
@@ -1087,6 +1088,7 @@ void app_main(void)
      * (/assets/settings.bin)과 RTC 시드값(/assets/time_sync.txt) 둘 다 이 안에 있음 */
     ESP_ERROR_CHECK(fs_init());
     notify_init();  /* 2026-10-03(할 일 AD) — 휴대폰 알림 보내기 태스크(설정 notify.cfg는 LittleFS) */
+    alarm_init();   /* 2026-10-05(할 일 AD 5단계) — 알림 기록 큐(사건은 여기서부터 쌓이고 처리는 alarm_start 뒤) */
     web_auth_init();  /* 2026-10-03(할 일 AD) — 웹 로그인(web_auth.bin) */
     /* 2026-09-27(로그 정리) — 개발 로그: ESP_LOG 가로채기 시작 + 저장 문턱 적용(설정은 /assets/devlog.cfg라 fs 뒤) */
     dev_log_init();
@@ -1145,6 +1147,7 @@ void app_main(void)
      * 읽어와야 로고 부제(시계)가 처음부터 맞는 값으로 뜸 */
     esp_err_t rtc_ret = rtc_sync_init();
     ESP_LOGI(TAG, "rtc_sync_init: %s", rtc_ret == ESP_OK ? "OK" : "FAILED");
+    alarm_start();  /* SD(기록 파일)·RTC(시각)가 준비된 뒤 — 부팅 중 쌓인 사건(SD 마운트 실패 등)도 여기서 처리 */
 
     esp_lv_adapter_config_t adapter_config = ESP_LV_ADAPTER_DEFAULT_CONFIG();
     adapter_config.task_stack_size = 12 * 1024;

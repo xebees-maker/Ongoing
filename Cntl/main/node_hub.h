@@ -132,6 +132,7 @@ typedef struct {
     uint16_t        battery_adc_raw;
     uint16_t        battery_mv;
     uint8_t         battery_pct;
+    bool            batt_low_alarmed;   /* 2026-10-05 — 배터리 부족 알림을 보냈음(30% 위로 오르면 해제) */
 
     /* 2026-09-04(사용자 지시 — 요약판넬 우측 신호세기 표시) — 이 노드에서 온 가장 최근
      * ESP-NOW 수신의 rx_ctrl.rssi(dBm). 메시지 종류 무관하게 recv_cb 공통 지점에서 매번

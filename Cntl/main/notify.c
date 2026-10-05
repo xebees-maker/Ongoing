@@ -16,8 +16,10 @@ static const char *TAG = "NOTIFY";
 
 #define NOTIFY_CFG_PATH   FS_MOUNT_POINT "/notify.cfg"
 #define NOTIFY_SERVER     "http://ntfy.sh/"
-#define NOTIFY_Q_DEPTH    4
+#define NOTIFY_Q_DEPTH    8
 #define NOTIFY_TIMEOUT_MS 10000
+#define NOTIFY_RETRY_MAX  6
+#define NOTIFY_RETRY_MS   5000
 
 typedef struct {
     char title[64];
@@ -75,27 +77,37 @@ static void send_one(const notify_item_t *it)
         return;
     }
     snprintf(s_url, NOTIFY_URL_LEN, NOTIFY_SERVER "%s", s_send_cfg->topic);
-    esp_http_client_config_t hc = {
-        .url = s_url,
-        .method = HTTP_METHOD_POST,
-        .timeout_ms = NOTIFY_TIMEOUT_MS,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&hc);
-    if (!client) {
-        ESP_LOGE(TAG, "http client init failed");
-        return;
-    }
-    esp_http_client_set_header(client, "Content-Type", "text/plain");
-    if (it->title[0]) esp_http_client_set_header(client, "Title", it->title);
-    if (s_send_cfg->click[0]) esp_http_client_set_header(client, "Click", s_send_cfg->click);
-    esp_http_client_set_post_field(client, it->msg, (int)strlen(it->msg));
-    esp_err_t err = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
-    if (err != ESP_OK || status != 200) {
-        ESP_LOGW(TAG, "Send failed: %s (HTTP %d) - %s", esp_err_to_name(err), status, it->title);
-    } else {
-        ESP_LOGI(TAG, "Sent: %s", it->title);
+    /* 2026-10-05(실기 — 부팅 직후 Wi-Fi가 붙기 전에 보낸 알림이 ESP_ERR_HTTP_CONNECT로 버려졌음) — 서버 응답 자체가 없을
+     * 때(연결 실패)만 NOTIFY_RETRY_MS 간격으로 NOTIFY_RETRY_MAX번까지 다시 시도. 서버가 응답했으면(4xx 등) 다시 안 함 */
+    for (int attempt = 1; ; attempt++) {
+        esp_http_client_config_t hc = {
+            .url = s_url,
+            .method = HTTP_METHOD_POST,
+            .timeout_ms = NOTIFY_TIMEOUT_MS,
+        };
+        esp_http_client_handle_t client = esp_http_client_init(&hc);
+        if (!client) {
+            ESP_LOGE(TAG, "http client init failed");
+            return;
+        }
+        esp_http_client_set_header(client, "Content-Type", "text/plain");
+        if (it->title[0]) esp_http_client_set_header(client, "Title", it->title);
+        if (s_send_cfg->click[0]) esp_http_client_set_header(client, "Click", s_send_cfg->click);
+        esp_http_client_set_post_field(client, it->msg, (int)strlen(it->msg));
+        esp_err_t err = esp_http_client_perform(client);
+        int status = esp_http_client_get_status_code(client);
+        esp_http_client_cleanup(client);
+        if (err == ESP_OK && status == 200) {
+            ESP_LOGI(TAG, "Sent: %s", it->title);
+            return;
+        }
+        bool no_reply = (err != ESP_OK && status == 0);
+        if (!no_reply || attempt >= NOTIFY_RETRY_MAX) {
+            ESP_LOGW(TAG, "Send failed: %s (HTTP %d, try %d) - %s", esp_err_to_name(err), status, attempt, it->title);
+            return;
+        }
+        ESP_LOGW(TAG, "Send failed: %s (try %d) - retry in %ds", esp_err_to_name(err), attempt, NOTIFY_RETRY_MS / 1000);
+        vTaskDelay(pdMS_TO_TICKS(NOTIFY_RETRY_MS));
     }
 }
 

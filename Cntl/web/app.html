@@ -163,6 +163,16 @@
   .viewer img { position:absolute; left:50%; top:50%; max-width:100vw; max-height:100vh; transform-origin:center center; user-select:none; -webkit-user-drag:none; }
   .viewer .vx { position:absolute; top:10px; right:10px; z-index:2; color:#fff; border:none; font-size:26px; background:rgba(0,0,0,.4); }
   .choice.sel { border-color:var(--blue); }
+  /* 알림(5단계): 종 버튼 + 안 본 개수, 새 알림 배너, 알림 기록 */
+  #alarmBtn { position:relative; padding:3px 6px; line-height:0; }
+  #alarmCnt { position:absolute; top:-6px; right:-6px; min-width:17px; height:17px; padding:0 4px; border-radius:9px; background:var(--red);
+              color:#fff; font-size:11px; line-height:17px; text-align:center; font-variant-numeric:tabular-nums; }
+  .banner { position:fixed; left:8px; right:8px; top:8px; z-index:45; background:#111827; color:#fff; border-radius:10px; padding:12px 14px;
+            font-size:14px; box-shadow:0 4px 16px rgba(0,0,0,.3); cursor:pointer; }
+  .banner .bt { font-size:12px; opacity:.75; margin-bottom:2px; }
+  .arow { padding:10px 14px; border-bottom:1px solid var(--line); font-size:14px; overflow-wrap:anywhere; }
+  .arow.unread { font-weight:700; background:rgba(37,99,235,.08); }
+  .arow .sub { font-weight:400; }
   /* 설정 팝업 */
   .gtitle { padding:16px 14px 6px; font-size:13px; font-weight:700; color:var(--muted); border-bottom:1px solid var(--line); }
   .gsub { padding:12px 14px 4px 26px; font-size:12px; font-weight:600; color:var(--muted); border-bottom:1px solid var(--line); }
@@ -211,6 +221,7 @@
     <span id="clock" class="inv"></span>
     <span id="net" class="inv"></span>
     <span id="sicon" class="sicon"></span>
+    <button id="alarmBtn" class="small" aria-label="notifications"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span id="alarmCnt" class="hidden"></span></button>
     <button id="setBtn" class="small" aria-label="settings"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   </div>
 </header>
@@ -265,6 +276,7 @@
 
 <div id="sheet" class="sheet hidden"><div class="sbody" id="sheetBody"></div></div>
 <div id="toast" class="toast hidden"></div>
+<div id="banner" class="banner hidden"></div>
 <div id="modal" class="modal hidden"><div class="mbox" id="modalBox"></div></div>
 <div id="busy" class="busy hidden"><div class="bbox"><div id="busyTxt" class="btxt"></div><div class="bar" id="busyBar"><i id="busyFill"></i></div></div></div>
 <div id="viewer" class="viewer hidden"><button class="vx" id="viewerX" aria-label="close">&#x2715;</button><img id="viewerImg" alt=""></div>
@@ -292,7 +304,8 @@
     PW_CHANGE: ['비밀번호 변경', 'Change password'], PW_CHANGED: ['비밀번호를 바꿨습니다', 'Password changed'],
     PW_FAIL: ['비밀번호를 바꾸지 못했습니다', 'Password not changed'], LOGOUT_ALL: ['모든 기기 로그아웃', 'Log out all devices'],
     LOGOUT_ALL_CONFIRM: ['모든 기기에서 로그아웃합니다. 이 기기도 다시 로그인해야 합니다.', 'All devices will be logged out, including this one.'],
-    RESTARTING: ['재시작합니다', 'Restarting']
+    RESTARTING: ['재시작합니다', 'Restarting'],
+    NOT_PUSHED: ['보내지 않음(꺼진 종류)', 'Not sent (type off)'], NO_ALARMS: ['알림이 없습니다', 'No notifications']
   };
   /* 센서 채널 종류(esp_now_link.h SENSOR_CHAN_*) → 콘 주화면과 같은 글자·단위 */
   var CHAN = { 1: ['T', 'STR_CHAN_UNIT_TEMP_C'], 2: ['H', 'STR_CHAN_UNIT_HUMI_PCT'], 3: ['C', 'STR_CHAN_UNIT_CO2_PPM'], 4: ['A', 'STR_CHAN_UNIT_NH3_PPM'] };
@@ -456,6 +469,7 @@
 
   function render(d) {
     checkCleanup(d.cleanup);
+    checkAlarms(d.alarm);
     renderHeader(d);
     renderSummary(d);
     renderRelays(d.relays || []);
@@ -519,6 +533,8 @@
   });
 
   $('setBtn').addEventListener('click', function () { if (view === 'main') openSettings(); });
+  $('alarmBtn').addEventListener('click', function () { if (view === 'main') openAlarms(); });
+  $('banner').addEventListener('click', function () { hideBanner(); if (view === 'main') openAlarms(); });
 
   function setLang(l) {
     lang = l;
@@ -1033,6 +1049,71 @@
         cam.page = Math.min(pages - 1, Math.max(0, cam.page + (+b.getAttribute('data-pg'))));
         loadPhotos();
       });
+    });
+  }
+
+  /* ── 알림(할 일 AD 5단계): 콘 알림 기록이 기준. 안 본 개수 = 콘 마지막 번호 - 이 브라우저가 본 번호(브라우저마다 따로).
+   *    웹앱이 열려 있는 동안 생긴 보낼 대상은 콘이 주화면 조회 응답(alarm.new)에 실어 줌 → 배너. 누르면 알림 기록 ── */
+  var ALARM_MAX = 500, alarmSeen = null, alarmLast = 0, bannerTimer = null;
+  try { var sv = localStorage.getItem('alarmSeen'); if (sv !== null && sv !== '') alarmSeen = +sv; } catch (e) {}
+  function setAlarmSeen(v) { alarmSeen = v; try { localStorage.setItem('alarmSeen', String(v)); } catch (e) {} }
+  function typeLabel(t) { var x = W.N_TYPES[t]; return x ? x[li()] : ''; }
+  function renderAlarmBadge() {
+    var n = Math.max(0, Math.min(ALARM_MAX, alarmLast - (alarmSeen || 0))), el = $('alarmCnt');
+    el.textContent = n > 99 ? '99+' : String(n);
+    el.classList.toggle('hidden', n === 0);
+  }
+  function checkAlarms(a) {
+    if (!a) return;
+    /* 처음 쓰는 브라우저는 지난 알림을 안 본 것으로 치지 않음. 콘 기록이 비워졌으면(번호가 줄면) 다시 맞춤 */
+    if (alarmSeen === null || a.last < alarmSeen) setAlarmSeen(a.last);
+    alarmLast = a.last;
+    renderAlarmBadge();
+    if (a.new && a.new.length) showBanner(a.new);
+  }
+  function showBanner(list) {
+    var it = list[list.length - 1];
+    $('banner').innerHTML = '<div class="bt">' + esc(typeLabel(it.type) + '  ' + fmtTime(it.t)) + '</div><div>' + esc(it.msg) +
+                            (list.length > 1 ? ' (+' + (list.length - 1) + ')' : '') + '</div>';
+    $('banner').classList.remove('hidden');
+    clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(hideBanner, 8000);
+  }
+  function hideBanner() { clearTimeout(bannerTimer); $('banner').classList.add('hidden'); }
+
+  var al = { page: 0, data: null, seenAtOpen: 0 };
+  function openAlarms() {
+    al.page = 0;
+    al.data = null;
+    al.seenAtOpen = alarmSeen || 0;   /* 이 팝업 안에서는 열기 전 기준으로 안 본 것을 굵게 */
+    openSheet(renderAlarms);
+    loadAlarms();
+  }
+  function loadAlarms() {
+    api('api/alarms?page=' + al.page).then(function (d) {
+      al.data = d;
+      if (al.page === 0) { setAlarmSeen(d.last); alarmLast = d.last; renderAlarmBadge(); }   /* 열어 본 것 = 모두 본 것 */
+      if (sheetRender === renderAlarms) renderAlarms();
+    }).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+  }
+  function renderAlarms() {
+    var h = sheetHead('STR_TAB_OPTION').replace(esc(S('STR_TAB_OPTION')), esc(Wt('NOTIFY')));
+    var d = al.data;
+    if (d) {
+      if (!d.items.length) h += '<div class="field"><span class="sub">' + esc(Wt('NO_ALARMS')) + '</span></div>';
+      h += d.items.map(function (it) {
+        return '<div class="arow' + (it.id > al.seenAtOpen ? ' unread' : '') + '"><div class="sub">' + esc(fmtTime(it.t) + '  ' + typeLabel(it.type) +
+               (it.push ? '' : '  · ' + Wt('NOT_PUSHED'))) + '</div><div>' + esc(it.msg) + '</div></div>';
+      }).join('');
+      var pages = Math.max(1, Math.ceil(d.count / d.page_size));
+      if (pages > 1) {
+        h += '<div class="pager"><button class="small" data-apg="-1"' + (al.page > 0 ? '' : ' disabled') + '>&lt;</button><span class="sub">' + (al.page + 1) + ' / ' + pages +
+             '</span><button class="small" data-apg="1"' + (al.page + 1 < pages ? '' : ' disabled') + '>&gt;</button></div>';
+      }
+    }
+    $('sheetBody').innerHTML = h;
+    $('sheetBody').querySelectorAll('[data-apg]').forEach(function (b) {
+      b.addEventListener('click', function () { al.page = Math.max(0, al.page + (+b.getAttribute('data-apg'))); loadAlarms(); });
     });
   }
 

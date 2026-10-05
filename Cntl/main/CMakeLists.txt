@@ -21,6 +21,7 @@ idf_component_register(
         "sens_kind_store.c"
         "can_bridge.c"
         "notify.c"
+        "alarm.c"
         "web_auth.c"
         "web_session.c"
         "web_api.c"

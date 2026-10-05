@@ -97,15 +97,23 @@ void ui_log_add(const char *fmt, ...)
     xSemaphoreGive(s_mutex);
 }
 
-/* 호출부가 이미 뮤텍스를 잡고 있어야 함 — 같은 코드가 이미 있으면 무시(중복 방지) */
-static void push_history_locked(int code)
+static ui_log_event_cb_t s_event_cb = NULL;
+
+void ui_log_set_event_cb(ui_log_event_cb_t cb)
+{
+    s_event_cb = cb;
+}
+
+/* 호출부가 이미 뮤텍스를 잡고 있어야 함 — 같은 코드가 이미 있으면 무시(중복 방지). 반환: 새로 올라갔는지 */
+static bool push_history_locked(int code)
 {
     for (int i = 0; i < s_err_history_count; i++) {
-        if (s_err_history[i] == code) return;
+        if (s_err_history[i] == code) return false;
     }
     if (s_err_history_count < UI_ERR_HISTORY_CAP) {
         s_err_history[s_err_history_count++] = code;
     }
+    return true;
 }
 
 void ui_log_add_err(int code, const char *fmt, ...)
@@ -132,11 +140,12 @@ void ui_log_add_err(int code, const char *fmt, ...)
     strncpy(s_last_err, line, UI_LOG_ERR_CAP - 1);
     s_last_err[UI_LOG_ERR_CAP - 1] = '\0';
     s_err_pending = true;
-    push_history_locked(code);
+    bool fresh = push_history_locked(code);
 
     line[add_len] = '\n';
     append_locked(line, add_len + 1);
     xSemaphoreGive(s_mutex);
+    if (fresh && s_event_cb) s_event_cb(true, code, msg);
 }
 
 bool ui_log_get_pending_error(char *out, size_t out_cap)
@@ -195,14 +204,15 @@ static int  s_warn_history_count = 0;
 /* 워닝 설명 문구는 화면 표시용이라 ui_main.c의 warn_code_to_desc_str()(ui_strings)에 둠 —
  * 여기에 한글 문자열을 두면 비트맵 폰트에서 깨짐 */
 
-static void push_warn_history_locked(int code)
+static bool push_warn_history_locked(int code)
 {
     for (int i = 0; i < s_warn_history_count; i++) {
-        if (s_warn_history[i] == code) return;
+        if (s_warn_history[i] == code) return false;
     }
     if (s_warn_history_count < UI_WARN_HISTORY_CAP) {
         s_warn_history[s_warn_history_count++] = code;
     }
+    return true;
 }
 
 void ui_log_add_warn(int code, const char *fmt, ...)
@@ -229,11 +239,12 @@ void ui_log_add_warn(int code, const char *fmt, ...)
     strncpy(s_last_warn, line, UI_LOG_WARN_CAP - 1);
     s_last_warn[UI_LOG_WARN_CAP - 1] = '\0';
     s_warn_pending = true;
-    push_warn_history_locked(code);
+    bool fresh = push_warn_history_locked(code);
 
     line[add_len] = '\n';
     append_locked(line, add_len + 1);
     xSemaphoreGive(s_mutex);
+    if (fresh && s_event_cb) s_event_cb(false, code, msg);
 }
 
 bool ui_log_get_pending_warn(char *out, size_t out_cap)

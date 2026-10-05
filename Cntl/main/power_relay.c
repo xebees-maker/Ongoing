@@ -2,6 +2,7 @@
 #include "memdiag.h"
 #include "ui_main.h"
 #include "fs.h"
+#include "alarm.h"
 
 #include <string.h>
 #include <math.h>
@@ -171,6 +172,9 @@ static void power_relay_command(int idx, bool on, uint32_t now_ms)
     s_last_transition_ms[idx] = now_ms;
     relay_set_output(idx, on);
     ESP_LOGI(TAG, "Relay%d(%s) -> %s", idx, s_relay_cfg[idx].alias, on ? "On" : "Off");
+    /* 2026-10-05(할 일 AD 5단계) — 릴레이 켜짐·꺼짐 알림(수동 강제 포함 — 출력이 바뀌는 곳은 여기 하나) */
+    if (s_relay_cfg[idx].alias[0]) alarm_post(NOTIFY_TYPE_RELAY, on ? "Relay ON" : "Relay OFF", "%s %s", s_relay_cfg[idx].alias, on ? "ON" : "OFF");
+    else alarm_post(NOTIFY_TYPE_RELAY, on ? "Relay ON" : "Relay OFF", "Relay %d %s", idx + 1, on ? "ON" : "OFF");
 }
 
 static void power_relay_apply_override_immediate(int idx)

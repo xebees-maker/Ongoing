@@ -83,6 +83,10 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 #define UI_ERR_CAN_TX_STUCK         5013  /* 2026-10-02(할 일 Q) — CAN 송신에 ACK 없음(브 꺼짐·재부팅 등), 300ms마다 중단돼 송신 실패 */
 
 void ui_log_add_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+/* 2026-10-05(할 일 AD 5단계) — 에러·경고 코드가 이력 목록에 새로 올라갈 때(이미 있으면 안 부름) 부를 함수 하나.
+ * ui_log 뮤텍스 밖에서, 기록한 태스크에서 불림 — 받는 쪽은 큐에 넣기만 할 것(alarm.c) */
+typedef void (*ui_log_event_cb_t)(bool is_err, int code, const char *msg);
+void ui_log_set_event_cb(ui_log_event_cb_t cb);
 
 /* 확인 안 한 에러가 있으면 out에 채우고 true+플래그 클리어, 없으면 false */
 bool ui_log_get_pending_error(char *out, size_t out_cap);
