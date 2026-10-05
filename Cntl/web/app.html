@@ -219,7 +219,7 @@
   <h1 data-s="STR_LOGO_TITLE"></h1>
   <div class="hright">
     <span id="net" class="inv"></span>
-    <span id="sicon" class="sicon"></span>
+    <span id="sicon" class="sicon tap" role="button" aria-label="status"></span>
     <button id="alarmBtn" class="small" aria-label="notifications"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span id="alarmCnt" class="hidden"></span></button>
     <button id="setBtn" class="small" aria-label="settings"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   </div>
@@ -287,6 +287,8 @@
 
   /* 콘 문구 표 — build_web.py가 채움: { STR_X: [한, 영] } */
   var STR = /*@STRINGS@*/;
+  /* 에러·경고 코드 → 설명 문구 키 — build_web.py가 콘 err/warn_code_to_desc_str에서 뽑아 채움 */
+  var ERRDESC = /*@ERRDESC@*/;
   /* 웹 전용 문구 */
   var W = {
     PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'],
@@ -573,6 +575,7 @@
 
   $('setBtn').addEventListener('click', function () { if (view === 'main') openSettings(); });
   $('alarmBtn').addEventListener('click', function () { if (view === 'main') openAlarms(); });
+  $('sicon').addEventListener('click', function () { if (view === 'main') openErrors(); });   /* 콘: 상태 아이콘 → 에러·경고 목록 */
   $('banner').addEventListener('click', function () { hideBanner(); if (view === 'main') openAlarms(); });
 
   function setLang(l) {
@@ -1089,6 +1092,66 @@
         loadPhotos();
       });
     });
+  }
+
+  /* ── 에러·경고 목록(콘 cb_logo_warning_tap): 에러 Exxxx(빨강), 경고 Wxxxx(짙은 노랑), 행마다 지우기. SD 5008/5009는 지우기 대신
+   *    해결 → 재마운트/포맷(콘처럼 검증을 통과해야 지워짐). X로만 닫힘 ── */
+  var errs = null;
+  function openErrors() {
+    api('api/errors').then(function (d) { errs = d; openSheet(renderErrors); }).catch(function () {});
+  }
+  function reloadErrors() {
+    api('api/errors').then(function (d) { errs = d; if (sheetRender === renderErrors) renderErrors(); poll(); }).catch(function () {});
+  }
+  function errDesc(kind, code) { var k = ERRDESC[kind][code] || ERRDESC[kind + '_UNKNOWN']; return k ? S(k) : ''; }
+  function renderErrors() {
+    var h = sheetHead('STR_TITLE_ERROR_LIST');
+    if (!errs.errors.length && !errs.warns.length) h += '<div class="field"><span class="sub">' + esc(S('STR_ERROR_LIST_EMPTY')) + '</span></div>';
+    errs.errors.forEach(function (c) {
+      var sd = c === 5008 || c === 5009;
+      h += '<div class="field"><label style="color:var(--red)">' + esc('E' + ('000' + c).slice(-4) + ' ' + errDesc('E', c)) + '</label>' +
+           (sd ? '<button class="small" data-sdres="1">' + esc(S('STR_BTN_SD_RESOLVE')) + '</button>'
+               : '<button class="small" data-eclr="e' + c + '">' + esc(S('STR_BTN_DISMISS')) + '</button>') + '</div>';
+    });
+    errs.warns.forEach(function (c) {
+      h += '<div class="field"><label style="color:#b8860b">' + esc('W' + ('000' + c).slice(-4) + ' ' + errDesc('W', c)) + '</label>' +
+           '<button class="small" data-eclr="w' + c + '">' + esc(S('STR_BTN_DISMISS')) + '</button></div>';
+    });
+    $('sheetBody').innerHTML = h;
+    $('sheetBody').querySelectorAll('[data-eclr]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var v = b.getAttribute('data-eclr');
+        post('api/errors/clear?kind=' + v.charAt(0) + '&code=' + v.slice(1)).then(reloadErrors).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+      });
+    });
+    $('sheetBody').querySelectorAll('[data-sdres]').forEach(function (b) { b.addEventListener('click', openSdResolve); });
+  }
+  /* SD 해결 — 재마운트 / 포맷(확인). 결과는 콘과 같은 문구. 실패하면 이 선택창을 다시 띄움(콘: 해결 팝업이 남아 다른 조치를 고름) */
+  function openSdResolve() {
+    $('modalBox').innerHTML = '<div class="mtitle">' + esc(S('STR_TITLE_SD_RESOLVE')) + '</div>' +
+      '<div class="sfoot"><button data-m="no">' + esc(S('STR_BTN_CANCEL')) + '</button><button data-m="rec">' + esc(S('STR_BTN_SD_RECONNECT')) +
+      '</button><button class="danger" data-m="fmt">' + esc(S('STR_BTN_SD_FORMAT')) + '</button></div>';
+    $('modal').classList.remove('hidden');
+    $('modal').onclick = function (ev) {
+      var m = ev.target.closest('[data-m]');
+      if (!m) return;
+      var a = m.getAttribute('data-m');
+      $('modal').classList.add('hidden');
+      $('modal').onclick = null;
+      if (a === 'no') return;
+      if (a === 'fmt' && !confirm(S('STR_MSG_SD_FORMAT_CONFIRM'))) { openSdResolve(); return; }
+      busyStart('LOADING');
+      post(a === 'rec' ? 'api/sd/reconnect' : 'api/sd/format').then(function () {
+        busyEnd();
+        alert(S(a === 'rec' ? 'STR_MSG_SD_RECONNECT_OK' : 'STR_MSG_SD_FORMAT_OK'));
+        reloadErrors();
+      }).catch(function (e) {
+        busyEnd();
+        if (e && e.handled) return;
+        alert(S(a === 'rec' ? 'STR_MSG_SD_RECONNECT_FAIL' : 'STR_MSG_SD_FORMAT_FAIL'));
+        openSdResolve();
+      });
+    };
   }
 
   /* ── 알림(할 일 AD 5단계): 콘 알림 기록이 기준. 안 본 개수 = 콘 마지막 번호 - 이 브라우저가 본 번호(브라우저마다 따로).

@@ -1135,12 +1135,55 @@ static esp_err_t api_alarms_ack_post_handler(httpd_req_t *req)
     return send_simple(req, NULL, "{\"ok\":true}");
 }
 
+/* GET /api/errors — 콘 상태 아이콘 목록과 같은 에러·경고 코드(설명 문구는 SPA가 코드로 찾음 — build_web.py가 콘 표에서 뽑음) */
+static esp_err_t api_errors_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    int *codes = heap_caps_malloc(sizeof(int) * (UI_ERR_HISTORY_CAP + UI_WARN_HISTORY_CAP), MALLOC_CAP_SPIRAM);
+    const size_t cap = 512;
+    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
+    if (!codes || !b.p) { heap_caps_free(codes); heap_caps_free(b.p); httpd_resp_send_500(req); return ESP_FAIL; }
+    int ne = ui_main_get_error_codes(codes, UI_ERR_HISTORY_CAP);
+    int nw = ui_main_get_warn_codes(codes + UI_ERR_HISTORY_CAP, UI_WARN_HISTORY_CAP);
+    jb_printf(&b, "{\"errors\":[");
+    for (int i = 0; i < ne; i++) jb_printf(&b, "%s%d", i ? "," : "", codes[i]);
+    jb_printf(&b, "],\"warns\":[");
+    for (int i = 0; i < nw; i++) jb_printf(&b, "%s%d", i ? "," : "", codes[UI_ERR_HISTORY_CAP + i]);
+    jb_printf(&b, "]}");
+    heap_caps_free(codes);
+    esp_err_t ret = send_jbuf(req, &b);
+    heap_caps_free(b.p);
+    return ret;
+}
+
+/* POST /api/errors/clear?kind=e|w&code= , /api/sd/reconnect , /api/sd/format — 콘 목록 팝업의 지우기·해결(재마운트/포맷)과 같음 */
+static esp_err_t err_op(httpd_req_t *req, ui_web_op_type_t type, uint32_t timeout_ms)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    ui_web_op_t *op = &s_w->op;
+    memset(op, 0, sizeof(*op));
+    op->type = type;
+    httpd_query_key_value(s_w->query, "kind", s_w->tmp, sizeof(s_w->tmp));
+    op->kind = (uint8_t)(s_w->tmp[0] == 'w' ? 'w' : 'e');
+    op->value = (uint32_t)query_int(s_w->query, "code", 0);
+    bool ok = ui_main_run_web_op(op, timeout_ms);
+    return send_simple(req, ok ? NULL : "409 Conflict", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+static esp_err_t api_errors_clear_post_handler(httpd_req_t *req) { return err_op(req, UI_WEB_OP_ERR_CLEAR, 3000); }
+static esp_err_t api_sd_reconnect_post_handler(httpd_req_t *req) { return err_op(req, UI_WEB_OP_SD_RECONNECT, 30000); }
+static esp_err_t api_sd_format_post_handler(httpd_req_t *req)    { return err_op(req, UI_WEB_OP_SD_FORMAT, 120000); }
+
 /* 시험용 — 출시 전 제거(조건부 C9). POST /api/alarm_sim?type=0..6 — 실제 사건과 같은 alarm_post로 넣음.
  * 웹 세션은 건드리지 않음(로그인만 확인) — 세션 유무에 따른 받는 곳 나눔을 시험하려고 */
 static esp_err_t api_alarm_sim_post_handler(httpd_req_t *req)
 {
     if (!web_auth_check(req)) return web_auth_reject(req);
     if (!work_ready(req)) return ESP_FAIL;
+    /* ?err=코드 / ?warn=코드 — 실제 ui_log 에러·경고 기록 경로로(상태 아이콘·목록·알림 연결까지 시험) */
+    int err_code = query_int(s_w->query, "err", 0), warn_code = query_int(s_w->query, "warn", 0);
+    if (err_code > 0) { ui_log_add_err(err_code, "TEST error (simulated)"); return send_simple(req, NULL, "{\"ok\":true}"); }
+    if (warn_code > 0) { ui_log_add_warn(warn_code, "TEST warning (simulated)"); return send_simple(req, NULL, "{\"ok\":true}"); }
     int type = query_int(s_w->query, "type", -1);
     if (type < 0 || type >= NOTIFY_TYPE_COUNT) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
     static const char *const names[NOTIFY_TYPE_COUNT] = { "Error", "Warning", "Relay", "Device disconnected", "SD error", "Low battery", "CAN bus fault" };
@@ -1169,6 +1212,14 @@ void web_api_register_handlers(httpd_handle_t server)
     static const httpd_uri_t alarms_ack_uri = { .uri = "/api/alarms/ack", .method = HTTP_POST, .handler = api_alarms_ack_post_handler };
     httpd_register_uri_handler(server, &ws_uri);
     httpd_register_uri_handler(server, &alarms_ack_uri);
+    static const httpd_uri_t errors_uri = { .uri = "/api/errors", .method = HTTP_GET, .handler = api_errors_get_handler };
+    static const httpd_uri_t errors_clear_uri = { .uri = "/api/errors/clear", .method = HTTP_POST, .handler = api_errors_clear_post_handler };
+    static const httpd_uri_t sd_reconnect_uri = { .uri = "/api/sd/reconnect", .method = HTTP_POST, .handler = api_sd_reconnect_post_handler };
+    static const httpd_uri_t sd_format_uri = { .uri = "/api/sd/format", .method = HTTP_POST, .handler = api_sd_format_post_handler };
+    httpd_register_uri_handler(server, &errors_uri);
+    httpd_register_uri_handler(server, &errors_clear_uri);
+    httpd_register_uri_handler(server, &sd_reconnect_uri);
+    httpd_register_uri_handler(server, &sd_format_uri);
     if (!s_ws_timer) {
         const esp_timer_create_args_t ta = { .callback = ws_timer_cb, .name = "ws_push" };
         if (esp_timer_create(&ta, &s_ws_timer) == ESP_OK) esp_timer_start_periodic(s_ws_timer, (uint64_t)WS_PUSH_MS * 1000);

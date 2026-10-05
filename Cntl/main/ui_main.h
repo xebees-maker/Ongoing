@@ -59,6 +59,10 @@ typedef enum {
     UI_WEB_OP_DEV_TAG,         /* value = 태그 필터 번호 */
     UI_WEB_OP_SET_TIME,        /* text = "YYYY-MM-DD HH:MM:SS"(콘 현지 시각) */
     UI_WEB_OP_RESTART,         /* 응답이 나간 뒤 재시작(1초 뒤) */
+    /* 2026-10-05 — 에러·경고 목록(콘 cb_logo_warning_tap과 같은 조치) */
+    UI_WEB_OP_ERR_CLEAR,       /* kind 'e'/'w', value = 코드 — 행 "지우기"(SD 5008/5009는 안 됨 — 해결로만) */
+    UI_WEB_OP_SD_RECONNECT,    /* 해결 → 재마운트(검증 통과해야 성공·SD 에러 지움) */
+    UI_WEB_OP_SD_FORMAT,       /* 해결 → 포맷(검증 통과해야 성공·SD 에러 지움) */
 } ui_web_op_type_t;
 
 /* 릴레이 팝업의 사용자 선택값(화면 위젯이 나타내는 값 그대로). relay_apply_choices()가 이걸 설정 구조체로 바꿈 —
@@ -137,6 +141,10 @@ typedef struct {
 bool ui_main_stats_graph(uint8_t scale, uint32_t offset, uint8_t group, bool temp_precise, bool humi_precise,
                          ui_stats_graph_t *out);
 bool ui_main_stats_overview(uint8_t scale, ui_stats_overview_t *out);
+/* 에러·경고 목록(콘 상태 아이콘 팝업과 같은 이력). 반환: 개수 */
+int ui_main_get_error_codes(int *out, int cap);
+int ui_main_get_warn_codes(int *out, int cap);
+
 /* 통계 표의 기기 이름(Alias 우선, 콘 Record 표와 같음) */
 void ui_main_stats_device_name(const uint8_t mac[6], char *out, size_t cap);
 

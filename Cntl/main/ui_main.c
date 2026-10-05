@@ -910,6 +910,9 @@ static void cb_web_lock_takeover(lv_event_t *e)
     web_session_takeover();  /* 잠금 해제는 콜백(ui_main_on_web_session_lock)을 거쳐 옴 */
 }
 
+static lv_obj_t *s_error_warn_popup;                /* 정의는 에러·경고 목록 부분 */
+static void cb_close_error_warn_popup(lv_event_t *e);
+
 static void web_lock_apply(void *arg)
 {
     bool locked = (bool)(intptr_t)arg;
@@ -919,6 +922,7 @@ static void web_lock_apply(void *arg)
         if (s_relay_popup) teardown_relay_popup();
         if (s_camera_popup) teardown_camera_tab();
         if (s_stats_popup) teardown_stats_tab();
+        if (s_error_warn_popup) cb_close_error_warn_popup(NULL);
         if (s_option_popup) {  /* 설정·로그 팝업(cb_close_option_popup과 같은 정리 — 로그를 보고 있었으면 로그부터) */
             if (s_log_tab_built) teardown_log_tab();
             else teardown_option_tab();
@@ -1452,6 +1456,7 @@ static lv_obj_t *s_error_warn_popup = NULL;
 static void cb_close_error_warn_popup(lv_event_t *e)
 {
     (void)e;
+    if (!s_error_warn_popup) return;
     lv_obj_delete(s_error_warn_popup);
     s_error_warn_popup = NULL;
     resume_bg_timers();
@@ -10668,6 +10673,27 @@ static bool web_op_execute(const ui_web_op_t *op)
         case UI_WEB_OP_RESTART:           /* cb_restart_confirmed — 웹 응답이 나간 뒤에 재시작 */
             web_restart_later();
             return true;
+        case UI_WEB_OP_ERR_CLEAR:         /* cb_dismiss_error_row / cb_dismiss_warn_row */
+            if (op->kind == 'w') {
+                ui_log_clear_one_warn((int)op->value);
+            } else {
+                if (op->value == UI_ERR_SD_MOUNT_FAILED || op->value == UI_ERR_SD_IO_FAIL) return false;  /* 검증 후에만(해결) */
+                ui_log_clear_one_error((int)op->value);
+            }
+            sync_error_warn_active_from_history();
+            return true;
+        case UI_WEB_OP_SD_RECONNECT: {    /* cb_sd_reconnect_tap */
+            bool ok = (sd_storage_reconnect() == ESP_OK) && sd_verify_healthy();
+            if (ok) clear_sd_io_fail();
+            refresh_storage_status_label();
+            return ok;
+        }
+        case UI_WEB_OP_SD_FORMAT: {       /* cb_sd_format_confirmed(확인은 웹에서) */
+            bool ok = (sd_storage_format() == ESP_OK) && sd_verify_healthy();
+            if (ok) clear_sd_io_fail();
+            refresh_storage_status_label();
+            return ok;
+        }
         default:
             return false;
     }
@@ -10781,6 +10807,17 @@ int ui_main_relay_chan_list(uint8_t *out, int cap)
  * httpd는 태스크 하나라 요청이 겹치지 않음) */
 _Static_assert(UI_STATS_MAX_SLOTS == STATS_GRAPH_SERIES_COUNT, "web stats slot count");
 _Static_assert(UI_STATS_POINTS == STATS_GRAPH_POINT_COUNT, "web stats point count");
+
+/* 2026-10-05(웹 에러·경고 목록) — 콘 목록 팝업과 같은 이력(ui_log)을 그대로 */
+int ui_main_get_error_codes(int *out, int cap)
+{
+    return ui_log_get_error_history(out, cap);
+}
+
+int ui_main_get_warn_codes(int *out, int cap)
+{
+    return ui_log_get_warn_history(out, cap);
+}
 
 bool ui_main_stats_graph(uint8_t scale, uint32_t offset, uint8_t group, bool temp_precise, bool humi_precise,
                          ui_stats_graph_t *out)

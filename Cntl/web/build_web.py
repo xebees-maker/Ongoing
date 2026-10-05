@@ -18,6 +18,10 @@ STRINGS_C = os.path.join(HERE, '..', 'main', 'ui_strings.c')
 SRC = os.path.join(HERE, 'app.html')
 OUT_DIR = os.path.join(HERE, 'out')
 MARKER = '/*@STRINGS@*/'
+# 2026-10-05 — 에러·경고 코드 → 설명 문구 키. 콘 ui_main.c의 err/warn_code_to_desc_str와 ui_log.h의 코드 번호에서 뽑음(손으로 안 옮김)
+ERRDESC_MARKER = '/*@ERRDESC@*/'
+UI_LOG_H = os.path.join(HERE, '..', 'main', 'ui_log.h')
+UI_MAIN_C = os.path.join(HERE, '..', 'main', 'ui_main.c')
 
 
 def c_literal_bytes(body):
@@ -83,9 +87,31 @@ def parse_strings(path):
     return table
 
 
+def parse_err_desc():
+    """{"E": {코드: STR_키}, "W": {...}, "E_UNKNOWN": 키, "W_UNKNOWN": 키}"""
+    codes = {m.group(1): int(m.group(2)) for m in re.finditer(r'#define\s+(UI_(?:ERR|WARN)_\w+)\s+(\d+)', open(UI_LOG_H, encoding='utf-8').read())}
+    src = open(UI_MAIN_C, encoding='utf-8').read()
+    out = {}
+    for kind, fn in (('E', 'err_code_to_desc_str'), ('W', 'warn_code_to_desc_str')):
+        body = re.search(r'static ui_str_id_t ' + fn + r'\(int code\)\s*\{(.*?)\n\}', src, re.S)
+        if not body:
+            sys.exit('%s not found in ui_main.c' % fn)
+        out[kind] = {codes[m.group(1)]: m.group(2) for m in re.finditer(r'case\s+(UI_\w+):\s*return\s+(STR_\w+);', body.group(1))}
+        dm = re.search(r'default:\s*return\s+(STR_\w+);', body.group(1))
+        out[kind + '_UNKNOWN'] = dm.group(1) if dm else ''
+    return out
+
+
 def main():
     table = parse_strings(STRINGS_C)
     html = open(SRC, encoding='utf-8').read()
+    errdesc = parse_err_desc()
+    bad = sorted(set(k for kind in ('E', 'W') for k in errdesc[kind].values()) - set(table))
+    if bad:
+        sys.exit('error description keys not in ui_strings.c: ' + ', '.join(bad))
+    if ERRDESC_MARKER not in html:
+        sys.exit('marker %s not found in app.html' % ERRDESC_MARKER)
+    html = html.replace(ERRDESC_MARKER, json.dumps(errdesc, separators=(',', ':')))
     # 2026-10-03 — SPA가 쓰는 콘 문구 키가 표에 있는지(없으면 화면에 키 이름이 그대로 보임 — STR_BTN_OK 사고)
     used = set(re.findall(r"'(STR_[A-Z0-9_]+)'", html)) | set(re.findall(r'data-s="(STR_[A-Z0-9_]+)"', html))
     missing = sorted(k for k in used if k not in table)
