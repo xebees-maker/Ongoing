@@ -218,7 +218,6 @@
 <header>
   <h1 data-s="STR_LOGO_TITLE"></h1>
   <div class="hright">
-    <span id="clock" class="inv"></span>
     <span id="net" class="inv"></span>
     <span id="sicon" class="sicon"></span>
     <button id="alarmBtn" class="small" aria-label="notifications"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg><span id="alarmCnt" class="hidden"></span></button>
@@ -338,7 +337,7 @@
     $('loginView').classList.toggle('hidden', v !== 'login');
     $('localView').classList.toggle('hidden', v !== 'local');
     $('mainView').classList.toggle('hidden', v !== 'main');
-    if (v !== 'main') clearTimeout(timer);
+    if (v !== 'main') { clearTimeout(timer); wsStop(); }
     if (v === 'login') setTimeout(function () { $('pw').focus(); }, 0);
   }
 
@@ -445,7 +444,6 @@
 
   function renderHeader(d) {
     /* 콘 시계는 현지 시각을 그대로 초로 셈(타임존 없음) — UTC로 풀어야 콘 화면과 같은 값 */
-    $('clock').textContent = new Date(d.time * 1000).toISOString().substr(11, 8);
     $('net').textContent = (d.net.mode === 'ap' ? 'AP' : 'STA') + (d.net.ssid ? ' ' + d.net.ssid : '');
     var col = d.status === 'error' ? 'var(--red)' : d.status === 'warning' ? 'var(--amber)' : 'var(--green)';
     /* 정상 = 초록 원 안의 체크(사용자 선택 10-03), 경고·에러 = 노랑·빨강 삼각형 */
@@ -477,14 +475,20 @@
     renderCams(d.nodes || []);
   }
 
+  function onDash(d) {
+    if (view !== 'main') show('main');
+    last = d;
+    render(d);
+    $('conn').textContent = '';
+    $('conn').className = '';
+  }
+
+  /* 처음 열 때·팝업을 닫을 때·WebSocket이 끊겼을 때 한 번 받아 옴. WebSocket이 붙어 있으면 그것으로 끝, 아니면 5초 뒤 다시 */
   function poll() {
     api('api/dashboard')
       .then(function (d) {
-        if (view !== 'main') show('main');
-        last = d;
-        render(d);
-        $('conn').textContent = '';
-        $('conn').className = '';
+        onDash(d);
+        wsStart();
         schedule();
       })
       .catch(function (e) {
@@ -497,12 +501,47 @@
 
   function schedule() {
     clearTimeout(timer);
-    if (!document.hidden && view === 'main') timer = setTimeout(poll, POLL_MS);
+    if (!document.hidden && view === 'main' && !wsOk) timer = setTimeout(poll, POLL_MS);
+  }
+
+  /* ── WebSocket(10-05 사용자 지시 — 5초 조회 대신): 콘이 바뀐 것이 있을 때 주화면 내용을 밀어 줌. 5초마다 "hb"로 웹 세션 유지
+   *    (휴대폰이 잠기면 hb가 끊겨 콘이 20초 뒤 세션을 끝내고 알림을 ntfy로 넘김). 끊기면 5초 조회로 돌아가고 10초 뒤 다시 붙음 ── */
+  var ws = null, wsOk = false, hbTimer = null, wsNextTry = 0;
+  function wsUrl() {
+    return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + location.pathname.replace(/[^\/]*$/, '') + 'ws';
+  }
+  function wsStart() {
+    if (ws || document.hidden || view !== 'main' || Date.now() < wsNextTry || !window.WebSocket) return;
+    wsNextTry = Date.now() + 10000;
+    try { ws = new WebSocket(wsUrl()); } catch (e) { ws = null; return; }
+    ws.onopen = function () {
+      wsOk = true;
+      clearTimeout(timer);
+      try { ws.send('hb'); } catch (e) {}   /* 콘은 첫 hb를 받을 때 이 연결을 등록하고 첫 내용을 보냄 */
+      hbTimer = setInterval(function () { try { ws.send('hb'); } catch (e) {} }, 5000);
+    };
+    ws.onmessage = function (ev) {
+      var d;
+      try { d = JSON.parse(ev.data); } catch (e) { return; }
+      if (d.error === 'local') { wsStop(); show('local'); return; }
+      onDash(d);
+    };
+    ws.onclose = ws.onerror = function () {
+      var was = wsOk;
+      wsStop();
+      if (view === 'main' && !document.hidden) { if (was) poll(); else schedule(); }
+    };
+  }
+  function wsStop() {
+    clearInterval(hbTimer);
+    if (ws) { ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null; try { ws.close(); } catch (e) {} }
+    ws = null;
+    wsOk = false;
   }
 
   document.addEventListener('visibilitychange', function () {
-    if (document.hidden) clearTimeout(timer);
-    else if (view === 'main' || view === '') poll();
+    if (document.hidden) { clearTimeout(timer); wsStop(); }
+    else if (view === 'main' || view === '') { wsNextTry = 0; poll(); }
   });
 
   $('loginView').addEventListener('submit', function (ev) {
@@ -1054,7 +1093,7 @@
 
   /* ── 알림(할 일 AD 5단계): 콘 알림 기록이 기준. 안 본 개수 = 콘 마지막 번호 - 이 브라우저가 본 번호(브라우저마다 따로).
    *    웹앱이 열려 있는 동안 생긴 보낼 대상은 콘이 주화면 조회 응답(alarm.new)에 실어 줌 → 배너. 누르면 알림 기록 ── */
-  var ALARM_MAX = 500, alarmSeen = null, alarmLast = 0, bannerTimer = null;
+  var ALARM_MAX = 500, alarmSeen = null, alarmLast = 0, bannerTimer = null, bannerMax = 0;
   try { var sv = localStorage.getItem('alarmSeen'); if (sv !== null && sv !== '') alarmSeen = +sv; } catch (e) {}
   function setAlarmSeen(v) { alarmSeen = v; try { localStorage.setItem('alarmSeen', String(v)); } catch (e) {} }
   function typeLabel(t) { var x = W.N_TYPES[t]; return x ? x[li()] : ''; }
@@ -1069,7 +1108,12 @@
     if (alarmSeen === null || a.last < alarmSeen) setAlarmSeen(a.last);
     alarmLast = a.last;
     renderAlarmBadge();
-    if (a.new && a.new.length) showBanner(a.new);
+    var fresh = (a.new || []).filter(function (it) { return it.id > bannerMax; });
+    if (fresh.length) {
+      showBanner(fresh);
+      bannerMax = fresh[fresh.length - 1].id;
+      post('api/alarms/ack?id=' + bannerMax).catch(function () {});
+    }
   }
   function showBanner(list) {
     var it = list[list.length - 1];

@@ -83,6 +83,21 @@ bool web_session_gate(httpd_req_t *req)
     return true;
 }
 
+bool web_session_local_active(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    bool local = (s_owner == OWNER_LOCAL);
+    taskEXIT_CRITICAL(&s_lock);
+    return local;
+}
+
+bool web_session_touch(void)
+{
+    if (web_session_local_active()) return false;
+    set_owner(OWNER_WEB);  /* web_session_gate와 같음 — 처음이면 잠금, 이미 웹이면 마지막 시각만 갱신 */
+    return true;
+}
+
 void web_session_takeover(void)
 {
     set_owner(OWNER_LOCAL);

@@ -30,6 +30,10 @@ void web_session_takeover(void);
 /* 지금 웹이 주인(콘 잠금)인지 */
 bool web_session_web_active(void);
 
+/* 2026-10-05(WebSocket) — 콘이 넘겨받은 상태인지 / 웹앱 하트비트(요청 없이 세션 유지). 넘겨받은 상태면 false(웹 주인으로 안 바꿈) */
+bool web_session_local_active(void);
+bool web_session_touch(void);
+
 /* POST /api/session/claim 등록 */
 void web_session_register_handlers(httpd_handle_t server);
 

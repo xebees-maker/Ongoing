@@ -226,17 +226,26 @@ int alarm_read_page(uint32_t page, uint32_t page_size, alarm_rec_t *out)
     return n;
 }
 
-int alarm_take_web_new(alarm_rec_t *out, int cap)
+int alarm_peek_web_new(alarm_rec_t *out, int cap)
 {
     if (!s_mutex) return 0;
     int n = 0;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (uint32_t id = s_pending_from; id <= s_last_id && n < cap; id++) {
-        alarm_rec_t *r = slot(id);
-        if (!is_pending(r, id)) continue;
-        r->flags |= ALARM_F_SEEN;
-        out[n++] = *r;
+        const alarm_rec_t *r = slot(id);
+        if (is_pending(r, id)) out[n++] = *r;
     }
     xSemaphoreGive(s_mutex);
     return n;
+}
+
+void alarm_ack_web(uint32_t upto_id)
+{
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (uint32_t id = s_pending_from; id <= s_last_id && id <= upto_id; id++) {
+        alarm_rec_t *r = slot(id);
+        if (is_pending(r, id)) r->flags |= ALARM_F_SEEN;
+    }
+    xSemaphoreGive(s_mutex);
 }

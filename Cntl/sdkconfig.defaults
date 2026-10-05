@@ -77,3 +77,7 @@ CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 # 2026-10-03(사용자 지시 — 웹 사진 전송 속도 시험) — TCP 송신 버퍼 5760 → 23040(4배). 내부 RAM을 전송 중 그만큼 더 씀.
 # 효과는 사용자가 측정. Wi-Fi/lwIP 쪽 변경은 이 한 줄만(feedback_no_wifi_memory_tuning — 사용자가 이 시험을 직접 지시)
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=46080
+# 2026-10-05(할 일 AD) — 웹앱 실시간 갱신을 5초 조회 대신 WebSocket으로
+CONFIG_HTTPD_WS_SUPPORT=y
+# IDF v6는 연결을 맺을 때 URI 핸들러를 부르지 않음 — 로그인·웹 세션 확인은 연결 전 콜백에서
+CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT=y

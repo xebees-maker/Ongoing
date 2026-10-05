@@ -91,34 +91,30 @@ static esp_err_t send_jbuf(httpd_req_t *req, jbuf_t *b)
     return httpd_resp_send(req, b->p, b->len);
 }
 
-/* GET /api/dashboard — 콘 주화면 한 장분: 상단바(시각·네트워크·상태), Summary(메모리·저장 공간), Power Control(릴레이),
- * Sensor·Camera 목록. SPA가 5초마다 부름(웹 세션 유지 신호를 겸함) */
-static esp_err_t api_dashboard_get_handler(httpd_req_t *req)
+/* 콘 주화면 한 장분: 상단바(네트워크·상태), Summary(메모리·저장 공간), Power Control(릴레이), Sensor·Camera 목록, 알림.
+ * GET /api/dashboard와 WebSocket 밀어주기(ws_push_work)가 같이 씀 — httpd 태스크에서만. mem 구간(자주 바뀜)의 위치를
+ * 돌려줌(WebSocket이 바뀐 게 있는지 비교할 때 뺌). 2026-10-05 — 시각은 뺌(웹 상단 시계 없앰, 사용자 결정) */
+static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
 {
-    WEB_SCREEN_API_BEGIN(req);
-    const size_t cap = 8192;
-    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
+    jbuf_t b = *bp;
     node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
-    if (!b.p || !nodes) {
-        heap_caps_free(b.p);
-        heap_caps_free(nodes);
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
+    if (!nodes) return false;
 
     /* 상단바 */
     bool err = false, warn = false, sd_fail = false;
     ui_main_get_status_flags(&err, &warn, &sd_fail);
     bool ap = device_config_get_wifi_ap_mode();
     const char *ssid = ap ? wifi_sta_get_ap_ssid() : wifi_sta_get_active_ssid();
-    jb_printf(&b, "{\"time\":%lu,\"net\":{\"mode\":\"%s\",\"ssid\":", (unsigned long)rtc_sync_get_unix_time(), ap ? "ap" : "sta");
+    jb_printf(&b, "{\"net\":{\"mode\":\"%s\",\"ssid\":", ap ? "ap" : "sta");
     jb_str(&b, ssid ? ssid : "");
     jb_printf(&b, ",\"ip\":%s},\"status\":\"%s\"", wifi_sta_get_own_ip_str()[0] ? "true" : "false",
               (err || sd_fail) ? "error" : warn ? "warning" : "normal");
 
     /* Summary — 메모리(바이트), 저장 공간(영역별 사용%·여유MB, 콘 Summary와 같은 계산) */
+    *mem_from = b.len;
     jb_printf(&b, ",\"mem\":{\"i\":%u,\"p\":%u}", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    *mem_to = b.len;
     if (sd_fail) {
         jb_printf(&b, ",\"sd\":{\"state\":\"io_error\"}");
     } else if (!sd_storage_is_mounted()) {
@@ -212,9 +208,10 @@ static esp_err_t api_dashboard_get_handler(httpd_req_t *req)
     jb_printf(&b, "]");
     heap_caps_free(nodes);
 
-    /* 2026-10-05(할 일 AD 5단계) — 알림: 마지막 번호(안 본 개수 계산용) + 웹앱에 아직 안 간 보낼 대상(웹앱이 띄움 — 받아 간 것으로 표시) */
+    /* 2026-10-05(할 일 AD 5단계) — 알림: 마지막 번호(안 본 개수 계산용) + 웹앱에 아직 안 간 보낼 대상(웹앱이 띄운 뒤
+     * POST /api/alarms/ack로 알려 오면 빠짐) */
     alarm_rec_t *al = heap_caps_malloc(sizeof(alarm_rec_t) * 8, MALLOC_CAP_SPIRAM);
-    int an = al ? alarm_take_web_new(al, 8) : 0;
+    int an = al ? alarm_peek_web_new(al, 8) : 0;
     jb_printf(&b, ",\"alarm\":{\"last\":%lu,\"new\":[", (unsigned long)alarm_last_id());
     for (int i = 0; i < an; i++) {
         jb_printf(&b, "%s{\"id\":%lu,\"t\":%lu,\"type\":%u,\"msg\":", i ? "," : "", (unsigned long)al[i].id, (unsigned long)al[i].t, (unsigned)al[i].type);
@@ -223,11 +220,153 @@ static esp_err_t api_dashboard_get_handler(httpd_req_t *req)
     }
     jb_printf(&b, "]}}");
     heap_caps_free(al);
+    *bp = b;
+    return true;
+}
 
+/* GET /api/dashboard — 처음 열 때와 WebSocket이 안 될 때(5초 조회로 대신) */
+static esp_err_t api_dashboard_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    const size_t cap = 8192;
+    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
+    size_t mf = 0, mt = 0;
+    if (!b.p || !build_dashboard(&b, &mf, &mt)) {
+        heap_caps_free(b.p);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
     esp_err_t ret = send_jbuf(req, &b);
     heap_caps_free(b.p);
     return ret;
 }
+
+/* ── WebSocket /ws(2026-10-05 — 5초 조회 대신, 사용자 지시) ──
+ * - 웹앱 하나(단일 접속 전제) — 새로 붙으면 이전 연결은 닫음.
+ * - 콘이 1초마다 주화면 내용을 만들어 바뀐 게 있으면 보냄(메모리 수치만 바뀌면 5초마다). 첫 연결은 바로 보냄.
+ * - 웹앱은 5초마다 "hb"를 보냄 → 웹 세션 유지(web_session_touch). 휴대폰이 잠기면 hb가 끊겨 기존 20초 규칙으로 세션이
+ *   끝나고, 그때 이 연결도 닫음(알림은 ntfy로 넘어감). 콘이 넘겨받으면 {"error":"local"}을 보내고 닫음 */
+#define WS_PUSH_MS        1000
+#define WS_MEM_ONLY_MS    5000
+static httpd_handle_t s_server = NULL;
+static int s_ws_fd = -1;
+static uint32_t s_ws_hash = 0;
+static int64_t s_ws_sent_us = 0;
+static jbuf_t s_ws_buf = { 0 };
+static esp_timer_handle_t s_ws_timer = NULL;
+
+static uint32_t fnv1a(const char *p, size_t n, uint32_t h)
+{
+    for (size_t i = 0; i < n; i++) { h ^= (uint8_t)p[i]; h *= 16777619u; }
+    return h;
+}
+
+/* 연결이 이미 닫혔으면(닫기 프레임은 httpd가 직접 처리) 같은 소켓 번호가 다른 HTTP 연결에 다시 쓰였을 수 있음 —
+ * 보내거나 닫기 전에 아직 WebSocket인지 확인 */
+static bool ws_fd_alive(int fd)
+{
+    return fd >= 0 && httpd_ws_get_fd_info(s_server, fd) == HTTPD_WS_CLIENT_WEBSOCKET;
+}
+
+static void ws_close_current(void)
+{
+    if (ws_fd_alive(s_ws_fd)) httpd_sess_trigger_close(s_server, s_ws_fd);
+    s_ws_fd = -1;
+}
+
+static esp_err_t ws_send_text(int fd, const char *p, size_t len)
+{
+    httpd_ws_frame_t f = { .final = true, .type = HTTPD_WS_TYPE_TEXT, .payload = (uint8_t *)p, .len = len };
+    return httpd_ws_send_frame_async(s_server, fd, &f);
+}
+
+/* httpd 태스크에서(httpd_queue_work) — 다른 핸들러와 겹치지 않음 */
+static void ws_push_work(void *arg)
+{
+    (void)arg;
+    int fd = s_ws_fd;
+    if (fd < 0) return;
+    if (!ws_fd_alive(fd)) {
+        s_ws_fd = -1;
+        return;
+    }
+    if (web_session_local_active()) {
+        static const char local_msg[] = "{\"error\":\"local\"}";
+        ws_send_text(fd, local_msg, sizeof(local_msg) - 1);
+        ws_close_current();
+        return;
+    }
+    if (!web_session_web_active()) {  /* hb가 끊겨 세션이 끝남 */
+        ws_close_current();
+        return;
+    }
+    if (!s_ws_buf.p) {
+        s_ws_buf.cap = 8192;
+        s_ws_buf.p = heap_caps_malloc(s_ws_buf.cap, MALLOC_CAP_SPIRAM);
+        if (!s_ws_buf.p) return;
+    }
+    s_ws_buf.len = 0;
+    s_ws_buf.overflow = false;
+    size_t mf = 0, mt = 0;
+    if (!build_dashboard(&s_ws_buf, &mf, &mt) || s_ws_buf.overflow) return;
+    uint32_t h = fnv1a(s_ws_buf.p, mf, 2166136261u);
+    h = fnv1a(s_ws_buf.p + mt, s_ws_buf.len - mt, h);
+    int64_t now = esp_timer_get_time();
+    if (h == s_ws_hash && now - s_ws_sent_us < (int64_t)WS_MEM_ONLY_MS * 1000) return;
+    if (ws_send_text(fd, s_ws_buf.p, s_ws_buf.len) != ESP_OK) {
+        ESP_LOGW(TAG, "WS send failed - closing");
+        ws_close_current();
+        return;
+    }
+    s_ws_hash = h;
+    s_ws_sent_us = now;
+}
+
+static void ws_timer_cb(void *arg)
+{
+    (void)arg;
+    if (s_ws_fd >= 0 && s_server) httpd_queue_work(s_server, ws_push_work, NULL);
+}
+
+/* 연결을 맺기 전(IDF v6는 연결 맺을 때 URI 핸들러를 부르지 않음 — 실기 확인) — 로그인 + 웹 세션. 실패하면 연결 안 맺음
+ * (콘이 넘겨받은 상태면 web_session_gate가 409를 보냄 → 웹앱은 HTTP 조회로 돌아가 넘겨받음 화면) */
+static esp_err_t ws_pre_handshake(httpd_req_t *req)
+{
+    if (!web_auth_check(req)) return ESP_FAIL;
+    if (!web_session_gate(req)) return ESP_FAIL;
+    return ESP_OK;
+}
+
+/* 프레임 — 웹앱은 연결되자마자, 그 뒤 5초마다 "hb"를 보냄. 이 연결을 처음 보면 여기서 등록하고 첫 내용을 바로 보냄 */
+static esp_err_t ws_handler(httpd_req_t *req)
+{
+    httpd_ws_frame_t f = { 0 };
+    uint8_t buf[8];  /* 받는 것은 "hb" 하나뿐 — 큰 프레임은 읽지 않고 버림 */
+    f.payload = buf;
+    if (httpd_ws_recv_frame(req, &f, 0) != ESP_OK) return ESP_FAIL;
+    if (f.len > sizeof(buf)) return ESP_FAIL;  /* 읽지 않고 두면 다음 프레임이 어긋남 — 연결을 닫음 */
+    if (f.len > 0) {
+        f.payload = buf;
+        if (httpd_ws_recv_frame(req, &f, f.len) != ESP_OK) return ESP_FAIL;
+    }
+    if (f.type == HTTPD_WS_TYPE_CLOSE) {
+        if (httpd_req_to_sockfd(req) == s_ws_fd) s_ws_fd = -1;
+        return ESP_OK;
+    }
+    if (f.type != HTTPD_WS_TYPE_TEXT) return ESP_OK;
+    int fd = httpd_req_to_sockfd(req);
+    if (fd != s_ws_fd) {
+        if (s_ws_fd >= 0) ws_close_current();  /* 단일 접속 — 이전 연결은 닫음 */
+        s_ws_fd = fd;
+        s_ws_hash = 0;
+        s_ws_sent_us = 0;
+        ESP_LOGI(TAG, "WS connected (fd %d)", fd);
+    }
+    web_session_touch();   /* 넘겨받은 상태면 false — 아래 밀어주기가 local을 알리고 닫음 */
+    if (s_ws_hash == 0) httpd_queue_work(s_server, ws_push_work, NULL);  /* 첫 내용 바로 */
+    return ESP_OK;
+}
+
 
 /* ── 요청 인자 ── */
 static bool hex_to_mac(const char *hex, uint8_t mac[6])
@@ -986,6 +1125,16 @@ static esp_err_t api_alarms_get_handler(httpd_req_t *req)
     return ret;
 }
 
+/* POST /api/alarms/ack?id= — 웹앱이 띄운 알림 번호까지 "받아 감"(그 뒤로는 ntfy로 안 보냄) */
+static esp_err_t api_alarms_ack_post_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    int id = query_int(s_w->query, "id", 0);
+    if (id > 0) alarm_ack_web((uint32_t)id);
+    return send_simple(req, NULL, "{\"ok\":true}");
+}
+
 /* 시험용 — 출시 전 제거(조건부 C9). POST /api/alarm_sim?type=0..6 — 실제 사건과 같은 alarm_post로 넣음.
  * 웹 세션은 건드리지 않음(로그인만 확인) — 세션 유무에 따른 받는 곳 나눔을 시험하려고 */
 static esp_err_t api_alarm_sim_post_handler(httpd_req_t *req)
@@ -1013,6 +1162,17 @@ static esp_err_t api_stats_delete_all_post_handler(httpd_req_t *req)
 
 void web_api_register_handlers(httpd_handle_t server)
 {
+    s_server = server;
+    s_ws_fd = -1;
+    static const httpd_uri_t ws_uri = { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .is_websocket = true,
+                                        .ws_pre_handshake_cb = ws_pre_handshake };
+    static const httpd_uri_t alarms_ack_uri = { .uri = "/api/alarms/ack", .method = HTTP_POST, .handler = api_alarms_ack_post_handler };
+    httpd_register_uri_handler(server, &ws_uri);
+    httpd_register_uri_handler(server, &alarms_ack_uri);
+    if (!s_ws_timer) {
+        const esp_timer_create_args_t ta = { .callback = ws_timer_cb, .name = "ws_push" };
+        if (esp_timer_create(&ta, &s_ws_timer) == ESP_OK) esp_timer_start_periodic(s_ws_timer, (uint64_t)WS_PUSH_MS * 1000);
+    }
     static const httpd_uri_t stats_uri = { .uri = "/api/stats", .method = HTTP_GET, .handler = api_stats_get_handler };
     static const httpd_uri_t stats_records_uri = { .uri = "/api/stats/records", .method = HTTP_GET, .handler = api_stats_records_get_handler };
     static const httpd_uri_t stats_delete_all_uri = { .uri = "/api/stats/delete_all", .method = HTTP_POST, .handler = api_stats_delete_all_post_handler };

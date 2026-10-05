@@ -42,5 +42,7 @@ void alarm_post(notify_type_t type, const char *title, const char *fmt, ...) __a
 uint32_t alarm_last_id(void);
 /* 알림 기록 한 페이지 — 0 = 최신, 최신이 앞. 반환: 채운 개수 */
 int alarm_read_page(uint32_t page, uint32_t page_size, alarm_rec_t *out);
-/* 웹앱에 아직 안 간 보낼 대상(ntfy로도 안 보낸 것)을 꺼내 "받아 감"으로 표시 — 주화면 조회(웹 세션 중)에서 부름 */
-int alarm_take_web_new(alarm_rec_t *out, int cap);
+/* 웹앱에 아직 안 간 보낼 대상(ntfy로도 안 보낸 것) — 주화면 내용(HTTP 조회·WebSocket)에 실음. 표시하지 않음 */
+int alarm_peek_web_new(alarm_rec_t *out, int cap);
+/* 웹앱이 띄웠다고 알려 온 번호까지 "받아 감"으로(2026-10-05 — 보냈다고 받은 것은 아님: 휴대폰이 잠기는 순간이면 못 띄움) */
+void alarm_ack_web(uint32_t upto_id);
