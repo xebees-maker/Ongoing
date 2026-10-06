@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_attr.h"
 
 static const char *TAG = "SENS";
 
@@ -45,6 +46,11 @@ static bool s_single_shot_pending = false;
 static int s_last_fault = 0;
 
 int scd41_last_fault(void) { return s_last_fault; }
+
+/* 2026-10-05(진단, 임시 — SCD41 단발 측정이 계속 NOT_READY) — 이번 트리거 뒤 data_ready 폴 횟수·마지막 상태 원값 */
+static int      s_diag_polls = 0;
+static uint16_t s_diag_status = 0xFFFF;  /* 0xFFFF = 상태를 한 번도 못 받음 */
+void scd41_diag_get(int *polls, uint16_t *last_status) { *polls = s_diag_polls; *last_status = s_diag_status; }
 void scd41_clear_fault(void) { s_last_fault = 0; }
 
 static bool start_measurement_sequence(void);
@@ -90,6 +96,9 @@ static void force_reinit(const char *reason)
 
 static void note_failure(void)
 {
+    /* 2026-10-05(실기 — 재초기화가 몰아침) — 단발 모드는 재초기화를 호출부(센스 측정 코드) 한 곳에서만 판단. 드라이버가 따로
+     * 실패를 세면 두 재초기화가 서로의 실행 시간을 모른 채 겹침. 실패 때 버스 리셋(recover_bus)은 그대로 */
+    if (s_single_shot_mode) return;
     if (s_reinit_in_progress) return;
     if (++s_fail_count < REINIT_FAIL_THRESHOLD) return;
     force_reinit("repeated I2C failures");
@@ -106,6 +115,7 @@ static void note_success(void)
  * 마지막 성공 측정 이후 경과 시간으로 별도 감지한다. */
 static void check_stale(void)
 {
+    if (s_single_shot_mode) return;  /* note_failure와 같은 이유 */
     if (s_reinit_in_progress) return;
     if (s_last_success_tick == 0) return;  /* 아직 기준 시각 없음 (초기화 직후) */
     if ((xTaskGetTickCount() - s_last_success_tick) < pdMS_TO_TICKS(STALE_TIMEOUT_MS)) return;
@@ -245,6 +255,8 @@ static bool data_ready(void)
     }
 
     uint16_t status = ((uint16_t)resp[0] << 8) | resp[1];
+    s_diag_polls++;
+    s_diag_status = status;
     bool ready = (status & 0x07FF) != 0;
     ESP_LOGD(TAG, "data_ready: status=0x%04X ready=%d", status, ready);
     if (!ready) check_stale();
@@ -314,15 +326,84 @@ bool scd41_reinit(void)
     bool stop_ok = send_cmd(CMD_STOP_PERIODIC_MEASUREMENT);
     vTaskDelay(pdMS_TO_TICKS(500));
     bool reinit_ok = send_cmd(CMD_REINIT);
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(30));  /* 2026-10-05 — 데이터시트 reinit 실행 시간 30ms(예전 20ms) — 그동안 다른 명령 금지 */
     s_single_shot_pending = false;
     ESP_LOGW(TAG, "SCD41 reinit: stop=%s reinit=%s", stop_ok ? "ACK" : "NACK", reinit_ok ? "ACK" : "NACK");
     return reinit_ok;
 }
 
+/* 2026-10-05(진단, 임시) — 센서 일련번호(0x3682)·종류(get_sensor_variant 0x202F, 데이터시트: 상위 4비트 0=SCD40, 1=SCD41)를
+ * 읽어 로그로 남김. 둘 다 유휴 상태에서만 받는 명령, 실행 시간 1ms */
+static bool read_words(uint16_t cmd, uint16_t *w, int n)
+{
+    if (!send_cmd(cmd)) return false;
+    vTaskDelay(pdMS_TO_TICKS(2));
+    uint8_t resp[9] = { 0 };
+    if (i2c_master_receive(s_dev, resp, (size_t)n * 3, I2C_TIMEOUT_MS) != ESP_OK) return false;
+    for (int i = 0; i < n; i++) {
+        if (crc8(&resp[i * 3], 2) != resp[i * 3 + 2]) return false;
+        w[i] = ((uint16_t)resp[i * 3] << 8) | resp[i * 3 + 1];
+    }
+    return true;
+}
+
+void scd41_log_identity(void)
+{
+    if (!s_dev) return;
+    uint16_t sn[3] = { 0 }, var = 0;
+    bool sn_ok = read_words(0x3682, sn, 3);
+    bool var_ok = read_words(0x202F, &var, 1);
+    ESP_LOGW(TAG, "SCD4x identity: serial=%s%04X%04X%04X variant=%s0x%04X",
+             sn_ok ? "" : "(fail)", sn[0], sn[1], sn[2], var_ok ? "" : "(fail)", var);
+
+    /* 2026-10-05(사용자 지시 — 읽기만) — get_automatic_self_calibration_enabled(0x2313): 1 = ASC 켜짐, 0 = 꺼짐 */
+    uint16_t asc = 0xFFFF;
+    bool asc_ok = read_words(0x2313, &asc, 1);
+    ESP_LOGW(TAG, "SCD4x ASC: %s%u", asc_ok ? "" : "(read fail) ", (unsigned)asc);
+
+}
+
+/* 2026-10-05(사용자 결정 — SCD41 개선 3단계) — ASC 끄기 + persist_settings, 센서당 한 번만.
+ * 근거: Sensirion 저전력 앱노트 5.2 — ASC가 켜져 있으면 단발 48번마다 보정 이력을 EEPROM에 씀(15초 간격이면 하루 약 120번,
+ * persist 수명 2000회 이상). EEPROM 쓰기는 "켜져 있을 때만" — 끈 뒤로는 읽기만 하므로 전원을 여러 번 켜도 센서당 한 번.
+ * 저장 뒤 다시 읽어도 켜져 있으면 이번 전원 동안은 다시 쓰지 않음(RTC 메모리 — 딥슬립에도 유지, 전원 끄면 지워짐) */
+static RTC_DATA_ATTR bool s_asc_write_tried = false;
+
+void scd41_ensure_asc_off(void)
+{
+    if (!s_dev) return;
+    uint16_t asc = 0xFFFF;
+    if (!read_words(0x2313, &asc, 1)) { ESP_LOGW(TAG, "SCD4x ASC: read fail - not writing"); return; }
+    if (asc == 0) { ESP_LOGI(TAG, "SCD4x ASC: off (no write)"); return; }
+    if (s_asc_write_tried) { ESP_LOGE(TAG, "SCD4x ASC: still on after persist this power cycle - not writing again"); return; }
+    s_asc_write_tried = true;
+    uint8_t buf[5] = { 0x24, 0x16, 0x00, 0x00, 0 };  /* set_automatic_self_calibration_enabled(0) */
+    buf[4] = crc8(&buf[2], 2);
+    esp_err_t err = i2c_master_transmit(s_dev, buf, sizeof(buf), I2C_TIMEOUT_MS);
+    vTaskDelay(pdMS_TO_TICKS(2));
+    bool persist_ok = (err == ESP_OK) && send_cmd(0x3615);  /* persist_settings — 실행 800ms */
+    vTaskDelay(pdMS_TO_TICKS(800));
+    uint16_t after = 0xFFFF;
+    bool rb_ok = read_words(0x2313, &after, 1);
+    ESP_LOGW(TAG, "SCD4x ASC: was on -> set=%s persist=%s readback=%s%u",
+             err == ESP_OK ? "ACK" : "NACK", persist_ok ? "ACK" : "NACK", rb_ok ? "" : "(fail) ", (unsigned)after);
+}
+
+/* 2026-10-06(시험 — Sensirion 단발 예제 그대로) — 공식 wakeUp(): 0x36F6을 보내고 결과는 무시, 30ms 대기.
+ * 유휴 상태에선 NACK이 정상이라 send_cmd(실패 시 버스 리셋·로그)를 쓰지 않음 */
+void scd41_wake_up(void)
+{
+    if (!s_dev) return;
+    uint8_t buf[2] = { (uint8_t)(CMD_WAKE_UP >> 8), (uint8_t)(CMD_WAKE_UP & 0xFF) };
+    (void)i2c_master_transmit(s_dev, buf, sizeof(buf), I2C_TIMEOUT_MS);
+    vTaskDelay(pdMS_TO_TICKS(30));
+}
+
 bool scd41_trigger_single_shot(void)
 {
     if (!s_dev) return false;
+    s_diag_polls = 0;
+    s_diag_status = 0xFFFF;
     if (!send_cmd(CMD_MEASURE_SINGLE_SHOT)) return false;
     s_single_shot_pending = true;
     return true;

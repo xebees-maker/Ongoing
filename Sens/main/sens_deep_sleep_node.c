@@ -110,8 +110,10 @@ static const char *TAG = "sens_deep_sleep_node";
  * 처리(cam_node.c류 "무한정 안 기다린다" 원칙과 동일). 센서마다 측정 소요시간이 다름
  * (사용자 지시: 온습도~100ms, CO2~1초, 암모니아~3초) — 이 값은 SCD41 전용, MQ137은 AO/DO를
  * 그냥 즉시 읽으면 되므로(트리거+폴링 자체가 없음) 이 타임아웃이 필요 없음 */
-#define SCD41_MEASURE_POLL_MS    200
-#define SCD41_MEASURE_TIMEOUT_MS 6000
+/* 2026-10-05(사용자 결정 — SCD41 개선 1단계) — Sensirion 공식 드라이버(measureAndReadSingleShot)처럼 5초 뒤부터 100ms마다,
+ * 준비될 때까지 기다림. 공식은 제한 없음 — 여기선 RWDT 예산·전력 때문에 상한 15초(예전 6초에 포기 → 다음 측정이 남은 결과를 읽던 패턴) */
+#define SCD41_MEASURE_POLL_MS    100
+#define SCD41_MEASURE_TIMEOUT_MS 15000
 /* 2026-09-14(사용자 지적 "SCD41 값 못읽은 거 왜 안 찾았냐" 재조사 — Sensirion SCD4x
  * 공식 매뉴얼 v1.7 확인) — measure_single_shot(0x219d)의 실행시간은 정확히 5000ms
  * (Table 9)이고, Section 3.4: "실행시간이 명시된 명령은 그 실행시간 동안 추가 명령을
@@ -162,7 +164,7 @@ static RTC_DATA_ATTR uint32_t s_seconds_since_last_measurement    = 0;
 static RTC_DATA_ATTR uint8_t  s_sensor_fault                      = 0;
 static RTC_DATA_ATTR uint16_t s_sensor_fail_streak                = 0;
 /* 연속 실패가 이 배수가 될 때마다 SCD41 재초기화(stop -> reinit, 데이터시트 3.9.5) */
-#define SENS_REINIT_EVERY_FAILS 3
+#define SENS_REINIT_EVERY_FAILS 2  /* 2026-10-06(사용자 결정) — 2회 연속 실패마다 reinit(예전 3회) */
 /* measure_sensor()가 실패했을 때 그 원인 — attempt_one_measurement()가 채움 */
 static uint8_t s_attempt_fault = 0;
 
@@ -379,34 +381,64 @@ static void pm_lock_no_light_sleep_release(void) {}
  * 한 부팅 안에서 블로킹으로 끝냄(scd41.c의 trigger/poll API 자체는 안 건드림) */
 static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
 {
+    /* 2026-10-05(실기 — 플래시 직후 첫 명령 NACK) — 이 보드는 SCD41 전원이 3.3V 직결이라 ESP만 리셋되면 센서는 그대로.
+     * 리셋 직전에 단발 측정을 시작했다면 그 실행 시간(5초) 동안은 명령을 안 받음 → 이 부팅의 첫 명령이 NACK이면
+     * 그만큼 기다렸다 한 번만 더(딥슬립 웨이크는 이전 측정이 이미 끝나 있어 해당 없음) */
+    static bool s_first_cmd_this_boot = true;
+    scd41_wake_up();  /* 2026-10-06(시험 — 공식 loop() 첫 줄 wakeUp()) */
     scd41_clear_fault();
-    if (!scd41_trigger_single_shot()) {
+    bool trig_ok = scd41_trigger_single_shot();
+    if (!trig_ok && s_first_cmd_this_boot) {
+        ESP_LOGW(TAG, "SCD41 first command NACK - previous measurement may still be running, retry in %ums",
+                 (unsigned)SCD41_MEASURE_MIN_WAIT_MS);
+        vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_MIN_WAIT_MS));
+        scd41_clear_fault();
+        trig_ok = scd41_trigger_single_shot();
+    }
+    s_first_cmd_this_boot = false;
+    if (!trig_ok) {
         s_attempt_fault = SENSOR_FAULT_CMD_NACK;
         return false;
     }
 
-    /* 위 SCD41_MEASURE_MIN_WAIT_MS 주석 참고 — 데이터시트가 명시한 5000ms 실행시간
-     * 동안은 어떤 명령도 안 보내고 그냥 기다림(이전엔 200ms마다 폴링해서 위반) */
-    vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_MIN_WAIT_MS));
-
-    uint32_t waited_ms = SCD41_MEASURE_MIN_WAIT_MS;
-    while (waited_ms < SCD41_MEASURE_TIMEOUT_MS) {
-        int co2 = 0;
-        float t = 0.0f, h = 0.0f;
-        bool ok = false;
-        if (scd41_poll_single_shot(&co2, &t, &h, &ok)) {
-            if (ok) { out[0] = (float)co2; out[1] = t; out[2] = h; }
-            else s_attempt_fault = scd41_last_fault() ? (uint8_t)scd41_last_fault() : SENSOR_FAULT_READ;
-            return ok;
+    /* 2026-10-06(사용자 결정 — Sensirion 단발 예제 그대로 시험) — exampleScd41SingleShot.ino loop():
+     * wakeUp() → measureSingleShot()(5초, 결과 버림) → measureAndReadSingleShot()(트리거 → 5초 → 100ms마다 data-ready, 준비되면 읽기).
+     * wake_up은 이 함수 맨 앞, 위의 트리거가 "버리는 측정". 공식은 무한정 기다림 — RWDT 예산 때문에 두 번째 트리거 뒤 15초 상한(시험, 임시) */
+    static RTC_DATA_ATTR uint32_t s_mfr_n = 0, s_mfr_ok = 0;
+    vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_MIN_WAIT_MS));  /* 첫 측정(버림) — 공식 measureSingleShot() 안의 delay(5000) */
+    scd41_clear_fault();
+    bool ok = false;
+    uint32_t waited_ms = 0;
+    int diag_polls = 0; uint16_t diag_status = 0xFFFF;
+    if (!scd41_trigger_single_shot()) {
+        s_attempt_fault = SENSOR_FAULT_CMD_NACK;
+    } else {
+        vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_MIN_WAIT_MS));
+        waited_ms = SCD41_MEASURE_MIN_WAIT_MS;
+        bool done = false;
+        while (!done && waited_ms <= 15000) {
+            int co2 = 0;
+            float t = 0.0f, h = 0.0f;
+            bool read_ok = false;
+            if (scd41_poll_single_shot(&co2, &t, &h, &read_ok)) {
+                done = true;
+                ok = read_ok;
+                if (ok) { out[0] = (float)co2; out[1] = t; out[2] = h; }
+                else s_attempt_fault = scd41_last_fault() ? (uint8_t)scd41_last_fault() : SENSOR_FAULT_READ;
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                waited_ms += 100;
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_POLL_MS));
-        waited_ms += SCD41_MEASURE_POLL_MS;
+        if (!done) s_attempt_fault = scd41_last_fault() ? (uint8_t)scd41_last_fault() : SENSOR_FAULT_NOT_READY;
+        scd41_diag_get(&diag_polls, &diag_status);
     }
-    /* 폴링 중 통신 오류가 있었으면 그 원인, 없었으면 "명령은 받았지만 준비가 안 됨" */
-    s_attempt_fault = scd41_last_fault() ? (uint8_t)scd41_last_fault() : SENSOR_FAULT_NOT_READY;
-    ESP_LOGW(TAG, "SCD41 measurement timeout (%ums, fault=%u)", (unsigned)SCD41_MEASURE_TIMEOUT_MS,
-             (unsigned)s_attempt_fault);
-    return false;
+    s_mfr_n++;
+    if (ok) s_mfr_ok++;
+    ESP_LOGW(TAG, "SCD41 MFR n=%u %s ready_ms=%u polls=%d status=0x%04X fault=%u (ok total %u/%u)",
+             (unsigned)s_mfr_n, ok ? "OK" : "FAIL", (unsigned)(ok ? waited_ms : 0), diag_polls, (unsigned)diag_status,
+             (unsigned)(ok ? 0 : s_attempt_fault), (unsigned)s_mfr_ok, (unsigned)s_mfr_n);
+    return ok;
 }
 #endif
 
@@ -478,6 +510,32 @@ static bool attempt_one_measurement(float out[SENSOR_CHAN_COUNT], uint32_t *accu
  * 없으면 측정 자체가 무의미 — 그래서 이 함수는 반드시 "실제로 페어링된 게 확인된 뒤"에만
  * app_main에서 호출해야 함(광고/스캔 중엔 호출 안 함). 측정주기 게이팅(due_for_measurement)
  * 자체는 그대로 유지 */
+/* 2026-10-05(실기 — SCD41을 붙였는데 측정이 계속 안 됨) — 측정 실패·회복 처리. 보통 경로와 Live 경로가 같이 씀.
+ * 예전엔 Live 경로(응답성 "즉시")가 이걸 안 해서 콘에 실패가 보고되지 않았고, 3번마다 하는 SCD41 재초기화도 없어서
+ * 한 번 측정이 안 되는 상태에 빠지면 Live 동안 6초마다 같은 실패만 반복했음 */
+static void note_measure_recovered(void)
+{
+    if (s_sensor_fail_streak > 0) {
+        ESP_LOGI(TAG, "Sensor recovered after %u failed measurements (last fault=%u)",
+                 (unsigned)s_sensor_fail_streak, (unsigned)s_sensor_fault);
+    }
+    s_sensor_fault = SENSOR_FAULT_NONE;
+    s_sensor_fail_streak = 0;
+}
+
+static void note_measure_failed(void)
+{
+    s_sensor_fault = s_attempt_fault;
+    if (s_sensor_fail_streak < UINT16_MAX) s_sensor_fail_streak++;
+    ESP_LOGW(TAG, "MEASMARK read failed (fault=%u, streak=%u) - reusing cached value (measID=%u)",
+             (unsigned)s_sensor_fault, (unsigned)s_sensor_fail_streak, (unsigned)s_measurement_id);
+#if CONFIG_SENS_SENSOR_SCD41
+    /* 2026-09-29(Sensirion 데이터시트 3.9.5) — 연속 실패가 이어지면 센서가 갇힌 상태로 보고 재초기화.
+     * 이 보드는 SCD41 전원을 끊을 수 없어서(3.3V 직결) 데이터시트의 마지막 단계(전원 껐다 켜기)는 못 함 */
+    if (s_sensor_fail_streak % SENS_REINIT_EVERY_FAILS == 0) scd41_reinit();
+#endif
+}
+
 static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
 {
     uint32_t measure_period_sec = esp_now_node_get_sample_interval_sec();
@@ -504,12 +562,7 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
 #endif
 
         if (fresh_ok) {
-            if (s_sensor_fail_streak > 0) {
-                ESP_LOGI(TAG, "Sensor recovered after %u failed measurements (last fault=%u)",
-                         (unsigned)s_sensor_fail_streak, (unsigned)s_sensor_fault);
-            }
-            s_sensor_fault = SENSOR_FAULT_NONE;
-            s_sensor_fail_streak = 0;
+            note_measure_recovered();
             memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
             for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = 1;
             s_measurement_id++;
@@ -545,15 +598,7 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
                      abs(pt_temp_x100) / 100, abs(pt_temp_x100) % 100);
 #endif
         } else {
-            s_sensor_fault = s_attempt_fault;
-            if (s_sensor_fail_streak < UINT16_MAX) s_sensor_fail_streak++;
-            ESP_LOGW(TAG, "MEASMARK read failed (fault=%u, streak=%u) - reusing cached value (measID=%u)",
-                     (unsigned)s_sensor_fault, (unsigned)s_sensor_fail_streak, (unsigned)s_measurement_id);
-#if CONFIG_SENS_SENSOR_SCD41
-            /* 2026-09-29(Sensirion 데이터시트 3.9.5) — 연속 실패가 이어지면 센서가 갇힌 상태로 보고 재초기화.
-             * 이 보드는 SCD41 전원을 끊을 수 없어서(3.3V 직결) 데이터시트의 마지막 단계(전원 껐다 켜기)는 못 함 */
-            if (s_sensor_fail_streak % SENS_REINIT_EVERY_FAILS == 0) scd41_reinit();
-#endif
+            note_measure_failed();
         }
     } else {
         ESP_LOGI(TAG, "Measurement period (%us) not reached (elapsed %us) - skipped, reusing cached value (measID=%u)",
@@ -614,6 +659,17 @@ void app_main(void)
         ESP_LOGW(TAG, "SCD41 init failed - check wiring (retry next cycle)");
     }
     vTaskDelay(pdMS_TO_TICKS(1000));  /* 싱글샷용 전원안정화 지연(위 주석 참고) */
+    /* 2026-10-05(사용자 결정 — SCD41 개선 2단계) — Sensirion 단발 예제처럼 시작할 때 센서를 깨끗한 상태로:
+     * stop_periodic(500ms) → reinit(30ms). 09-06에 "단발엔 필요 없다"며 뺐던 것을 되돌림.
+     * 딥슬립에서 깰 때마다 할지 전원 켤 때만 할지는 Live에서 효과 확인 뒤 결정(사용자) — 지금은 부팅마다 */
+    /* 2026-10-06(사용자 결정) — Sensirion 단발 예제 setup()처럼 wakeUp → stop → reinit, ASC 끔 확인.
+     * 딥슬립에서 깰 때는 하지 않음(센서 전원은 그대로라 상태가 이어짐) — 전원 켬·리셋 부팅 때만 */
+    if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
+        scd41_wake_up();
+        scd41_reinit();
+        scd41_log_identity();  /* 2026-10-05(진단, 임시) */
+        scd41_ensure_asc_off();  /* 2026-10-05(SCD41 개선 3단계) */
+    }
 #elif CONFIG_SENS_SENSOR_SHT45
     /* SHT4x는 SCD41과 달리 전원안정화 지연 요구사항이 문서화돼있지 않음(예전 sensor_node.c도
      * 지연 없이 바로 init) — I2C 버스 공유(BSP_C3_I2C_*)는 SCD41과 동일 자리 */
@@ -737,11 +793,16 @@ void app_main(void)
     uint32_t live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
     bool measured_this_boot = false;  /* 2026-09-06(사용자 지시) — 페어링 확인 전엔 측정 안 함,
                                           확인되면 딱 한 번만 이 부팅의 최초 측정을 함 */
+    /* 2026-10-05 — 측정이 실패하면 이 시각 전엔 다시 시도하지 않음(측정 주기만큼 뒤). 재초기화 간격도 그만큼 벌어짐 */
+    uint32_t live_retry_after_ms = 0;
 
     if (paired_now) {
         do_gated_measurement_once(&measurement_elapsed_ms);
         measured_this_boot = true;
         live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (s_sensor_fail_streak > 0) {
+            live_retry_after_ms = live_awake_baseline_ms + esp_now_node_get_sample_interval_sec() * 1000u;
+        }
     }
 
     for (;;) {
@@ -809,18 +870,20 @@ void app_main(void)
         uint32_t live_now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         uint32_t live_awake_elapsed_sec = (live_now_ms - live_awake_baseline_ms) / 1000;
         uint32_t live_measure_period_sec = esp_now_node_get_sample_interval_sec();
-        if (s_seconds_since_last_measurement + live_awake_elapsed_sec >= live_measure_period_sec) {
+        if (s_seconds_since_last_measurement + live_awake_elapsed_sec >= live_measure_period_sec &&
+            (int32_t)(live_now_ms - live_retry_after_ms) >= 0) {
             float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
             if (attempt_one_measurement(fresh_vals, &measurement_elapsed_ms)) {
+                note_measure_recovered();
                 memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
                 for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = 1;
                 s_measurement_id++;
                 s_seconds_since_last_measurement = 0;
                 live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
             } else {
-                ESP_LOGW(TAG, "Sensor read failed (Live re-measure) - reusing cached value (measID=%u)",
-                         (unsigned)s_measurement_id);
-                /* 기준점을 안 옮겨서 다음 Live 반복에서 곧바로 다시 재시도됨 */
+                ESP_LOGW(TAG, "Sensor read failed (Live re-measure) - retry in %us", (unsigned)live_measure_period_sec);
+                note_measure_failed();  /* 2026-10-05 — 보통 경로와 같게: 콘에 실패 보고 + 3번마다 SCD41 재초기화 */
+                live_retry_after_ms = (uint32_t)(esp_timer_get_time() / 1000) + live_measure_period_sec * 1000u;
             }
         }
 
