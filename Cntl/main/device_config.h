@@ -102,6 +102,9 @@ bool     device_config_sens_sample_interval_is_set(const uint8_t *mac);
  * 확인 가능) */
 #define DEVICE_CONFIG_ALIAS_MAX_LEN 32
 const char *device_config_get_alias(const uint8_t *mac);
+/* 2026-10-05(사용자 결정) — 콘 화면 표시용: 별명의 한글을 로마자로(romanize.h). 저장은 입력한 그대로. 별명이 없으면 "" */
+#define DEVICE_CONFIG_ALIAS_DISP_LEN 80
+const char *device_config_get_alias_display(const uint8_t *mac);
 void        device_config_set_alias(const uint8_t *mac, const char *alias);
 bool        device_config_is_known_device(const uint8_t *mac);
 /* 페어링 성공 시 node_hub가 호출 — 슬롯이 없으면 alias 빈 문자열로 새로 만듦(이미 있으면

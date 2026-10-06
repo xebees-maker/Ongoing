@@ -114,6 +114,9 @@ void power_relay_load(void);
 void power_relay_start(void);
 
 const power_relay_config_t *power_relay_get_config(int idx);  /* idx: 0..POWER_RELAY_COUNT-1 */
+/* 2026-10-05(사용자 결정) — 콘 화면 표시용 별명(한글 → 로마자, romanize.h). 별명이 없으면 "" */
+#define POWER_RELAY_ALIAS_DISP_LEN 80
+const char *power_relay_get_alias_display(int idx);  /* idx: 0..POWER_RELAY_COUNT-1 */
 void power_relay_set_config(int idx, const power_relay_config_t *cfg);
 
 /* 소프트웨어가 판단한 현재 명령 상태(물리 확인 불가 — SSR-DK25DA는 피드백 없음, 2026-09-16

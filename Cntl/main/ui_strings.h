@@ -97,6 +97,8 @@ typedef enum {
     STR_LABEL_AEC,
     STR_LABEL_XCLK,
     STR_CAPTURE_QUEUED_TOAST,
+    STR_BTN_NOT_CONNECTED,       /* 2026-10-05 — 지금 촬영 자리: 연결 안 된 캠 */
+    STR_FMT_CAPTURE_ON_WAKE,     /* 2026-10-05 — 잠든 캠 지금 촬영 안내, %u = 최대 대기 초(응답성) */
     STR_OPT_XCLK_LIST,
     STR_LABEL_SENS_MEASURE_INTERVAL,
     STR_OPT_SENS_MEASURE_INTERVAL_LIST,

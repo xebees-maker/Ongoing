@@ -2,6 +2,8 @@
 #include "memdiag.h"
 #include "ui_main.h"
 #include "fs.h"
+#include "romanize.h"
+#include "esp_heap_caps.h"
 #include "alarm.h"
 
 #include <string.h>
@@ -57,6 +59,16 @@ typedef struct __attribute__((packed)) {
 } power_relay_file_t;
 
 static power_relay_config_t s_relay_cfg[POWER_RELAY_COUNT];
+
+/* 2026-10-05 — 릴레이마다 로마자 별명(PSRAM, 저장 안 함) */
+static char (*s_relay_alias_disp)[POWER_RELAY_ALIAS_DISP_LEN] = NULL;
+
+static void relay_alias_disp_refresh(int i)
+{
+    if (!s_relay_alias_disp) s_relay_alias_disp = heap_caps_calloc(POWER_RELAY_COUNT, POWER_RELAY_ALIAS_DISP_LEN, MALLOC_CAP_SPIRAM);
+    if (!s_relay_alias_disp || i < 0 || i >= POWER_RELAY_COUNT) return;
+    romanize_hangul(s_relay_cfg[i].alias, s_relay_alias_disp[i], POWER_RELAY_ALIAS_DISP_LEN);
+}
 static bool     s_commanded_on[POWER_RELAY_COUNT];
 static uint32_t s_last_transition_ms[POWER_RELAY_COUNT];
 static uint32_t s_last_data_ms[POWER_RELAY_COUNT];
@@ -117,8 +129,15 @@ void power_relay_load(void)
         s.relays[i].alias[sizeof(s.relays[i].alias) - 1] = '\0';
     }
     memcpy(s_relay_cfg, s.relays, sizeof(s_relay_cfg));
+    for (int i = 0; i < POWER_RELAY_COUNT; i++) relay_alias_disp_refresh(i);
     ESP_LOGI(TAG, "Config restored (relay0.configured=%d relay1.configured=%d)",
              (int)s_relay_cfg[0].configured, (int)s_relay_cfg[1].configured);
+}
+
+const char *power_relay_get_alias_display(int idx)
+{
+    if (idx < 0 || idx >= POWER_RELAY_COUNT || !s_relay_alias_disp) return "";
+    return s_relay_alias_disp[idx];
 }
 
 const power_relay_config_t *power_relay_get_config(int idx)
@@ -142,6 +161,7 @@ void power_relay_set_config(int idx, const power_relay_config_t *cfg)
     if (idx < 0 || idx >= POWER_RELAY_COUNT || !cfg) return;
     s_relay_cfg[idx] = *cfg;
     s_relay_cfg[idx].alias[sizeof(s_relay_cfg[idx].alias) - 1] = '\0';
+    relay_alias_disp_refresh(idx);
     /* 설정이 바뀌면 추세 이력/최근전환시각을 리셋 — 새 소스/방향/임계값 기준으로 처음부터
      * 다시 판단해야지, 이전 소스 기준으로 쌓인 샘플을 섞어 쓰면 안 됨 */
     memset(&s_trend[idx], 0, sizeof(s_trend[idx]));

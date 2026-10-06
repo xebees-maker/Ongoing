@@ -3059,6 +3059,17 @@ static void cb_capture_now(lv_event_t *e)
      * 대신 영문으로 */
     if (!require_active_or_report(s_selected_cam_mac, "Capture now")) return;
 
+    /* 2026-10-05(사용자 설계) — 잠든 캠(초록)은 진행 팝업 없이 "깨어나면 촬영(최대 약 N초)"만 알림. N = 응답성(잠든 캠이 깨는 주기) */
+    if (node_hub_get_conn_state(s_selected_cam_mac) != HUB_CONN_STATE_ACTIVE) {
+        photo_rx_capture_now(s_selected_cam_mac);
+        uint32_t wake_sec = device_config_get_response_interval_sec();
+        char msg[96];
+        if (wake_sec) snprintf(msg, sizeof(msg), ui_str(STR_FMT_CAPTURE_ON_WAKE), (unsigned)wake_sec);
+        else snprintf(msg, sizeof(msg), "%s", ui_str(STR_CAPTURE_QUEUED_TOAST));  /* 응답성 "즉시"면 주기가 없음 */
+        show_toast(msg, lv_palette_main(LV_PALETTE_GREEN));
+        ui_log_add("Capture now queued - CAM will shoot on next wake");
+        return;
+    }
     show_capture_popup();
     photo_rx_capture_now(s_selected_cam_mac);
 }
@@ -3165,9 +3176,18 @@ static void cb_camera_select_changed(lv_event_t *e)
  * 혼재 시나리오까지 지원) — macs[0..live_count)는 라이브(nodes[i] 유효), macs[live_count..count)는
  * SD 이력만 있는 known-only(살아있는 노드 정보가 없어 nodes 배열 범위 밖 — MAC 기반 이름으로
  * 폴백) */
+static void trim_to_width(char *text, const lv_font_t *font, int32_t max_width);  /* 아래 정의 */
+
 static void rebuild_camera_dropdown_if_changed(const node_hub_node_t *nodes, int live_count,
                                                 const uint8_t macs[][6], int count)
 {
+    /* 2026-10-05(사용자 지적 — 긴 이름(로마자)이 칸을 넘어 스크롤이 생김) — 칸 폭(화살표 자리 뺌)에 맞춰 "..."로 줄임.
+     * 줄인 이름을 담을 버퍼는 PSRAM(LVGL 태스크 전용, 1회 할당) */
+    static char *s_dd_name = NULL;
+    if (!s_dd_name) s_dd_name = heap_caps_malloc(DEVICE_CONFIG_ALIAS_DISP_LEN, MALLOC_CAP_SPIRAM);
+    const lv_font_t *dd_font = lv_obj_get_style_text_font(s_camera_select_dd, LV_PART_MAIN);
+    int32_t dd_room = lv_obj_get_content_width(s_camera_select_dd) - 24;  /* 24 = 펼침 화살표 자리 */
+    if (dd_room < 40) dd_room = 40;
     /* 2026-09-10(사용자 지시 — "카메라 팝업에서 카메라 목록 선택을 alias로 바꿈") — 대시보드
      * 행(3351/3469줄)과 동일한 alias-or-name 패턴. 버퍼는 alias가 name보다 길 수 있어서
      * DEVICE_CONFIG_ALIAS_MAX_LEN 기준으로 잡음(예전엔 ESP_NOW_LINK_NAME_LEN 기준이라 alias
@@ -3175,7 +3195,7 @@ static void rebuild_camera_dropdown_if_changed(const node_hub_node_t *nodes, int
     char options[NODE_HUB_MAX_NODES * (DEVICE_CONFIG_ALIAS_MAX_LEN + 1)];
     size_t off = 0;
     for (int i = 0; i < count; i++) {
-        const char *alias = device_config_get_alias(macs[i]);
+        const char *alias = device_config_get_alias_display(macs[i]);  /* 10-05 — 콘 화면은 로마자 */
         char fallback_name[24];
         if (alias[0] == '\0') {
             if (i < live_count) {
@@ -3186,6 +3206,11 @@ static void rebuild_camera_dropdown_if_changed(const node_hub_node_t *nodes, int
             }
         }
         const char *display_name = (alias[0] != '\0') ? alias : fallback_name;
+        if (s_dd_name) {
+            snprintf(s_dd_name, DEVICE_CONFIG_ALIAS_DISP_LEN, "%s", display_name);
+            trim_to_width(s_dd_name, dd_font, dd_room);
+            display_name = s_dd_name;
+        }
         int n = snprintf(options + off, sizeof(options) - off, "%s%s",
                           i > 0 ? "\n" : "", display_name);
         if (n < 0 || (size_t)n >= sizeof(options) - off) break;
@@ -3584,13 +3609,22 @@ static bool stats_chain_has_series(const stats_chain_t *ch, int series_idx)
 
 /* 사슬의 기기 이름을 "C->F"로 이어 붙임(Alias 우선). 화살표는 글꼴에 없을 수 있어 ASCII로.
  * 빈 사슬(Agar 고정 슬롯 중 기기 없는 것)은 호출부가 따로 "Agar N"으로 이름 붙임 */
+static void stats_chain_label_ex(const stats_chain_t *ch, char *out, size_t out_cap, bool display);
+
+/* 콘 화면용 — 별명은 로마자(2026-10-05) */
 static void stats_chain_label(const stats_chain_t *ch, char *out, size_t out_cap)
+{
+    stats_chain_label_ex(ch, out, out_cap, true);
+}
+
+/* display = false: 입력한 그대로(웹이 언어에 맞춰 고름) */
+static void stats_chain_label_ex(const stats_chain_t *ch, char *out, size_t out_cap, bool display)
 {
     out[0] = '\0';
     for (int m = 0; m < ch->n; m++) {
         char devname[ESP_NOW_LINK_NAME_LEN];
         find_node_name_by_mac(ch->mac[m], devname, sizeof(devname));
-        const char *alias = device_config_get_alias(ch->mac[m]);
+        const char *alias = display ? device_config_get_alias_display(ch->mac[m]) : device_config_get_alias(ch->mac[m]);
         size_t len = strlen(out);
         snprintf(out + len, out_cap - len, "%s%s", (m > 0) ? "->" : "", (alias[0] != '\0') ? alias : devname);
     }
@@ -3920,7 +3954,7 @@ static bool refresh_stats_table(void)
             find_node_name_by_mac(r->mac, name, sizeof(name));
             /* 2026-09-15(사용자 지시 — "통계에도 Alias가 있으면 Alias로 표기") — Sensor/Camera
              * 판넬(device_config_get_alias 사용처 참고)과 동일 규칙: 빈 문자열=미지정 */
-            const char *alias = device_config_get_alias(r->mac);
+            const char *alias = device_config_get_alias_display(r->mac);  /* 10-05 — 콘 화면은 로마자 */
             const char *display_name = (alias[0] != '\0') ? alias : name;
 
             ui_str_id_t label_id, unit_id;
@@ -4827,7 +4861,7 @@ static void refresh_power_control_panel(void)
         const power_relay_config_t *cfg = power_relay_get_config(i);
         char default_name[POWER_RELAY_ALIAS_MAX_LEN];
         snprintf(default_name, sizeof(default_name), ui_str(STR_RELAY_DEFAULT_NAME_FMT), i + 1);
-        const char *disp = (cfg && cfg->alias[0] != '\0') ? cfg->alias : default_name;
+        const char *disp = (cfg && cfg->alias[0] != '\0') ? power_relay_get_alias_display(i) : default_name;  /* 10-05 — 로마자 */
         bool on = power_relay_get_commanded_on(i);
 
         /* 2026-09-17(사용자 지시 — "센서처럼 설정된 값이 나열되야되... Turn ~ Up to [값]까지만") —
@@ -5046,7 +5080,7 @@ static void refresh_dashboard(lv_timer_t *t)
              * 장치명, alias는 표시용으로만 쓰는 별도 필드(빈 문자열=미지정) */
             strncpy(s_sensor_dash_row_names[i], sens_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
             s_sensor_dash_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
-            strncpy(s_sensor_dash_row_alias[i], device_config_get_alias(sens_macs[i]),
+            strncpy(s_sensor_dash_row_alias[i], device_config_get_alias_display(sens_macs[i]),
                     sizeof(s_sensor_dash_row_alias[i]) - 1);
             s_sensor_dash_row_alias[i][sizeof(s_sensor_dash_row_alias[i]) - 1] = '\0';
             s_sensor_dash_row_last_text[i][0] = '\0';
@@ -5257,7 +5291,7 @@ static void refresh_dashboard(lv_timer_t *t)
              * alias는 표시용 별도 필드 */
             strncpy(s_camera_dash_row_names[i], cam_nodes[i].name, ESP_NOW_LINK_NAME_LEN - 1);
             s_camera_dash_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
-            strncpy(s_camera_dash_row_alias[i], device_config_get_alias(cam_macs[i]),
+            strncpy(s_camera_dash_row_alias[i], device_config_get_alias_display(cam_macs[i]),
                     sizeof(s_camera_dash_row_alias[i]) - 1);
             s_camera_dash_row_alias[i][sizeof(s_camera_dash_row_alias[i]) - 1] = '\0';
             s_camera_dash_row_last_text[i][0] = '\0';
@@ -5350,10 +5384,17 @@ static void refresh_dashboard(lv_timer_t *t)
      * hub가 아예 모르는 MAC(순수 SD 이력뿐)에도 안전하게 WAITING을 반환함(find_node
      * 실패 시 ever_paired=false로 처리) — require_active_or_report()와 동일 판정 기준 */
     if (s_camera_capture_btn) {
-        bool selected_is_live = s_has_selected_cam &&
-            (node_hub_get_conn_state(s_selected_cam_mac) != HUB_CONN_STATE_WAITING);
-        if (selected_is_live) lv_obj_remove_state(s_camera_capture_btn, LV_STATE_DISABLED);
-        else                  lv_obj_add_state(s_camera_capture_btn, LV_STATE_DISABLED);
+        hub_conn_state_t cs = s_has_selected_cam ? node_hub_get_conn_state(s_selected_cam_mac) : HUB_CONN_STATE_WAITING;
+        /* 2026-10-05(사용자 설계) — 색으로 언제 찍히는지 알림: 통신 중 = 파랑(바로), 연결됨·잠듦 = 초록(깨어나면),
+         * 연결 안 됨 = 꺼짐 + "Not connected"(주화면 신호 색과 같은 뜻) */
+        if (cs == HUB_CONN_STATE_WAITING) {
+            lv_obj_add_state(s_camera_capture_btn, LV_STATE_DISABLED);
+            lv_label_set_text(s_camera_capture_lbl, ui_str(STR_BTN_NOT_CONNECTED));
+        } else {
+            lv_obj_remove_state(s_camera_capture_btn, LV_STATE_DISABLED);
+            lv_label_set_text(s_camera_capture_lbl, ui_str(STR_BTN_CAPTURE_NOW));
+            lv_obj_set_style_bg_color(s_camera_capture_btn, lv_palette_main(cs == HUB_CONN_STATE_ACTIVE ? LV_PALETTE_BLUE : LV_PALETTE_GREEN), 0);
+        }
     }
     if (camera_connected) {
         lv_obj_add_flag(s_camera_empty, LV_OBJ_FLAG_HIDDEN);
@@ -8444,7 +8485,7 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
 
     lv_obj_t *popup = create_page_popup();
     s_device_popup = popup;
-    const char *alias = device_config_get_alias(mac);
+    const char *alias = device_config_get_alias_display(mac);  /* 10-05 — 콘 화면은 로마자(그대로 Apply하면 안 바뀜 — 아래) */
     /* 2026-09-09(사용자 지시 — "팝업 제목은 Sensor/Camera로 고정") — 어떤 장치를 열든
      * 제목은 판넬 종류로 고정, Alias/장치명은 본문에만 표시 */
     add_page_popup_header(popup, ui_str(is_sensor ? STR_GROUP_SENSOR : STR_GROUP_CAMERA),
@@ -8495,7 +8536,8 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
 
     /* 2026-09-09(사용자 최종 설계) — 측정주기/촬영주기와 동일한 Apply 버튼. applied_text를
      * 현재 저장값으로 초기화해두면 이 시점엔 텍스트와 같으니 자동으로 비활성 상태로 시작 */
-    strncpy(s_device_alias_applied_text, alias, sizeof(s_device_alias_applied_text) - 1);
+    /* 2026-10-05 — 기준은 칸에 실제로 들어간 글자(로마자, 31자에서 잘릴 수 있음) — 손대지 않으면 Apply가 꺼져 있어 한글 별명을 덮어쓰지 않음 */
+    strncpy(s_device_alias_applied_text, lv_textarea_get_text(s_device_alias_ta), sizeof(s_device_alias_applied_text) - 1);
     s_device_alias_applied_text[sizeof(s_device_alias_applied_text) - 1] = '\0';
     s_device_alias_apply_btn = lv_button_create(alias_cluster);
     lv_obj_add_event_cb(s_device_alias_apply_btn, cb_device_alias_apply_clicked, LV_EVENT_CLICKED, NULL);
@@ -8774,7 +8816,7 @@ static void relay_rebuild_device_dropdown(void)
             if (nodes[i].chan_type[c] == want_chan) { has_chan = true; break; }
         }
         if (!has_chan) continue;
-        const char *alias = device_config_get_alias(nodes[i].mac);
+        const char *alias = device_config_get_alias_display(nodes[i].mac);  /* 10-05 — 콘 화면은 로마자 */
         const char *disp = (alias[0] != '\0') ? alias : nodes[i].name;
         if (s_relay_device_dd_count > 0) strncat(options, "\n", sizeof(options) - strlen(options) - 1);
         strncat(options, disp, sizeof(options) - strlen(options) - 1);
@@ -9436,14 +9478,15 @@ static void build_relay_popup(int idx)
     lv_textarea_set_one_line(s_relay_alias_ta, true);
     lv_textarea_set_max_length(s_relay_alias_ta, POWER_RELAY_ALIAS_MAX_LEN - 1);
     lv_textarea_set_placeholder_text(s_relay_alias_ta, default_name);
-    if (cfg->alias[0] != '\0') lv_textarea_set_text(s_relay_alias_ta, cfg->alias);
+    if (cfg->alias[0] != '\0') lv_textarea_set_text(s_relay_alias_ta, power_relay_get_alias_display(idx));  /* 10-05 — 로마자 */
     lv_obj_set_flex_grow(s_relay_alias_ta, 1);
     lv_obj_set_style_text_font(s_relay_alias_ta, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_add_event_cb(s_relay_alias_ta, cb_relay_text_ta_focused, LV_EVENT_FOCUSED, NULL);
     lv_obj_add_event_cb(s_relay_alias_ta, cb_relay_text_ta_focused, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_relay_alias_ta, cb_relay_alias_ta_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-    strncpy(s_relay_alias_applied_text, cfg->alias, sizeof(s_relay_alias_applied_text) - 1);
+    /* 10-05 — 기준은 칸에 실제로 들어간 글자(로마자) — 손대지 않으면 Apply가 꺼져 있어 한글 별명을 덮어쓰지 않음 */
+    strncpy(s_relay_alias_applied_text, lv_textarea_get_text(s_relay_alias_ta), sizeof(s_relay_alias_applied_text) - 1);
     s_relay_alias_applied_text[sizeof(s_relay_alias_applied_text) - 1] = '\0';
     s_relay_alias_apply_btn = lv_button_create(alias_row);
     lv_obj_add_event_cb(s_relay_alias_apply_btn, cb_relay_alias_apply_clicked, LV_EVENT_CLICKED, NULL);
@@ -10627,8 +10670,8 @@ static bool web_op_execute(const ui_web_op_t *op)
         case UI_WEB_OP_PHOTO_DELETE_ALL: /* cb_delete_all_confirmed와 같음 */
             photo_storage_delete_all(op->mac);
             return true;
-        case UI_WEB_OP_CAPTURE:          /* cb_capture_now와 같음 — 통신 중(ACTIVE)인 캠만 */
-            if (node_hub_get_conn_state(op->mac) != HUB_CONN_STATE_ACTIVE) return false;
+        case UI_WEB_OP_CAPTURE:          /* cb_capture_now와 같음 — 연결된 캠이면(10-05 — 잠들었으면 깨어날 때 촬영) */
+            if (node_hub_get_conn_state(op->mac) == HUB_CONN_STATE_WAITING) return false;
             photo_rx_capture_now(op->mac);
             return true;
         case UI_WEB_OP_STATS_DELETE_ALL:  /* cb_delete_stats_confirmed와 같음 */
@@ -10848,7 +10891,7 @@ bool ui_main_stats_graph(uint8_t scale, uint32_t offset, uint8_t group, bool tem
         ui_stats_slot_t *sl = &out->slot[s];
         sl->chan_type = chan[s];
         sl->name[0] = '\0';
-        if (s_web_chains[s].n > 0) stats_chain_label(&s_web_chains[s], sl->name, sizeof(sl->name));
+        if (s_web_chains[s].n > 0) stats_chain_label_ex(&s_web_chains[s], sl->name, sizeof(sl->name), false);
         stats_graph_series_compute(s_web_win, &s_web_chains[s], &sl->d);
     }
     return true;
@@ -10888,7 +10931,7 @@ bool ui_main_stats_overview(uint8_t scale, ui_stats_overview_t *out)
         m = &out->agar[i];
         m->have = stats_chain_stat(w, &chains[i], &m->mn, &m->mx, &m->avg);
         out->agar_name[i][0] = '\0';
-        if (chains[i].n > 0) stats_chain_label(&chains[i], out->agar_name[i], sizeof(out->agar_name[i]));
+        if (chains[i].n > 0) stats_chain_label_ex(&chains[i], out->agar_name[i], sizeof(out->agar_name[i]), false);
     }
     n = stats_build_chains(w, STATS_VIEW_GROUP_GAS, SENSOR_CHAN_CO2_PPM, false, chains, 1);
     m = &out->co2;

@@ -1,6 +1,7 @@
 #include "device_config.h"
 #include "fs.h"
 #include "ui_log.h"
+#include "romanize.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -116,6 +117,14 @@ static bool     s_auto_connect_new         = false;
 static sta_credential_t *s_sta_credentials = NULL;
 static sens_interval_entry_t *s_sens_intervals = NULL;
 static alias_entry_t *s_aliases = NULL;
+static char (*s_alias_disp)[DEVICE_CONFIG_ALIAS_DISP_LEN] = NULL;  /* 2026-10-05 — 슬롯마다 로마자 별명(PSRAM, 저장 안 함) */
+
+static void alias_disp_refresh(int i)
+{
+    if (!s_alias_disp) s_alias_disp = heap_caps_calloc(ALIAS_SLOTS, DEVICE_CONFIG_ALIAS_DISP_LEN, MALLOC_CAP_SPIRAM);
+    if (!s_alias_disp || !s_aliases || i < 0 || i >= ALIAS_SLOTS) return;
+    romanize_hangul(s_aliases[i].in_use ? s_aliases[i].alias : "", s_alias_disp[i], DEVICE_CONFIG_ALIAS_DISP_LEN);
+}
 static cam_settings_entry_t *s_cam_settings = NULL;
 
 /* 2026-08-30 — device_config.bin 암호화(assets 파일 업로드/다운로드 엔드포인트로 평문 WiFi
@@ -215,6 +224,7 @@ void device_config_load(void)
     memcpy(s_sta_credentials, s.sta_credentials, sizeof(s.sta_credentials));
     memcpy(s_sens_intervals, s.sens_intervals, sizeof(s.sens_intervals));
     memcpy(s_aliases, s.aliases, sizeof(s.aliases));
+    for (int i = 0; i < ALIAS_SLOTS; i++) alias_disp_refresh(i);
     memcpy(s_cam_settings, s.cam_settings, sizeof(s.cam_settings));
     ESP_LOGI(TAG, "Config restored: response=%us adaptive=%us WiFi=%s SSID=%s (per-camera settings restored per mac)",
              (unsigned)s_response_interval_sec, (unsigned)s_adaptive_response_sec,
@@ -471,6 +481,13 @@ const char *device_config_get_alias(const uint8_t *mac)
     return e ? e->alias : "";
 }
 
+const char *device_config_get_alias_display(const uint8_t *mac)
+{
+    alias_entry_t *e = find_alias_slot(mac);
+    if (!e || !s_alias_disp) return "";
+    return s_alias_disp[e - s_aliases];
+}
+
 void device_config_set_alias(const uint8_t *mac, const char *alias)
 {
     if (!s_aliases || !mac) return;
@@ -488,6 +505,7 @@ void device_config_set_alias(const uint8_t *mac, const char *alias)
     e->in_use = 1;
     strncpy(e->alias, alias ? alias : "", sizeof(e->alias) - 1);
     e->alias[sizeof(e->alias) - 1] = '\0';
+    alias_disp_refresh((int)(e - s_aliases));
     device_config_save();
 }
 

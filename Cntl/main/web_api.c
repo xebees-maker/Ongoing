@@ -13,6 +13,7 @@
 #include "stats_store.h"
 #include "notify.h"
 #include "alarm.h"
+#include "romanize.h"
 #include "dev_log.h"
 #include "ui_log.h"
 
@@ -60,6 +61,17 @@ static void jb_str(jbuf_t *b, const char *s)
         else jb_printf(b, "%c", c);
     }
     jb_printf(b, "\"");
+}
+
+/* 2026-10-05 — ,"<key>_en":"<로마자>" — 웹이 영어 화면일 때 씀(콘 화면과 같은 romanize_hangul). httpd 태스크 하나라 버퍼 하나 */
+static void jb_en(jbuf_t *b, const char *key, const char *s)
+{
+    static char *buf = NULL;
+    if (!buf) buf = heap_caps_malloc(DEVICE_CONFIG_ALIAS_DISP_LEN * 2, MALLOC_CAP_SPIRAM);
+    if (!buf) return;
+    romanize_hangul(s, buf, DEVICE_CONFIG_ALIAS_DISP_LEN * 2);
+    jb_printf(b, ",\"%s_en\":", key);
+    jb_str(b, buf);
 }
 
 static void jb_mac(jbuf_t *b, const uint8_t *m)
@@ -153,6 +165,7 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
         const power_relay_config_t *c = power_relay_get_config(i);
         jb_printf(&b, "%s{\"idx\":%d,\"alias\":", i ? "," : "", i);
         jb_str(&b, c ? c->alias : "");
+        jb_en(&b, "alias", c ? c->alias : "");
         jb_printf(&b, ",\"on\":%s", power_relay_get_commanded_on(i) ? "true" : "false");
         if (c) {
             jb_printf(&b, ",\"configured\":%s,\"override\":%s,\"override_on\":%s,\"turns_on\":%s,\"rises\":%s,\"chan\":%u,\"center\":",
@@ -179,6 +192,7 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
         jb_str(&b, nd->name);
         jb_printf(&b, ",\"alias\":");
         jb_str(&b, device_config_get_alias(nd->mac));
+        jb_en(&b, "alias", device_config_get_alias(nd->mac));
         jb_printf(&b, ",\"status\":\"%s\"", conn_code(cs));
         uint32_t timeout_ms = node_hub_node_timeout_ms(nd);
         bool near_orphan = timeout_ms > 0 && (uint64_t)(now_ms - nd->last_seen_ms) * 10 >= (uint64_t)timeout_ms * 8;
@@ -630,6 +644,7 @@ static esp_err_t api_relay_get_handler(httpd_req_t *req)
             jb_mac(&b, nodes[i].mac);
             jb_printf(&b, ",\"name\":");
             jb_str(&b, alias[0] ? alias : nodes[i].name);
+            jb_en(&b, "name", alias[0] ? alias : nodes[i].name);
             jb_printf(&b, "}");
         }
         jb_printf(&b, "]}");
@@ -718,7 +733,8 @@ static esp_err_t api_cam_list_get_handler(httpd_req_t *req)
     if (!b.p || !nodes || !known) { heap_caps_free(b.p); heap_caps_free(nodes); heap_caps_free(known); httpd_resp_send_500(req); return ESP_FAIL; }
     int n = node_hub_get_nodes(HUB_NODE_KIND_CAM, nodes, NODE_HUB_MAX_NODES);
     int nk = (int)photo_storage_list_camera_macs(known, NODE_HUB_MAX_NODES);
-    jb_printf(&b, "{\"cams\":[");
+    /* 2026-10-05 — wake_s: 잠든 캠이 깨는 주기(응답성) — 웹 "깨어나면 촬영(최대 약 N초)" 안내와 사진 기다리는 시간 */
+    jb_printf(&b, "{\"wake_s\":%lu,\"cams\":[", (unsigned long)device_config_get_response_interval_sec());
     int out = 0;
     for (int i = 0; i < n; i++) {   /* 연결된 캠(연결 대기 제외 — 콘 주화면과 같음) */
         hub_conn_state_t cs = node_hub_get_conn_state(nodes[i].mac);
@@ -728,6 +744,7 @@ static esp_err_t api_cam_list_get_handler(httpd_req_t *req)
         jb_printf(&b, ",\"name\":");
         const char *alias = device_config_get_alias(nodes[i].mac);
         jb_str(&b, alias[0] ? alias : nodes[i].name);
+        jb_en(&b, "name", alias[0] ? alias : nodes[i].name);
         jb_printf(&b, ",\"status\":\"%s\",\"count\":%lu}", conn_code(cs), (unsigned long)photo_storage_get_count(nodes[i].mac));
     }
     for (int k = 0; k < nk; k++) {  /* 사진 이력만 있는 캠 */
@@ -740,7 +757,7 @@ static esp_err_t api_cam_list_get_handler(httpd_req_t *req)
         jb_mac(&b, known[k]);
         const char *alias = device_config_get_alias(known[k]);
         jb_printf(&b, ",\"name\":");
-        if (alias[0]) jb_str(&b, alias);
+        if (alias[0]) { jb_str(&b, alias); jb_en(&b, "name", alias); }
         else jb_printf(&b, "\"C%02X%02X%02X\"", known[k][3], known[k][4], known[k][5]);
         jb_printf(&b, ",\"status\":\"offline\",\"count\":%lu}", (unsigned long)photo_storage_get_count(known[k]));
     }
@@ -881,6 +898,7 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
     for (int i = 0; i < 3; i++) {
         jb_printf(&b, "%s{\"name\":", i ? "," : "");
         jb_str(&b, ov->agar_name[i]);
+        jb_en(&b, "name", ov->agar_name[i]);
         jb_printf(&b, ",\"v\":");
         jb_mma(&b, &ov->agar[i]);
         jb_printf(&b, "}");
@@ -895,6 +913,7 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
         const ui_stats_series_t *d = &sl->d;
         jb_printf(&b, "%s{\"chan\":%u,\"name\":", sidx ? "," : "", (unsigned)sl->chan_type);
         jb_str(&b, sl->name);
+        jb_en(&b, "name", sl->name);
         if (d->have_range) {
             jb_printf(&b, ",\"min\":");
             jb_float(&b, d->mn);
@@ -948,6 +967,7 @@ static esp_err_t api_stats_records_get_handler(httpd_req_t *req)
         ui_main_stats_device_name(r->mac, name, 48);
         jb_printf(&b, "%s{\"name\":", i ? "," : "");
         jb_str(&b, name);
+        jb_en(&b, "name", name);
         jb_printf(&b, ",\"chan\":%u,\"v\":", (unsigned)r->chan_type);
         jb_float(&b, r->value);
         jb_printf(&b, ",\"t\":%lu}", (unsigned long)r->unix_time);

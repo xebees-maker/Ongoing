@@ -22,6 +22,7 @@ idf_component_register(
         "can_bridge.c"
         "notify.c"
         "alarm.c"
+        "romanize.c"
         "web_auth.c"
         "web_session.c"
         "web_api.c"
