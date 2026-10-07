@@ -121,6 +121,14 @@ static void send_cask_sleep_now(node_hub_node_t *n)
  * (핑퐁), CNTL이 CAM 살아있나 확인하는 걸로 뒤집는다"는 설계의 CNTL쪽 절반. 노드 종류
  * 구분 없이 전부 훑음(사용자 지시: "모든 노드는 같은 구조로 CNTL에 붙을 거라서 CNTL은
  * 하나의 타이머와 디스패처로 모두 연동") — 1초 주기, 노드 수와 무관하게 타이머 하나 */
+/* 2026-10-06(사용자 보고 — 측정은 16초마다 들어오는데 "no response for 90s" 알림) — now_ms는 대개 뮤텍스를 잡기 전에 읽음.
+ * 그 사이 다른 태스크(ESP-NOW 수신은 Wi-Fi 태스크, 우선순위 23)가 먼저 뮤텍스를 잡고 last_seen_ms를 더 늦은 시각으로 쓰면
+ * now_ms - last_seen_ms가 부호 없는 뺄셈이라 약 43억이 돼 "아주 오래 무응답"으로 판정됐음. 기록 시각이 now보다 뒤면 방금 받은 것(0) */
+static inline uint32_t elapsed_ms(uint32_t now_ms, uint32_t then_ms)
+{
+    return ((int32_t)(now_ms - then_ms) > 0) ? (now_ms - then_ms) : 0;
+}
+
 static esp_timer_handle_t s_liveness_sweep_timer = NULL;
 #define LIVENESS_SWEEP_INTERVAL_US (1 * 1000 * 1000)
 
@@ -152,14 +160,19 @@ static void battery_alarm_check_locked(node_hub_node_t *n)
 static void liveness_sweep_cb(void *arg)
 {
     (void)arg;
-    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);  /* 2026-10-06 — 뮤텍스 안에서 읽음(elapsed_ms 주석 참고) */
     for (int i = 0; i < s_node_count; i++) {
         node_hub_node_t *n = &s_nodes[i];
         uint32_t timeout_ms = node_hub_node_timeout_ms(n);  /* 2026-09-05 — 노드별(특히
                                                                     Sens 자체 샘플주기) 기준으로 */
-        if (n->conn_state == NODE_CONN_PAIRED && now_ms - n->last_seen_ms > timeout_ms) {
+        if (n->conn_state == NODE_CONN_PAIRED && elapsed_ms(now_ms, n->last_seen_ms) > timeout_ms) {
             ESP_LOGW(TAG_LINK, "%s no response (%us+) - demoted from PAIRED", n->name, (unsigned)(timeout_ms / 1000));
+            /* 2026-10-06(사후 분석용) — 판정 근거: 마지막 수신·hello·페어링 후 경과, 잠 주기(타임아웃 = 그 6배, 최소 50초) */
+            ESP_LOGW(TAG_LINK, "LIVENESS %s seen=%lums ago hello=%lums ago paired=%lums ago sleep_s=%lu ds=%d timeout=%lums",
+                     n->name, (unsigned long)elapsed_ms(now_ms, n->last_seen_ms), (unsigned long)elapsed_ms(now_ms, n->last_hello_ms),
+                     (unsigned long)elapsed_ms(now_ms, n->last_paired_ms), (unsigned long)n->ds_last_sleep_interval_sec,
+                     (int)n->has_deepsleep_stats, (unsigned long)timeout_ms);
             n->conn_state = NODE_CONN_ORPHAN;
             alarm_post(NOTIFY_TYPE_DISCONNECT, "Device disconnected", "%s no response for %us", alarm_name(n), (unsigned)(timeout_ms / 1000));
         }
@@ -195,7 +208,7 @@ static node_hub_node_t *find_or_add_node(const uint8_t *mac)
     int victim = -1;
     uint32_t victim_idle = 0;
     for (int i = 0; i < s_node_count; i++) {
-        uint32_t idle = now_ms - s_nodes[i].last_seen_ms;
+        uint32_t idle = elapsed_ms(now_ms, s_nodes[i].last_seen_ms);
         if (idle <= node_hub_node_timeout_ms(&s_nodes[i])) continue;
         if (victim < 0 || idle > victim_idle) { victim = i; victim_idle = idle; }
     }
@@ -263,7 +276,7 @@ static node_quota_class_t quota_class_locked(const node_hub_node_t *n)
  * 타임아웃이 지나면 자리를 내줌) */
 static bool occupies_quota_locked(const node_hub_node_t *n, uint32_t now_ms)
 {
-    return n->ever_paired && !n->user_unpaired && (now_ms - n->last_seen_ms) <= node_hub_node_timeout_ms(n);
+    return n->ever_paired && !n->user_unpaired && elapsed_ms(now_ms, n->last_seen_ms) <= node_hub_node_timeout_ms(n);
 }
 
 /* s_nodes_mutex를 쥔 상태. self를 뺀 같은 그룹 기기가 이미 상한이면 그 그룹을, 아니면 NONE */
@@ -429,7 +442,7 @@ static bool is_duplicate_hello_locked(node_hub_node_t *n, const uint8_t *data, i
 {
     if (len > (int)sizeof(n->last_hello)) return false;
     bool dup = (len == n->last_hello_len &&
-                (now_ms - n->last_hello_ms) < WAKE_HELLO_DUP_WINDOW_MS &&
+                elapsed_ms(now_ms, n->last_hello_ms) < WAKE_HELLO_DUP_WINDOW_MS &&
                 memcmp(n->last_hello, data, (size_t)len) == 0);
     if (!dup) {
         memcpy(n->last_hello, data, (size_t)len);
@@ -1048,7 +1061,7 @@ int node_hub_get_nodes(hub_node_kind_t kind, node_hub_node_t *out, int max)
     for (int i = 0; i < s_node_count && count < max; i++) {
         if (kind != HUB_NODE_KIND_UNKNOWN && s_nodes[i].kind != kind) continue;
         uint32_t timeout_ms = node_hub_node_timeout_ms(&s_nodes[i]);
-        if (now_ms - s_nodes[i].last_seen_ms > timeout_ms) continue;
+        if (elapsed_ms(now_ms, s_nodes[i].last_seen_ms) > timeout_ms) continue;
         out[count++] = s_nodes[i];
     }
     xSemaphoreGive(s_nodes_mutex);
@@ -1062,7 +1075,7 @@ bool node_hub_is_reconnect_stuck(const uint8_t *mac)
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     node_hub_node_t *n = find_node(mac);
     uint32_t timeout_ms = node_hub_node_timeout_ms(n);
-    if (n && n->ever_paired && n->conn_state != NODE_CONN_PAIRED && (now_ms - n->last_paired_ms) > timeout_ms) {
+    if (n && n->ever_paired && n->conn_state != NODE_CONN_PAIRED && elapsed_ms(now_ms, n->last_paired_ms) > timeout_ms) {
         stuck = true;
     }
     xSemaphoreGive(s_nodes_mutex);
@@ -1084,7 +1097,7 @@ hub_conn_state_t node_hub_get_conn_state(const uint8_t *mac)
     node_hub_node_t *n = find_node(mac);
     bool ever_paired = n && n->ever_paired;
     bool radio_paired = n && (n->conn_state == NODE_CONN_PAIRED);
-    bool recently_active = n && (now_ms - n->last_seen_ms < HUB_NODE_ACTIVE_WINDOW_MS);
+    bool recently_active = n && (elapsed_ms(now_ms, n->last_seen_ms) < HUB_NODE_ACTIVE_WINDOW_MS);
     bool user_unpaired = n && n->user_unpaired;
     xSemaphoreGive(s_nodes_mutex);
 
