@@ -37,6 +37,8 @@ void alarm_init(void);
 void alarm_start(void);
 
 void alarm_post(notify_type_t type, const char *title, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+/* 2026-10-08 — 기록만(알림 목록·SD에 남기고 푸시는 안 함) */
+void alarm_record(notify_type_t type, const char *title, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 
 /* 마지막 알림 번호(웹앱의 안 본 개수 계산용) */
 uint32_t alarm_last_id(void);

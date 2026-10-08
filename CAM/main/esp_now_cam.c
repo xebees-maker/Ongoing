@@ -773,6 +773,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * 더 보낼 수 있는 창을 최소화함(peer 등록/레이트 설정 같은 뒤쪽 작업이 끝날 때까지
      * 기다릴 이유가 없음 — 어차피 hub_mac은 이미 확정됐으므로) */
     s_conn_state = CAM_CONN_PAIRED;
+    esp_now_channelsync_diag_send_report(s_hub_mac);  /* 2026-10-08 — 끊긴 적 있으면 요약을 콘으로 */
     ESP_LOGI(TAG_CASK, "[STATE] -> %s (pair_request)", conn_state_name(s_conn_state));
     esp_now_channelsync_notify_paired();
     cam_speaker_notify(SPK_EVT_PAIR_REQUESTED);
@@ -923,6 +924,7 @@ static bool esp_now_cam_try_wake_hello_fast_path(void)
      * 내부적으로 스캔/휴식 타이머를 null-check하므로 아직 초기화 전(최초 성공)이어도 안전 */
     esp_now_channelsync_notify_paired();
     s_conn_state = CAM_CONN_PAIRED;
+    esp_now_channelsync_diag_send_report(s_hub_mac);  /* 2026-10-08 — 끊긴 적 있으면 요약을 콘으로 */
     ESP_LOGI(TAG, "[STATE] -> %s (wake_hello)", conn_state_name(s_conn_state));
     set_led(LED_PATTERN_HEARTBEAT);
     return true;
@@ -983,6 +985,7 @@ void esp_now_cam_init(void)
 
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
+    esp_now_channelsync_diag_start();  /* 2026-10-08 — 사후 분석용 링크 진단(esp_now_channelsync.h 참고) */
     ESP_ERROR_CHECK(esp_now_register_send_cb(send_cb));
 
     esp_now_cam_reconnect();

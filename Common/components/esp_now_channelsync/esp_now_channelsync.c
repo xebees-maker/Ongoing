@@ -7,6 +7,7 @@
 #include "esp_timer.h"
 #include "esp_attr.h"
 #include "esp_mac.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -78,6 +79,30 @@ static RTC_DATA_ATTR uint8_t s_last_synced_channel = 0;  /* 0 = 유효한 값 �
 
 static const uint8_t s_broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
+/* 2026-10-08(사용자 지시 — 캠이 "콘 찾는 중" LED로 40분 넘게 멈춰 있었는데 시리얼엔 아무것도 없었고 콘·브도
+ * 아무것도 못 받음. 광고를 실제로 내보냈는지, 광고 타이머가 돌았는지 사후에 알 수 없었음) — 링크 진단.
+ * 카운터는 RTC 메모리(딥슬립·RWDT 리셋에도 유지) — 다시 붙으면 콘으로 요약을 보내고 0으로 */
+#define LINK_DIAG_MAGIC        0x4C444731u   /* "LDG1" */
+#define LINK_DIAG_PERIOD_US    (30LL * 1000 * 1000)
+#define LINK_DIAG_NO_CONTACT_US (30LL * 1000 * 1000)
+typedef struct {
+    uint32_t magic;
+    bool     outage;        /* 지금 끊긴 상태 */
+    bool     report_pending;
+    uint32_t awake_ms;
+    uint16_t boots;
+    uint8_t  last_reset;
+    uint8_t  flags;
+    uint32_t adv_queued, adv_qfail, adv_tx_ok, ack_rx;
+    uint16_t sweeps;
+} link_diag_t;
+static RTC_DATA_ATTR link_diag_t s_dg;
+static int64_t            s_dg_last_contact_us = 0;
+static int64_t            s_dg_last_tick_us    = 0;
+static esp_timer_handle_t s_dg_timer           = NULL;
+static esp_timer_handle_t s_scan_timer;   /* 아래 정의 — 진단에서 동작 여부만 봄 */
+static esp_timer_handle_t s_rest_timer;
+
 static char    s_node_name[ESP_NOW_LINK_NAME_LEN] = "";
 static uint8_t s_node_mac[6] = { 0 };
 
@@ -101,7 +126,7 @@ static esp_timer_handle_t s_scan_timer = NULL;  /* UNSYNCED에서만 동작 */
  *   11분 이후 계속: 스윕 사이 30초 휴식
  * s_rest_timer는 원샷(one-shot) — 스윕 한 바퀴(채널 랩어라운드) 끝날 때만 켜고, 끝나면
  * scan_timer를 다시 주기 재개시킴 */
-static esp_timer_handle_t s_rest_timer      = NULL;
+static esp_timer_handle_t s_rest_timer      = NULL;  /* 위에 진단용 선언 있음 */
 static int64_t            s_unsynced_start_us = 0;
 
 #define BACKOFF_CONTINUOUS_DURATION_US   (60LL * 1000 * 1000)         /* 0~1분: 연속 스윕 */
@@ -172,6 +197,7 @@ static void send_advertise_on_current_channel(void)
     memcpy(msg.name, s_node_name, sizeof(msg.name));
     memcpy(msg.mac, s_node_mac, sizeof(msg.mac));
     esp_err_t err = esp_now_send(s_broadcast_addr, (const uint8_t *)&msg, sizeof(msg));
+    if (err == ESP_OK) s_dg.adv_queued++; else s_dg.adv_qfail++;  /* 2026-10-08 — 링크 진단 */
     /* 2026-08-24(사용자 지시: "실제 송출될 때만 소리가 나도록") — esp_now_send()의 동기
      * 리턴값(err)은 "로컬 큐에 접수됐다"는 뜻일 뿐 진짜 무선 송출 완료가 아님(그건 비동기
      * send_cb로 나중에 옴 — esp_now_channelsync_notify_advertise_send_done() 참고). 여기선
@@ -262,6 +288,12 @@ static void scan_timer_cb(void *arg)
          * 확인: 1분 깨있고 3초 자고 반복). 아래 백오프 로직 자체는 CAML의 계속 켜있는 채로 도는
          * 모델에는 여전히 유효하므로 그대로 둠 — 훅 호출 위치만 분리 */
         if (s_on_scan_sweep_done) s_on_scan_sweep_done();
+        s_dg.sweeps++;  /* 2026-10-08 — 링크 진단 */
+        if (!s_dg.outage) {
+            s_dg.outage = true;  /* 한 바퀴 돌도록 못 찾음 — 깨어 있는 시간이 30초보다 짧은 딥슬립 사이클도 끊김으로 셈 */
+            s_dg.boots = 0;
+            s_dg.last_reset = (uint8_t)esp_reset_reason();
+        }
         s_scan_visit_count = 0;  /* 다음 스윕 — 첫 이동+광고가 방문 1회가 됨 */
 
         /* 스윕 백오프: 계속 켜있을 경우(CAML)에만 쉴지 판단. 스윕 중간엔 원래대로 계속 300ms
@@ -342,9 +374,86 @@ void esp_now_channelsync_init(const char *node_name, const uint8_t *node_mac,
     xSemaphoreGive(s_state_mutex);
 }
 
+/* ── 2026-10-08 링크 진단(위 s_dg 주석 참고) ── */
+static void diag_contact(void)
+{
+    s_dg_last_contact_us = esp_timer_get_time();
+    if (s_dg.outage) {
+        s_dg.outage = false;
+        s_dg.report_pending = true;
+        ESP_LOGW(TAG, "LINKDIAG contact restored - awake %lus, boots %u, adv q=%lu qfail=%lu tx=%lu ack=%lu sweeps=%u flags=0x%02X",
+                 (unsigned long)(s_dg.awake_ms / 1000), (unsigned)s_dg.boots, (unsigned long)s_dg.adv_queued,
+                 (unsigned long)s_dg.adv_qfail, (unsigned long)s_dg.adv_tx_ok, (unsigned long)s_dg.ack_rx,
+                 (unsigned)s_dg.sweeps, (unsigned)s_dg.flags);
+    }
+}
+
+static void diag_timer_cb(void *arg)
+{
+    (void)arg;
+    int64_t now = esp_timer_get_time();
+    if (s_dg.outage) s_dg.awake_ms += (uint32_t)((now - s_dg_last_tick_us) / 1000);
+    s_dg_last_tick_us = now;
+    if (!s_dg.outage && now - s_dg_last_contact_us > LINK_DIAG_NO_CONTACT_US) {
+        s_dg.outage = true;
+        s_dg.boots = 0;
+        s_dg.awake_ms = (uint32_t)((now - s_dg_last_contact_us) / 1000);
+        s_dg.last_reset = (uint8_t)esp_reset_reason();
+    }
+    if (!s_dg.outage) return;
+    bool gate = should_advertise_now();
+    bool scan_on = s_scan_timer && esp_timer_is_active(s_scan_timer);
+    bool rest_on = s_rest_timer && esp_timer_is_active(s_rest_timer);
+    if (!gate) s_dg.flags |= ESP_NOW_LINK_DIAG_F_GATE_CLOSED;
+    if (gate && !scan_on && !rest_on) s_dg.flags |= ESP_NOW_LINK_DIAG_F_NO_SCAN_TMR;
+    ESP_LOGW(TAG, "LINKDIAG no contact %lus | sync=%d gate=%d scan_tmr=%d rest_tmr=%d visit=%u ch=%u | "
+             "adv q=%lu qfail=%lu tx=%lu ack=%lu sweeps=%u boots=%u flags=0x%02X",
+             (unsigned long)((now - s_dg_last_contact_us) / 1000000), (int)s_synced, (int)gate, (int)scan_on, (int)rest_on,
+             (unsigned)s_scan_visit_count, (unsigned)s_scan_channel, (unsigned long)s_dg.adv_queued,
+             (unsigned long)s_dg.adv_qfail, (unsigned long)s_dg.adv_tx_ok, (unsigned long)s_dg.ack_rx,
+             (unsigned)s_dg.sweeps, (unsigned)s_dg.boots, (unsigned)s_dg.flags);
+}
+
+void esp_now_channelsync_diag_start(void)
+{
+    if (s_dg.magic != LINK_DIAG_MAGIC) {
+        memset(&s_dg, 0, sizeof(s_dg));
+        s_dg.magic = LINK_DIAG_MAGIC;
+    }
+    if (s_dg.outage) {
+        if (s_dg.boots < UINT16_MAX) s_dg.boots++;
+        s_dg.last_reset = (uint8_t)esp_reset_reason();
+    }
+    s_dg_last_contact_us = esp_timer_get_time();  /* 부팅 직후는 아직 끊김 아님 — 30초 지나도 연락 없으면 끊김 */
+    s_dg_last_tick_us = s_dg_last_contact_us;
+    if (!s_dg_timer) {
+        const esp_timer_create_args_t args = { .callback = diag_timer_cb, .name = "link_diag" };
+        if (esp_timer_create(&args, &s_dg_timer) == ESP_OK) esp_timer_start_periodic(s_dg_timer, LINK_DIAG_PERIOD_US);
+    }
+}
+
+void esp_now_channelsync_diag_send_report(const uint8_t hub_mac[6])
+{
+    if (!s_dg.report_pending || !hub_mac) return;
+    esp_now_link_diag_t m = {
+        .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_LINK_DIAG,
+        .awake_s = s_dg.awake_ms / 1000, .boots = s_dg.boots, .last_reset = s_dg.last_reset, .flags = s_dg.flags,
+        .adv_queued = s_dg.adv_queued, .adv_qfail = s_dg.adv_qfail, .adv_tx_ok = s_dg.adv_tx_ok,
+        .ack_rx = s_dg.ack_rx, .sweeps = s_dg.sweeps,
+    };
+    add_peer_if_needed(hub_mac);
+    if (esp_now_send(hub_mac, (const uint8_t *)&m, sizeof(m)) != ESP_OK) return;  /* 실패하면 다음 연결 때 다시 */
+    uint32_t magic = s_dg.magic;
+    memset(&s_dg, 0, sizeof(s_dg));
+    s_dg.magic = magic;
+}
+
 void esp_now_channelsync_on_recv(const esp_now_recv_info_t *info, uint8_t msg_type,
                                   const uint8_t *data, int len)
 {
+    /* 2026-10-08 — 링크 진단: 나에게 온 유니캐스트(콘이 보낸 것)만 연락으로 셈. 다른 노드의 광고(브로드캐스트)는 제외 */
+    if (info && info->des_addr && memcmp(info->des_addr, s_broadcast_addr, 6) != 0) diag_contact();
+    if (msg_type == ESP_NOW_MSG_ADVERTISE_ACK) s_dg.ack_rx++;
     ensure_state_mutex();
     xSemaphoreTake(s_state_mutex, portMAX_DELAY);
 
@@ -411,6 +520,7 @@ void esp_now_channelsync_notify_paired(void)
  * 부팅 시 한 번만 설정되고 이후 안 바뀜, 다른 공유 상태를 안 건드림 */
 void esp_now_channelsync_notify_advertise_send_done(void)
 {
+    s_dg.adv_tx_ok++;  /* 2026-10-08 — 링크 진단 */
     ESP_LOGD(TAG, "ADVERTISE sent (TX done confirmed)");
     if (s_on_advertise_sent) s_on_advertise_sent();
 }

@@ -172,6 +172,8 @@ typedef enum {
     /* 2026-09-29(임시 — 사용자 지시: 콘 요약 판넬의 스위치로 캠 촬영용 LED 켜기/끄기 시험) — CASK 할일 큐로 전달 */
     ESP_NOW_MSG_CAM_LIGHT_SET = 55,          /* Cntl -> CAM: esp_now_cam_light_t */
     ESP_NOW_MSG_CAM_LIGHT_ACK = 56,          /* CAM -> Cntl: 같은 구조체, msg_type만 바꿈 */
+    /* 2026-10-08(사용자 지시 — 캠이 "콘 찾는 중" LED로 멈춰 콘·브가 아무것도 못 받은 일, 사후 분석용) */
+    ESP_NOW_MSG_LINK_DIAG = 57,              /* CAM/Sens -> Cntl: 끊겼다 다시 붙을 때 끊긴 동안 요약(esp_now_link_diag_t), 응답 없음 */
 } esp_now_msg_type_t;
 
 /* ESP_NOW_MSG_SLEEP_NOW 페이로드. ESP_NOW_MSG_SLEEP_NOW_ACK도 이 구조체를 msg_type만 바꿔
@@ -251,6 +253,24 @@ typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
 } esp_now_cask_work_none_t;
+
+/* ESP_NOW_MSG_LINK_DIAG(2026-10-08) — 노드가 콘과 연락이 끊긴 동안 센 값. 카운터는 지난 보고 이후 누적
+ * (노드 RTC 메모리 — 딥슬립·RWDT 리셋에도 유지, 전원을 끄면 지워짐). esp_now_channelsync.c 참고 */
+#define ESP_NOW_LINK_DIAG_F_GATE_CLOSED  0x01   /* 끊긴 동안 "광고 허용"이 꺼진 채인 것을 본 적 있음 */
+#define ESP_NOW_LINK_DIAG_F_NO_SCAN_TMR  0x02   /* 광고는 허용인데 광고·휴식 타이머가 둘 다 멈춘 것을 본 적 있음 */
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint32_t awake_s;      /* 끊긴 동안 깨어 있던 시간 합(초, 딥슬립 시간 제외) */
+    uint16_t boots;        /* 끊긴 동안 부팅 수(딥슬립 깸·리셋) */
+    uint8_t  last_reset;   /* 마지막 부팅의 esp_reset_reason() */
+    uint8_t  flags;        /* ESP_NOW_LINK_DIAG_F_* */
+    uint32_t adv_queued;   /* 광고 송신 큐 넣기 성공 */
+    uint32_t adv_qfail;    /* 광고 송신 큐 넣기 실패 */
+    uint32_t adv_tx_ok;    /* 광고 실제 송신 완료(send_cb 성공) */
+    uint32_t ack_rx;       /* ADVERTISE_ACK 받음 */
+    uint16_t sweeps;       /* 13채널 스윕 완료 수 */
+} esp_now_link_diag_t;
 
 /* ESP_NOW_MSG_CAM_LIGHT_SET / _ACK(2026-09-29, 임시 시험용) */
 typedef struct __attribute__((packed)) {

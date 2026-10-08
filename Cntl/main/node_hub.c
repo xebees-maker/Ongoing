@@ -616,6 +616,25 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             can_bridge_relay_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
         }
 
+    } else if (msg_type == ESP_NOW_MSG_LINK_DIAG) {
+        /* 2026-10-08(사후 분석용) — 노드가 끊겼다 다시 붙으며 보낸 "끊긴 동안 요약". Dev Log + 알림 기록(푸시 없음) */
+        if (len < (int)sizeof(esp_now_link_diag_t)) return;
+        esp_now_link_diag_t d;
+        memcpy(&d, data, sizeof(d));
+        char nm[64] = "?";  /* 별칭(한글 3바이트/자)이 잘리지 않게 */
+        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        node_hub_node_t *dn = find_node(info->src_addr);
+        if (dn) snprintf(nm, sizeof(nm), "%s", alarm_name(dn));
+        xSemaphoreGive(s_nodes_mutex);
+        ESP_LOGW(TAG_LINK, "LINKDIAG %s: lost awake %lus boots %u reset %u flags 0x%02X | adv q=%lu qfail=%lu tx=%lu ack=%lu sweeps=%u",
+                 nm, (unsigned long)d.awake_s, (unsigned)d.boots, (unsigned)d.last_reset, (unsigned)d.flags,
+                 (unsigned long)d.adv_queued, (unsigned long)d.adv_qfail, (unsigned long)d.adv_tx_ok,
+                 (unsigned long)d.ack_rx, (unsigned)d.sweeps);
+        alarm_record(NOTIFY_TYPE_DISCONNECT, "Link report", "%s lost %lus boot%u rst%u f%02X adv%lu/%lu tx%lu ack%lu sw%u",
+                     nm, (unsigned long)d.awake_s, (unsigned)d.boots, (unsigned)d.last_reset, (unsigned)d.flags,
+                     (unsigned long)d.adv_queued, (unsigned long)d.adv_qfail, (unsigned long)d.adv_tx_ok,
+                     (unsigned long)d.ack_rx, (unsigned)d.sweeps);
+
     } else if (msg_type == ESP_NOW_MSG_PAIR_ACK) {
         if (len < (int)sizeof(esp_now_pair_ack_t)) return;
         const esp_now_pair_ack_t *ack = (const esp_now_pair_ack_t *)data;

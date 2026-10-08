@@ -21,6 +21,7 @@ static const char *TAG = "ALARM";
 
 typedef struct {
     uint8_t type;
+    bool    record_only;   /* 2026-10-08 — 기록만(종류 설정과 상관없이 푸시 안 함) */
     char    title[32];
     char    msg[86];
 } alarm_item_t;
@@ -89,7 +90,7 @@ static void write_rec(const alarm_rec_t *r)
 static void handle(const alarm_item_t *it)
 {
     notify_get_settings(s_ns);
-    bool push = (s_ns->types >> it->type) & 1u;
+    bool push = !it->record_only && ((s_ns->types >> it->type) & 1u);
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     uint32_t id = ++s_last_id;
     alarm_rec_t *r = slot(id);
@@ -185,19 +186,33 @@ void alarm_start(void)
     if (s_start) xSemaphoreGive(s_start);
 }
 
-void alarm_post(notify_type_t type, const char *title, const char *fmt, ...)
+static void post_v(notify_type_t type, bool record_only, const char *title, const char *fmt, va_list ap)
 {
     if (!s_q || type >= NOTIFY_TYPE_COUNT) return;
     xSemaphoreTake(s_post_mutex, portMAX_DELAY);
     memset(s_staging, 0, sizeof(*s_staging));
     s_staging->type = (uint8_t)type;
+    s_staging->record_only = record_only;
     snprintf(s_staging->title, sizeof(s_staging->title), "%s", title ? title : "");
-    va_list ap;
-    va_start(ap, fmt);
     vsnprintf(s_staging->msg, sizeof(s_staging->msg), fmt, ap);
-    va_end(ap);
     if (xQueueSend(s_q, s_staging, 0) != pdTRUE) ESP_LOGW(TAG, "Queue full - dropped: %s", s_staging->title);
     xSemaphoreGive(s_post_mutex);
+}
+
+void alarm_post(notify_type_t type, const char *title, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    post_v(type, false, title, fmt, ap);
+    va_end(ap);
+}
+
+void alarm_record(notify_type_t type, const char *title, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    post_v(type, true, title, fmt, ap);
+    va_end(ap);
 }
 
 uint32_t alarm_last_id(void)

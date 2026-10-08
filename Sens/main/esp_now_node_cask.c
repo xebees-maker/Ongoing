@@ -345,6 +345,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     memcpy(s_hub_mac, info->src_addr, sizeof(s_hub_mac));
 
     s_conn_state = SENS_CONN_PAIRED;
+    esp_now_channelsync_diag_send_report(s_hub_mac);  /* 2026-10-08 — 끊긴 적 있으면 요약을 콘으로 */
     ESP_LOGI(TAG, "[STATE] -> %s (pair_request)", conn_state_name(s_conn_state));
     esp_now_channelsync_notify_paired();
     set_led(LED_PATTERN_HEARTBEAT);
@@ -460,6 +461,7 @@ bool esp_now_node_report_reading(uint8_t chan_count, const uint8_t *chan_ok,
      * 동일 관례) */
     esp_now_channelsync_notify_paired();
     s_conn_state = SENS_CONN_PAIRED;
+    esp_now_channelsync_diag_send_report(s_hub_mac);  /* 2026-10-08 — 끊긴 적 있으면 요약을 콘으로 */
     ESP_LOGI(TAG, "[STATE] -> %s (wake_hello)", conn_state_name(s_conn_state));
     set_led(LED_PATTERN_HEARTBEAT);
     return true;
@@ -492,6 +494,7 @@ void esp_now_node_init(sensor_kind_t sensor_kind, uint8_t chan_count, const uint
 
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
+    esp_now_channelsync_diag_start();  /* 2026-10-08 — 사후 분석용 링크 진단(esp_now_channelsync.h 참고) */
     ESP_ERROR_CHECK(esp_now_register_send_cb(send_cb));
     if (!s_reply_q) {
         s_reply_q = xQueueCreate(6, sizeof(reply_item_t));

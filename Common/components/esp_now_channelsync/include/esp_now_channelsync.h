@@ -99,6 +99,12 @@ void esp_now_channelsync_set_event_hooks(esp_now_channelsync_event_cb_t on_chann
  * 브로드캐스트로 나가는 메시지라 목적지만으로 구분 가능) */
 void esp_now_channelsync_notify_advertise_send_done(void);
 
+/* 2026-10-08(사후 분석용 링크 진단 — 캠·센스 공용) — 노드 init에서 한 번(ESP-NOW 시작 뒤). 콘에서 온 유니캐스트가
+ * 30초 넘게 없으면 끊김으로 보고 30초마다 "LINKDIAG …" 한 줄(W)을 찍고 카운터를 RTC 메모리에 쌓음 */
+void esp_now_channelsync_diag_start(void);
+/* 다시 연결(PAIRED)된 직후 노드가 부름 — 끊긴 적이 있으면 요약(ESP_NOW_MSG_LINK_DIAG)을 콘으로 한 번 보냄 */
+void esp_now_channelsync_diag_send_report(const uint8_t hub_mac[6]);
+
 #ifdef __cplusplus
 }
 #endif
