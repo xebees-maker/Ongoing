@@ -29,9 +29,12 @@
 #include "storage_mgr.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -89,7 +92,8 @@ static void unlock(void)
 
 /* 2026-09-28 — SD 재마운트/포맷 동안 측정값 파일 조작을 막음(기록은 열기~닫기가 전부 s_mutex 안이라,
  * 잡으면 진행 중이던 기록이 끝날 때까지 기다린 뒤 막힘) */
-void stats_store_io_suspend(void) { lock(); }
+static void raw_close_cached_locked(void);  /* 아래 정의 */
+void stats_store_io_suspend(void) { lock(); raw_close_cached_locked(); }  /* 2026-10-08 — 열어 둔 기록 파일도 닫음 */
 void stats_store_io_resume(void) { unlock(); }
 
 /* 호출부가 lock() 잡은 상태 — 버퍼가 없으면 한 번만 할당. 실패하면 false */
@@ -162,6 +166,20 @@ static bool close_synced(FILE *f)
     return ok;
 }
 
+/* 2026-10-08(실측 — 쓰기마다 fopen("ab")만 82~105ms, 파일 끝을 찾느라) — 이번 주 원시 기록 파일은 열어 둔 채 씀.
+ * 쓸 때마다 fflush+fsync(닫을 때와 같은 안전정책 — 다른 핸들로 읽는 쪽도 바로 보임). 주가 바뀌거나, 오류가 나거나,
+ * 파일을 지우거나 자르거나(삭제·정리·재검사), SD를 내릴 때(stats_store_io_suspend) 닫음. 열린 파일은 하나뿐(max_files 5) */
+static FILE    *s_raw_f      = NULL;
+static uint32_t s_raw_f_week = UINT32_MAX;
+static void raw_close_cached_locked(void)
+{
+    if (s_raw_f) {
+        fclose(s_raw_f);
+        s_raw_f = NULL;
+        s_raw_f_week = UINT32_MAX;
+    }
+}
+
 /* ════════════════════════════════════════════════════════════
  * 그래프용 스케일별 사전집계 — [[project_cntl_stats_graph_redesign_2026_09_10]]
  * ════════════════════════════════════════════════════════════ */
@@ -195,8 +213,36 @@ typedef struct {
 #define AGG_ACCUM_BYTES (sizeof(agg_accum_t) * STATS_SCALE_COUNT * STATS_AGG_MAX_CHAN_TYPES * STATS_AGG_MAX_MACS)
 static agg_accum_t (*s_agg_accum)[STATS_AGG_MAX_CHAN_TYPES][STATS_AGG_MAX_MACS] = NULL;
 
-/* 호출부가 lock() 잡은 상태 — 방금 닫힌 버킷 하나를 그 버킷이 속한 주의 집계 파일에 씀. 실패해도
- * 로그만(치명적 아님, 원시 기록 자체는 이미 성공한 뒤라 유실은 이 사전집계 한 포인트뿐) */
+/* 2026-10-08(실측 — 12분 칸 경계에 칸마다 파일을 따로 열어 한 번에 1초 넘게 걸림) — 닫힌 칸은 여기 모았다가
+ * agg_pending_write_locked()가 같은 (눈금, 주) 파일끼리 한 번만 열어 씀. 칸 수 상한 = 눈금 × 채널 종류 × 기기 */
+#define AGG_PEND_MAX 64
+typedef struct { uint8_t scale; uint32_t week; stats_bucket_t rec; } agg_pend_t;
+static agg_pend_t *s_agg_pend = NULL;   /* PSRAM, 처음 쓸 때 */
+static int         s_agg_pend_n = 0;
+
+static void agg_pending_write_locked(void)
+{
+    for (int i = 0; i < s_agg_pend_n; i++) {
+        if (s_agg_pend[i].scale == 0xFF) continue;   /* 이미 같은 파일 묶음으로 씀 */
+        uint8_t sc = s_agg_pend[i].scale;
+        uint32_t week = s_agg_pend[i].week;
+        int widx = week_get_or_add_locked(week);
+        char path[48];
+        agg_path(sc, week, path, sizeof(path));
+        FILE *f = (widx >= 0) ? fopen(path, "ab") : NULL;
+        if (!f) ESP_LOGW(TAG, "Aggregate bucket open failed (scale=%u) - points lost", (unsigned)sc);
+        for (int j = i; j < s_agg_pend_n; j++) {
+            if (s_agg_pend[j].scale != sc || s_agg_pend[j].week != week) continue;
+            if (f && fwrite(&s_agg_pend[j].rec, sizeof(stats_bucket_t), 1, f) == 1) s_weeks[widx].agg_bytes += sizeof(stats_bucket_t);
+            s_agg_pend[j].scale = 0xFF;
+        }
+        if (f) close_synced(f);
+    }
+    s_agg_pend_n = 0;
+}
+
+/* 호출부가 lock() 잡은 상태 — 방금 닫힌 버킷 하나를 그 버킷이 속한 주의 집계 파일에 씀(2026-10-08 — 모아 두었다가
+ * agg_pending_write_locked()에서). 실패해도 로그만(치명적 아님, 원시 기록 자체는 이미 성공한 뒤라 유실은 이 사전집계 한 포인트뿐) */
 static void agg_flush_bucket_locked(uint8_t scale_idx, uint8_t kind, uint8_t chan_type, const uint8_t mac[6],
                                      const agg_accum_t *acc)
 {
@@ -210,20 +256,13 @@ static void agg_flush_bucket_locked(uint8_t scale_idx, uint8_t kind, uint8_t cha
     };
     memcpy(rec.mac, mac, 6);
 
-    uint32_t week = acc->bucket_start / STATS_WEEK_SEC;
-    int widx = week_get_or_add_locked(week);
-    if (widx < 0) return;
-
-    char path[48];
-    agg_path(scale_idx, week, path, sizeof(path));
-    FILE *f = fopen(path, "ab");
-    if (!f) {
-        ESP_LOGW(TAG, "Aggregate bucket open failed (scale=%u) - this point lost", (unsigned)scale_idx);
-        return;
-    }
-    size_t n = fwrite(&rec, sizeof(rec), 1, f);
-    close_synced(f);
-    if (n == 1) s_weeks[widx].agg_bytes += sizeof(rec);
+    if (!s_agg_pend) s_agg_pend = heap_caps_malloc(sizeof(agg_pend_t) * AGG_PEND_MAX, MALLOC_CAP_SPIRAM);
+    if (!s_agg_pend) return;
+    if (s_agg_pend_n >= AGG_PEND_MAX) agg_pending_write_locked();
+    s_agg_pend[s_agg_pend_n].scale = scale_idx;
+    s_agg_pend[s_agg_pend_n].week  = acc->bucket_start / STATS_WEEK_SEC;
+    s_agg_pend[s_agg_pend_n].rec   = rec;
+    s_agg_pend_n++;
 }
 
 /* 호출부가 lock() 잡은 상태 — mac -> 누적 슬롯 인덱스. 처음 보는 mac이면 새로 등록.
@@ -309,6 +348,7 @@ void stats_store_flush_ended_buckets(uint32_t now_unix)
             }
         }
     }
+    agg_pending_write_locked();
     unlock();
 }
 
@@ -436,7 +476,12 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
     size_t before = MEMDIAG_HEAP();
     bool ok = true;
 
+    /* 2026-10-08(진단, 임시 — 12분마다 센스 깨움 응답이 870ms 늦어 센스가 광고 스윕으로 넘어감, 직전 줄이 매번 이 함수) —
+     * 단계별 걸린 시간. 50ms 넘으면 W로 한 줄(파일 크기 포함 — 새 공간 할당 때 느려지는지 보려고) */
+    int64_t t0 = esp_timer_get_time(), t_open = 0, t_write = 0, t_close = 0, t_agg = 0;
+    long fsize = -1;
     lock();
+    int64_t t_locked = esp_timer_get_time();
     if (!ensure_alloc_locked()) { unlock(); return false; }
 
     /* 한 번의 호출(WAKE_HELLO_SENS 1건)은 보통 같은 시각이라 같은 주 — 그래도 주가 바뀌는 경계에
@@ -453,8 +498,16 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
 
         char path[48];
         raw_path(week, path, sizeof(path));
-        FILE *f = fopen(path, "ab");
+        int64_t ta = esp_timer_get_time();
+        if (s_raw_f && s_raw_f_week != week) raw_close_cached_locked();
+        if (!s_raw_f) {
+            s_raw_f = fopen(path, "ab");
+            s_raw_f_week = week;
+        }
+        FILE *f = s_raw_f;
+        t_open += esp_timer_get_time() - ta;
         if (!f) {
+            s_raw_f_week = UINT32_MAX;
             s_last_io_error = true;
             s_write_io_error_pending = true;
             ESP_LOGW(TAG, "Value file open failed (append, errno=%d) - %u values lost", errno, (unsigned)(j - i));
@@ -462,8 +515,14 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
             i = j;
             continue;
         }
+        ta = esp_timer_get_time();
         size_t written = fwrite(&records[i], sizeof(stats_record_t), j - i, f);
-        bool synced = close_synced(f);
+        fsize = ftell(f);
+        t_write += esp_timer_get_time() - ta;
+        ta = esp_timer_get_time();
+        bool synced = (fflush(f) == 0) && (fsync(fileno(f)) == 0);   /* 닫지 않음(위 s_raw_f 주석 참고) */
+        t_close += esp_timer_get_time() - ta;
+        if (written != j - i || !synced) raw_close_cached_locked();   /* 오류면 다음엔 새로 엶 */
         if (written != j - i || !synced) {
             s_last_io_error = true;
             s_write_io_error_pending = true;
@@ -475,16 +534,28 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
         total_written += (uint32_t)written;
 
         /* 원시 기록이 된 레코드만 사전집계에 반영 */
+        ta = esp_timer_get_time();
         for (uint32_t k = i; k < i + (uint32_t)written; k++) {
             stats_agg_update_locked(records[k].mac, records[k].kind, records[k].chan_type,
                                     records[k].unix_time, records[k].value);
         }
+        agg_pending_write_locked();
+        t_agg += esp_timer_get_time() - ta;
         i = j;
     }
     unlock();
 
+    int64_t ta = esp_timer_get_time();
     storage_mgr_notify_changed();
     if (total_written > 0 && s_appended_cb) s_appended_cb();  /* 잠금 밖에서 — 받는 쪽이 표를 다시 읽음 */
+    int64_t t_after = esp_timer_get_time() - ta;
+    int64_t t_total = esp_timer_get_time() - t0;
+    if (t_total >= 50000) {
+        ESP_LOGW(TAG, "STATSIO slow append %ums: lockwait %u open %u write %u close %u agg %u after %u (ms), %u rec, file %ld B",
+                 (unsigned)(t_total / 1000), (unsigned)((t_locked - t0) / 1000), (unsigned)(t_open / 1000),
+                 (unsigned)(t_write / 1000), (unsigned)(t_close / 1000), (unsigned)(t_agg / 1000),
+                 (unsigned)(t_after / 1000), (unsigned)count, fsize);
+    }
 
     s_stats_append_call_count++;
     size_t after = MEMDIAG_HEAP();
@@ -702,6 +773,7 @@ bool stats_store_get_min_max(uint8_t chan_type, float *out_min, float *out_max)
 /* 호출부가 lock() 잡은 상태 — idx 주의 원시+집계 파일을 지우고 색인에서 뺌. 지운 원시 레코드 수 반환 */
 static uint32_t delete_week_locked(uint32_t idx)
 {
+    raw_close_cached_locked();  /* 2026-10-08 — 열어 둔 기록 파일을 지우지 않게 */
     uint32_t week = s_weeks[idx].week;
     uint32_t removed = s_weeks[idx].raw_count;
     char path[48];
@@ -775,6 +847,7 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
 {
     uint32_t bad = 0;
     lock();
+    raw_close_cached_locked();  /* 2026-10-08 — 열어 둔 기록 파일을 자르지 않게 */
     if (!ensure_alloc_locked()) { unlock(); if (out_bad_entries) *out_bad_entries = 0; return; }
     s_week_count = 0;
     s_total_raw = 0;
@@ -834,4 +907,91 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
     }
     unlock();
     if (out_bad_entries) *out_bad_entries = bad;
+}
+
+
+/* ── 2026-10-08(실측 — 센스 깨움 처리 중 SD 쓰기·집계가 600ms~1.1초 걸려 응답(ACK)이 늦어지고, 센스가 광고 스윕으로
+ * 넘어가 12분마다 "Link report"가 남음) — 통신 경로(콘 ESP-NOW 처리, 우선순위 17)는 큐에 넣기만, SD 쓰기는 이 태스크
+ * (파일 작업 우선순위 10 — 통신17/SR15/파일10)가 함. 큐 칸·스택은 PSRAM ── */
+#define APPEND_Q_DEPTH 32
+#define APPEND_MAX_RECS 8
+/* 2026-10-08 — fn이 있으면 측정값 대신 "통신 밖에서 할 저장 작업"(stats_store_post_job) */
+typedef struct {
+    uint8_t count;
+    stats_record_t recs[APPEND_MAX_RECS];
+    stats_store_job_fn_t fn;
+    uint8_t arg[STATS_STORE_JOB_ARG_MAX];
+} append_item_t;
+static QueueHandle_t  s_append_q = NULL;
+static StaticQueue_t  s_append_q_struct;
+static StaticTask_t   s_append_tcb;
+static append_item_t *s_append_rx = NULL;
+static append_item_t *s_append_tx = NULL;
+static SemaphoreHandle_t s_append_tx_mutex = NULL;
+
+static void append_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        if (xQueueReceive(s_append_q, s_append_rx, portMAX_DELAY) == pdTRUE) {
+            if (s_append_rx->fn) s_append_rx->fn(s_append_rx->arg);
+            else stats_store_append_batch(s_append_rx->recs, s_append_rx->count);
+        }
+    }
+}
+
+static bool append_task_start(void)
+{
+    if (s_append_q) return true;
+    uint8_t *q_storage = heap_caps_malloc(sizeof(append_item_t) * APPEND_Q_DEPTH, MALLOC_CAP_SPIRAM);
+    StackType_t *stack = heap_caps_malloc(6144, MALLOC_CAP_SPIRAM);
+    s_append_rx = heap_caps_malloc(sizeof(append_item_t), MALLOC_CAP_SPIRAM);
+    s_append_tx = heap_caps_malloc(sizeof(append_item_t), MALLOC_CAP_SPIRAM);
+    s_append_tx_mutex = xSemaphoreCreateMutex();
+    if (!q_storage || !stack || !s_append_rx || !s_append_tx || !s_append_tx_mutex) {
+        heap_caps_free(q_storage); heap_caps_free(stack); heap_caps_free(s_append_rx); heap_caps_free(s_append_tx);
+        if (s_append_tx_mutex) vSemaphoreDelete(s_append_tx_mutex);
+        s_append_rx = s_append_tx = NULL; s_append_tx_mutex = NULL;
+        return false;
+    }
+    s_append_q = xQueueCreateStatic(APPEND_Q_DEPTH, sizeof(append_item_t), q_storage, &s_append_q_struct);
+    xTaskCreateStaticPinnedToCore(append_task, "stats_wr", 6144 / sizeof(StackType_t), NULL, 10, stack, &s_append_tcb, 1);
+    return true;
+}
+
+bool stats_store_append_async(const stats_record_t *records, uint32_t count)
+{
+    if (count == 0 || !records) return true;
+    if (!append_task_start()) return stats_store_append_batch(records, count);  /* 메모리 없으면 예전처럼 바로 씀 */
+    bool ok = true;
+    xSemaphoreTake(s_append_tx_mutex, portMAX_DELAY);   /* 조립 칸은 PSRAM 하나(스택에 큰 데이터 안 둠) — 큐가 복사함 */
+    s_append_tx->fn = NULL;
+    while (count > 0) {
+        s_append_tx->count = (uint8_t)(count > APPEND_MAX_RECS ? APPEND_MAX_RECS : count);
+        memcpy(s_append_tx->recs, records, s_append_tx->count * sizeof(stats_record_t));
+        if (xQueueSend(s_append_q, s_append_tx, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "Append queue full - %u values lost", (unsigned)s_append_tx->count);
+            ok = false;
+        }
+        records += s_append_tx->count;
+        count -= s_append_tx->count;
+    }
+    xSemaphoreGive(s_append_tx_mutex);
+    return ok;
+}
+
+bool stats_store_post_job(stats_store_job_fn_t fn, const void *arg, size_t arg_len)
+{
+    if (!fn || arg_len > STATS_STORE_JOB_ARG_MAX) return false;
+    if (!append_task_start()) { fn((const uint8_t *)arg); return true; }  /* 메모리 없으면 예전처럼 바로 */
+    xSemaphoreTake(s_append_tx_mutex, portMAX_DELAY);
+    s_append_tx->fn = fn;
+    s_append_tx->count = 0;
+    memset(s_append_tx->arg, 0, sizeof(s_append_tx->arg));
+    if (arg && arg_len) memcpy(s_append_tx->arg, arg, arg_len);
+    bool ok = xQueueSend(s_append_q, s_append_tx, 0) == pdTRUE;
+    s_append_tx->fn = NULL;
+    xSemaphoreGive(s_append_tx_mutex);
+    if (!ok) ESP_LOGW(TAG, "Append queue full - job dropped");
+    return ok;
 }

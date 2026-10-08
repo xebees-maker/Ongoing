@@ -157,6 +157,10 @@ static void battery_alarm_check_locked(node_hub_node_t *n)
     }
 }
 
+/* 2026-10-08(사용자 지시 — 통신 경로에서 IO 금지) — 저장 작업은 기록 태스크(stats_store_post_job)에서 */
+static void job_sens_kind_store(const uint8_t *a) { sens_kind_store_set(a, a[6]); }
+static void job_mark_known_device(const uint8_t *a) { device_config_mark_known_device(a); }
+
 static void liveness_sweep_cb(void *arg)
 {
     (void)arg;
@@ -668,7 +672,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                  * stats_store의 과거 기록을 분류할 수 있게 mac별 sensor_kind를 SD에 영구
                  * 기록. sens_kind_store_set() 자체가 값이 안 바뀌면 파일 재기록을 생략하므로,
                  * 이 핸들러가 매 keepalive마다 불려도(PAIR_ACK 특성) 불필요한 SD 쓰기는 없음 */
-                sens_kind_store_set(info->src_addr, ack->sensor_kind);
+                {   /* 2026-10-08 — SD 쓰기는 통신 밖(기록 태스크)에서 */
+                    uint8_t a[7];
+                    memcpy(a, info->src_addr, 6);
+                    a[6] = ack->sensor_kind;
+                    stats_store_post_job(job_sens_kind_store, a, sizeof(a));
+                }
             }
             /* 생존 신호(last_seen_ms)는 항상 갱신 — 페어링 후엔 CAM/SENS가 ADVERTISE를
              * 끊고 이 PAIR_ACK(keepalive)로만 살아있음을 알리는 것으로 보이는데, 이걸
@@ -731,7 +740,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             /* 2026-09-08(사용자 설계 — 연결 기능 주화면 이관) — 이 mac을 "알고 있는 장치"로
              * 영구 기록(이미 있으면 손 안 댐, alias 보존) — auto_connect_known 판단 근거이자
              * Alias 슬롯 그 자체 */
-            device_config_mark_known_device(info->src_addr);
+            stats_store_post_job(job_mark_known_device, info->src_addr, 6);  /* 2026-10-08 — LittleFS 저장은 통신 밖에서 */
             size_t m2 = MEMDIAG_HEAP();
             /* 2026-08-10 — "최초 페어링"과 "단순 생존확인 재페어링"을 구분(사용자 지적으로
              * 재설계). 처음엔 모든 became_paired에서 이 리셋을 했는데, 그러면 페어링(=CAM이
@@ -950,7 +959,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 rec_count++;
             }
             if (rec_count > 0) {
-                stats_store_append_batch(recs, rec_count);
+                stats_store_append_async(recs, rec_count);  /* 2026-10-08 — SD 쓰기는 기록 태스크로(응답 지연 방지) */
             }
         }
 

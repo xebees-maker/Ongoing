@@ -54,6 +54,12 @@ typedef struct __attribute__((packed)) {
  * 5배 줄어듦. fopen 실패(SD 자체 문제로 추정) 시 false 반환, 값 전체 유실(로그만 남김,
  * 치명적 아님 — sd_storage_init() 실패해도 앱 전체가 안 멈추는 기존 정책과 동일) */
 bool stats_store_append_batch(const stats_record_t *records, uint32_t count);
+/* 2026-10-08 — 통신 경로용: 큐에 넣기만 하고 바로 돌아옴(SD 쓰기는 기록 태스크 "stats_wr", 우선순위 10) */
+bool stats_store_append_async(const stats_record_t *records, uint32_t count);
+/* 2026-10-08 — 통신 경로에서 해야 하는 다른 저장(SD·LittleFS)도 같은 기록 태스크로 넘김. arg는 복사(최대 16바이트) */
+#define STATS_STORE_JOB_ARG_MAX 16
+typedef void (*stats_store_job_fn_t)(const uint8_t *arg);
+bool stats_store_post_job(stats_store_job_fn_t fn, const void *arg, size_t arg_len);
 
 /* 2026-09-30(사용자 지시 — "새 측정값이 올 때 갱신해야지") — stats_store_append_batch()가 원시 기록을 하나라도 쓰면
  * 부르는 콜백(Record 표 갱신용). 부르는 쪽 태스크(ESP-NOW 처리)에서 불리므로 UI는 lv_async_call로 넘겨야 함 */

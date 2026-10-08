@@ -13,6 +13,7 @@
 #include "esp_rom_crc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -130,7 +131,10 @@ static sr_session_t *find_session_locked(const uint8_t *mac)
 static bool flush_wbuf(sr_session_t *s)
 {
     if (s->wlen == 0) return true;
+    int64_t t0 = esp_timer_get_time();   /* 2026-10-08(진단, 임시 — 사진 경로 SD 쓰기가 데이터 경로를 얼마나 막는지) */
     bool ok = s->writer && photo_storage_append(s->writer, s->wbuf, s->wlen);
+    int64_t dt = esp_timer_get_time() - t0;
+    if (dt >= 50000) ESP_LOGW(TAG, "PHOTOIO slow append %ums (%u B)", (unsigned)(dt / 1000), (unsigned)s->wlen);
     s->wlen = 0;
     return ok;
 }
@@ -200,7 +204,9 @@ static void handle_sr_meta(const uint8_t *mac, const uint8_t *body, size_t len)
     xSemaphoreGive(s_mutex);
 
     /* SD 열기는 잠금 밖에서(수 ms~) */
+    int64_t tb = esp_timer_get_time();   /* 2026-10-08(진단, 임시) */
     s->writer = photo_storage_begin(mac, meta.kind);
+    if (esp_timer_get_time() - tb >= 50000) ESP_LOGW(TAG, "PHOTOIO slow begin %ums", (unsigned)((esp_timer_get_time() - tb) / 1000));
     if (!s->writer) ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)meta.file_id);
 }
 
@@ -269,7 +275,9 @@ static void handle_sr_done(const uint8_t *mac, const uint8_t *body, size_t len)
     uint32_t seq = 0;
     bool saved = false;
     if (crc_ok && s->writer && flush_wbuf(s)) {
+        int64_t tf = esp_timer_get_time();   /* 2026-10-08(진단, 임시) */
         saved = photo_storage_finish(s->writer, &seq);  /* 성공/실패 모두 writer 해제 */
+        if (esp_timer_get_time() - tf >= 50000) ESP_LOGW(TAG, "PHOTOIO slow finish %ums", (unsigned)((esp_timer_get_time() - tf) / 1000));
         s->writer = NULL;
     }
     uint32_t file_id = s->file_id, size = s->total_size;
