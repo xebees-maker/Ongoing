@@ -98,6 +98,13 @@ typedef struct {
     uint8_t       *queue_storage;
     StackType_t   *task_stack;
     StaticTask_t  *task_tcb;
+    /* 2026-10-08(실기 크래시 — idle 태스크가 종료 대기 목록 정리 중 LoadProhibited, prvCheckTasksWaitingTermination →
+     * uxListRemove) — 예전엔 워커가 vTaskDelete(NULL)로 스스로 지웠는데, 자기 삭제한 TCB는 idle이 정리할 때까지
+     * 종료 대기 목록에 남음. 그 사이 디스패처가 같은 슬롯의 task_tcb로 새 워커를 만들면 목록 안의 TCB를 덮어써 목록이
+     * 깨짐(ESP-IDF idf_additions.c 주석에도 같은 위험). 이제 워커는 멈추기만(vTaskSuspend) 하고, 슬롯을 다시 쓸 때
+     * 디스패처가 이 핸들을 지움 — 실행 중이 아닌 태스크의 삭제는 그 자리에서 끝나므로 재사용과 겹치지 않음.
+     * 버퍼는 원래도 슬롯마다 남겨 두므로 메모리는 같음 */
+    TaskHandle_t   task;
 } tx_worker_t;
 
 static QueueHandle_t     s_tx_queue = NULL;       /* 입구 — 디스패처만 소비 */
@@ -150,12 +157,12 @@ static void tx_worker_task(void *arg)
                 xSemaphoreGive(s_workers_mutex);
                 continue;
             }
-            QueueHandle_t q = w->queue;
+            vQueueDelete(w->queue);   /* 2026-10-08 — 뮤텍스 안에서(슬롯이 비었다고 보이기 전에) 정리 */
             w->in_use = false;
             w->queue  = NULL;
             xSemaphoreGive(s_workers_mutex);
-            vQueueDelete(q);
-            vTaskDelete(NULL);
+            /* 2026-10-08 — 스스로 지우지 않고 멈춤(위 tx_worker_t.task 주석 참고). 디스패처가 다음에 이 슬롯을 쓸 때 지움 */
+            for (;;) vTaskSuspend(NULL);
         }
 
         int64_t start_us = esp_timer_get_time();
@@ -264,7 +271,13 @@ static void tx_dispatcher_task(void *arg)
                     xQueueSend(w->queue, &item, 0);  /* 태스크 생성 전에 미리 넣어둠 — 유실 없음 */
                     /* 2026-09-26(설계 §3 — CAN 관련은 코어 1) — 워커는 CAN으로 RELIABLE_SEND를 보내므로 TWAI 인터럽트와
                      * 같은 코어 1에 고정(can_bridge.c send_app_msg가 대행 없이 바로 보냄) */
-                    xTaskCreateStaticPinnedToCore(tx_worker_task, "node_req_w", TX_WORKER_STACK / sizeof(StackType_t),
+                    /* 2026-10-08 — 이 슬롯의 이전 워커(멈춰 있음)를 먼저 지움. 같은 코어(1)에 고정된 디스패처가 지금 돌고
+                     * 있으니 그 워커는 실행 중이 아님 → 삭제가 그 자리에서 끝남(종료 대기 목록을 거치지 않음) */
+                    if (w->task) {
+                        vTaskDelete(w->task);
+                        w->task = NULL;
+                    }
+                    w->task = xTaskCreateStaticPinnedToCore(tx_worker_task, "node_req_w", TX_WORKER_STACK / sizeof(StackType_t),
                                        w, TX_WORKER_PRIORITY, w->task_stack, w->task_tcb, 1);
                 }
             }
