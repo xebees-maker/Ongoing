@@ -100,9 +100,15 @@ static TaskHandle_t s_reply_task = NULL;
 /* 송신 큐에 자리가 났다는 신호(send_cb가 줌) — 청크 재전송 루프가 20ms 폴링 대신 기다림 */
 static SemaphoreHandle_t s_tx_space_sem = NULL;
 
+/* 2026-10-08(실측 — 센스 SLEEP_NOW 응답이 브에 안 와 콘 쪽 SLEEP_NOW가 0.9초 뒤 실패, 대기 센스 11.5%) — esp_now_send()는
+ * 송신 큐에 넣기만 하고, 실제 송신은 조금 뒤 Wi-Fi 태스크가 함. 응답을 넣자마자 딥슬립하면 응답이 공중에 못 나감.
+ * 콘으로 보낸 응답 수를 세어 두고(송신 완료 send_cb마다 하나씩 뺌), 잠들기 직전 0이 될 때까지 잠깐 기다림 */
+static volatile uint32_t s_reply_inflight = 0;
+
 static void send_reply(const uint8_t *mac, const void *msg, size_t len)
 {
     esp_err_t err = esp_now_send(mac, (const uint8_t *)msg, len);
+    if (err == ESP_OK) __atomic_add_fetch(&s_reply_inflight, 1, __ATOMIC_RELAXED);
     if (err != ESP_ERR_ESPNOW_NO_MEM) {
         if (err != ESP_OK) ESP_LOGW(TAG, "Reply (type=%u) send failed: %s", ((const uint8_t *)msg)[1], esp_err_to_name(err));
         return;
@@ -130,8 +136,23 @@ static void reply_task(void *arg)
             err = esp_now_send(item.mac, item.data, item.len);
         }
         if (err != ESP_OK) ESP_LOGW(TAG, "Reply (type=%u) resend failed: %s", item.data[1], esp_err_to_name(err));
-        else ESP_LOGD(TAG, "Reply (type=%u) resent after NO_MEM", item.data[1]);
+        else {
+            __atomic_add_fetch(&s_reply_inflight, 1, __ATOMIC_RELAXED);
+            ESP_LOGD(TAG, "Reply (type=%u) resent after NO_MEM", item.data[1]);
+        }
     }
+}
+
+/* 2026-10-08 — 딥슬립 직전: 보낸 응답이 실제로 나갈 때까지 최대 max_ms 기다림(위 s_reply_inflight 주석 참고) */
+void esp_now_cam_wait_replies_sent(uint32_t max_ms)
+{
+    int64_t t0 = esp_timer_get_time();
+    while (__atomic_load_n(&s_reply_inflight, __ATOMIC_RELAXED) > 0 &&
+           esp_timer_get_time() - t0 < (int64_t)max_ms * 1000) {
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    ESP_LOGD(TAG, "Replies flushed before sleep: %u left after %ums",
+             (unsigned)__atomic_load_n(&s_reply_inflight, __ATOMIC_RELAXED), (unsigned)((esp_timer_get_time() - t0) / 1000));
 }
 /* 2026-08-10 도입 — photo_transfer_task가 뭔가 처리 중인지(2026-09-19: esp_now_cam_enqueue_
  * auto_capture()도 큐잉 시점에 앞당겨 세팅함 — mark_transfer_idle() 주석 참고) */
@@ -243,6 +264,11 @@ static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t statu
     /* 2026-09-26(할 일 8) — 송신 큐에 자리 생김: 응답 재전송 태스크와 청크 재전송 루프를 깨움 */
     if (s_reply_task) xTaskNotifyGive(s_reply_task);
     if (s_tx_space_sem) xSemaphoreGive(s_tx_space_sem);
+    /* 2026-10-08 — 콘으로 간 송신 완료 = 보낸 응답 하나 처리됨(위 s_reply_inflight 주석 참고) */
+    if (info && info->des_addr && memcmp(info->des_addr, s_hub_mac, 6) == 0) {
+        uint32_t v = __atomic_load_n(&s_reply_inflight, __ATOMIC_RELAXED);
+        if (v > 0) __atomic_sub_fetch(&s_reply_inflight, 1, __ATOMIC_RELAXED);
+    }
     if (info && info->des_addr && memcmp(info->des_addr, s_broadcast_mac, sizeof(s_broadcast_mac)) == 0) {
         if (status == ESP_NOW_SEND_SUCCESS) {
             esp_now_channelsync_notify_advertise_send_done();
@@ -846,6 +872,7 @@ static uint32_t s_last_wake_hello_report_ms = 0;
 
 /* WAKE_HELLO 한 번(reliable 200ms×3) — fast path와 전송 중 체크인(esp_now_cam_checkin_during_transfer) 공용.
  * notify_speaker=false면 소리 안 냄(전송 중 1초 주기 체크인이 매번 울리지 않게) */
+#define WAKE_HELLO_DEADLINE_MS 3000   /* 2026-10-08 — WAKE_HELLO 실패 판단 마감(아래 send_wake_hello 참고) */
 static esp_err_t send_wake_hello(bool notify_speaker)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
@@ -870,9 +897,11 @@ static esp_err_t send_wake_hello(bool notify_speaker)
      * 보내므로, 그게 도착하기 전에(전송 직전) 미리 대기 상태를 깨끗하게 함 — cam_node.c의
      * cam_node_reset_sleep_now_state() 주석 참고 */
     cam_node_reset_sleep_now_state();
-    return esp_now_reliable_request(s_hub_mac, &hello, sizeof(hello),
+    /* 2026-10-08(실기 — 콘이 0.6초 늦자 캠이 바로 광고 스윕으로 넘어가 콘이 연결 해제 처리, 12분마다 반복) — 재전송은
+     * 200ms × 3 그대로, 실패 판단은 마감 WAKE_HELLO_DEADLINE_MS(3초)까지 늦은 응답을 기다린 뒤 */
+    return esp_now_reliable_request_deadline(s_hub_mac, &hello, sizeof(hello),
                                     s_wake_hello_ack_types, 1,
-                                    200, 3,  /* 2026-09-05 — 100ms는 CNTL이 사진전송
+                                    200, 3, WAKE_HELLO_DEADLINE_MS,  /* 2026-09-05 — 100ms는 CNTL이 사진전송
                                                 뒷정리 등으로 순간 바쁠 때 너무 타이트해서
                                                 불필요한 재전송을 유발(node_hub.c의
                                                 WAKE_HELLO_ACK 재시도 수정과 짝) */

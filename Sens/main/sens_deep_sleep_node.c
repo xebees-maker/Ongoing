@@ -915,5 +915,6 @@ void app_main(void)
     ESP_LOGI(TAG, "Deep sleep: wake in %us (requested %us, %us spent measuring)",
              (unsigned)actual_sleep_sec, (unsigned)sleep_sec, (unsigned)measurement_elapsed_sec);
     esp_sleep_enable_timer_wakeup((uint64_t)actual_sleep_sec * 1000000ULL);
+    esp_now_node_wait_replies_sent(100);  /* 2026-10-08 — SLEEP_NOW 응답이 나가기 전에 잠들지 않게 */
     esp_deep_sleep_start();
 }

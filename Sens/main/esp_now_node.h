@@ -92,6 +92,8 @@ uint32_t esp_now_node_get_sample_interval_sec(void);
  *        (CAM의 s_sleep_entry_unix_time과 동일 이유).
  */
 void esp_now_node_note_sleep_entry(void);
+/* 2026-10-08 — 딥슬립 직전: 콘으로 보낸 응답(SLEEP_NOW_ACK 등)이 실제로 나갈 때까지 최대 max_ms 기다림 */
+void esp_now_node_wait_replies_sent(uint32_t max_ms);
 
 /**
  * @brief 아래 4개는 CAM의 cam_node_signal_recheck()/cam_node_note_sleep_now_requested()/

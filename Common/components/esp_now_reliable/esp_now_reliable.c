@@ -57,6 +57,8 @@ typedef struct {
     uint8_t  accept[ACCEPT_MAX];
     size_t   accept_count;
     uint32_t timeout_ms;
+    uint32_t final_wait_ms;     /* 2026-10-08 — 마지막 재전송 뒤 마감까지 응답을 더 기다리는 시간(0 = 예전대로 바로 실패) */
+    bool     in_final_wait;
     int      attempts_total;
     int      attempts_left;
     int      nomem_tries;
@@ -140,13 +142,22 @@ static void service_slot(slot_t *s)
         s->timer_fired = false;
         if (s->state == SLOT_WAIT_REPLY) {
             s->attempts_left--;
+            if (s->attempts_left <= 0 && s->final_wait_ms > 0 && !s->in_final_wait) {
+                /* 2026-10-08(사용자 지적 — "재시도가 문제가 아니고 에러로 판단하는 시간이 짧은 게 문제") — 재전송은 끝났어도
+                 * 마감까지는 실패로 판단하지 않고 늦게 오는 응답을 기다림(응답 매칭은 슬롯이 비기 전까지 계속 됨) */
+                s->in_final_wait = true;
+                esp_timer_stop(s->timer);
+                esp_timer_start_once(s->timer, (uint64_t)s->final_wait_ms * 1000);
+                xSemaphoreGive(s_lock);
+                return;
+            }
             if (s->attempts_left <= 0) {
                 esp_now_reliable_done_cb_t cb = s->cb;
                 void *cb_ctx = s->cb_ctx;
                 int total = s->attempts_total;
                 s->state = SLOT_FREE;   /* 콜백 전에 비움 — 위 성공 경로와 같은 이유 */
                 xSemaphoreGive(s_lock);
-                ESP_LOGW(TAG, "Request timeout (all %d tries no response)", total);
+                ESP_LOGW(TAG, "Request timeout (all %d tries no response%s)", total, s->in_final_wait ? ", deadline passed" : "");
                 if (cb) cb(cb_ctx, ESP_ERR_TIMEOUT, NULL, 0);
                 return;
             }
@@ -217,11 +228,11 @@ static void ensure_init(void)
     xTaskCreatePinnedToCore(service_task, "reliable_svc", 3072, NULL, 17, &s_service_task, 0);
 }
 
-esp_err_t esp_now_reliable_request_async(const uint8_t *peer_mac,
-                                          const void *req, size_t req_len,
-                                          const uint8_t *accept_reply_types, size_t accept_reply_types_count,
-                                          uint32_t timeout_ms, int max_attempts,
-                                          esp_now_reliable_done_cb_t cb, void *cb_ctx)
+static esp_err_t request_async_impl(const uint8_t *peer_mac,
+                                    const void *req, size_t req_len,
+                                    const uint8_t *accept_reply_types, size_t accept_reply_types_count,
+                                    uint32_t timeout_ms, int max_attempts, uint32_t final_wait_ms,
+                                    esp_now_reliable_done_cb_t cb, void *cb_ctx)
 {
     if (!peer_mac || !req || req_len == 0 || !accept_reply_types || accept_reply_types_count == 0) return ESP_ERR_INVALID_ARG;
     if (req_len > REQ_BUF_CAP || accept_reply_types_count > ACCEPT_MAX) return ESP_ERR_INVALID_SIZE;
@@ -256,6 +267,8 @@ esp_err_t esp_now_reliable_request_async(const uint8_t *peer_mac,
     memcpy(free_slot->accept, accept_reply_types, accept_reply_types_count);
     free_slot->accept_count = accept_reply_types_count;
     free_slot->timeout_ms = timeout_ms;
+    free_slot->final_wait_ms = final_wait_ms;
+    free_slot->in_final_wait = false;
     free_slot->attempts_total = (max_attempts > 0) ? max_attempts : 1;
     free_slot->attempts_left = free_slot->attempts_total;
     free_slot->nomem_tries = 0;
@@ -272,6 +285,16 @@ esp_err_t esp_now_reliable_request_async(const uint8_t *peer_mac,
 }
 
 /* ---- 동기 포장 ---- */
+esp_err_t esp_now_reliable_request_async(const uint8_t *peer_mac,
+                                          const void *req, size_t req_len,
+                                          const uint8_t *accept_reply_types, size_t accept_reply_types_count,
+                                          uint32_t timeout_ms, int max_attempts,
+                                          esp_now_reliable_done_cb_t cb, void *cb_ctx)
+{
+    return request_async_impl(peer_mac, req, req_len, accept_reply_types, accept_reply_types_count,
+                              timeout_ms, max_attempts, 0, cb, cb_ctx);
+}
+
 typedef struct {
     SemaphoreHandle_t done;
     esp_err_t result;
@@ -296,11 +319,11 @@ static void sync_done_cb(void *ctx, esp_err_t result, const uint8_t *reply, size
     xSemaphoreGive(w->done);
 }
 
-esp_err_t esp_now_reliable_request(const uint8_t *peer_mac,
-                                    const void *req, size_t req_len,
-                                    const uint8_t *accept_reply_types, size_t accept_reply_types_count,
-                                    uint32_t timeout_ms, int max_attempts,
-                                    void *reply_out, size_t reply_out_cap, size_t *reply_out_len)
+static esp_err_t request_sync_impl(const uint8_t *peer_mac,
+                                   const void *req, size_t req_len,
+                                   const uint8_t *accept_reply_types, size_t accept_reply_types_count,
+                                   uint32_t timeout_ms, int max_attempts, uint32_t final_wait_ms,
+                                   void *reply_out, size_t reply_out_cap, size_t *reply_out_len)
 {
     ensure_init();
     xSemaphoreTake(s_api_mutex, portMAX_DELAY);
@@ -313,9 +336,9 @@ esp_err_t esp_now_reliable_request(const uint8_t *peer_mac,
         .reply_out_cap = reply_out_cap,
         .reply_out_len = reply_out_len,
     };
-    esp_err_t err = esp_now_reliable_request_async(peer_mac, req, req_len,
-                                                    accept_reply_types, accept_reply_types_count,
-                                                    timeout_ms, max_attempts, sync_done_cb, &w);
+    esp_err_t err = request_async_impl(peer_mac, req, req_len,
+                                       accept_reply_types, accept_reply_types_count,
+                                       timeout_ms, max_attempts, final_wait_ms, sync_done_cb, &w);
     if (err == ESP_OK) {
         xSemaphoreTake(w.done, portMAX_DELAY);  /* 서비스가 timeout×시도 안에 반드시 콜백을 부름 */
         err = w.result;
@@ -323,6 +346,28 @@ esp_err_t esp_now_reliable_request(const uint8_t *peer_mac,
     vSemaphoreDelete(w.done);
     xSemaphoreGive(s_api_mutex);
     return err;
+}
+
+esp_err_t esp_now_reliable_request(const uint8_t *peer_mac,
+                                    const void *req, size_t req_len,
+                                    const uint8_t *accept_reply_types, size_t accept_reply_types_count,
+                                    uint32_t timeout_ms, int max_attempts,
+                                    void *reply_out, size_t reply_out_cap, size_t *reply_out_len)
+{
+    return request_sync_impl(peer_mac, req, req_len, accept_reply_types, accept_reply_types_count,
+                             timeout_ms, max_attempts, 0, reply_out, reply_out_cap, reply_out_len);
+}
+
+esp_err_t esp_now_reliable_request_deadline(const uint8_t *peer_mac,
+                                             const void *req, size_t req_len,
+                                             const uint8_t *accept_reply_types, size_t accept_reply_types_count,
+                                             uint32_t resend_ms, int max_sends, uint32_t deadline_ms,
+                                             void *reply_out, size_t reply_out_cap, size_t *reply_out_len)
+{
+    uint32_t sends_span = resend_ms * (uint32_t)(max_sends > 0 ? max_sends : 1);
+    uint32_t final_wait = deadline_ms > sends_span ? deadline_ms - sends_span : 0;
+    return request_sync_impl(peer_mac, req, req_len, accept_reply_types, accept_reply_types_count,
+                             resend_ms, max_sends, final_wait, reply_out, reply_out_cap, reply_out_len);
 }
 
 void esp_now_reliable_on_recv(uint8_t msg_type, const uint8_t *src_mac,

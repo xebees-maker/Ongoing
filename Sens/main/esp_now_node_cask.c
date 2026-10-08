@@ -189,9 +189,15 @@ typedef struct {
 static QueueHandle_t s_reply_q = NULL;
 static TaskHandle_t s_reply_task = NULL;
 
+/* 2026-10-08(실측 — 센스 SLEEP_NOW 응답이 브에 안 와 콘 쪽 SLEEP_NOW가 0.9초 뒤 실패, 대기 센스 11.5%) — esp_now_send()는
+ * 송신 큐에 넣기만 하고, 실제 송신은 조금 뒤 Wi-Fi 태스크가 함. 응답을 넣자마자 딥슬립하면 응답이 공중에 못 나감.
+ * 콘으로 보낸 응답 수를 세어 두고(송신 완료 send_cb마다 하나씩 뺌), 잠들기 직전 0이 될 때까지 잠깐 기다림 */
+static volatile uint32_t s_reply_inflight = 0;
+
 static esp_err_t send_reply(const uint8_t *mac, const void *msg, size_t len)
 {
     esp_err_t err = esp_now_send(mac, (const uint8_t *)msg, len);
+    if (err == ESP_OK) __atomic_add_fetch(&s_reply_inflight, 1, __ATOMIC_RELAXED);
     if (err != ESP_ERR_ESPNOW_NO_MEM) {
         if (err != ESP_OK) ESP_LOGW(TAG, "Reply (type=%u) send failed: %s", ((const uint8_t *)msg)[1], esp_err_to_name(err));
         return err;
@@ -220,7 +226,10 @@ static void reply_task(void *arg)
             err = esp_now_send(item.mac, item.data, item.len);
         }
         if (err != ESP_OK) ESP_LOGW(TAG, "Reply (type=%u) resend failed: %s", item.data[1], esp_err_to_name(err));
-        else ESP_LOGD(TAG, "Reply (type=%u) resent after NO_MEM", item.data[1]);
+        else {
+            __atomic_add_fetch(&s_reply_inflight, 1, __ATOMIC_RELAXED);
+            ESP_LOGD(TAG, "Reply (type=%u) resent after NO_MEM", item.data[1]);
+        }
     }
 }
 
@@ -230,6 +239,11 @@ static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t statu
      * esp_now_reliable_request()를 깨움(이벤트 방식, 대기 중인 게 없으면 아무 일도 안 함) */
     esp_now_reliable_on_send_done();
     if (s_reply_task) xTaskNotifyGive(s_reply_task);  /* 응답 재전송 태스크 깨움(할 일 8, 캠과 동일) */
+    /* 2026-10-08 — 콘으로 간 송신 완료 = 보낸 응답 하나 처리됨(위 s_reply_inflight 주석 참고) */
+    if (info && info->des_addr && memcmp(info->des_addr, s_hub_mac, 6) == 0) {
+        uint32_t v = __atomic_load_n(&s_reply_inflight, __ATOMIC_RELAXED);
+        if (v > 0) __atomic_sub_fetch(&s_reply_inflight, 1, __ATOMIC_RELAXED);
+    }
     if (info && info->des_addr && memcmp(info->des_addr, s_broadcast_mac, sizeof(s_broadcast_mac)) == 0) {
         if (status == ESP_NOW_SEND_SUCCESS) {
             esp_now_channelsync_notify_advertise_send_done();
@@ -443,9 +457,10 @@ bool esp_now_node_report_reading(uint8_t chan_count, const uint8_t *chan_ok,
 
     static const uint8_t s_wake_hello_sens_ack_types[] = { ESP_NOW_MSG_WAKE_HELLO_SENS_ACK };
     esp_now_wake_hello_sens_ack_t ack;
-    esp_err_t err = esp_now_reliable_request(s_hub_mac, &hello, sizeof(hello),
+    /* 2026-10-08 — 재전송 200ms × 3, 실패 판단은 마감 3초(esp_now_cam.c의 WAKE_HELLO_DEADLINE_MS와 같은 이유) */
+    esp_err_t err = esp_now_reliable_request_deadline(s_hub_mac, &hello, sizeof(hello),
                                               s_wake_hello_sens_ack_types, 1,
-                                              200, 3,  /* CAM의 WAKE_HELLO와 동일 값(esp_now_cam.c
+                                              200, 3, 3000,  /* CAM의 WAKE_HELLO와 동일 값(esp_now_cam.c
                                                           2026-09-05 수정과 짝) */
                                               &ack, sizeof(ack), NULL);
     if (err != ESP_OK) {
@@ -520,4 +535,17 @@ const char *esp_now_node_get_name(void)
 bool esp_now_node_is_paired(void)
 {
     return s_conn_state == SENS_CONN_PAIRED;
+}
+
+/* 2026-10-08 — 딥슬립 직전: 보낸 응답이 실제로 나갈 때까지 최대 max_ms 기다림(위 s_reply_inflight 주석 참고) */
+void esp_now_node_wait_replies_sent(uint32_t max_ms)
+{
+    int64_t t0 = esp_timer_get_time();
+    while (__atomic_load_n(&s_reply_inflight, __ATOMIC_RELAXED) > 0 &&
+           esp_timer_get_time() - t0 < (int64_t)max_ms * 1000) {
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    uint32_t left = __atomic_load_n(&s_reply_inflight, __ATOMIC_RELAXED);
+    ESP_LOGD(TAG, "Replies flushed before sleep: %u left after %ums", (unsigned)left,
+             (unsigned)((esp_timer_get_time() - t0) / 1000));
 }

@@ -50,6 +50,14 @@ esp_err_t esp_now_reliable_request(const uint8_t *peer_mac,
  * 반환: ESP_OK(접수 — cb가 반드시 한 번 불림), ESP_ERR_INVALID_STATE(그 노드에 진행 중인 요청이 이미
  * 있음 — 노드당 1개 원칙 위반), ESP_ERR_NO_MEM/INVALID_SIZE/INVALID_ARG(접수 안 됨 — cb 안 불림).
  * req_len 최대 250바이트, accept 최대 8개 */
+/* 2026-10-08(사용자 지적 — 짧은 지연을 에러로 판단하면 안 됨) — 재전송 간격(resend_ms × max_sends)과 별도로
+ * 실패 판단 마감(deadline_ms). 재전송을 다 한 뒤에도 마감까지는 늦게 온 응답을 성공으로 받음.
+ * deadline_ms가 resend_ms × max_sends 이하면 esp_now_reliable_request()와 같음 */
+esp_err_t esp_now_reliable_request_deadline(const uint8_t *peer_mac,
+                                             const void *req, size_t req_len,
+                                             const uint8_t *accept_reply_types, size_t accept_reply_types_count,
+                                             uint32_t resend_ms, int max_sends, uint32_t deadline_ms,
+                                             void *reply_out, size_t reply_out_cap, size_t *reply_out_len);
 typedef void (*esp_now_reliable_done_cb_t)(void *cb_ctx, esp_err_t result, const uint8_t *reply, size_t reply_len);
 esp_err_t esp_now_reliable_request_async(const uint8_t *peer_mac,
                                           const void *req, size_t req_len,

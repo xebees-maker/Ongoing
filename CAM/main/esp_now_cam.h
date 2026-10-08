@@ -42,6 +42,8 @@ bool esp_now_cam_checkin_during_transfer(void);
 /** @brief 광고(채널 스캔) 중단 — 스윕 실패로 잠들기로 정한 직후 호출. 재부팅(딥슬립 복귀) 전까지
  *  다시 광고 안 함 */
 void esp_now_cam_stop_advertising(void);
+/* 2026-10-08 — 딥슬립 직전: 콘으로 보낸 응답(SLEEP_NOW_ACK 등)이 실제로 나갈 때까지 최대 max_ms 기다림 */
+void esp_now_cam_wait_replies_sent(uint32_t max_ms);
 
 /** @brief 상태 LED 키 등록(esp_now_cam_init() 이전에 호출). 키는 status_led로 이미 초기화돼
  *  있어야 함 — CAM은 BSP_CAM_PWR_LED_STATUS_ID(IO 익스팬더 EXIO6, status_led_init_custom) */

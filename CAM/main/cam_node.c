@@ -1028,6 +1028,7 @@ void app_main(void)
      * (그리고 그 이후 시리얼이 뚝 끊기는지 = 진짜 딥슬립 진입했는지) 눈으로 바로 확인 가능하게 함 */
     ESP_LOGD(TAG, "Just before esp_deep_sleep_start() (sleep_sec=%u) - serial drop after this line is normal",
              (unsigned)sleep_sec);
+    esp_now_cam_wait_replies_sent(100);  /* 2026-10-08 — SLEEP_NOW 응답이 나가기 전에 잠들지 않게 */
     esp_deep_sleep_start();  /* RWDT는 이미 무장돼있음, 안 건드림 */
     ESP_LOGE(TAG, "esp_deep_sleep_start() returned (must not happen) - sleep_sec=%u", (unsigned)sleep_sec);
 #else
