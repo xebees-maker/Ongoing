@@ -174,6 +174,12 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
                       c->manual_override_on ? "true" : "false", c->z_turns_on ? "true" : "false",
                       c->y_rises ? "true" : "false", (unsigned)c->chan_type);
             jb_float(&b, (c->on_threshold + c->off_threshold) / 2.0f);
+            const power_relay_timer_t *t = power_relay_get_timer(i);   /* 2026-10-09 — 타이머(행 요약용) */
+            if (t && t->timer_mode) {
+                jb_printf(&b, ",\"timer\":{\"on\":%lu,\"off\":%lu,\"dn\":%s,\"non\":%lu,\"noff\":%lu}",
+                          (unsigned long)t->on_sec, (unsigned long)t->off_sec, t->day_night ? "true" : "false",
+                          (unsigned long)t->night_on_sec, (unsigned long)t->night_off_sec);
+            }
         }
         jb_printf(&b, "}");
     }
@@ -613,6 +619,15 @@ static esp_err_t api_relay_get_handler(httpd_req_t *req)
     jb_values(&b, 3);
     jb_printf(&b, ",\"opt_hold\":");
     jb_values(&b, 4);
+    {   /* 2026-10-09(할 일 AG) — 타이머 칸, 수동 자동 해제 선택지 */
+        const power_relay_timer_t *t = power_relay_get_timer(idx);
+        jb_printf(&b, ",\"timer\":{\"mode\":%s,\"on\":%lu,\"off\":%lu,\"dn\":%s,\"ds\":%u,\"ns\":%u,\"non\":%lu,\"noff\":%lu}",
+                  t->timer_mode ? "true" : "false", (unsigned long)t->on_sec, (unsigned long)t->off_sec,
+                  t->day_night ? "true" : "false", (unsigned)t->day_start_min, (unsigned)t->night_start_min,
+                  (unsigned long)t->night_on_sec, (unsigned long)t->night_off_sec);
+        jb_printf(&b, ",\"opt_rel\":");
+        jb_values(&b, 7);
+    }
 
     /* 채널별: 기본값, 범위(기본/정밀), 기준 장치 후보(그 채널을 보고하는 센서 — 콘 relay_rebuild_device_dropdown과 같은 기준) */
     uint8_t chans[4];
@@ -685,6 +700,15 @@ static esp_err_t api_relay_apply_post_handler(httpd_req_t *req)
     c->trend_enable = query_int(body, "trend", 0) != 0;
     c->trend_samples = (uint32_t)query_int(body, "ts", 0);
     c->min_hold_sec = (uint32_t)query_int(body, "hold", 0);
+    /* 2026-10-09(할 일 AG) — 타이머: tm=1이면 ton/toff(초), tdn, tds/tns(분), tnon/tnoff(초) */
+    c->timer_mode = query_int(body, "tm", 0) != 0;
+    c->timer.on_sec = (uint32_t)query_int(body, "ton", 900);
+    c->timer.off_sec = (uint32_t)query_int(body, "toff", 2700);
+    c->timer.day_night = query_int(body, "tdn", 0) != 0;
+    c->timer.day_start_min = (uint16_t)query_int(body, "tds", 360);
+    c->timer.night_start_min = (uint16_t)query_int(body, "tns", 1080);
+    c->timer.night_on_sec = (uint32_t)query_int(body, "tnon", 900);
+    c->timer.night_off_sec = (uint32_t)query_int(body, "tnoff", 2700);
     op->type = UI_WEB_OP_RELAY_APPLY;
     bool ok = ui_main_run_web_op(op, 2000);
     return send_simple(req, ok ? NULL : "400 Bad Request", ok ? "{\"ok\":true}" : "{\"ok\":false}");
@@ -714,6 +738,7 @@ static esp_err_t api_relay_override_post_handler(httpd_req_t *req)
     memset(op, 0, sizeof(*op));
     if (!relay_idx_from_query(&op->idx)) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
     op->value = (uint32_t)(query_int(s_w->query, "on", 0) != 0);
+    op->value2 = (uint32_t)query_int(s_w->query, "rel", 0);   /* 2026-10-09 — 자동 해제(초) */
     op->type = UI_WEB_OP_RELAY_OVERRIDE;
     bool ok = ui_main_run_web_op(op, 2000);
     return send_simple(req, ok ? NULL : "400 Bad Request", ok ? "{\"ok\":true}" : "{\"ok\":false}");

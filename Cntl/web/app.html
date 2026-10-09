@@ -390,12 +390,27 @@
   function relaySummary(r) {
     /* refresh_power_control_panel과 같은 문장 — 언어별 어순 틀(STR_FMT_RELAY_SUMMARY, 콘 fill_relay_summary와 같은 규칙) */
     if (r.override) return S(r.override_on ? 'STR_MSG_OVERRIDE_ON_SUMMARY' : 'STR_MSG_OVERRIDE_OFF_SUMMARY');
+    if (r.timer) return timerSummary(r.timer);   /* 10-09 — 동작 = 타이머(콘 fill_timer_summary와 같은 틀) */
     if (!r.configured) return S('STR_RELAY_NOT_CONFIGURED');
     var num = r.center === null ? '-' : (r.chan === CHAN_CO2 ? String(Math.round(r.center)) : Number(r.center).toFixed(1));
     var parts = { act: S(r.turns_on ? 'STR_STATUS_RELAY_ON' : 'STR_STATUS_RELAY_OFF'),
                   item: S(r.chan === CHAN_CO2 ? 'STR_CHANNEL_NAME_CO2' : 'STR_CHANNEL_NAME_TEMP'),
                   dir: S(r.rises ? 'STR_DIRECTION_NAME_UPTO' : 'STR_DIRECTION_NAME_BELOW'), value: num };
     return S('STR_FMT_RELAY_SUMMARY').replace(/\{(act|item|dir|value)\}/g, function (m, k) { return parts[k]; });
+  }
+
+  /* 10-09(할 일 AG) — 시간 길이 표시(콘 fmt_duration과 같음: 1시간30분 / 1h30m), HH:MM, 타이머 요약 */
+  function fmtDur(sec) {
+    var u = S('STR_DUR_UNITS').split('\n'), h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60, o = '';
+    if (h) o += h + u[0];
+    if (m) o += m + u[1];
+    if (s || (!h && !m)) o += s + u[2];
+    return o;
+  }
+  function fmtClock(min) { return ('0' + Math.floor(min / 60) % 24).slice(-2) + ':' + ('0' + min % 60).slice(-2); }
+  function timerSummary(t) {
+    var p = { on: fmtDur(t.on), off: fmtDur(t.off), non: fmtDur(t.non), noff: fmtDur(t.noff) };
+    return S(t.dn ? 'STR_FMT_RELAY_TIMER_DN_SUMMARY' : 'STR_FMT_RELAY_TIMER_SUMMARY').replace(/\{(noff|non|off|on)\}/g, function (m, k) { return p[k]; });
   }
 
   function renderRelays(list) {
@@ -418,7 +433,7 @@
   }
 
   /* 촬영 주기 — 콘 format_capture_interval과 같게(값 목록 = ui_main.c s_capture_interval_values, 문구 = STR_OPT_CAPTURE_INTERVAL_LIST) */
-  var CAPTURE_VALUES = [0, 10, 30, 1800, 3600, 10800, 36000];
+  var CAPTURE_VALUES = [0, 60, 600, 3600, 10800, 43200];   /* 10-09 — 콘 상용 주기와 같게 */
   function captureText(sec) {
     var i = CAPTURE_VALUES.indexOf(sec);
     if (i < 0) return sec + 's';
@@ -708,25 +723,30 @@
   }
 
   /* ── 수동 조작 확인(콘 show_override_confirm_popup과 같은 문장: 경고 + "~할까요, [On] 또는 [Off]" + 예/아니오) ── */
+  var RELEASE_VALUES = [0, 600, 1800, 3600, 10800];   /* 10-09 — 콘 s_manual_release_values와 같음(STR_OPT_MANUAL_RELEASE_LIST 순서) */
   function confirmOverride(idx, onDone, onCancel) {
-    var sel = true;
+    var sel = true, rel = 0;
     function draw() {
       /* 경고문(언어별 문장) 아래에 선택 칸만(언어와 상관없이 같은 배치) — 콘 show_override_confirm_popup과 같음 */
       $('modalBox').innerHTML = '<div class="mtitle">' + esc(S('STR_TITLE_WARNING')) + '</div><div class="mtext">' +
         esc(S('STR_MSG_OVERRIDE_WARNING')) + '<div style="display:flex;gap:12px;justify-content:center;margin-top:14px">' +
         '<button class="choice' + (sel ? ' sel' : '') + '" data-c="1">' + esc(S('STR_STATUS_RELAY_ON')) + '</button>' +
-        '<button class="choice' + (sel ? '' : ' sel') + '" data-c="0">' + esc(S('STR_STATUS_RELAY_OFF')) + '</button></div></div>' +
+        '<button class="choice' + (sel ? '' : ' sel') + '" data-c="0">' + esc(S('STR_STATUS_RELAY_OFF')) + '</button></div>' +
+        '<div class="field" style="margin-top:12px"><label>' + esc(S('STR_LABEL_MANUAL_RELEASE')) + '</label><select id="ovRel">' +
+        S('STR_OPT_MANUAL_RELEASE_LIST').split('\n').map(function (l, i) {
+          return '<option value="' + RELEASE_VALUES[i] + '"' + (RELEASE_VALUES[i] === rel ? ' selected' : '') + '>' + esc(l) + '</option>';
+        }).join('') + '</select></div></div>' +
         '<div class="sfoot"><button data-m="no">' + esc(S('STR_BTN_NO')) + '</button><button class="primary" data-m="yes">' + esc(S('STR_BTN_YES')) + '</button></div>';
     }
     draw();
     $('modal').classList.remove('hidden');
     $('modal').onclick = function (ev) {
       var c = ev.target.closest('[data-c]'), m = ev.target.closest('[data-m]');
-      if (c) { sel = c.getAttribute('data-c') === '1'; draw(); return; }
+      if (c) { sel = c.getAttribute('data-c') === '1'; rel = +$('ovRel').value; draw(); return; }
       if (!m) return;
       $('modal').classList.add('hidden');
       if (m.getAttribute('data-m') === 'yes') {
-        post('api/relay/override?idx=' + idx + '&on=' + (sel ? 1 : 0))
+        post('api/relay/override?idx=' + idx + '&on=' + (sel ? 1 : 0) + '&rel=' + (+$('ovRel').value || 0))
           .then(function () { if (onDone) onDone(); poll(); })
           .catch(function (e) { if (!(e && e.handled)) toast('Error'); if (onCancel) onCancel(); });
       } else if (onCancel) onCancel();
@@ -740,7 +760,9 @@
     var f = rl.form;
     return ['chan=' + f.chan, 'y=' + (f.y ? 1 : 0), 'z=' + (f.z ? 1 : 0), 'center=' + f.center, 'margin=' + f.margin,
             'ai=' + (f.ai ? 1 : 0), 'manual=' + (f.manual ? 1 : 0), 'src=' + f.src, 'gc=' + f.gc, 'dev=' + (f.dev || ''),
-            'stat=' + f.stat, 'trend=' + (f.trend ? 1 : 0), 'ts=' + f.ts, 'hold=' + f.hold].join('&');
+            'stat=' + f.stat, 'trend=' + (f.trend ? 1 : 0), 'ts=' + f.ts, 'hold=' + f.hold,
+            'tm=' + (f.tm ? 1 : 0), 'ton=' + f.t.on, 'toff=' + f.t.off, 'tdn=' + (f.t.dn ? 1 : 0), 'tds=' + f.t.ds, 'tns=' + f.t.ns,
+            'tnon=' + f.t.non, 'tnoff=' + f.t.noff].join('&');
   }
   function rlChan(type) { return rl.data.chans.filter(function (c) { return c.type === type; })[0] || rl.data.chans[0]; }
   function rlSpec() {   /* 값 범위 — 온도 그룹이면 기본/정밀 선택대로, 장치면 정밀(서버가 실제 센서 사양으로 다시 자름) */
@@ -753,7 +775,9 @@
       var devs = rlChanDevices(d, d.chan);
       rl = { data: d, form: { chan: d.chan, y: d.y, z: d.z, center: d.center, margin: d.margin, ai: d.ai, manual: d.manual, src: d.src,
                               gc: d.gc, dev: devs.some(function (x) { return x.mac === d.dev; }) ? d.dev : (devs[0] ? devs[0].mac : ''),
-                              stat: d.stat, trend: d.trend, ts: d.ts, hold: d.hold }, alias: d.alias };
+                              stat: d.stat, trend: d.trend, ts: d.ts, hold: d.hold,
+                              tm: d.timer.mode, t: { on: d.timer.on, off: d.timer.off, dn: d.timer.dn, ds: d.timer.ds, ns: d.timer.ns,
+                                                     non: d.timer.non, noff: d.timer.noff } }, alias: d.alias };
       rlSnap = rlForm();
       openSheet(renderRelay);
     }).catch(function () {});
@@ -772,11 +796,29 @@
     var h = sheetHead('STR_PANEL_POWER_CONTROL');
     h += '<div class="field"><label for="rAlias">' + esc(S('STR_LABEL_ALIAS')) + '</label><input type="text" id="rAlias" maxlength="' + d.alias_max +
          '" value="' + esc(rl.alias) + '" placeholder="' + esc(name) + '"><button id="rAliasApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
-    h += '<div class="field"><label>' + esc(S('STR_LABEL_AI_MODE').replace(':', '')) + '</label>' + toggleHtml('rAi', f.ai) +
+    h += '<div class="field">' + (f.tm ? '<span class="grow"></span>' : '<label>' + esc(S('STR_LABEL_AI_MODE').replace(':', '')) + '</label>' + toggleHtml('rAi', f.ai)) +
          '<label style="text-align:right">' + esc(S('STR_LABEL_MANUAL_MODE')) + '</label>' + toggleHtml('rManual', f.manual) + '</div>';
     h += '<div class="grayp' + (f.manual ? ' off' : '') + '">';
     /* 입력 칸은 언어와 상관없이 같은 배치(사용자 결정): 동작 / 항목 / 조건 */
-    h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ACTION')) + '</label>' + sel('rZ', 'STR_OPT_TURN_ACTION_LIST', [1, 0], f.z ? 1 : 0) + '</div>';
+    h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ACTION')) + '</label>' + sel('rZ', 'STR_OPT_TURN_ACTION_LIST', [1, 0, 2], f.tm ? 2 : (f.z ? 1 : 0)) + '</div>';
+    if (f.tm) {   /* 10-09(할 일 AG) — 동작 = 타이머: 항목·조건·고급 대신 타이머 칸(콘 relay_build_timer_box와 같은 배치) */
+      var t = f.t;
+      function tb(key, txt) { return '<button class="vbtn" data-troll="' + key + '">' + esc(txt) + '</button>'; }
+      h += '<div class="field"><label>' + esc(S(t.dn ? 'STR_LABEL_DAY_ON' : 'STR_LABEL_TIMER_ON')) + '</label>' + tb('on', fmtDur(t.on)) +
+           '<label style="text-align:right">' + esc(S(t.dn ? 'STR_LABEL_DAY_OFF' : 'STR_LABEL_TIMER_OFF')) + '</label>' + tb('off', fmtDur(t.off)) + '</div>';
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_DAY_NIGHT')) + '</label>' + toggleHtml('rDn', t.dn) + '</div>';
+      if (t.dn) {
+        h += '<div class="field"><label>' + esc(S('STR_LABEL_DAY_START')) + '</label>' + tb('ds', fmtClock(t.ds)) +
+             '<label style="text-align:right">' + esc(S('STR_LABEL_NIGHT_START')) + '</label>' + tb('ns', fmtClock(t.ns)) + '</div>';
+        h += '<div class="field"><label>' + esc(S('STR_LABEL_NIGHT_ON')) + '</label>' + tb('non', fmtDur(t.non)) +
+             '<label style="text-align:right">' + esc(S('STR_LABEL_NIGHT_OFF')) + '</label>' + tb('noff', fmtDur(t.noff)) + '</div>';
+      }
+      h += '</div><div class="sfoot"><button id="rApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
+      $('sheetBody').innerHTML = h;
+      bindRelay();
+      rlDirty();
+      return;
+    }
     h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ITEM')) + '</label>' +
          sel('rChan', 'STR_OPT_CHAN_TYPE_LIST', d.chans.map(function (c) { return c.type; }), f.chan) + '</div>';
     h += '<div class="sent"><span class="grow">' + esc(S('STR_LABEL_RELAY_CONDITION')) + '</span>' + sel('rY', 'STR_OPT_RISE_FALL_LIST', [1, 0], f.y ? 1 : 0) +
@@ -857,6 +899,38 @@
     };
   }
 
+  /* 10-09(할 일 AG) — 시간 롤러: 길이 = [시][분][초], 시각 = [시]:[분](콘 cb_rt_tap과 같음) */
+  function openTimeRoller(key) {
+    var t = rl.form.t, clock = (key === 'ds' || key === 'ns');
+    var v = clock ? t[key] * 60 : t[key];
+    var u = S('STR_DUR_UNITS').split('\n');
+    var c1 = rollCol('rtH', 0, 23, Math.floor(v / 3600)), c2 = rollCol('rtM', 0, 59, Math.floor(v / 60) % 60), c3 = rollCol('rtS', 0, 59, v % 60);
+    var cols = clock ? [['rtH', c1], ['rtM', c2]] : [['rtH', c1], ['rtM', c2], ['rtS', c3]];
+    var h = clock ? c1.html + '<span class="rfix">:</span>' + c2.html
+                  : c1.html + '<span class="rfix">' + esc(u[0]) + '</span>' + c2.html + '<span class="rfix">' + esc(u[1]) + '</span>' + c3.html + '<span class="rfix">' + esc(u[2]) + '</span>';
+    $('modalBox').innerHTML = '<div class="mtitle" style="background:var(--blue);color:#fff">' + esc(S('STR_TITLE_SETTING')) + '</div>' +
+      '<div class="roll"><div class="band"></div>' + h + '</div>' +
+      '<div class="sfoot"><button data-m="no">' + esc(S('STR_BTN_CANCEL')) + '</button><button class="primary" data-m="yes">' + esc(S('STR_BTN_CONFIRM')) + '</button></div>';
+    $('modal').classList.remove('hidden');
+    cols.forEach(function (c) {
+      var el = $(c[0]);
+      el.scrollTop = (c[1].cur - c[1].a) * ROW;
+      markCol(c[0]);
+      el.addEventListener('scroll', function () { markCol(c[0]); }, { passive: true });
+    });
+    $('modal').onclick = function (ev) {
+      var m = ev.target.closest('[data-m]');
+      if (!m) return;
+      if (m.getAttribute('data-m') === 'yes') {
+        var hh = colValue('rtH', 0), mm = colValue('rtM', 0);
+        t[key] = clock ? hh * 60 + mm : hh * 3600 + mm * 60 + colValue('rtS', 0);
+        renderRelay();
+      }
+      $('modal').classList.add('hidden');
+      $('modal').onclick = null;
+    };
+  }
+
   function rlDirty() { var b = $('rApply'); if (b) b.disabled = (rlForm() === rlSnap); }
   function bindRelay() {
     var f = rl.form, d = rl.data;
@@ -873,7 +947,15 @@
         confirmOverride(d.idx, function () { closeSheet(); }, function () { renderRelay(); });
       } else { f.manual = false; renderRelay(); }
     });
-    on('rZ', 'change', function () { f.z = this.value === '1'; rlDirty(); });
+    on('rZ', 'change', function () {   /* 10-09 — 2 = 타이머(조건의 켬/끔은 그대로 둠) */
+      var v = this.value;
+      if (v === '2') f.tm = true; else { f.tm = false; f.z = v === '1'; }
+      renderRelay();
+    });
+    on('rDn', 'change', function () { f.t.dn = this.checked; renderRelay(); });
+    [].forEach.call(document.querySelectorAll('[data-troll]'), function (btn) {
+      btn.addEventListener('click', function () { openTimeRoller(btn.getAttribute('data-troll')); });
+    });
     on('rY', 'change', function () { f.y = this.value === '1'; rlDirty(); });
     on('rChan', 'change', function () {
       f.chan = +this.value;

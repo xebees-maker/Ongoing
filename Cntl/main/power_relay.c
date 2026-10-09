@@ -5,6 +5,7 @@
 #include "romanize.h"
 #include "esp_heap_caps.h"
 #include "alarm.h"
+#include "rtc_sync.h"
 
 #include <string.h>
 #include <math.h>
@@ -59,6 +60,139 @@ typedef struct __attribute__((packed)) {
 } power_relay_file_t;
 
 static power_relay_config_t s_relay_cfg[POWER_RELAY_COUNT];
+
+/* ── 2026-10-09 릴레이 타이머(할 일 AG, power_relay.h 참고) ── */
+#define POWER_RELAY_TIMER_PATH    FS_MOUNT_POINT "/power_relay_timer.bin"
+#define POWER_RELAY_TIMER_VERSION 1
+#define CLOCK_VALID_MIN_UNIX      1704067200u   /* 2024-01-01 — 이보다 작으면 콘 시계가 아직 안 맞은 것 */
+#define UPTIME_UNTIL_FLAG         0x80000000u
+typedef struct __attribute__((packed)) {
+    uint32_t version;
+    power_relay_timer_t timers[POWER_RELAY_COUNT];
+} power_relay_timer_file_t;
+static power_relay_timer_t s_timer[POWER_RELAY_COUNT];
+
+static void timer_defaults(power_relay_timer_t *t)
+{
+    memset(t, 0, sizeof(*t));
+    t->on_sec = 15 * 60;
+    t->off_sec = 45 * 60;
+    t->day_start_min = 6 * 60;
+    t->night_start_min = 18 * 60;
+    t->night_on_sec = 15 * 60;
+    t->night_off_sec = 45 * 60;
+}
+
+static void timer_save(void)
+{
+    FILE *f = fopen(POWER_RELAY_TIMER_PATH, "wb");
+    if (!f) { ESP_LOGW(TAG, "Timer save failed (fopen)"); return; }
+    power_relay_timer_file_t s = { .version = POWER_RELAY_TIMER_VERSION };
+    memcpy(s.timers, s_timer, sizeof(s.timers));
+    fwrite(&s, sizeof(s), 1, f);
+    fclose(f);
+}
+
+static void timer_load(void)
+{
+    for (int i = 0; i < POWER_RELAY_COUNT; i++) timer_defaults(&s_timer[i]);
+    FILE *f = fopen(POWER_RELAY_TIMER_PATH, "rb");
+    if (!f) return;
+    power_relay_timer_file_t s = { 0 };
+    bool ok = (fread(&s, sizeof(s), 1, f) == 1) && s.version == POWER_RELAY_TIMER_VERSION;
+    fclose(f);
+    if (ok) memcpy(s_timer, s.timers, sizeof(s_timer));
+    else ESP_LOGW(TAG, "Timer file format mismatch - keeping defaults");
+}
+
+static bool clock_valid(uint32_t *out_now)
+{
+    uint32_t t = rtc_sync_get_unix_time();
+    if (out_now) *out_now = t;
+    return t >= CLOCK_VALID_MIN_UNIX;
+}
+
+/* 구간 안에서 켜짐? — elapsed: 구간 시작부터 지난 초. next: 다음 전환까지 남은 초 */
+static bool cycle_state(uint32_t elapsed, uint32_t on_sec, uint32_t off_sec, uint32_t *next)
+{
+    uint32_t cyc = on_sec + off_sec;
+    if (on_sec == 0) { if (next) *next = UINT32_MAX; return false; }
+    if (off_sec == 0) { if (next) *next = UINT32_MAX; return true; }
+    uint32_t pos = elapsed % cyc;
+    if (pos < on_sec) { if (next) *next = on_sec - pos; return true; }
+    if (next) *next = cyc - pos;
+    return false;
+}
+
+bool power_relay_timer_state(const power_relay_timer_t *t, uint32_t *out_next_sec)
+{
+    uint32_t now = 0, next = UINT32_MAX;
+    bool on;
+    if (!clock_valid(&now)) {
+        /* 시계가 아직 — 부팅부터 센 시간으로, 하루 종일(낮) 값 */
+        uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
+        on = cycle_state(up, t->on_sec, t->off_sec, &next);
+    } else {
+        uint32_t sod = now % 86400u;   /* 콘 시각은 현지 시각을 초로 셈(rtc_sync) */
+        if (!t->day_night) {
+            on = cycle_state(sod, t->on_sec, t->off_sec, &next);
+            uint32_t to_midnight = 86400u - sod;
+            if (to_midnight < next) next = to_midnight;
+        } else {
+            uint32_t ds = (uint32_t)t->day_start_min * 60u, ns = (uint32_t)t->night_start_min * 60u;
+            bool in_day = (ds <= ns) ? (sod >= ds && sod < ns) : (sod >= ds || sod < ns);
+            uint32_t seg_start = in_day ? ds : ns, seg_end = in_day ? ns : ds;
+            uint32_t elapsed = (sod + 86400u - seg_start) % 86400u;
+            uint32_t to_end = (seg_end + 86400u - sod) % 86400u;
+            if (to_end == 0) to_end = 86400u;
+            on = in_day ? cycle_state(elapsed, t->on_sec, t->off_sec, &next)
+                        : cycle_state(elapsed, t->night_on_sec, t->night_off_sec, &next);
+            if (to_end < next) next = to_end;
+        }
+    }
+    if (out_next_sec) *out_next_sec = next;
+    return on;
+}
+
+const power_relay_timer_t *power_relay_get_timer(int idx)
+{
+    if (idx < 0 || idx >= POWER_RELAY_COUNT) return NULL;
+    return &s_timer[idx];
+}
+
+void power_relay_set_timer(int idx, const power_relay_timer_t *t)
+{
+    if (idx < 0 || idx >= POWER_RELAY_COUNT || !t) return;
+    uint32_t keep_release = s_timer[idx].manual_release_sec, keep_until = s_timer[idx].manual_until;
+    s_timer[idx] = *t;
+    s_timer[idx].manual_release_sec = keep_release;   /* 수동 자동해제는 power_relay_set_manual_release로만 */
+    s_timer[idx].manual_until = keep_until;
+    if (s_timer[idx].day_start_min > 1439) s_timer[idx].day_start_min = 1439;
+    if (s_timer[idx].night_start_min > 1439) s_timer[idx].night_start_min = 1439;
+    timer_save();
+    power_relay_kick();
+}
+
+void power_relay_set_manual_release(int idx, uint32_t sec)
+{
+    if (idx < 0 || idx >= POWER_RELAY_COUNT) return;
+    s_timer[idx].manual_release_sec = sec;
+    uint32_t now = 0;
+    if (sec == 0) s_timer[idx].manual_until = 0;
+    else if (clock_valid(&now)) s_timer[idx].manual_until = now + sec;
+    else s_timer[idx].manual_until = UPTIME_UNTIL_FLAG | ((uint32_t)(esp_timer_get_time() / 1000000) + sec);
+    timer_save();
+}
+
+/* 수동 강제의 자동 해제 시각이 지났나 */
+static bool manual_release_due(int idx)
+{
+    uint32_t u = s_timer[idx].manual_until;
+    if (u == 0) return false;
+    if (u & UPTIME_UNTIL_FLAG) return (uint32_t)(esp_timer_get_time() / 1000000) >= (u & ~UPTIME_UNTIL_FLAG);
+    uint32_t now = 0;
+    return clock_valid(&now) && now >= u;
+}
 
 /* 2026-10-05 — 릴레이마다 로마자 별명(PSRAM, 저장 안 함) */
 static char (*s_relay_alias_disp)[POWER_RELAY_ALIAS_DISP_LEN] = NULL;
@@ -116,6 +250,7 @@ void power_relay_load(void)
         s_relay_cfg[i].off_threshold = 18.0f;  /* center(20) - margin(2) */
     }
 
+    timer_load();   /* 2026-10-09 — 타이머 설정(따로 저장) */
     FILE *f = fopen(POWER_RELAY_FILE_PATH, "rb");
     if (!f) return;
     power_relay_file_t s = { 0 };
@@ -148,6 +283,7 @@ const power_relay_config_t *power_relay_get_config(int idx)
 
 /* relay_set_output()/power_relay_command() 본문보다 앞에서 쓰여서 fwd 필요 */
 static void power_relay_apply_override_immediate(int idx);
+void power_relay_kick(void);
 
 /* 2026-09-16(실기에서 발견된 잘못 — "Alias만 줬는데 재부팅") — 예전엔 여기서 무조건
  * configured=true로 만들었음. Alias 전용 Apply(cb_relay_alias_apply_clicked)도 내부적으로
@@ -161,6 +297,10 @@ void power_relay_set_config(int idx, const power_relay_config_t *cfg)
     if (idx < 0 || idx >= POWER_RELAY_COUNT || !cfg) return;
     s_relay_cfg[idx] = *cfg;
     s_relay_cfg[idx].alias[sizeof(s_relay_cfg[idx].alias) - 1] = '\0';
+    if (!cfg->manual_override && s_timer[idx].manual_until) {   /* 2026-10-09 — 강제를 끄면 자동 해제 예약도 없앰 */
+        s_timer[idx].manual_until = 0;
+        timer_save();
+    }
     relay_alias_disp_refresh(idx);
     /* 설정이 바뀌면 추세 이력/최근전환시각을 리셋 — 새 소스/방향/임계값 기준으로 처음부터
      * 다시 판단해야지, 이전 소스 기준으로 쌓인 샘플을 섞어 쓰면 안 됨 */
@@ -171,6 +311,7 @@ void power_relay_set_config(int idx, const power_relay_config_t *cfg)
     /* 2026-09-18(Manual Override, 사용자 설계) — Override를 켠 순간(팝업 OK) 다음 15초
      * 판정주기까지 안 기다리고 바로 반영 */
     power_relay_apply_override_immediate(idx);
+    power_relay_kick();   /* 2026-10-09 — 타이머·조건도 바로 다시 판정 */
 }
 
 bool power_relay_get_commanded_on(int idx)
@@ -185,16 +326,22 @@ static void relay_set_output(int idx, bool on)
     if (err != ESP_OK) ESP_LOGE(TAG, "Relay%d: DO write failed (%s)", idx, esp_err_to_name(err));
 }
 
-static void power_relay_command(int idx, bool on, uint32_t now_ms)
+static void power_relay_command_ex(int idx, bool on, uint32_t now_ms, bool by_timer)
 {
     if (s_commanded_on[idx] == on) return;
     s_commanded_on[idx] = on;
     s_last_transition_ms[idx] = now_ms;
     relay_set_output(idx, on);
-    ESP_LOGI(TAG, "Relay%d(%s) -> %s", idx, s_relay_cfg[idx].alias, on ? "On" : "Off");
-    /* 2026-10-05(할 일 AD 5단계) — 릴레이 켜짐·꺼짐 알림(수동 강제 포함 — 출력이 바뀌는 곳은 여기 하나) */
-    if (s_relay_cfg[idx].alias[0]) alarm_post(NOTIFY_TYPE_RELAY, on ? "Relay ON" : "Relay OFF", "%s %s", s_relay_cfg[idx].alias, on ? "ON" : "OFF");
-    else alarm_post(NOTIFY_TYPE_RELAY, on ? "Relay ON" : "Relay OFF", "Relay %d %s", idx + 1, on ? "ON" : "OFF");
+    ESP_LOGI(TAG, "Relay%d(%s) -> %s%s", idx, s_relay_cfg[idx].alias, on ? "On" : "Off", by_timer ? " (timer)" : "");
+    /* 2026-10-09 — 타이머 전환은 주기가 짧으면 알림이 많아져 기록만(푸시 없음) */
+    void (*post)(notify_type_t, const char *, const char *, ...) = by_timer ? alarm_record : alarm_post;
+    if (s_relay_cfg[idx].alias[0]) post(NOTIFY_TYPE_RELAY, on ? "Relay ON" : "Relay OFF", "%s %s%s", s_relay_cfg[idx].alias, on ? "ON" : "OFF", by_timer ? " (timer)" : "");
+    else post(NOTIFY_TYPE_RELAY, on ? "Relay ON" : "Relay OFF", "Relay %d %s%s", idx + 1, on ? "ON" : "OFF", by_timer ? " (timer)" : "");
+}
+
+static void power_relay_command(int idx, bool on, uint32_t now_ms)
+{
+    power_relay_command_ex(idx, on, now_ms, false);
 }
 
 static void power_relay_apply_override_immediate(int idx)
@@ -278,6 +425,16 @@ static void evaluate_relay(int idx, uint32_t now_ms)
      * 이력을 계속 쌓아서, Override 해제 순간 바로 이어받을 수 있게 하는 기존 설계 유지 —
      * 아래 300줄 부근 주석 참고. 이 함수 끝에서 같은 조건을 한 번 더 평가하지만
      * currently_on이 이미 맞춰져 있어 그냥 조용히 no-op됨) */
+    /* 2026-10-09 — 수동 강제의 자동 해제 시각이 지났으면 강제를 끔(그다음은 원래 동작 — 타이머 또는 센서 조건) */
+    if (cfg->manual_override && manual_release_due(idx)) {
+        cfg->manual_override = false;
+        s_timer[idx].manual_until = 0;
+        power_relay_save();
+        timer_save();
+        alarm_record(NOTIFY_TYPE_RELAY, "Relay manual end", "%s manual mode ended (auto release)",
+                     s_relay_cfg[idx].alias[0] ? s_relay_cfg[idx].alias : "Relay");
+
+    }
     if (cfg->manual_override) {
         bool currently_on = s_commanded_on[idx];
         bool want_on = cfg->manual_override_on;
@@ -287,6 +444,17 @@ static void evaluate_relay(int idx, uint32_t now_ms)
             power_relay_command(idx, want_on, now_ms);
             if (want_on) s_ever_on_since_boot[idx] = true;
         }
+    }
+
+    /* 2026-10-09(할 일 AG) — 동작 = 타이머: 센서 조건 대신 시계로. 수동 강제 중이면 위에서 이미 처리 */
+    if (s_timer[idx].timer_mode) {
+        if (cfg->manual_override) return;
+        bool want_on = power_relay_timer_state(&s_timer[idx], NULL);
+        if (want_on == s_commanded_on[idx]) return;
+        if (want_on && !s_ever_on_since_boot[idx] && (now_ms - s_boot_ms_ref) < POWER_RELAY_BOOT_ON_DELAY_MS) return;
+        power_relay_command_ex(idx, want_on, now_ms, true);
+        if (want_on) s_ever_on_since_boot[idx] = true;
+        return;
     }
 
     if (!cfg->configured) return;
@@ -365,6 +533,9 @@ static void evaluate_relay(int idx, uint32_t now_ms)
     if (effective_want_on) s_ever_on_since_boot[idx] = true;
 }
 
+static TaskHandle_t s_relay_task = NULL;
+void power_relay_kick(void) { if (s_relay_task) xTaskNotifyGive(s_relay_task); }   /* 설정 바뀜 — 바로 다시 판정 */
+
 static void power_relay_task(void *arg)
 {
     (void)arg;
@@ -373,7 +544,16 @@ static void power_relay_task(void *arg)
         for (int i = 0; i < POWER_RELAY_COUNT; i++) {
             evaluate_relay(i, now_ms);
         }
-        vTaskDelay(pdMS_TO_TICKS(POWER_RELAY_EVAL_INTERVAL_MS));
+        /* 2026-10-09 — 타이머는 초 단위라 15초 주기 대신 다음 전환 시각에 맞춰 깸(+0.2초 여유). 설정이 바뀌면
+         * power_relay_kick()이 바로 깨움 */
+        uint32_t wait_ms = POWER_RELAY_EVAL_INTERVAL_MS;
+        for (int i = 0; i < POWER_RELAY_COUNT; i++) {
+            if (!s_timer[i].timer_mode || s_relay_cfg[i].manual_override) continue;
+            uint32_t next = UINT32_MAX;
+            power_relay_timer_state(&s_timer[i], &next);
+            if (next != UINT32_MAX && next * 1000u + 200u < wait_ms) wait_ms = next * 1000u + 200u;
+        }
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms));
     }
 }
 
@@ -403,10 +583,10 @@ void power_relay_start(void)
     static StaticTask_t s_power_relay_tcb;
     StackType_t *stack_buf = heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
     if (stack_buf) {
-        xTaskCreateStaticPinnedToCore(power_relay_task, "power_relay", 8192, NULL, 15, stack_buf, &s_power_relay_tcb, 1);
+        s_relay_task = xTaskCreateStaticPinnedToCore(power_relay_task, "power_relay", 8192, NULL, 15, stack_buf, &s_power_relay_tcb, 1);
     } else {
         ESP_LOGE(TAG, "SR task stack PSRAM alloc failed - falling back to internal RAM");
-        xTaskCreatePinnedToCore(power_relay_task, "power_relay", 8192, NULL, 15, NULL, 1);
+        xTaskCreatePinnedToCore(power_relay_task, "power_relay", 8192, NULL, 15, &s_relay_task, 1);
     }
     size_t after = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG power_relay_start cost: internal %u -> %u (used %d bytes)",

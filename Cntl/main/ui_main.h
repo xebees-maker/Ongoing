@@ -83,12 +83,15 @@ typedef struct {
     bool     trend_enable;
     uint32_t trend_samples;    /* 선택지 값(3/5/10) */
     uint32_t min_hold_sec;     /* 선택지 값(30/60/180/300) */
+    bool     timer_mode;       /* 2026-10-09 — 동작 = 타이머(할 일 AG) */
+    power_relay_timer_t timer; /* 타이머 칸 값(자동 해제 필드는 무시) */
 } ui_web_relay_choices_t;
 
 typedef struct {
     ui_web_op_type_t type;
     uint8_t  mac[6];
     uint32_t value;
+    uint32_t value2;                   /* 2026-10-09 — 릴레이 수동 강제의 자동 해제(초) */
     char     text[32];
     int      idx;                      /* 릴레이 번호(0..) */
     uint8_t  kind;                     /* 사진 종류('M'/'T') */
@@ -99,7 +102,7 @@ typedef struct {
 bool ui_main_run_web_op(const ui_web_op_t *op, uint32_t timeout_ms);
 
 /* 콘 화면 선택지 값 목록(웹이 같은 선택지를 보여 주려고) — which: 0 측정 주기(초), 1 촬영 주기(초), 2 XCLK(MHz). 개수 반환 */
-int ui_main_get_option_values(int which, const uint32_t **out);  /* 3 추세 샘플 수, 4 최소 유지(초), 5 응답성(초), 6 적응형(초) */
+int ui_main_get_option_values(int which, const uint32_t **out);  /* 3 추세 샘플 수, 4 최소 유지(초), 5 응답성(초), 6 적응형(초), 7 수동 자동 해제(초) */
 
 /* 릴레이 팝업 기본값·값 범위(콘 화면과 같은 표) — 웹 릴레이 팝업용 */
 void ui_main_relay_defaults(uint8_t chan, float *center, float *margin);

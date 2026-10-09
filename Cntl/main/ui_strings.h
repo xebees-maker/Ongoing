@@ -367,6 +367,21 @@ typedef enum {
     STR_LABEL_RELAY_CONDITION,   /* "조건:" / "Condition:" */
     /* 주화면 요약 문장 — 언어별 어순 틀. {act} {item} {dir} {value}를 채움(콘·웹 공용) */
     STR_FMT_RELAY_SUMMARY,
+    /* 2026-10-09 — 릴레이 타이머(할 일 AG) */
+    STR_LABEL_TIMER_ON,
+    STR_LABEL_TIMER_OFF,
+    STR_LABEL_DAY_NIGHT,
+    STR_LABEL_DAY_START,
+    STR_LABEL_NIGHT_START,
+    STR_LABEL_DAY_ON,
+    STR_LABEL_DAY_OFF,
+    STR_LABEL_NIGHT_ON,
+    STR_LABEL_NIGHT_OFF,
+    STR_DUR_UNITS,                    /* "시간\n분\n초" — 시간 길이 표시 단위 */
+    STR_FMT_RELAY_TIMER_SUMMARY,      /* {on} {off} */
+    STR_FMT_RELAY_TIMER_DN_SUMMARY,   /* {on} {off} {non} {noff} */
+    STR_LABEL_MANUAL_RELEASE,
+    STR_OPT_MANUAL_RELEASE_LIST,
     STR_SENTENCE_PLUSMINUS,      /* Center/Margin 값 사이: "+/-" / "+/-" */
     STR_UNIT_HUMI,                /* 습도 단위(향후 채널 추가용): "%" / "%" */
     /* 2026-09-17(주화면 Power Control 행 요약용 — "Turn On if Temperature Up to 30.0") —

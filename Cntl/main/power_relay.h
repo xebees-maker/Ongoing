@@ -108,6 +108,30 @@ typedef struct {
 } power_relay_config_t;
 
 /* app_main()에서 fs_init() 이후 한 번 호출 — 저장된 설정 복원(없으면 미설정 기본값) */
+/* 2026-10-09(사용자 설계 — 할 일 AG) — 릴레이 타이머. 동작(켬/끔/타이머)에서 타이머를 고르면 센서 조건 대신 시계로 켜고 끔.
+ * 기존 설정 파일 형식을 바꾸지 않으려고 따로 저장(power_relay_timer.bin).
+ * 시간 기준은 실시간: 구간 시작 시각(낮·밤 구분 안 하면 자정)에서 "켜기"로 시작해 켜기/끄기 반복. 콘 시계가 아직 안 맞았으면
+ * 부팅부터 센 시간으로 임시(시계가 맞으면 실시간으로) */
+typedef struct {
+    bool     timer_mode;          /* true = 동작이 타이머 */
+    uint32_t on_sec, off_sec;     /* 하루 종일(낮·밤 구분 안 할 때) 또는 낮 구간 */
+    bool     day_night;           /* 낮·밤 구분 */
+    uint16_t day_start_min;       /* 0..1439, 낮 시작 시각(분) */
+    uint16_t night_start_min;     /* 0..1439, 밤 시작 시각(분) */
+    uint32_t night_on_sec, night_off_sec;
+    uint32_t manual_release_sec;  /* 수동 강제 켬/끔의 자동 해제(0 = 끝없음) — 강제 시작 때 정한 값 */
+    uint32_t manual_until;        /* 자동 해제 시각(콘 시각, 0 = 없음). 시계가 안 맞았으면 부팅 기준 ms에 0x80000000을 더함 */
+} power_relay_timer_t;
+
+const power_relay_timer_t *power_relay_get_timer(int idx);
+void power_relay_set_timer(int idx, const power_relay_timer_t *t);
+/* 수동 강제를 시작할 때 자동 해제 시간(초, 0 = 끝없음)을 정함 — power_relay_set_config()로 강제를 켜기 전에 부름 */
+void power_relay_set_manual_release(int idx, uint32_t sec);
+/* 지금 시계 기준 타이머 상태(켜짐?)와 다음 전환까지 남은 초 — 화면 표시용 */
+bool power_relay_timer_state(const power_relay_timer_t *t, uint32_t *out_next_sec);
+/* 설정이 바뀌었을 때 판정 태스크를 바로 깨움 */
+void power_relay_kick(void);
+
 void power_relay_load(void);
 
 /* app_main() 끝부분에서 한 번 호출 — GPIO 초기화 + 주기적 판정 태스크 시작 */

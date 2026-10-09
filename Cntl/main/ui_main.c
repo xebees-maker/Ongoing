@@ -701,6 +701,69 @@ static int        s_relay_popup_idx  = -1;
  * 판단하도록 바꿈 — "이벤트가 떴는가"가 아니라 "값이 실제로 다른가"로 판정 */
 static power_relay_config_t s_relay_form;
 static power_relay_config_t s_relay_popup_snapshot;
+/* 2026-10-09 — 릴레이 타이머(할 일 AG): 팝업이 고친 값과 연 시점 값(모델-뷰-dirty, 설정과 같은 방식) */
+static power_relay_timer_t s_relay_timer_form;
+static power_relay_timer_t s_relay_timer_snapshot;
+static lv_obj_t *s_relay_ai_group = NULL, *s_relay_item_group = NULL, *s_relay_sentence_row = NULL, *s_relay_timer_box = NULL;
+static lv_obj_t *s_rt_on_name = NULL, *s_rt_off_name = NULL, *s_rt_on_lbl = NULL, *s_rt_off_lbl = NULL;
+static lv_obj_t *s_rt_dn_switch = NULL, *s_rt_dn_box = NULL;
+static lv_obj_t *s_rt_daystart_lbl = NULL, *s_rt_nightstart_lbl = NULL, *s_rt_non_lbl = NULL, *s_rt_noff_lbl = NULL;
+static lv_obj_t *s_override_release_dd = NULL;
+static const uint32_t s_manual_release_values[] = { 0, 600, 1800, 3600, 10800 };   /* STR_OPT_MANUAL_RELEASE_LIST 순서 */
+
+/* 시간 길이 표시: 1시간30분, 15분, 45초(영어 1h30m 식). 0이면 "0" + 초 단위 */
+static void fmt_duration(char *buf, size_t cap, uint32_t sec)
+{
+    const char *u = ui_str(STR_DUR_UNITS);
+    char uh[16] = "", um[16] = "", us[16] = "";
+    const char *p1 = strchr(u, '\n'), *p2 = p1 ? strchr(p1 + 1, '\n') : NULL;
+    if (p1 && p2) {
+        snprintf(uh, sizeof(uh), "%.*s", (int)(p1 - u), u);
+        snprintf(um, sizeof(um), "%.*s", (int)(p2 - p1 - 1), p1 + 1);
+        snprintf(us, sizeof(us), "%s", p2 + 1);
+    }
+    uint32_t h = sec / 3600, m = (sec / 60) % 60, s = sec % 60;
+    size_t n = 0;
+    buf[0] = '\0';
+    if (h) n += (size_t)snprintf(buf + n, cap > n ? cap - n : 0, "%u%s", (unsigned)h, uh);
+    if (m && n < cap) n += (size_t)snprintf(buf + n, cap - n, "%u%s", (unsigned)m, um);
+    if ((s || (!h && !m)) && n < cap) snprintf(buf + n, cap - n, "%u%s", (unsigned)s, us);
+}
+
+static void fmt_clock_min(char *buf, size_t cap, uint16_t min)
+{
+    snprintf(buf, cap, "%02u:%02u", (unsigned)(min / 60) % 24, (unsigned)(min % 60));
+}
+
+/* 릴레이 행 요약(타이머) — 틀의 {on}{off}{non}{noff}를 채움 */
+static void fill_timer_summary(char *out, size_t cap, const power_relay_timer_t *t)
+{
+    char on[24], off[24], non[24], noff[24];
+    fmt_duration(on, sizeof(on), t->on_sec);
+    fmt_duration(off, sizeof(off), t->off_sec);
+    fmt_duration(non, sizeof(non), t->night_on_sec);
+    fmt_duration(noff, sizeof(noff), t->night_off_sec);
+    const char *tp = ui_str(t->day_night ? STR_FMT_RELAY_TIMER_DN_SUMMARY : STR_FMT_RELAY_TIMER_SUMMARY);
+    size_t n = 0;
+    out[0] = '\0';
+    while (*tp && n + 1 < cap) {
+        const char *rep = NULL; size_t skip = 0;
+        if (strncmp(tp, "{noff}", 6) == 0) { rep = noff; skip = 6; }
+        else if (strncmp(tp, "{non}", 5) == 0) { rep = non; skip = 5; }
+        else if (strncmp(tp, "{off}", 5) == 0) { rep = off; skip = 5; }
+        else if (strncmp(tp, "{on}", 4) == 0) { rep = on; skip = 4; }
+        if (rep) {
+            int w = snprintf(out + n, cap - n, "%s", rep);
+            if (w < 0) break;
+            n += (size_t)w;
+            if (n >= cap) { n = cap - 1; break; }
+            tp += skip;
+        } else {
+            out[n++] = *tp++;
+        }
+    }
+    out[n] = '\0';
+}
 
 static lv_obj_t  *s_relay_alias_ta         = NULL;
 static lv_obj_t  *s_relay_alias_apply_btn  = NULL;
@@ -4926,6 +4989,9 @@ static void refresh_power_control_panel(void)
             /* 2026-09-18(Manual Override, 사용자 설계 — "On by manual override" 식) */
             snprintf(value_buf, sizeof(value_buf), "%s",
                      ui_str(cfg->manual_override_on ? STR_MSG_OVERRIDE_ON_SUMMARY : STR_MSG_OVERRIDE_OFF_SUMMARY));
+        } else if (power_relay_get_timer(i) && power_relay_get_timer(i)->timer_mode) {
+            /* 2026-10-09(할 일 AG) — 동작 = 타이머 */
+            fill_timer_summary(value_buf, sizeof(value_buf), power_relay_get_timer(i));
         } else if (cfg && cfg->configured) {
             /* 2026-09-17(근본 재설계 — Y·Z는 독립값, direction에서 역산 안 함) — 팝업과
              * 똑같이 cfg->y_rises/z_turns_on을 그대로 읽음. direction으로부터 되짚어 만들면
@@ -8917,7 +8983,19 @@ static void relay_set_gray_panel_controls_disabled(bool disabled)
 static void relay_apply_row_visibility(void)
 {
     bool ai_on = lv_obj_has_state(s_relay_ai_switch, LV_STATE_CHECKED);
-    if (ai_on) lv_obj_add_flag(s_relay_advanced_box, LV_OBJ_FLAG_HIDDEN);
+    /* 2026-10-09(할 일 AG) — 동작 = 타이머면 항목·조건·고급·AI 칸을 숨기고 타이머 칸만 */
+    bool timer = s_relay_action_word_dd && lv_dropdown_get_selected(s_relay_action_word_dd) == 2;
+    lv_obj_t *hide_in_timer[] = { s_relay_item_group, s_relay_sentence_row, s_relay_ai_group };
+    for (size_t k = 0; k < sizeof(hide_in_timer) / sizeof(hide_in_timer[0]); k++) {
+        if (!hide_in_timer[k]) continue;
+        if (timer) lv_obj_add_flag(hide_in_timer[k], LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_remove_flag(hide_in_timer[k], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_relay_timer_box) {
+        if (timer) lv_obj_remove_flag(s_relay_timer_box, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_relay_timer_box, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (ai_on || timer) lv_obj_add_flag(s_relay_advanced_box, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_remove_flag(s_relay_advanced_box, LV_OBJ_FLAG_HIDDEN);
 
     uint16_t basedon_idx = lv_dropdown_get_selected(s_relay_basedon_dd);
@@ -8990,7 +9068,11 @@ static void relay_sync_form_from_widgets(void)
     ui_web_relay_choices_t c = { 0 };
     c.chan_type = (uint8_t)s_relay_form.chan_type;
     c.y_rises = (lv_dropdown_get_selected(s_relay_direction_word_dd) == 0);   /* 0=도달(Up to) 1=미만(Below) */
-    c.z_turns_on = (lv_dropdown_get_selected(s_relay_action_word_dd) == 0);   /* 0=켜짐(On) 1=꺼짐(Off) */
+    {   /* 0=켜짐(On) 1=꺼짐(Off) 2=타이머(2026-10-09 — 이때 조건의 켬/끔은 원래 값 유지) */
+        uint16_t act = lv_dropdown_get_selected(s_relay_action_word_dd);
+        c.z_turns_on = (act == 2) ? s_relay_popup_snapshot.z_turns_on : (act == 0);
+        s_relay_timer_form.timer_mode = (act == 2);
+    }
     c.center = s_relay_center_value;
     c.margin = s_relay_margin_value;
     c.ai_mode = lv_obj_has_state(s_relay_ai_switch, LV_STATE_CHECKED);
@@ -9129,7 +9211,8 @@ static void cb_relay_field_dirty(lv_event_t *e)
         relay_sync_form_from_widgets();
     }
     if (!s_relay_apply_btn) return;
-    bool dirty = (memcmp(&s_relay_form, &s_relay_popup_snapshot, sizeof(s_relay_form)) != 0);
+    bool dirty = (memcmp(&s_relay_form, &s_relay_popup_snapshot, sizeof(s_relay_form)) != 0) ||
+                 (memcmp(&s_relay_timer_form, &s_relay_timer_snapshot, sizeof(s_relay_timer_form)) != 0);   /* 2026-10-09 */
     if (dirty) lv_obj_remove_state(s_relay_apply_btn, LV_STATE_DISABLED);
     else lv_obj_add_state(s_relay_apply_btn, LV_STATE_DISABLED);
 }
@@ -9403,12 +9486,14 @@ static void cb_relay_apply_clicked(lv_event_t *e)
      * 구조적 원인이었음(2026-09-17) */
     relay_sync_form_from_widgets();  /* 혹시 아직 dirty체크를 안 거친 마지막 위젯 변경 반영 */
     s_relay_form.configured = true;  /* 본 설정 Apply만 true로 세팅(2026-09-16 실기 크래시 수정) */
+    power_relay_set_timer(s_relay_popup_idx, &s_relay_timer_form);   /* 2026-10-09 — 타이머 먼저(아래 set_config가 바로 다시 판정) */
     power_relay_set_config(s_relay_popup_idx, &s_relay_form);
     /* 2026-09-17(사용자 정정 — "적용하고 팝업을 닫아는, 적용 후 사람이 닫는단 말이었어") —
      * 프로젝트 컨벤션(plain dismiss=우측상단 X, 액션 버튼=Apply 등, 절대 안 섞음)대로
      * Apply는 저장만 하고 팝업은 안 닫음. 스냅샷을 방금 저장한 모델로 갱신해서 dirty=false로
      * 만들고 버튼을 다시 비활성화하는 것 자체가 "적용됨" 피드백 */
     s_relay_popup_snapshot = s_relay_form;
+    s_relay_timer_snapshot = s_relay_timer_form;   /* 2026-10-09 */
     lv_obj_add_state(s_relay_apply_btn, LV_STATE_DISABLED);
 }
 
@@ -9440,6 +9525,9 @@ static void teardown_relay_popup(void)
     s_relay_trend_window_dd = NULL;
     s_relay_apply_btn = NULL;
     s_relay_apply_lbl = NULL;
+    s_relay_ai_group = s_relay_item_group = s_relay_sentence_row = s_relay_timer_box = NULL;   /* 2026-10-09 */
+    s_rt_on_name = s_rt_off_name = s_rt_on_lbl = s_rt_off_lbl = NULL;
+    s_rt_dn_switch = s_rt_dn_box = s_rt_daystart_lbl = s_rt_nightstart_lbl = s_rt_non_lbl = s_rt_noff_lbl = NULL;
     s_relay_popup_idx = -1;
 }
 
@@ -9495,6 +9583,198 @@ static lv_obj_t *relay_popup_dropdown_field(lv_obj_t *pair_row, ui_str_id_t labe
     return dd;
 }
 
+/* ── 2026-10-09 릴레이 타이머 칸(할 일 AG — 사용자 설계) ──
+ * 켜기·끄기 시간(시·분·초), 낮·밤 구분 스위치, 구분하면 낮 시작·밤 시작(HH:MM)과 밤 켜기·끄기. 시간 칸은 탭하면 롤러 창 */
+enum { RT_ON = 0, RT_OFF, RT_DAYSTART, RT_NIGHTSTART, RT_NON, RT_NOFF };
+static lv_obj_t *s_tr_h = NULL, *s_tr_m = NULL, *s_tr_s = NULL;
+static int s_tr_field = -1;
+
+static void relay_timer_refresh_labels(void)
+{
+    if (!s_relay_timer_box) return;
+    char b[24];
+    const power_relay_timer_t *t = &s_relay_timer_form;
+    fmt_duration(b, sizeof(b), t->on_sec);          lv_label_set_text(s_rt_on_lbl, b);
+    fmt_duration(b, sizeof(b), t->off_sec);         lv_label_set_text(s_rt_off_lbl, b);
+    fmt_duration(b, sizeof(b), t->night_on_sec);    lv_label_set_text(s_rt_non_lbl, b);
+    fmt_duration(b, sizeof(b), t->night_off_sec);   lv_label_set_text(s_rt_noff_lbl, b);
+    fmt_clock_min(b, sizeof(b), t->day_start_min);  lv_label_set_text(s_rt_daystart_lbl, b);
+    fmt_clock_min(b, sizeof(b), t->night_start_min); lv_label_set_text(s_rt_nightstart_lbl, b);
+    lv_label_set_text(s_rt_on_name, ui_str(t->day_night ? STR_LABEL_DAY_ON : STR_LABEL_TIMER_ON));
+    lv_label_set_text(s_rt_off_name, ui_str(t->day_night ? STR_LABEL_DAY_OFF : STR_LABEL_TIMER_OFF));
+    if (t->day_night) lv_obj_remove_flag(s_rt_dn_box, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_rt_dn_box, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void cb_time_roller_close(lv_event_t *e)
+{
+    s_tr_h = s_tr_m = s_tr_s = NULL;
+    s_tr_field = -1;
+    cb_modal_close(e);
+}
+
+static void cb_time_roller_confirm(lv_event_t *e)
+{
+    if (s_tr_h && s_tr_m && s_tr_field >= 0) {
+        uint32_t h = lv_roller_get_selected(s_tr_h), m = lv_roller_get_selected(s_tr_m);
+        uint32_t s = s_tr_s ? lv_roller_get_selected(s_tr_s) : 0;
+        power_relay_timer_t *t = &s_relay_timer_form;
+        uint32_t dur = h * 3600 + m * 60 + s;
+        switch (s_tr_field) {
+            case RT_ON:         t->on_sec = dur; break;
+            case RT_OFF:        t->off_sec = dur; break;
+            case RT_NON:        t->night_on_sec = dur; break;
+            case RT_NOFF:       t->night_off_sec = dur; break;
+            case RT_DAYSTART:   t->day_start_min = (uint16_t)(h * 60 + m); break;
+            case RT_NIGHTSTART: t->night_start_min = (uint16_t)(h * 60 + m); break;
+        }
+        relay_timer_refresh_labels();
+        cb_relay_field_dirty(e);
+    }
+    cb_time_roller_close(e);
+}
+
+static lv_obj_t *time_roller(lv_obj_t *row, int count, int sel)
+{
+    char *opts = heap_caps_malloc((size_t)count * 4 + 4, MALLOC_CAP_SPIRAM);   /* "00\n".."59" — 스택에 안 둠 */
+    lv_obj_t *r = lv_roller_create(row);
+    lv_obj_set_flex_grow(r, 1);
+    lv_obj_set_style_text_font(r, ui_font_get(UI_FONT_SIZE_18), 0);
+    if (opts) {
+        size_t n = 0;
+        for (int i = 0; i < count; i++) n += (size_t)sprintf(opts + n, i ? "\n%02d" : "%02d", i);
+        lv_roller_set_options(r, opts, LV_ROLLER_MODE_NORMAL);
+        heap_caps_free(opts);
+    }
+    if (sel >= count) sel = count - 1;
+    lv_roller_set_selected(r, (uint16_t)(sel < 0 ? 0 : sel), LV_ANIM_OFF);
+    lv_obj_set_width(r, 70);
+    return r;
+}
+
+static void time_roller_unit(lv_obj_t *row, int unit_line)
+{
+    const char *u = ui_str(STR_DUR_UNITS);
+    for (int i = 0; i < unit_line && u; i++) { u = strchr(u, '\n'); if (u) u++; }
+    char b[16] = "";
+    if (u) { const char *e = strchr(u, '\n'); snprintf(b, sizeof(b), "%.*s", e ? (int)(e - u) : (int)strlen(u), u); }
+    lv_obj_t *l = lv_label_create(row);
+    lv_label_set_text(l, b);
+    lv_obj_set_style_text_font(l, ui_font_get(UI_FONT_SIZE_18), 0);
+}
+
+static void cb_rt_tap(lv_event_t *e)
+{
+    if (s_tr_h) return;
+    int field = (int)(intptr_t)lv_event_get_user_data(e);
+    const power_relay_timer_t *t = &s_relay_timer_form;
+    bool clock = (field == RT_DAYSTART || field == RT_NIGHTSTART);
+    uint32_t v = 0;
+    switch (field) {
+        case RT_ON: v = t->on_sec; break;
+        case RT_OFF: v = t->off_sec; break;
+        case RT_NON: v = t->night_on_sec; break;
+        case RT_NOFF: v = t->night_off_sec; break;
+        case RT_DAYSTART: v = (uint32_t)t->day_start_min * 60; break;
+        case RT_NIGHTSTART: v = (uint32_t)t->night_start_min * 60; break;
+    }
+    s_tr_field = field;
+    lv_obj_t *box = create_modal();
+    create_modal_title(box, STR_TITLE_SETTING, MODAL_KIND_NORMAL);
+    lv_obj_t *row = lv_obj_create(box);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 6, 0);
+    s_tr_h = time_roller(row, 24, (int)(v / 3600));
+    if (clock) { lv_obj_t *c = lv_label_create(row); lv_label_set_text(c, ":"); lv_obj_set_style_text_font(c, ui_font_get(UI_FONT_SIZE_18), 0); }
+    else time_roller_unit(row, 0);
+    s_tr_m = time_roller(row, 60, (int)((v / 60) % 60));
+    if (!clock) {
+        time_roller_unit(row, 1);
+        s_tr_s = time_roller(row, 60, (int)(v % 60));
+        time_roller_unit(row, 2);
+    } else {
+        s_tr_s = NULL;
+    }
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_CANCEL, cb_time_roller_close, NULL);
+    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_time_roller_confirm, NULL);
+}
+
+static void cb_rt_dn_changed(lv_event_t *e)
+{
+    s_relay_timer_form.day_night = lv_obj_has_state(s_rt_dn_switch, LV_STATE_CHECKED);
+    relay_timer_refresh_labels();
+    cb_relay_field_dirty(e);
+}
+
+static lv_obj_t *rt_value_label(lv_obj_t *group, int field)
+{
+    lv_obj_t *l = lv_label_create(group);
+    lv_obj_set_style_text_font(l, ui_font_get(UI_FONT_SIZE_18), 0);
+    style_inverted_control(l);
+    lv_obj_add_flag(l, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(l, cb_rt_tap, LV_EVENT_CLICKED, (void *)(intptr_t)field);
+    return l;
+}
+
+static void relay_build_timer_box(lv_obj_t *parent)
+{
+    s_relay_timer_box = lv_obj_create(parent);
+    lv_obj_set_size(s_relay_timer_box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_relay_timer_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(s_relay_timer_box, 0, 0);
+    lv_obj_set_style_bg_opa(s_relay_timer_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_relay_timer_box, 0, 0);
+    lv_obj_set_style_pad_row(s_relay_timer_box, 10, 0);
+
+    lv_obj_t *r1 = relay_make_pair_row(s_relay_timer_box);
+    lv_obj_t *g_on = relay_field_group(r1, STR_LABEL_TIMER_ON);
+    s_rt_on_name = lv_obj_get_child(g_on, 0);
+    s_rt_on_lbl = rt_value_label(g_on, RT_ON);
+    lv_obj_t *g_off = relay_field_group(r1, STR_LABEL_TIMER_OFF);
+    s_rt_off_name = lv_obj_get_child(g_off, 0);
+    s_rt_off_lbl = rt_value_label(g_off, RT_OFF);
+
+    lv_obj_t *r2 = relay_make_pair_row(s_relay_timer_box);
+    lv_obj_t *g_dn = relay_field_group(r2, STR_LABEL_DAY_NIGHT);
+    s_rt_dn_switch = lv_switch_create(g_dn);
+    if (s_relay_timer_form.day_night) lv_obj_add_state(s_rt_dn_switch, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(s_rt_dn_switch, cb_rt_dn_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_t *sp = lv_obj_create(r2);   /* 오른쪽 절반 비움(두 칸 배치 유지) */
+    lv_obj_set_flex_grow(sp, 1);
+    lv_obj_set_height(sp, LV_SIZE_CONTENT);
+    lv_obj_set_style_border_width(sp, 0, 0);
+    lv_obj_set_style_bg_opa(sp, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(sp, 0, 0);
+
+    s_rt_dn_box = lv_obj_create(s_relay_timer_box);
+    lv_obj_set_size(s_rt_dn_box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_rt_dn_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(s_rt_dn_box, 0, 0);
+    lv_obj_set_style_bg_opa(s_rt_dn_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_rt_dn_box, 0, 0);
+    lv_obj_set_style_pad_row(s_rt_dn_box, 10, 0);
+    lv_obj_t *r3 = relay_make_pair_row(s_rt_dn_box);
+    s_rt_daystart_lbl = rt_value_label(relay_field_group(r3, STR_LABEL_DAY_START), RT_DAYSTART);
+    s_rt_nightstart_lbl = rt_value_label(relay_field_group(r3, STR_LABEL_NIGHT_START), RT_NIGHTSTART);
+    lv_obj_t *r4 = relay_make_pair_row(s_rt_dn_box);
+    s_rt_non_lbl = rt_value_label(relay_field_group(r4, STR_LABEL_NIGHT_ON), RT_NON);
+    s_rt_noff_lbl = rt_value_label(relay_field_group(r4, STR_LABEL_NIGHT_OFF), RT_NOFF);
+
+    relay_timer_refresh_labels();
+}
+
+/* 동작 드롭다운: 켬/끔/타이머 — 타이머면 항목·조건·고급 칸 대신 타이머 칸 */
+static void cb_relay_action_changed(lv_event_t *e)
+{
+    relay_apply_row_visibility();
+    cb_relay_field_dirty(e);
+}
+
 static void build_relay_popup(int idx)
 {
     if (s_relay_popup) return;  /* 이미 열려있음 */
@@ -9506,6 +9786,8 @@ static void build_relay_popup(int idx)
      * Dirty = 이 둘을 구조체 통째로 비교 */
     s_relay_form = *cfg;
     s_relay_popup_snapshot = *cfg;
+    s_relay_timer_form = *power_relay_get_timer(idx);       /* 2026-10-09 */
+    s_relay_timer_snapshot = s_relay_timer_form;
 
     lv_obj_t *popup = create_page_popup();
     s_relay_popup = popup;
@@ -9563,6 +9845,7 @@ static void build_relay_popup(int idx)
      * 각 절반은 label-왼쪽/control-오른쪽) 재사용 */
     lv_obj_t *ai_row = relay_make_pair_row(popup);
     lv_obj_t *ai_group = relay_field_group(ai_row, STR_LABEL_AI_MODE);
+    s_relay_ai_group = ai_group;   /* 2026-10-09 — 타이머면 숨김 */
     s_relay_ai_switch = lv_switch_create(ai_group);
     if (cfg->ai_mode) lv_obj_add_state(s_relay_ai_switch, LV_STATE_CHECKED);
     lv_obj_add_event_cb(s_relay_ai_switch, cb_relay_ai_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
@@ -9608,6 +9891,7 @@ static void build_relay_popup(int idx)
     lv_obj_t *act_item_row = relay_make_pair_row(s_relay_gray_panel);
     lv_obj_t *act_group = relay_field_group(act_item_row, STR_LABEL_RELAY_ACTION);
     lv_obj_t *item_group = relay_field_group(act_item_row, STR_LABEL_RELAY_ITEM);
+    s_relay_item_group = item_group;   /* 2026-10-09 — 타이머면 숨김 */
     lv_obj_t *sentence_row = lv_obj_create(s_relay_gray_panel);
     lv_obj_set_size(sentence_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(sentence_row, LV_FLEX_FLOW_ROW_WRAP);
@@ -9616,6 +9900,7 @@ static void build_relay_popup(int idx)
     lv_obj_set_style_bg_opa(sentence_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_pad_all(sentence_row, 0, 0);
     lv_obj_set_style_pad_column(sentence_row, 6, 0);
+    s_relay_sentence_row = sentence_row;   /* 2026-10-09 — 타이머면 숨김 */
     lv_obj_t *cond_lbl = lv_label_create(sentence_row);
     lv_label_set_text(cond_lbl, ui_str(STR_LABEL_RELAY_CONDITION));
     lv_obj_set_style_text_font(cond_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -9628,7 +9913,9 @@ static void build_relay_popup(int idx)
     lv_obj_set_style_text_font(lv_dropdown_get_list(s_relay_action_word_dd), ui_font_get(UI_FONT_SIZE_18), 0);
     ui_dropdown_apply_variable_width(s_relay_action_word_dd, ui_str(STR_OPT_TURN_ACTION_LIST));
     lv_obj_add_event_cb(s_relay_action_word_dd, cb_relay_field_dirty, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_dropdown_set_selected(s_relay_action_word_dd, cfg->z_turns_on ? 0 : 1);  /* Z 원본 그대로 복원 */
+    lv_dropdown_set_selected(s_relay_action_word_dd, s_relay_timer_form.timer_mode ? 2 : (cfg->z_turns_on ? 0 : 1));  /* Z 원본 그대로 복원, 2 = 타이머 */
+    lv_obj_remove_event_cb(s_relay_action_word_dd, cb_relay_field_dirty);
+    lv_obj_add_event_cb(s_relay_action_word_dd, cb_relay_action_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     /* 2026-09-16(사용자 지적 — "글씨와 다운화살표가 겹쳐") — lv_dropdown 기본폭은 내용에 안
      * 맞춰지는 고정 130px(LV_DPI_DEF, lv_dropdown.c의 width_def 확인) — 옵션 문구가 길면
@@ -9787,6 +10074,7 @@ static void build_relay_popup(int idx)
         lv_dropdown_set_selected(s_relay_min_hold_dd, (uint16_t)(mi >= 0 ? mi : 0));
     }
 
+    relay_build_timer_box(s_relay_gray_panel);   /* 2026-10-09 — 동작 = 타이머일 때 보이는 칸 */
     relay_apply_row_visibility();
 }
 
@@ -9847,6 +10135,7 @@ static void relay_apply_override(int idx, bool want_on)
 
 static void cb_override_no(lv_event_t *e)
 {
+    s_override_release_dd = NULL;
     if (s_relay_manual_switch) lv_obj_remove_state(s_relay_manual_switch, LV_STATE_CHECKED);
     s_override_on_word = NULL;
     s_override_off_word = NULL;
@@ -9856,7 +10145,16 @@ static void cb_override_no(lv_event_t *e)
 
 static void cb_override_yes(lv_event_t *e)
 {
-    if (s_override_popup_idx >= 0) relay_apply_override(s_override_popup_idx, s_override_selected_on);
+    if (s_override_popup_idx >= 0) {
+        uint32_t rel = 0;   /* 2026-10-09 — 자동 해제 */
+        if (s_override_release_dd) {
+            uint16_t ri = lv_dropdown_get_selected(s_override_release_dd);
+            if (ri < sizeof(s_manual_release_values) / sizeof(s_manual_release_values[0])) rel = s_manual_release_values[ri];
+        }
+        power_relay_set_manual_release(s_override_popup_idx, rel);
+        relay_apply_override(s_override_popup_idx, s_override_selected_on);
+    }
+    s_override_release_dd = NULL;
     s_override_on_word = NULL;
     s_override_off_word = NULL;
     s_override_icon = NULL;
@@ -9922,6 +10220,24 @@ static void show_override_confirm_popup(int idx)
 
     s_override_selected_on = power_relay_get_commanded_on(idx);
     relay_override_update_choice_visual();
+
+    {   /* 2026-10-09(할 일 AG — "지금부터 N분만") — 자동 해제 */
+        lv_obj_t *rel_row = lv_obj_create(box);
+        lv_obj_set_size(rel_row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(rel_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(rel_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(rel_row, 0, 0);
+        lv_obj_set_style_pad_all(rel_row, 0, 0);
+        lv_obj_t *rl = lv_label_create(rel_row);
+        lv_label_set_text(rl, ui_str(STR_LABEL_MANUAL_RELEASE));
+        lv_obj_set_style_text_font(rl, ui_font_get(UI_FONT_SIZE_18), 0);
+        s_override_release_dd = lv_dropdown_create(rel_row);
+        lv_obj_set_style_pad_ver(s_override_release_dd, 7, 0);
+        lv_dropdown_set_options(s_override_release_dd, ui_str(STR_OPT_MANUAL_RELEASE_LIST));
+        lv_obj_set_style_text_font(s_override_release_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_set_style_text_font(lv_dropdown_get_list(s_override_release_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+        ui_dropdown_apply_variable_width(s_override_release_dd, ui_str(STR_OPT_MANUAL_RELEASE_LIST));
+    }
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
     add_modal_button(btn_row, STR_BTN_NO, cb_override_no, NULL);
@@ -10717,6 +11033,8 @@ static bool web_op_execute(const ui_web_op_t *op)
             return web_relay_apply(op->idx, &op->relay);
         case UI_WEB_OP_RELAY_OVERRIDE:
             if (op->idx < 0 || op->idx >= POWER_RELAY_COUNT) return false;
+            if (op->value2 && !value_in(s_manual_release_values, sizeof(s_manual_release_values) / sizeof(s_manual_release_values[0]), op->value2)) return false;
+            power_relay_set_manual_release(op->idx, op->value2);   /* 2026-10-09 — 자동 해제(0 = 끝없음) */
             relay_apply_override(op->idx, op->value != 0);   /* 전원 아이콘 확인 팝업 Yes와 같음 */
             return true;
         case UI_WEB_OP_PHOTO_DELETE:     /* cb_photo_delete_confirm과 같음 */
@@ -10815,6 +11133,26 @@ static bool web_relay_apply(int idx, const ui_web_relay_choices_t *in)
     ui_web_relay_choices_t c = *in;
     power_relay_config_t cfg = *power_relay_get_config(idx);
     if (c.manual_override && !cfg.manual_override) c.manual_override = false;  /* 켜기는 OVERRIDE로만(방향을 함께 정해야 함) */
+    /* 2026-10-09(할 일 AG) — 타이머 칸(콘 팝업 Apply와 같은 순서: 타이머 먼저, 그다음 설정) */
+    {
+        power_relay_timer_t t = *power_relay_get_timer(idx);
+        t.timer_mode = c.timer_mode;
+        if (c.timer_mode) {
+            const power_relay_timer_t *w = &c.timer;
+            if (w->on_sec > 86399 || w->off_sec > 86399 || w->night_on_sec > 86399 || w->night_off_sec > 86399 ||
+                w->day_start_min > 1439 || w->night_start_min > 1439) return false;
+            t.on_sec = w->on_sec; t.off_sec = w->off_sec; t.day_night = w->day_night;
+            t.day_start_min = w->day_start_min; t.night_start_min = w->night_start_min;
+            t.night_on_sec = w->night_on_sec; t.night_off_sec = w->night_off_sec;
+        }
+        power_relay_set_timer(idx, &t);
+        if (c.timer_mode) {   /* 조건 칸은 그대로 두고 수동 강제 해제만 반영 */
+            if (!c.manual_override) cfg.manual_override = false;
+            cfg.configured = true;
+            power_relay_set_config(idx, &cfg);
+            return true;
+        }
+    }
     relay_apply_choices(&cfg, &c);
     relay_roller_spec_t spec = relay_roller_spec_for_channel(cfg.chan_type, cfg.precise);
     bool clamped = false;
@@ -10873,6 +11211,7 @@ int ui_main_get_option_values(int which, const uint32_t **out)
     switch (which) {
         case 0: *out = s_sens_measure_interval_values; return (int)(sizeof(s_sens_measure_interval_values) / sizeof(s_sens_measure_interval_values[0]));
         case 1: *out = s_capture_interval_values;      return (int)(sizeof(s_capture_interval_values) / sizeof(s_capture_interval_values[0]));
+        case 7: *out = s_manual_release_values; return (int)(sizeof(s_manual_release_values) / sizeof(s_manual_release_values[0]));  /* 2026-10-09 */
         case 2: *out = s_xclk_values;                  return (int)(sizeof(s_xclk_values) / sizeof(s_xclk_values[0]));
         case 3: *out = s_relay_trend_sample_values;    return (int)(sizeof(s_relay_trend_sample_values) / sizeof(s_relay_trend_sample_values[0]));
         case 4: *out = s_relay_min_hold_values;        return (int)(sizeof(s_relay_min_hold_values) / sizeof(s_relay_min_hold_values[0]));

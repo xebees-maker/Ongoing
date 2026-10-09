@@ -338,7 +338,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LABEL_AI_MODE]        = { "AI:", "AI:" },
     /* 2026-09-17(사용자 최종 문구 — "Turn On if Temperature Up to") */
     [STR_OPT_RISE_FALL_LIST]   = { "이상\n이하", "Up to\nBelow" },
-    [STR_OPT_TURN_ACTION_LIST] = { "켬\n끔", "On\nOff" },
+    [STR_OPT_TURN_ACTION_LIST] = { "켬\n끔\n타이머", "On\nOff\nTimer" },  /* 2026-10-09 — 타이머 추가(할 일 AG) */
     /* 2026-09-16(사용자 지적 — "글 깨짐이 있고") — 비트맵 폰트(Montserrat, 영문 ASCII만)에
      * 없는 특수기호(→/±/°)를 썼다가 미싱글리프로 깨져 보였던 문제, 순수 ASCII로 교체 */
     [STR_SENTENCE_ARROW]       = { "->", "->" },
@@ -356,6 +356,20 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LABEL_RELAY_ITEM]      = { "항목:", "Item:" },
     [STR_LABEL_RELAY_CONDITION] = { "조건:", "Condition:" },
     [STR_FMT_RELAY_SUMMARY]     = { "{item} {value} {dir}이면 {act}", "Turn {act} if {item} {dir} {value}" },
+    [STR_LABEL_TIMER_ON]             = { "켜기", "On for" },
+    [STR_LABEL_TIMER_OFF]            = { "끄기", "Off for" },
+    [STR_LABEL_DAY_NIGHT]            = { "낮·밤 구분", "Day/Night" },
+    [STR_LABEL_DAY_START]            = { "낮 시작", "Day from" },
+    [STR_LABEL_NIGHT_START]          = { "밤 시작", "Night from" },
+    [STR_LABEL_DAY_ON]               = { "낮 켜기", "Day on" },
+    [STR_LABEL_DAY_OFF]              = { "낮 끄기", "Day off" },
+    [STR_LABEL_NIGHT_ON]             = { "밤 켜기", "Night on" },
+    [STR_LABEL_NIGHT_OFF]            = { "밤 끄기", "Night off" },
+    [STR_DUR_UNITS]                  = { "시간\n분\n초", "h\nm\ns" },
+    [STR_FMT_RELAY_TIMER_SUMMARY]    = { "{on} 켜고 {off} 끄기 반복", "On {on}, off {off}, repeat" },
+    [STR_FMT_RELAY_TIMER_DN_SUMMARY] = { "낮 {on}/{off} · 밤 {non}/{noff}", "Day {on}/{off} · Night {non}/{noff}" },
+    [STR_LABEL_MANUAL_RELEASE]       = { "자동 해제", "Auto release" },
+    [STR_OPT_MANUAL_RELEASE_LIST]    = { "끝없음\n10분\n30분\n1시간\n3시간", "Never\n10m\n30m\n1h\n3h" },
     [STR_SENTENCE_PLUSMINUS]   = { "+/-", "+/-" },
     [STR_UNIT_HUMI]            = { "%", "%" },
     [STR_CHANNEL_NAME_TEMP]    = { "온도", "Temperature" },
