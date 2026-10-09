@@ -304,8 +304,6 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
 static void build_relay_popup(int idx);  /* 2026-09-16(SR/Power Control) */
 static void teardown_relay_popup(void);  /* 2026-09-17 — Apply 클릭 시 팝업 닫기용 fwd */
 static void cb_power_dash_row_clicked(lv_event_t *e);
-static void cb_power_icon_tap(lv_event_t *e);  /* 2026-09-18 — Manual Override 확인팝업 트리거 */
-static void cb_relay_manual_switch_changed(lv_event_t *e);  /* 2026-09-18 — build_relay_popup()이 더 앞에서 씀 */
 static void refresh_power_control_panel(void);
 static void teardown_device_popup(void);
 static void cb_camera_dash_row_clicked(lv_event_t *e);
@@ -708,12 +706,14 @@ static lv_obj_t *s_relay_act_item_row = NULL, *s_relay_item_group = NULL, *s_rel
 /* 2026-10-09(사용자 설계) — 맨 위 줄: 왼쪽 강제 스위치, 오른쪽 방식 드롭다운(0 타이머 / 1 센서 AI / 2 센서 수동).
  * 강제가 켜져 있으면 방식·판넬은 비활성, 꺼져 있을 때만 방식대로. 방식은 저장값 둘에 대응(timer_mode, ai_mode) */
 static lv_obj_t *s_relay_mode_dd = NULL;
-enum { RELAY_MODE_TIMER = 0, RELAY_MODE_SENSOR_AI = 1, RELAY_MODE_SENSOR_MANUAL = 2 };
+/* 2026-10-09(사용자 설계 확정) — 방식 하나로: 강제 / 타이머 / 센서 AI / 센서 수동. 방식·값을 바꾸면 맨 위 줄 적용 버튼으로만
+ * 반영(릴레이는 외부 기기라 명시적 적용 — 강제도 경고 창 없이 같은 규칙), 적용 없이 닫으면 모두 버림 */
+enum { RELAY_MODE_OVERRIDE = 0, RELAY_MODE_TIMER = 1, RELAY_MODE_SENSOR_AI = 2, RELAY_MODE_SENSOR_MANUAL = 3 };
+static lv_obj_t *s_relay_override_box = NULL, *s_relay_ovr_dd = NULL, *s_relay_ovr_rel_dd = NULL;
 static int relay_mode_sel(void) { return s_relay_mode_dd ? (int)lv_dropdown_get_selected(s_relay_mode_dd) : RELAY_MODE_SENSOR_AI; }
 static lv_obj_t *s_rt_on_name = NULL, *s_rt_off_name = NULL, *s_rt_on_lbl = NULL, *s_rt_off_lbl = NULL;
 static lv_obj_t *s_rt_dn_switch = NULL, *s_rt_dn_box = NULL;
 static lv_obj_t *s_rt_daystart_lbl = NULL, *s_rt_nightstart_lbl = NULL, *s_rt_non_lbl = NULL, *s_rt_noff_lbl = NULL;
-static lv_obj_t *s_override_release_dd = NULL;
 static const uint32_t s_manual_release_values[] = { 0, 600, 1800, 3600, 10800 };   /* STR_OPT_MANUAL_RELEASE_LIST 순서 */
 
 /* 시간 길이 표시: 1시간30분, 15분, 45초(영어 1h30m 식). 0이면 "0" + 초 단위 */
@@ -775,7 +775,6 @@ static lv_obj_t  *s_relay_alias_apply_btn  = NULL;
 static char       s_relay_alias_applied_text[POWER_RELAY_ALIAS_MAX_LEN];
 
 static lv_obj_t  *s_relay_ai_switch       = NULL;
-static lv_obj_t  *s_relay_manual_switch   = NULL;  /* 2026-09-18: Manual Override, AI와 상호배타 */
 
 /* 2026-09-17(사용자 재작성) — 밝은 회색 판넬 하나에 Apply 대상 전체(문장골격~최소유지)를
  * 담고, Apply는 그 판넬 우측 상단 */
@@ -7312,7 +7311,6 @@ void ui_init(void)
         lv_label_set_text(status, LV_SYMBOL_POWER);
         lv_obj_add_flag(status, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_user_data(status, (void *)(uintptr_t)i);
-        lv_obj_add_event_cb(status, cb_power_icon_tap, LV_EVENT_CLICKED, NULL);
         s_power_dash_row_status[i] = status;
 
         lv_obj_t *label = lv_label_create(row);
@@ -8995,6 +8993,12 @@ static void relay_apply_row_visibility(void)
     int mode = relay_mode_sel();
     bool ai_on = (mode == RELAY_MODE_SENSOR_AI);
     bool timer = (mode == RELAY_MODE_TIMER);
+    bool ovr = (mode == RELAY_MODE_OVERRIDE);
+    if (s_relay_override_box) {
+        if (ovr) lv_obj_remove_flag(s_relay_override_box, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_relay_override_box, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (ovr) timer = true;   /* 아래 센서 칸 숨김은 타이머와 같음 */
     lv_obj_t *hide_in_timer[] = { s_relay_act_item_row, s_relay_sentence_row };
     for (size_t k = 0; k < sizeof(hide_in_timer) / sizeof(hide_in_timer[0]); k++) {
         if (!hide_in_timer[k]) continue;
@@ -9002,7 +9006,7 @@ static void relay_apply_row_visibility(void)
         else lv_obj_remove_flag(hide_in_timer[k], LV_OBJ_FLAG_HIDDEN);
     }
     if (s_relay_timer_box) {
-        if (timer) lv_obj_remove_flag(s_relay_timer_box, LV_OBJ_FLAG_HIDDEN);
+        if (timer && !ovr) lv_obj_remove_flag(s_relay_timer_box, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(s_relay_timer_box, LV_OBJ_FLAG_HIDDEN);
     }
     if (ai_on || timer) lv_obj_add_flag(s_relay_advanced_box, LV_OBJ_FLAG_HIDDEN);
@@ -9020,7 +9024,7 @@ static void relay_apply_row_visibility(void)
     if (!is_group) lv_obj_remove_flag(s_relay_device_dd, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(s_relay_device_dd, LV_OBJ_FLAG_HIDDEN);
 
-    bool manual_on = s_relay_manual_switch && lv_obj_has_state(s_relay_manual_switch, LV_STATE_CHECKED);
+    bool manual_on = false;   /* 2026-10-09 — 강제는 방식 중 하나(판넬을 흐리게 하지 않음) */
     relay_set_gray_panel_controls_disabled(manual_on);
 }
 
@@ -9070,8 +9074,17 @@ static void relay_sync_form_from_widgets(void)
 
     /* 2026-09-18(Manual Override) — manual_override_on(방향)은 확인팝업에서만 정해지므로
      * 여기선 안 건드림. 모드 플래그만 스위치 상태와 항상 일치시켜둠(방어적 동기화) */
-    if (s_relay_manual_switch) {
-        s_relay_form.manual_override = lv_obj_has_state(s_relay_manual_switch, LV_STATE_CHECKED);
+    {   /* 2026-10-09 — 방식 = 강제면 강제 켬/끔·자동 해제 */
+        bool ovr = (relay_mode_sel() == RELAY_MODE_OVERRIDE);
+        s_relay_form.manual_override = ovr;
+        if (ovr && s_relay_ovr_dd) s_relay_form.manual_override_on = (lv_dropdown_get_selected(s_relay_ovr_dd) == 0);
+        else if (!ovr) s_relay_form.manual_override_on = s_relay_popup_snapshot.manual_override_on;   /* 숨은 칸은 바뀐 것으로 안 침 */
+        uint32_t rel = s_relay_timer_snapshot.manual_release_sec;
+        if (ovr && s_relay_ovr_rel_dd) {
+            uint16_t ri = lv_dropdown_get_selected(s_relay_ovr_rel_dd);
+            if (ri < sizeof(s_manual_release_values) / sizeof(s_manual_release_values[0])) rel = s_manual_release_values[ri];
+        }
+        s_relay_timer_form.manual_release_sec = rel;
     }
 
     /* 2026-10-03(할 일 AD — 웹 릴레이 팝업) — 위젯에서 선택값만 모으고, 설정 계산은 relay_apply_choices()(웹과 공용)로 */
@@ -9079,11 +9092,14 @@ static void relay_sync_form_from_widgets(void)
     c.chan_type = (uint8_t)s_relay_form.chan_type;
     c.y_rises = (lv_dropdown_get_selected(s_relay_direction_word_dd) == 0);   /* 0=도달(Up to) 1=미만(Below) */
     c.z_turns_on = (lv_dropdown_get_selected(s_relay_action_word_dd) == 0);   /* 0=켜짐(On) 1=꺼짐(Off) */
-    s_relay_timer_form.timer_mode = (relay_mode_sel() == RELAY_MODE_TIMER);   /* 2026-10-09 — 방식 */
+    /* 2026-10-09 — 방식. 강제일 땐 그 밑의 방식(타이머/센서)을 그대로 둠 */
+    s_relay_timer_form.timer_mode = (relay_mode_sel() == RELAY_MODE_OVERRIDE) ? s_relay_timer_snapshot.timer_mode
+                                                                            : (relay_mode_sel() == RELAY_MODE_TIMER);
     c.center = s_relay_center_value;
     c.margin = s_relay_margin_value;
     /* 2026-10-09 — 센서 AI / 센서 수동. 타이머일 땐 저장된 AI 선택을 그대로 둠(센서 방식으로 돌아올 때 그대로) */
-    c.ai_mode = (relay_mode_sel() == RELAY_MODE_TIMER) ? s_relay_popup_snapshot.ai_mode : (relay_mode_sel() == RELAY_MODE_SENSOR_AI);
+    c.ai_mode = (relay_mode_sel() == RELAY_MODE_TIMER || relay_mode_sel() == RELAY_MODE_OVERRIDE)
+                ? s_relay_popup_snapshot.ai_mode : (relay_mode_sel() == RELAY_MODE_SENSOR_AI);
     c.manual_override = s_relay_form.manual_override;
     c.source_kind = (uint8_t)lv_dropdown_get_selected(s_relay_basedon_dd);
     c.group_choice = (uint8_t)lv_dropdown_get_selected(s_relay_group_choice_dd);
@@ -9489,8 +9505,12 @@ static void cb_relay_apply_clicked(lv_event_t *e)
      * 저장 — "위젯에서 다시 읽기"와 "모델에 쓰기"가 두 갈래로 나뉘어 있던 게 이전 버그의
      * 구조적 원인이었음(2026-09-17) */
     relay_sync_form_from_widgets();  /* 혹시 아직 dirty체크를 안 거친 마지막 위젯 변경 반영 */
-    s_relay_form.configured = true;  /* 본 설정 Apply만 true로 세팅(2026-09-16 실기 크래시 수정) */
+    /* 본 설정 Apply만 true로 세팅(2026-09-16 실기 크래시 수정). 2026-10-09 — 센서 방식으로 적용할 때만(강제·타이머로 적용하면서
+     * 아직 안 정한 센서 기본값이 "설정됨"이 되지 않게) */
+    int mode = relay_mode_sel();
+    if (mode == RELAY_MODE_SENSOR_AI || mode == RELAY_MODE_SENSOR_MANUAL) s_relay_form.configured = true;
     power_relay_set_timer(s_relay_popup_idx, &s_relay_timer_form);   /* 2026-10-09 — 타이머 먼저(아래 set_config가 바로 다시 판정) */
+    if (mode == RELAY_MODE_OVERRIDE) power_relay_set_manual_release(s_relay_popup_idx, s_relay_timer_form.manual_release_sec);
     power_relay_set_config(s_relay_popup_idx, &s_relay_form);
     /* 2026-09-17(사용자 정정 — "적용하고 팝업을 닫아는, 적용 후 사람이 닫는단 말이었어") —
      * 프로젝트 컨벤션(plain dismiss=우측상단 X, 액션 버튼=Apply 등, 절대 안 섞음)대로
@@ -9511,7 +9531,6 @@ static void teardown_relay_popup(void)
     s_relay_alias_ta = NULL;
     s_relay_alias_apply_btn = NULL;
     s_relay_ai_switch = NULL;
-    s_relay_manual_switch = NULL;
     s_relay_gray_panel = NULL;
     s_relay_action_word_dd = NULL;
     s_relay_chan_dd = NULL;
@@ -9530,6 +9549,7 @@ static void teardown_relay_popup(void)
     s_relay_apply_btn = NULL;
     s_relay_apply_lbl = NULL;
     s_relay_act_item_row = s_relay_item_group = s_relay_sentence_row = s_relay_timer_box = s_relay_mode_dd = NULL;   /* 2026-10-09 */
+    s_relay_override_box = s_relay_ovr_dd = s_relay_ovr_rel_dd = NULL;
     s_rt_on_name = s_rt_off_name = s_rt_on_lbl = s_rt_off_lbl = NULL;
     s_rt_dn_switch = s_rt_dn_box = s_rt_daystart_lbl = s_rt_nightstart_lbl = s_rt_non_lbl = s_rt_noff_lbl = NULL;
     s_relay_popup_idx = -1;
@@ -9772,6 +9792,25 @@ static void relay_build_timer_box(lv_obj_t *parent)
     relay_timer_refresh_labels();
 }
 
+/* 2026-10-09(사용자 설계) — 방식 = 강제: 켬/끔과 자동 해제(적용을 눌러야 반영 — 예전 경고 창은 없앰) */
+static void relay_build_override_box(lv_obj_t *parent, const power_relay_config_t *cfg)
+{
+    s_relay_override_box = lv_obj_create(parent);
+    lv_obj_set_size(s_relay_override_box, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_relay_override_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(s_relay_override_box, 0, 0);
+    lv_obj_set_style_bg_opa(s_relay_override_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(s_relay_override_box, 0, 0);
+    lv_obj_t *r = relay_make_pair_row(s_relay_override_box);
+    s_relay_ovr_dd = relay_popup_dropdown_field(r, STR_LABEL_MANUAL_MODE, ui_str(STR_OPT_TURN_ACTION_LIST), cb_relay_field_dirty);
+    bool on = cfg->manual_override ? cfg->manual_override_on : false;   /* 처음 고를 땐 끔 */
+    lv_dropdown_set_selected(s_relay_ovr_dd, on ? 0 : 1);
+    s_relay_ovr_rel_dd = relay_popup_dropdown_field(r, STR_LABEL_MANUAL_RELEASE, ui_str(STR_OPT_MANUAL_RELEASE_LIST), cb_relay_field_dirty);
+    int ri = find_value_index(s_manual_release_values, sizeof(s_manual_release_values) / sizeof(s_manual_release_values[0]),
+                              cfg->manual_override ? s_relay_timer_form.manual_release_sec : 0);
+    lv_dropdown_set_selected(s_relay_ovr_rel_dd, (uint16_t)(ri >= 0 ? ri : 0));
+}
+
 static void build_relay_popup(int idx)
 {
     if (s_relay_popup) return;  /* 이미 열려있음 */
@@ -9784,6 +9823,7 @@ static void build_relay_popup(int idx)
     s_relay_form = *cfg;
     s_relay_popup_snapshot = *cfg;
     s_relay_timer_form = *power_relay_get_timer(idx);       /* 2026-10-09 */
+    if (!cfg->manual_override) s_relay_timer_form.manual_release_sec = 0;
     s_relay_timer_snapshot = s_relay_timer_form;
 
     lv_obj_t *popup = create_page_popup();
@@ -9843,14 +9883,12 @@ static void build_relay_popup(int idx)
     lv_obj_t *ai_row = relay_make_pair_row(popup);
 
     /* 2026-09-18(Manual Override, 사용자 설계) — AI와 나란히, 상호배타 스위치 */
-    lv_obj_t *manual_group = relay_field_group(ai_row, STR_LABEL_MANUAL_MODE);   /* 2026-10-09 — 왼쪽: 강제 */
-    s_relay_manual_switch = lv_switch_create(manual_group);
-    if (cfg->manual_override) lv_obj_add_state(s_relay_manual_switch, LV_STATE_CHECKED);
-    lv_obj_add_event_cb(s_relay_manual_switch, cb_relay_manual_switch_changed, LV_EVENT_VALUE_CHANGED, NULL);
-    /* 2026-10-09(사용자 설계) — 오른쪽: 방식(타이머 / 센서 AI / 센서 수동) */
+    /* 2026-10-09(사용자 설계) — 맨 위 줄: 방식(강제 / 타이머 / 센서 AI / 센서 수동) + 적용(바뀐 게 있을 때만 켜짐) */
     s_relay_mode_dd = relay_popup_dropdown_field(ai_row, STR_LABEL_RELAY_MODE, ui_str(STR_OPT_RELAY_MODE_LIST), cb_relay_mode_changed);
-    lv_dropdown_set_selected(s_relay_mode_dd, s_relay_timer_form.timer_mode ? RELAY_MODE_TIMER
+    lv_dropdown_set_selected(s_relay_mode_dd, cfg->manual_override ? RELAY_MODE_OVERRIDE
+                                            : s_relay_timer_form.timer_mode ? RELAY_MODE_TIMER
                                             : (cfg->ai_mode ? RELAY_MODE_SENSOR_AI : RELAY_MODE_SENSOR_MANUAL));
+    lv_obj_t *apply_header_row = ai_row;
 
     /* 2026-09-17(사용자 지시 — "Apply의 대상들 전체를 밝은 회색 판넬 위에 올리고, Apply는
      * 상단 우측으로") — 문장골격부터 마지막 필드(최소유지)까지 전부 이 판넬 안 */
@@ -9861,13 +9899,6 @@ static void build_relay_popup(int idx)
     lv_obj_set_style_bg_color(s_relay_gray_panel, lv_palette_lighten(LV_PALETTE_GREY, 3), 0);
     lv_obj_set_style_bg_opa(s_relay_gray_panel, LV_OPA_COVER, 0);
 
-    lv_obj_t *apply_header_row = lv_obj_create(s_relay_gray_panel);
-    lv_obj_set_size(apply_header_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(apply_header_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(apply_header_row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(apply_header_row, 0, 0);
-    lv_obj_set_style_bg_opa(apply_header_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(apply_header_row, 0, 0);
     s_relay_apply_btn = lv_button_create(apply_header_row);
     lv_obj_add_event_cb(s_relay_apply_btn, cb_relay_apply_clicked, LV_EVENT_CLICKED, NULL);
     lv_obj_add_state(s_relay_apply_btn, LV_STATE_DISABLED);  /* 값 안 바뀌면 비활성(2026-09-17) */
@@ -10069,44 +10100,13 @@ static void build_relay_popup(int idx)
         lv_dropdown_set_selected(s_relay_min_hold_dd, (uint16_t)(mi >= 0 ? mi : 0));
     }
 
-    relay_build_timer_box(s_relay_gray_panel);   /* 2026-10-09 — 동작 = 타이머일 때 보이는 칸 */
+    relay_build_override_box(s_relay_gray_panel, cfg);   /* 2026-10-09 — 방식 = 강제일 때 보이는 칸 */
+    relay_build_timer_box(s_relay_gray_panel);   /* 2026-10-09 — 방식 = 타이머일 때 보이는 칸 */
     relay_apply_row_visibility();
 }
 
-/* 2026-09-18(Manual Override, 사용자 설계) — 주화면 아이콘 탭과 팝업 안 Manual 스위치가
- * 같은 확인팝업을 공유(사용자 확인: "1. 같은 메커니즘이야"). s_relay_manual_switch는
- * 릴레이 팝업이 열려있을 때만 non-NULL이므로, 이 값으로 "팝업 안에서 트리거됐는지"를 그대로
- * 판단 — No 시 그 스위치만 되돌리면 됨(주화면에서 직접 왔으면 되돌릴 스위치가 없음).
- * 2026-09-18(재설계, 사용자 지시) — 버튼 3개(Cancel/Off/On) 대신 문구 끝에 On/Off 스위치
- * (초기값=현재 릴레이 상태) + Yes/No 2개로 변경. No는 스위치가 뭐든 전부 취소 */
-static int s_override_popup_idx = -1;
-static lv_obj_t *s_override_on_word = NULL;
-static lv_obj_t *s_override_off_word = NULL;
-static lv_obj_t *s_override_icon = NULL;
-static bool s_override_selected_on = false;
-
-/* 2026-09-18(사용자 지시, 여러 차례 재설계 끝에 확정) — 문장은 "Do you want to override as
- * On or Off?" 그대로 두고(아이콘을 문장 중간에 끼우지 않음), 아이콘 1개는 문장 뒤에 별도로
- * 옴(주화면 상태아이콘처럼 초록=On/회색=Off). "On"/"Off" 단어는 둘 다 항상 각진 연회색
- * 배경(탭 가능 표시)을 갖고, 선택된 쪽만 2px 파란 테두리가 추가로 붙음 — 순수 검정 역상은
- * "눌림" 상태처럼 보여서 뺌(사용자 지적). border_width는 항상 2로 고정하고 opa만 토글해서
- * 선택 전환 시 레이아웃이 흔들리지 않게 함 */
-static void relay_override_update_choice_visual(void)
-{
-    if (!s_override_on_word || !s_override_off_word || !s_override_icon) return;
-    lv_obj_set_style_border_opa(s_override_on_word, s_override_selected_on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_opa(s_override_off_word, s_override_selected_on ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(s_override_icon,
-        s_override_selected_on ? lv_palette_main(LV_PALETTE_GREEN) : lv_palette_main(LV_PALETTE_GREY), 0);
-}
-
-static void cb_override_choice_tap(lv_event_t *e)
-{
-    lv_obj_t *target = lv_event_get_target(e);
-    s_override_selected_on = (target == s_override_on_word);
-    relay_override_update_choice_visual();
-}
-
+/* 2026-10-09(사용자 결정) — 주화면 전원 아이콘 지름길·경고 창·강제 스위치는 없앰(강제는 방식 중 하나, 적용으로 반영).
+ * relay_apply_override는 웹 API(/api/relay/override, 예전 호환)용으로 남김 */
 static void relay_apply_override(int idx, bool want_on)
 {
     power_relay_config_t cfg = *power_relay_get_config(idx);
@@ -10116,150 +10116,14 @@ static void relay_apply_override(int idx, bool want_on)
     /* 팝업이 열려있는 채로 트리거된 경우, 팝업의 모델/스냅샷/화면도 같이 맞춤 — Alias-Apply가
      * s_relay_form/snapshot을 동기화하던 것과 같은 이유(2026-09-17 패턴 재사용): 안 맞추면
      * 바깥 Apply가 이 변경을 되돌리거나 dirty가 어긋남 */
-    if (s_relay_manual_switch && idx == s_relay_popup_idx) {
+    if (s_relay_popup && s_relay_mode_dd && idx == s_relay_popup_idx) {
         s_relay_form.manual_override = true;
         s_relay_form.manual_override_on = want_on;
         s_relay_popup_snapshot = s_relay_form;   /* 2026-10-09 — 강제는 방식(AI 등)을 바꾸지 않음 */
-        lv_obj_add_state(s_relay_manual_switch, LV_STATE_CHECKED);
+        lv_dropdown_set_selected(s_relay_mode_dd, RELAY_MODE_OVERRIDE);
+        if (s_relay_ovr_dd) lv_dropdown_set_selected(s_relay_ovr_dd, want_on ? 0 : 1);
         relay_apply_row_visibility();
         if (s_relay_apply_btn) lv_obj_add_state(s_relay_apply_btn, LV_STATE_DISABLED);
-    }
-}
-
-static void cb_override_no(lv_event_t *e)
-{
-    s_override_release_dd = NULL;
-    if (s_relay_manual_switch) lv_obj_remove_state(s_relay_manual_switch, LV_STATE_CHECKED);
-    s_override_on_word = NULL;
-    s_override_off_word = NULL;
-    s_override_icon = NULL;
-    cb_modal_close(e);
-}
-
-static void cb_override_yes(lv_event_t *e)
-{
-    if (s_override_popup_idx >= 0) {
-        uint32_t rel = 0;   /* 2026-10-09 — 자동 해제 */
-        if (s_override_release_dd) {
-            uint16_t ri = lv_dropdown_get_selected(s_override_release_dd);
-            if (ri < sizeof(s_manual_release_values) / sizeof(s_manual_release_values[0])) rel = s_manual_release_values[ri];
-        }
-        power_relay_set_manual_release(s_override_popup_idx, rel);
-        relay_apply_override(s_override_popup_idx, s_override_selected_on);
-    }
-    s_override_release_dd = NULL;
-    s_override_on_word = NULL;
-    s_override_off_word = NULL;
-    s_override_icon = NULL;
-    cb_modal_close(e);
-}
-
-static void show_override_confirm_popup(int idx)
-{
-    s_override_popup_idx = idx;
-    lv_obj_t *box = create_modal();
-    /* 2026-09-18(팝업 타이틀바 컨벤션) — 공용 헬퍼로 교체, 최상단에 여백 없이 붙음 */
-    create_modal_title(box, STR_TITLE_WARNING, MODAL_KIND_WARNING);
-
-    /* 2026-09-18(사용자 지적) — 경고문(1행)과 아이콘 낀 질문 문장(2행)을 분리 */
-    lv_obj_t *line1 = lv_label_create(box);
-    lv_label_set_text(line1, ui_str(STR_MSG_OVERRIDE_WARNING));
-    lv_label_set_long_mode(line1, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(line1, LV_PCT(100));
-    lv_obj_set_style_text_font(line1, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    /* 2026-09-18(사용자 확정 — "Do you want to override as On or Off?" 문장 그대로, 아이콘은
-     * 문장 뒤에 별도) — 조각(prefix/On단어/or/Off단어/아이콘)을 전부 같은 ROW_WRAP 컨테이너의
-     * 형제로 둬서 자연스럽게 줄바꿈되는 한 문장처럼 읽히게 함 */
-    lv_obj_t *msg_row = lv_obj_create(box);
-    lv_obj_set_size(msg_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(msg_row, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(msg_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(msg_row, 0, 0);
-    lv_obj_set_style_pad_all(msg_row, 0, 0);
-    lv_obj_set_style_pad_column(msg_row, 12, 0);  /* 10-03 — 문장 조각 없이 선택 칸만 나란히 */
-    lv_obj_set_style_pad_row(msg_row, 4, 0);
-
-    s_override_on_word = lv_label_create(msg_row);
-    lv_label_set_text(s_override_on_word, ui_str(STR_STATUS_RELAY_ON));
-    lv_obj_set_style_text_font(s_override_on_word, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_style_radius(s_override_on_word, 0, 0);  /* 각짐(2026-09-18 사용자 지시) */
-    lv_obj_set_style_bg_opa(s_override_on_word, LV_OPA_20, 0);
-    lv_obj_set_style_bg_color(s_override_on_word, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_border_width(s_override_on_word, 2, 0);  /* 항상 2 — opa만 토글해 레이아웃 안 흔들림 */
-    lv_obj_set_style_border_color(s_override_on_word, lv_palette_main(LV_PALETTE_BLUE), 0);
-    lv_obj_set_style_pad_hor(s_override_on_word, 6, 0);
-    lv_obj_set_style_pad_ver(s_override_on_word, 2, 0);
-    lv_obj_add_flag(s_override_on_word, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_override_on_word, cb_override_choice_tap, LV_EVENT_CLICKED, NULL);
-
-    s_override_off_word = lv_label_create(msg_row);
-    lv_label_set_text(s_override_off_word, ui_str(STR_STATUS_RELAY_OFF));
-    lv_obj_set_style_text_font(s_override_off_word, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_style_radius(s_override_off_word, 0, 0);
-    lv_obj_set_style_bg_opa(s_override_off_word, LV_OPA_20, 0);
-    lv_obj_set_style_bg_color(s_override_off_word, lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_border_width(s_override_off_word, 2, 0);
-    lv_obj_set_style_border_color(s_override_off_word, lv_palette_main(LV_PALETTE_BLUE), 0);
-    lv_obj_set_style_pad_hor(s_override_off_word, 6, 0);
-    lv_obj_set_style_pad_ver(s_override_off_word, 2, 0);
-    lv_obj_add_flag(s_override_off_word, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_override_off_word, cb_override_choice_tap, LV_EVENT_CLICKED, NULL);
-
-    /* 문장 뒤 별도 아이콘(2026-09-18 사용자 확정) — 색은 현재 선택을 따라감 */
-    s_override_icon = lv_label_create(msg_row);
-    lv_label_set_text(s_override_icon, LV_SYMBOL_POWER);
-    lv_obj_set_style_text_font(s_override_icon, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    s_override_selected_on = power_relay_get_commanded_on(idx);
-    relay_override_update_choice_visual();
-
-    {   /* 2026-10-09(할 일 AG — "지금부터 N분만") — 자동 해제 */
-        lv_obj_t *rel_row = lv_obj_create(box);
-        lv_obj_set_size(rel_row, LV_PCT(100), LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(rel_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(rel_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_border_width(rel_row, 0, 0);
-        lv_obj_set_style_pad_all(rel_row, 0, 0);
-        lv_obj_t *rl = lv_label_create(rel_row);
-        lv_label_set_text(rl, ui_str(STR_LABEL_MANUAL_RELEASE));
-        lv_obj_set_style_text_font(rl, ui_font_get(UI_FONT_SIZE_18), 0);
-        s_override_release_dd = lv_dropdown_create(rel_row);
-        lv_obj_set_style_pad_ver(s_override_release_dd, 7, 0);
-        lv_dropdown_set_options(s_override_release_dd, ui_str(STR_OPT_MANUAL_RELEASE_LIST));
-        lv_obj_set_style_text_font(s_override_release_dd, ui_font_get(UI_FONT_SIZE_18), 0);
-        lv_obj_set_style_text_font(lv_dropdown_get_list(s_override_release_dd), ui_font_get(UI_FONT_SIZE_18), 0);
-        ui_dropdown_apply_variable_width(s_override_release_dd, ui_str(STR_OPT_MANUAL_RELEASE_LIST));
-    }
-
-    lv_obj_t *btn_row = create_modal_btn_row(box);
-    add_modal_button(btn_row, STR_BTN_NO, cb_override_no, NULL);
-    add_modal_button(btn_row, STR_BTN_YES, cb_override_yes, NULL);
-}
-
-static void cb_power_icon_tap(lv_event_t *e)
-{
-    lv_obj_t *icon = lv_event_get_target(e);
-    uintptr_t idx = (uintptr_t)lv_obj_get_user_data(icon);
-    if ((int)idx >= POWER_RELAY_COUNT) return;
-    show_override_confirm_popup((int)idx);
-}
-
-/* 2026-09-18(Manual Override) — 팝업 안 Manual 스위치. On으로 켜면 같은 확인팝업을 띄우고
- * (그 안에서 방향까지 결정), Off로 끄면(=해제) 즉시 자동모드로 복귀 — AI는 그대로 둠
- * (사용자 확인: "Manual Off를 누르면... AI는 여전히 off일 테니까") */
-static void cb_relay_manual_switch_changed(lv_event_t *e)
-{
-    bool on = lv_obj_has_state(s_relay_manual_switch, LV_STATE_CHECKED);
-    if (on) {
-        /* 확인 전까지는 아직 확정 아님 — 스위치는 눌렸지만 Cancel되면 cb_override_cancel이
-         * 다시 꺼둠. 확인 대화상자가 뜨는 동안 아래 설정을 만지지 못하게 미리 비활성화 */
-        relay_apply_row_visibility();
-        show_override_confirm_popup(s_relay_popup_idx);
-    } else {
-        s_relay_form.manual_override = false;
-        cb_relay_field_dirty(e);
-        relay_apply_row_visibility();
     }
 }
 
@@ -11125,7 +10989,19 @@ static bool web_relay_apply(int idx, const ui_web_relay_choices_t *in)
     if (in->min_hold_sec && !value_in(s_relay_min_hold_values, sizeof(s_relay_min_hold_values) / sizeof(s_relay_min_hold_values[0]), in->min_hold_sec)) return false;
     ui_web_relay_choices_t c = *in;
     power_relay_config_t cfg = *power_relay_get_config(idx);
-    if (c.manual_override && !cfg.manual_override) c.manual_override = false;  /* 켜기는 OVERRIDE로만(방향을 함께 정해야 함) */
+    /* 2026-10-09(사용자 설계) — 방식 = 강제: 콘 팝업 Apply와 같은 순서(타이머 → 자동 해제 → 설정). 그 밑의 방식(타이머/센서)은
+     * 웹이 보낸 그대로(바꾸지 않은 값) 두고, 센서 기본값을 "설정됨"으로 만들지 않음 */
+    if (c.manual_override) {
+        if (c.manual_release_sec && !value_in(s_manual_release_values, sizeof(s_manual_release_values) / sizeof(s_manual_release_values[0]), c.manual_release_sec)) return false;
+        power_relay_timer_t t = *power_relay_get_timer(idx);
+        t.timer_mode = c.timer_mode;
+        power_relay_set_timer(idx, &t);
+        power_relay_set_manual_release(idx, c.manual_release_sec);
+        cfg.manual_override = true;
+        cfg.manual_override_on = c.manual_on;
+        power_relay_set_config(idx, &cfg);
+        return true;
+    }
     /* 2026-10-09(할 일 AG) — 타이머 칸(콘 팝업 Apply와 같은 순서: 타이머 먼저, 그다음 설정) */
     {
         power_relay_timer_t t = *power_relay_get_timer(idx);
@@ -11139,9 +11015,8 @@ static bool web_relay_apply(int idx, const ui_web_relay_choices_t *in)
             t.night_on_sec = w->night_on_sec; t.night_off_sec = w->night_off_sec;
         }
         power_relay_set_timer(idx, &t);
-        if (c.timer_mode) {   /* 조건 칸은 그대로 두고 수동 강제 해제만 반영 */
-            if (!c.manual_override) cfg.manual_override = false;
-            cfg.configured = true;
+        if (c.timer_mode) {   /* 조건 칸은 그대로 두고 강제 해제만 반영. 2026-10-09 — 센서 방식으로 적용할 때만 "설정됨" */
+            cfg.manual_override = false;
             power_relay_set_config(idx, &cfg);
             return true;
         }

@@ -74,7 +74,9 @@ typedef struct {
     float    center;           /* 값 */
     float    margin;           /* ± 오차 */
     bool     ai_mode;
-    bool     manual_override;  /* 끄는 것만 여기서(켜기는 RELAY_OVERRIDE로 방향과 함께) */
+    bool     manual_override;  /* 2026-10-09 — 방식 = 강제(켬/끔·자동 해제도 같이 적용) */
+    bool     manual_on;        /* 2026-10-09 — 강제 켬/끔 */
+    uint32_t manual_release_sec; /* 2026-10-09 — 강제 자동 해제(선택지 값, 0 = 끝없음) */
     uint8_t  source_kind;      /* power_source_kind_t */
     uint8_t  group_choice;     /* 온도+그룹일 때: 0 Air 기본, 1 Air 정밀, 2 Agar */
     uint8_t  device_mac[6];

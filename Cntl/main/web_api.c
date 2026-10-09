@@ -625,7 +625,7 @@ static esp_err_t api_relay_get_handler(httpd_req_t *req)
                   t->timer_mode ? "true" : "false", (unsigned long)t->on_sec, (unsigned long)t->off_sec,
                   t->day_night ? "true" : "false", (unsigned)t->day_start_min, (unsigned)t->night_start_min,
                   (unsigned long)t->night_on_sec, (unsigned long)t->night_off_sec);
-        jb_printf(&b, ",\"opt_rel\":");
+        jb_printf(&b, ",\"rel\":%lu,\"opt_rel\":", (unsigned long)t->manual_release_sec);
         jb_values(&b, 7);
     }
 
@@ -672,7 +672,7 @@ static esp_err_t api_relay_get_handler(httpd_req_t *req)
     return ret;
 }
 
-/* POST /api/relay/apply?idx= — 본문 "chan=&y=&z=&center=&margin=&ai=&manual=&src=&gc=&dev=&stat=&trend=&ts=&hold="
+/* POST /api/relay/apply?idx= — 본문 "chan=&y=&z=&center=&margin=&ai=&manual=&mon=&rel=&src=&gc=&dev=&stat=&trend=&ts=&hold="
  * (화면 선택값 그대로). 설정 계산은 콘 화면과 같은 함수(relay_apply_choices) */
 static esp_err_t api_relay_apply_post_handler(httpd_req_t *req)
 {
@@ -693,6 +693,8 @@ static esp_err_t api_relay_apply_post_handler(httpd_req_t *req)
     c->margin = query_float(body, "margin", 0);
     c->ai_mode = query_int(body, "ai", 0) != 0;
     c->manual_override = query_int(body, "manual", 0) != 0;
+    c->manual_on = query_int(body, "mon", 0) != 0;                        /* 2026-10-09 — 방식 = 강제 */
+    c->manual_release_sec = (uint32_t)query_int(body, "rel", 0);
     c->source_kind = (uint8_t)query_int(body, "src", 0);
     c->group_choice = (uint8_t)query_int(body, "gc", 0);
     c->device_valid = httpd_query_key_value(body, "dev", s_w->tmp, sizeof(s_w->tmp)) == ESP_OK && hex_to_mac(s_w->tmp, c->device_mac);
