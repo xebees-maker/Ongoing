@@ -56,6 +56,8 @@ typedef struct __attribute__((packed)) {
 bool stats_store_append_batch(const stats_record_t *records, uint32_t count);
 /* 2026-10-08 — 통신 경로용: 큐에 넣기만 하고 바로 돌아옴(SD 쓰기는 기록 태스크 "stats_wr", 우선순위 10) */
 bool stats_store_append_async(const stats_record_t *records, uint32_t count);
+/* 2026-10-09 — 기록이 늘 때마다 바뀌는 번호(잠금 없이 읽음) — 웹 기록 표 자동 갱신 */
+uint32_t stats_store_get_append_seq(void);
 /* 2026-10-08 — 통신 경로에서 해야 하는 다른 저장(SD·LittleFS)도 같은 기록 태스크로 넘김. arg는 복사(최대 16바이트) */
 #define STATS_STORE_JOB_ARG_MAX 16
 typedef void (*stats_store_job_fn_t)(const uint8_t *arg);

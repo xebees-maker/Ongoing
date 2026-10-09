@@ -121,6 +121,7 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
     jb_str(&b, ssid ? ssid : "");
     jb_printf(&b, ",\"ip\":%s},\"status\":\"%s\"", wifi_sta_get_own_ip_str()[0] ? "true" : "false",
               (err || sd_fail) ? "error" : warn ? "warning" : "normal");
+    jb_printf(&b, ",\"rec\":%lu", (unsigned long)stats_store_get_append_seq());  /* 2026-10-09 — 웹 기록 표 자동 갱신 */
 
     /* Summary — 메모리(바이트), 저장 공간(영역별 사용%·여유MB, 콘 Summary와 같은 계산) */
     *mem_from = b.len;

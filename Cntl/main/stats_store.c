@@ -450,6 +450,7 @@ bool stats_store_had_io_error(void)
  * 실측 검증. 원인 확정되면 이 로그는 제거 예정 */
 static size_t s_stats_append_call_count = 0;
 static stats_store_appended_cb_t s_appended_cb = NULL;
+static volatile uint32_t s_append_seq;  /* 아래 정의(2026-10-09) */
 
 void stats_store_set_appended_cb(stats_store_appended_cb_t cb) { s_appended_cb = cb; }
 
@@ -547,6 +548,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
 
     int64_t ta = esp_timer_get_time();
     storage_mgr_notify_changed();
+    if (total_written > 0) s_append_seq++;   /* 2026-10-09 — 웹 기록 표 자동 갱신용 */
     if (total_written > 0 && s_appended_cb) s_appended_cb();  /* 잠금 밖에서 — 받는 쪽이 표를 다시 읽음 */
     int64_t t_after = esp_timer_get_time() - ta;
     int64_t t_total = esp_timer_get_time() - t0;
@@ -564,6 +566,10 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
              (int)before - (int)after);
     return ok;
 }
+
+/* 2026-10-09 — 기록이 늘 때마다 바뀌는 번호(잠금 없음 — 웹 주화면이 1초마다 읽음, 기록 태스크의 SD 쓰기를 기다리지 않게) */
+static volatile uint32_t s_append_seq = 0;
+uint32_t stats_store_get_append_seq(void) { return s_append_seq; }
 
 uint32_t stats_store_get_count(void)
 {

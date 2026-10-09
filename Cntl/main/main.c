@@ -30,6 +30,7 @@
 #include "sens_kind_store.h"
 #include "notify.h"
 #include "alarm.h"
+#include "esp_system.h"
 #include "web_auth.h"
 #include "web_session.h"
 #include "web_api.h"
@@ -288,10 +289,14 @@ static esp_err_t api_devlog_get_handler(httpd_req_t *req)
 static esp_err_t api_devlog_dump_get_handler(httpd_req_t *req)
 {
     WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
-    const size_t cap = 400 * 150;
+    /* 2026-10-09 — ?lvl=we 면 경고·에러 링(2000줄) */
+    char q[24] = "", lvl[8] = "";
+    bool we = httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+              httpd_query_key_value(q, "lvl", lvl, sizeof(lvl)) == ESP_OK && strcmp(lvl, "we") == 0;
+    const size_t cap = we ? 2000 * 150 : 400 * 150;
     char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
     if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
-    size_t len = dev_log_dump(buf, cap);
+    size_t len = we ? dev_log_dump_we(buf, cap) : dev_log_dump(buf, cap);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     esp_err_t ret = httpd_resp_send(req, buf, len);
     heap_caps_free(buf);
@@ -1148,6 +1153,26 @@ void app_main(void)
     esp_err_t rtc_ret = rtc_sync_init();
     ESP_LOGI(TAG, "rtc_sync_init: %s", rtc_ret == ESP_OK ? "OK" : "FAILED");
     alarm_start();  /* SD(기록 파일)·RTC(시각)가 준비된 뒤 — 부팅 중 쌓인 사건(SD 마운트 실패 등)도 여기서 처리 */
+    {   /* 2026-10-09(사용자 지시 — 콘 크래시를 하루 가까이 모르고 지남) — 콘 재시작을 알림 목록에. 크래시·워치독·전압 저하는 푸시,
+         * 플래시(USB)·전원·소프트웨어 재시작은 기록만 */
+        esp_reset_reason_t rr = esp_reset_reason();
+        const char *why = "other";
+        bool fault = false;
+        switch (rr) {
+            case ESP_RST_POWERON:  why = "power on"; break;
+            case ESP_RST_USB:      why = "USB/flash"; break;
+            case ESP_RST_SW:       why = "software"; break;
+            case ESP_RST_EXT:      why = "reset pin"; break;
+            case ESP_RST_PANIC:    why = "crash (panic)"; fault = true; break;
+            case ESP_RST_INT_WDT:  why = "interrupt watchdog"; fault = true; break;
+            case ESP_RST_TASK_WDT: why = "task watchdog"; fault = true; break;
+            case ESP_RST_WDT:      why = "watchdog"; fault = true; break;
+            case ESP_RST_BROWNOUT: why = "brownout"; fault = true; break;
+            default: break;
+        }
+        if (fault) alarm_post(NOTIFY_TYPE_ERROR, "Cntl restarted", "Cntl restarted: %s (reason %d)", why, (int)rr);
+        else alarm_record(NOTIFY_TYPE_WARN, "Cntl restarted", "Cntl restarted: %s (reason %d)", why, (int)rr);
+    }
 
     esp_lv_adapter_config_t adapter_config = ESP_LV_ADAPTER_DEFAULT_CONFIG();
     adapter_config.task_stack_size = 12 * 1024;

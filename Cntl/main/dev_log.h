@@ -43,3 +43,5 @@ size_t dev_log_render(char *out, size_t out_cap);
 
 /* 2026-09-30 — 보기 필터 없이 링 전체(최대 400줄)를 오래된 것부터 같은 형식으로 채움. 웹(/api/devlog_dump)에서 부름 */
 size_t dev_log_dump(char *out, size_t out_cap);
+/* 2026-10-09 — 경고·에러(W/E) 줄만 따로 오래(2000줄) 남긴 링 덤프 */
+size_t dev_log_dump_we(char *out, size_t out_cap);

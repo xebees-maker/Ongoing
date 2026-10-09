@@ -345,7 +345,60 @@ static lv_coord_t s_action_btn_width = 0;
  * 없어져서 10초/30초를 테스트용으로 다시 넣음(CAM 쪽 최소 안전값도 5초로 낮춤). 실기로
  * 오래 재현 시도해서 이상 없는지 계속 지켜볼 것 — "안 났다"를 "완전히 고쳐졌다"로
  * 성급히 단정하지 않음(이 코드베이스 원칙) */
-static const uint32_t s_capture_interval_values[]  = { 0, 10, 30, 1800, 3600, 10800, 36000 };
+/* 2026-10-09(사용자 결정 — 10초·30초는 개발용이었음) — 상용 주기: 끄기/1분/10분/1시간/3시간/12시간(STR_OPT_CAPTURE_INTERVAL_LIST와 같은 순서) */
+/* ── 2026-10-09(실기 크래시 — Cache error·InstructionFetchError, 둘 다 LVGL 타이머 실행이 망가진 콜백 주소로 뜀) ──
+ * lv_async_call()은 안에서 LVGL 타이머를 만들어 타이머 목록을 고침 → LVGL 잠금(esp_lv_adapter_lock) 없이 다른 태스크에서 부르면
+ * LVGL 태스크(코어 0)와 동시에 목록을 고쳐 깨짐. 7곳이 잠금 없이 불렀고, 10-08 측정값 기록을 기록 태스크(코어 1)로 옮긴 뒤
+ * 그 알림(on_stats_appended)이 LVGL과 실제로 겹치면서 크래시가 남. 다른 태스크는 ui_post()로 큐에 넣기만 하고 바로 돌아오고
+ * (통신 태스크가 LVGL 잠금을 기다리며 막히지 않게), 전달 태스크가 잠금을 잡고 lv_async_call을 부름. 큐 칸은 PSRAM */
+typedef struct { lv_async_cb_t cb; void *arg; } ui_post_item_t;
+static QueueHandle_t s_ui_post_q = NULL;
+
+static void ui_post_task(void *arg)
+{
+    (void)arg;
+    ui_post_item_t it;
+    for (;;) {
+        if (xQueueReceive(s_ui_post_q, &it, portMAX_DELAY) != pdTRUE) continue;
+        if (esp_lv_adapter_lock(-1) == ESP_OK) {
+            lv_async_call(it.cb, it.arg);
+            esp_lv_adapter_unlock();
+        }
+    }
+}
+
+static void ui_post_init(void)
+{
+    if (s_ui_post_q) return;
+    static StaticQueue_t q_cb;
+    static StaticTask_t  tcb;
+    uint8_t *q_storage = heap_caps_malloc(32 * sizeof(ui_post_item_t), MALLOC_CAP_SPIRAM);
+    StackType_t *stack = heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
+    if (!q_storage || !stack) {
+        heap_caps_free(q_storage);
+        heap_caps_free(stack);
+        ESP_LOGE(TAG, "ui_post alloc failed - falling back to locked direct calls");
+        return;
+    }
+    s_ui_post_q = xQueueCreateStatic(32, sizeof(ui_post_item_t), q_storage, &q_cb);
+    xTaskCreateStaticPinnedToCore(ui_post_task, "ui_post", 3072 / sizeof(StackType_t), NULL, 6, stack, &tcb, 1);
+}
+
+/* LVGL 태스크 밖에서 LVGL 쪽 일을 넘길 때 — 막히지 않음(큐가 차면 경고 후 버림) */
+static void ui_post(lv_async_cb_t cb, void *arg)
+{
+    if (!s_ui_post_q) {
+        if (esp_lv_adapter_lock(-1) == ESP_OK) {   /* 초기화 전·할당 실패 — 잠금을 잡고 바로 */
+            lv_async_call(cb, arg);
+            esp_lv_adapter_unlock();
+        }
+        return;
+    }
+    ui_post_item_t it = { .cb = cb, .arg = arg };
+    if (xQueueSend(s_ui_post_q, &it, 0) != pdTRUE) ESP_LOGW(TAG, "ui_post queue full - UI event dropped");
+}
+
+static const uint32_t s_capture_interval_values[]  = { 0, 60, 600, 3600, 10800, 43200 };
 /* 2026-08-10, CAM Deep Sleep 전환 — 이 값이 곧 딥슬립 사이클 길이가 되므로 절전 정도가
  * 극단적으로 갈리는 5단계로 재정의(즉시/빠름/균형/절전/최대절전). 각 값의 의미는
  * s_response_help_texts(아래)와 사용자 확인된 표 그대로 — 반드시 같이 바꿀 것.
@@ -1927,7 +1980,7 @@ static void cb_async_pair_quota_popup(void *user_data)
 static void on_pair_rejected_event(const uint8_t mac[6], node_quota_class_t cls)
 {
     (void)mac;
-    lv_async_call(cb_async_pair_quota_popup, (void *)(intptr_t)cls);
+    ui_post(cb_async_pair_quota_popup, (void *)(intptr_t)cls);
 }
 
 static void cb_pair_confirm(lv_event_t *e)
@@ -2336,7 +2389,7 @@ static void cb_async_photo_result(void *user_data)
 
 static void on_photo_result_event(void)
 {
-    lv_async_call(cb_async_photo_result, NULL);
+    ui_post(cb_async_photo_result, NULL);
 }
 
 /* 연결/끊기판 — 카메라 판넬이 다음 1초 대시보드 틱까지 안 기다리고 즉시 갱신되게(사용자
@@ -2353,7 +2406,7 @@ static void cb_async_connect_result(void *user_data)
 
 static void on_connect_result_event(void)
 {
-    lv_async_call(cb_async_connect_result, NULL);
+    ui_post(cb_async_connect_result, NULL);
 }
 
 /* 2026-09-19(사진목록 UI 로컬화) — 행의 LVGL user_data(void* 한 칸)에 (kind,seq)를 담아야
@@ -4652,9 +4705,9 @@ static void cb_async_stats_appended(void *arg)
     if (!refresh_stats_table()) report_sd_io_fail("record table");
 }
 
-static void on_stats_appended(void)  /* ESP-NOW 처리 태스크에서 불림 */
+static void on_stats_appended(void)  /* 기록 태스크(stats_wr)에서 불림 — 2026-10-09 ui_post로 */
 {
-    lv_async_call(cb_async_stats_appended, NULL);
+    ui_post(cb_async_stats_appended, NULL);
 }
 
 static void stats_prev_page_cb(lv_event_t *e)
@@ -6081,7 +6134,7 @@ static void wifi_test_stage_async_cb(void *user_data)
 static void cb_wifi_test_connect_stage(wifi_sta_test_stage_t stage, void *ctx)
 {
     (void)ctx;
-    lv_async_call(wifi_test_stage_async_cb, (void *)(uintptr_t)stage);
+    ui_post(wifi_test_stage_async_cb, (void *)(uintptr_t)stage);
 }
 
 static void cb_wifi_test_connect_result(bool success, void *ctx)
@@ -6096,7 +6149,7 @@ static void cb_wifi_test_connect_result(bool success, void *ctx)
      * 여기선 예약만 하고 바로 리턴 — WiFi 이벤트 태스크 스택 사용량을 최소화함.
      * (sys_evt 태스크 스택 자체도 2304->6144로 확대했지만, 애초에 이 무거운 작업을
      * 그 태스크에서 안 하는 게 더 근본적인 수정) */
-    lv_async_call(wifi_test_result_async_cb, (void *)(uintptr_t)success);
+    ui_post(wifi_test_result_async_cb, (void *)(uintptr_t)success);
 }
 
 static void cb_wifi_connect_btn(lv_event_t *e)
@@ -6602,7 +6655,7 @@ static bool run_on_lvgl_task(bool (*fn)(void *arg), void *arg, uint32_t timeout_
     s_inject_fn  = fn;
     s_inject_arg = arg;
     xSemaphoreTake(s_inject_done_sem, 0);  /* 이전에 남아있을 수 있는 신호 비움 */
-    lv_async_call(cb_async_inject_trampoline, NULL);
+    ui_post(cb_async_inject_trampoline, NULL);
     if (xSemaphoreTake(s_inject_done_sem, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return false;
     return s_inject_result;
 }
@@ -7501,6 +7554,7 @@ void ui_init(void)
 
     /* 2026-09-04(사용자 설계: "이벤트로 처리해") — 사진/목록/연결 완료 이벤트에 앱 쪽 반응을
      * 등록. 매틱 폴링하던 refresh_dashboard()의 해당 부분은 제거하고 여기로 옮김 */
+    ui_post_init();  /* 2026-10-09 — 아래 콜백들은 다른 태스크에서 불려 ui_post로 LVGL에 넘김 */
     photo_rx_set_ready_cb(on_photo_result_event);
     node_hub_set_connect_event_cb(on_connect_result_event);
     node_hub_set_pair_rejected_cb(on_pair_rejected_event);

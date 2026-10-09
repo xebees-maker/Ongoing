@@ -29,6 +29,11 @@ typedef struct {
 } dev_log_entry_t;
 
 static dev_log_entry_t *s_ring = NULL;
+/* 2026-10-09(사용자 결정 — D 저장 수준이면 링 400줄이 약 30초 분량이라 사후 분석에 못 씀) — 경고·에러(W/E) 줄만 따로 오래 남김
+ * (PSRAM, 2000줄 ≈ 280KB). /api/devlog_dump?lvl=we 로 읽음. 재부팅하면 지워짐 */
+#define DEV_LOG_WE_ENTRIES 2000
+static dev_log_entry_t *s_we_ring = NULL;
+static uint32_t s_we_head = 0;
 static uint32_t s_head = 0;       /* 다음에 쓸 자리(누적 번호 — % DEV_LOG_ENTRIES) */
 static volatile uint32_t s_seq = 0;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -105,6 +110,10 @@ static int dev_log_vprintf(const char *fmt, va_list ap)
     s_ring[s_head % DEV_LOG_ENTRIES] = e;
     s_head++;
     s_seq++;
+    if (s_we_ring && (e.lvl == 'E' || e.lvl == 'W')) {
+        s_we_ring[s_we_head % DEV_LOG_WE_ENTRIES] = e;
+        s_we_head++;
+    }
     taskEXIT_CRITICAL(&s_lock);
     return ret;
 }
@@ -146,6 +155,7 @@ void dev_log_init(void)
 {
     if (s_ring) return;
     s_ring = heap_caps_calloc(DEV_LOG_ENTRIES, sizeof(dev_log_entry_t), MALLOC_CAP_SPIRAM);
+    s_we_ring = heap_caps_calloc(DEV_LOG_WE_ENTRIES, sizeof(dev_log_entry_t), MALLOC_CAP_SPIRAM);  /* 실패해도 기본 링은 동작 */
     load_cfg();
     apply_levels();
     if (!s_ring) {
@@ -269,6 +279,31 @@ size_t dev_log_dump(char *out, size_t out_cap)
     for (uint32_t k = 0; k < count; k++) {
         const dev_log_entry_t *e = &snap[k];
         int w = snprintf(out + pos, out_cap - pos, "%s %c %-5s %s\n", e->ts, e->lvl, e->tag, e->text);
+        if (w <= 0 || (size_t)w >= out_cap - pos) break;
+        pos += (size_t)w;
+    }
+    return pos;
+}
+
+/* 2026-10-09 — 경고·에러 링 덤프(오래된 것부터). 한 줄씩 잠금 안에서 복사(큰 스냅샷 버퍼를 따로 두지 않음) */
+size_t dev_log_dump_we(char *out, size_t out_cap)
+{
+    if (!out || out_cap == 0) return 0;
+    out[0] = '\0';
+    if (!s_we_ring) return 0;
+    taskENTER_CRITICAL(&s_lock);
+    uint32_t head = s_we_head;
+    taskEXIT_CRITICAL(&s_lock);
+    uint32_t count = head < DEV_LOG_WE_ENTRIES ? head : DEV_LOG_WE_ENTRIES;
+    static dev_log_entry_t *one = NULL;
+    if (!one) one = heap_caps_malloc(sizeof(dev_log_entry_t), MALLOC_CAP_SPIRAM);
+    if (!one) return 0;
+    size_t pos = 0;
+    for (uint32_t k = 0; k < count; k++) {
+        taskENTER_CRITICAL(&s_lock);
+        *one = s_we_ring[(head - count + k) % DEV_LOG_WE_ENTRIES];
+        taskEXIT_CRITICAL(&s_lock);
+        int w = snprintf(out + pos, out_cap - pos, "%s %c %-5s %s\n", one->ts, one->lvl, one->tag, one->text);
         if (w <= 0 || (size_t)w >= out_cap - pos) break;
         pos += (size_t)w;
     }

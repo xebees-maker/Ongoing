@@ -477,6 +477,7 @@ void node_hub_on_bridge_reset(void)
     xSemaphoreGive(s_nodes_mutex);
     photo_rx_reset_sessions();
     ESP_LOGW(TAG, "Bridge rebooted - node state reset (%d nodes)", s_node_count);
+    alarm_record(NOTIFY_TYPE_CAN, "Bridge restarted", "Bridge restarted - node links reset (%d nodes)", s_node_count);  /* 2026-10-09 — 기록만 */
 }
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)

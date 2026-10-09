@@ -476,6 +476,7 @@
   function render(d) {
     checkCleanup(d.cleanup);
     checkAlarms(d.alarm);
+    recAutoRefresh(d.rec);   /* 10-09 — 기록 표를 맨 앞 페이지로 보고 있으면 새 기록이 들어올 때 다시 받음 */
     syncCamStatus(d.nodes);   /* 10-05 — 카메라 팝업이 열려 있으면 지금 촬영 버튼도 바로 */
     renderHeader(d);
     renderSummary(d);
@@ -1728,15 +1729,25 @@
     openSheet(renderRecord);
     loadRecord();
   }
-  function loadRecord() {
-    busyStart('LOADING');
+  /* 10-09(사용자 지시) — 콘 화면처럼 새 기록이 들어오면 표를 갱신. 주화면 내용(WebSocket)의 rec(기록 번호)가 바뀌었고, 기록 표를
+   * 맨 앞(최신) 페이지로 보고 있을 때만 조용히 다시 받음(옛 페이지를 보는 중엔 그대로) */
+  var recSeq = null;
+  function recAutoRefresh(seq) {
+    if (seq == null) return;
+    var changed = recSeq !== null && seq !== recSeq;
+    recSeq = seq;
+    if (changed && sheetRender === renderRecord && rec.page === 0 && rec.data) loadRecord(true);
+  }
+  function loadRecord(quiet) {
+    if (!quiet) busyStart('LOADING');
     api('api/stats/records?page=' + rec.page).then(function (d) {
-      busyEnd();
+      if (!quiet) busyEnd();
       rec.data = d;
       if (sheetRender === renderRecord) renderRecord();
     }).catch(function (e) {
-      busyEnd();
+      if (!quiet) busyEnd();
       if (e && e.handled) return;
+      if (quiet) return;
       if (statsBlockedSd(e)) { alert(S('STR_MSG_STATS_BLOCKED_SD_FAIL')); closeSheet(); return; }
       toast('Error');
     });
