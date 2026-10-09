@@ -2,7 +2,7 @@
    + W6002 원인 확인 + 4시간 무인 로그 (원래 PC, 사용자 부재 중 진행) ==
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
-- 2026-10-09 저녁: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시 안 함(사용자 지시 대기).
+- 2026-10-09 저녁: 원래 PC에서 작업 마침(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리 변경 없음(claude_memory_2026-10-05.zip 최신). sdkconfig 변경 없음. 상시 로그 수집기 계속 돌고 있음.
   git 밖 항목: 콘 LittleFS app.html.gz를 10-09 저녁 SPA로 올려 둠(릴레이 방식 4가지 + 적용 맨 위). 콘 power_relay_timer.bin(새 파일, LittleFS).
   캠 촬영 주기 1분(장시간 시험 중).
