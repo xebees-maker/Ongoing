@@ -368,6 +368,8 @@ typedef enum {
     /* 주화면 요약 문장 — 언어별 어순 틀. {act} {item} {dir} {value}를 채움(콘·웹 공용) */
     STR_FMT_RELAY_SUMMARY,
     /* 2026-10-09 — 릴레이 타이머(할 일 AG) */
+    STR_LABEL_RELAY_MODE,             /* 2026-10-09(사용자 설계) — 강제가 꺼졌을 때의 방식 */
+    STR_OPT_RELAY_MODE_LIST,          /* 타이머 / 센서 AI / 센서 수동 */
     STR_LABEL_TIMER_ON,
     STR_LABEL_TIMER_OFF,
     STR_LABEL_DAY_NIGHT,

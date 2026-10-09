@@ -796,12 +796,14 @@
     var h = sheetHead('STR_PANEL_POWER_CONTROL');
     h += '<div class="field"><label for="rAlias">' + esc(S('STR_LABEL_ALIAS')) + '</label><input type="text" id="rAlias" maxlength="' + d.alias_max +
          '" value="' + esc(rl.alias) + '" placeholder="' + esc(name) + '"><button id="rAliasApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
-    h += '<div class="field">' + (f.tm ? '<span class="grow"></span>' : '<label>' + esc(S('STR_LABEL_AI_MODE').replace(':', '')) + '</label>' + toggleHtml('rAi', f.ai)) +
-         '<label style="text-align:right">' + esc(S('STR_LABEL_MANUAL_MODE')) + '</label>' + toggleHtml('rManual', f.manual) + '</div>';
+    /* 10-09(사용자 설계) — 맨 위 줄: 왼쪽 강제, 오른쪽 방식(타이머 / 센서 AI / 센서 수동). 강제 중엔 방식·판넬 비활성 */
+    var mode = f.tm ? 0 : (f.ai ? 1 : 2);
+    h += '<div class="field"><label>' + esc(S('STR_LABEL_MANUAL_MODE')) + '</label>' + toggleHtml('rManual', f.manual) +
+         '<label style="text-align:right">' + esc(S('STR_LABEL_RELAY_MODE')) + '</label>' +
+         sel('rMode', 'STR_OPT_RELAY_MODE_LIST', [0, 1, 2], mode, f.manual ? ' disabled' : '') + '</div>';
     h += '<div class="grayp' + (f.manual ? ' off' : '') + '">';
     /* 입력 칸은 언어와 상관없이 같은 배치(사용자 결정): 동작 / 항목 / 조건 */
-    h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ACTION')) + '</label>' + sel('rZ', 'STR_OPT_TURN_ACTION_LIST', [1, 0, 2], f.tm ? 2 : (f.z ? 1 : 0)) + '</div>';
-    if (f.tm) {   /* 10-09(할 일 AG) — 동작 = 타이머: 항목·조건·고급 대신 타이머 칸(콘 relay_build_timer_box와 같은 배치) */
+    if (f.tm) {   /* 10-09(할 일 AG) — 방식 = 타이머: 동작·항목·조건·고급 대신 타이머 칸(콘 relay_build_timer_box와 같은 배치) */
       var t = f.t;
       function tb(key, txt) { return '<button class="vbtn" data-troll="' + key + '">' + esc(txt) + '</button>'; }
       h += '<div class="field"><label>' + esc(S(t.dn ? 'STR_LABEL_DAY_ON' : 'STR_LABEL_TIMER_ON')) + '</label>' + tb('on', fmtDur(t.on)) +
@@ -819,6 +821,7 @@
       rlDirty();
       return;
     }
+    h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ACTION')) + '</label>' + sel('rZ', 'STR_OPT_TURN_ACTION_LIST', [1, 0], f.z ? 1 : 0) + '</div>';
     h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ITEM')) + '</label>' +
          sel('rChan', 'STR_OPT_CHAN_TYPE_LIST', d.chans.map(function (c) { return c.type; }), f.chan) + '</div>';
     h += '<div class="sent"><span class="grow">' + esc(S('STR_LABEL_RELAY_CONDITION')) + '</span>' + sel('rY', 'STR_OPT_RISE_FALL_LIST', [1, 0], f.y ? 1 : 0) +
@@ -941,17 +944,18 @@
       post('api/relay/alias?idx=' + d.idx, v).then(function () { rl.alias = v; $('rAliasApply').disabled = true; toast(S('STR_BTN_APPLY') + ' \u2713'); })
         .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
     });
-    on('rAi', 'change', function () { f.ai = this.checked; if (f.ai) f.manual = false; renderRelay(); });
+    on('rMode', 'change', function () {   /* 10-09 — 0 타이머 / 1 센서 AI / 2 센서 수동(강제와는 별개 — 예전 AI·수동 배타 없앰) */
+      var v = +this.value;
+      f.tm = (v === 0);
+      if (v !== 0) f.ai = (v === 1);
+      renderRelay();
+    });
     on('rManual', 'change', function () {
       if (this.checked) {
         confirmOverride(d.idx, function () { closeSheet(); }, function () { renderRelay(); });
       } else { f.manual = false; renderRelay(); }
     });
-    on('rZ', 'change', function () {   /* 10-09 — 2 = 타이머(조건의 켬/끔은 그대로 둠) */
-      var v = this.value;
-      if (v === '2') f.tm = true; else { f.tm = false; f.z = v === '1'; }
-      renderRelay();
-    });
+    on('rZ', 'change', function () { f.z = this.value === '1'; rlDirty(); });
     on('rDn', 'change', function () { f.t.dn = this.checked; renderRelay(); });
     [].forEach.call(document.querySelectorAll('[data-troll]'), function (btn) {
       btn.addEventListener('click', function () { openTimeRoller(btn.getAttribute('data-troll')); });
