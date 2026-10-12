@@ -8597,6 +8597,22 @@ static void cb_cam_light_test_switch(lv_event_t *e)
     ESP_LOGI(TAG, "Cam light %s -> %s queued", on ? "on" : "off", s_device_popup_node.name);
 }
 
+/* 2026-10-13(사용자 지시) — 센서 보정 초기화(SCD41): 확인 창 → CASK 할일 큐(센스가 깨어나면 실행, 결과는 알림 목록) */
+static void cb_sens_calib_reset_confirm(void *ctx)
+{
+    node_hub_node_t *node = (node_hub_node_t *)ctx;
+    node_hub_sens_calib_reset(node->mac);
+    show_toast(ui_str(STR_MSG_CALIB_RESET_QUEUED), lv_palette_main(LV_PALETTE_BLUE));
+}
+
+static void cb_sens_calib_reset_clicked(lv_event_t *e)
+{
+    (void)e;
+    char msg[160];
+    snprintf(msg, sizeof(msg), "%s\n%s", s_device_popup_node.name, ui_str(STR_MSG_CALIB_RESET_CONFIRM));
+    show_confirm_popup(msg, MODAL_KIND_WARNING, cb_sens_calib_reset_confirm, &s_device_popup_node);
+}
+
 static void build_device_popup(const uint8_t *mac, const char *name, bool is_sensor)
 {
     if (s_device_popup) return;  /* 이미 열려있음 */
@@ -8802,6 +8818,22 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_obj_set_style_text_font(light_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_t *light_sw = lv_switch_create(light_cluster);
         lv_obj_add_event_cb(light_sw, cb_cam_light_test_switch, LV_EVENT_VALUE_CHANGED, NULL);
+
+        disconnect_parent = bottom_row;
+    } else if (sens_kind_store_get(mac) == SENSOR_KIND_SCD41) {
+        /* 2026-10-13(사용자 지시) — SCD41 센서면 같은 줄 왼쪽에 보정 초기화, 연결끊기는 오른쪽(카메라 조명 시험 줄과 같은 배치) */
+        lv_obj_t *bottom_row = lv_obj_create(popup);
+        lv_obj_set_size(bottom_row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(bottom_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(bottom_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(bottom_row, 0, 0);
+        lv_obj_set_style_pad_all(bottom_row, 0, 0);
+
+        lv_obj_t *calib_btn = lv_button_create(bottom_row);
+        lv_obj_add_event_cb(calib_btn, cb_sens_calib_reset_clicked, LV_EVENT_CLICKED, NULL);
+        lv_obj_t *calib_lbl = lv_label_create(calib_btn);
+        lv_label_set_text(calib_lbl, ui_str(STR_BTN_CALIB_RESET));
+        lv_obj_set_style_text_font(calib_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
         disconnect_parent = bottom_row;
     }
@@ -10867,6 +10899,10 @@ static bool web_op_execute(const ui_web_op_t *op)
             if (!value_in(s_xclk_values, sizeof(s_xclk_values) / sizeof(s_xclk_values[0]), op->value)) return false;
             node_hub_apply_cam_xclk_mhz(op->mac, (uint8_t)op->value);
             ui_log_add("XCLK saved (web) - applied on next CAM wake");
+            return true;
+        case UI_WEB_OP_SENS_CALIB_RESET:   /* cb_sens_calib_reset_confirm과 같은 명령 */
+            if (sens_kind_store_get(op->mac) != SENSOR_KIND_SCD41) return false;
+            node_hub_sens_calib_reset(op->mac);
             return true;
         case UI_WEB_OP_CAM_LIGHT: {
             /* cb_cam_light_test_switch와 같은 명령 */

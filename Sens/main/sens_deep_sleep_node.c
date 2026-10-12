@@ -442,11 +442,62 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
 }
 #endif
 
+/* 2026-10-13(사용자 지시 — 펌웨어 다시 빌드 없이 SCD41 보정 이력 되돌리기) — SENS_CALIB_RESET 처리. 수신 콜백에서 불리므로
+ * 실행(약 2.5초)은 별도 태스크로, 끝나면 결과 응답. 같은 seq 재시도면 다시 하지 않고 저장해 둔 결과로 응답(RTC — 딥슬립에도 유지).
+ * 측정·딥슬립 전에 calib_wait_idle()로 끝나기를 기다림(I2C를 같이 쓰지 않게, 실행 중에 잠들지 않게) */
+static volatile bool s_calib_busy = false;
+static RTC_DATA_ATTR bool     s_calib_done_valid = false;
+static RTC_DATA_ATTR uint16_t s_calib_done_seq = 0;
+static RTC_DATA_ATTR uint8_t  s_calib_done_result = 0, s_calib_done_asc = 0xFF;
+static uint16_t s_calib_run_seq = 0;
+
+#if CONFIG_SENS_SENSOR_SCD41
+static void calib_task(void *arg)
+{
+    (void)arg;
+    uint8_t asc = 0xFF;
+    bool ok = scd41_factory_reset(&asc);
+    s_calib_done_seq = s_calib_run_seq;
+    s_calib_done_result = ok ? SENS_CALIB_RESULT_OK : SENS_CALIB_RESULT_CMD_FAIL;
+    s_calib_done_asc = asc;
+    s_calib_done_valid = true;
+    s_calib_busy = false;
+    ESP_LOGW(TAG, "Calibration reset seq=%u result=%u asc=%u", (unsigned)s_calib_done_seq, (unsigned)s_calib_done_result, (unsigned)asc);
+    esp_now_node_send_calib_ack(s_calib_done_seq, s_calib_done_result, s_calib_done_asc);
+    vTaskDelete(NULL);
+}
+#endif
+
+void sens_node_calib_reset_request(uint16_t seq)
+{
+    if (s_calib_done_valid && seq == s_calib_done_seq) {   /* 재시도 — 이미 실행함 */
+        esp_now_node_send_calib_ack(seq, s_calib_done_result, s_calib_done_asc);
+        return;
+    }
+    if (s_calib_busy) return;   /* 실행 중 재시도 — 끝나면 응답 */
+#if CONFIG_SENS_SENSOR_SCD41
+    s_calib_busy = true;
+    s_calib_run_seq = seq;
+    if (xTaskCreate(calib_task, "calib", 3072, NULL, 5, NULL) != pdPASS) {
+        s_calib_busy = false;
+        esp_now_node_send_calib_ack(seq, SENS_CALIB_RESULT_BUSY, 0xFF);
+    }
+#else
+    esp_now_node_send_calib_ack(seq, SENS_CALIB_RESULT_UNSUPPORTED, 0xFF);
+#endif
+}
+
+static void calib_wait_idle(void)
+{
+    for (int i = 0; i < 60 && s_calib_busy; i++) vTaskDelay(pdMS_TO_TICKS(100));   /* 최대 6초(실행 약 2.5초) */
+}
+
 /* 2026-09-12(사용자 지시 — "같은 루틴, 변수만 다르게") — 센서 종류별 실제 판독 하나로
  * 모음. SCD41은 트리거+블로킹폴링(위), MQ137은 이미 히터가 외부전원으로 항상 예열돼
  * 있어서(배터리가 아니라 상시전원 전제) 트리거/대기 없이 즉시 읽으면 됨 */
 static bool measure_sensor(float out[SENSOR_CHAN_COUNT])
 {
+    calib_wait_idle();   /* 2026-10-13 */
 #if CONFIG_SENS_SENSOR_SCD41
     return measure_scd41(out);
 #elif CONFIG_SENS_SENSOR_MQ137
@@ -911,6 +962,7 @@ void app_main(void)
     uint32_t actual_sleep_sec = (sleep_sec > measurement_elapsed_sec)
                                      ? sleep_sec - measurement_elapsed_sec : 0;
 
+    calib_wait_idle();   /* 2026-10-13 — 보정 초기화 중엔 잠들지 않음 */
     esp_now_node_note_sleep_entry();
     ESP_LOGI(TAG, "Deep sleep: wake in %us (requested %us, %us spent measuring)",
              (unsigned)actual_sleep_sec, (unsigned)sleep_sec, (unsigned)measurement_elapsed_sec);

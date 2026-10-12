@@ -416,6 +416,9 @@ typedef enum {
     STR_AGAR_SLOT_FMT,           /* 기기 없는 Agar 슬롯 이름, %d=1..3 */
     STR_LABEL_SCREEN_OFF,        /* 2026-09-29 — 설정: 화면 자동 꺼짐 */
     STR_OPT_SCREEN_OFF_LIST,     /* 2026-09-29 — Off/1분/5분/10분(ui_main.c s_screen_off_values와 같은 순서) */
+    STR_BTN_CALIB_RESET,         /* 2026-10-13 — 센서 팝업(SCD41) 보정 초기화 버튼 */
+    STR_MSG_CALIB_RESET_CONFIRM, /* 2026-10-13 — 위 확인 문구 */
+    STR_MSG_CALIB_RESET_QUEUED,  /* 2026-10-13 — 요청을 넣은 뒤 안내 */
     STR_LABEL_LIGHT_TEST,        /* 2026-09-29 — 카메라 팝업 조명 시험 스위치: "조명 테스트" / "Light Test" */
 
     STR_COUNT,

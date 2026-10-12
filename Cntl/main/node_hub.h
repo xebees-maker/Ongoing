@@ -280,6 +280,10 @@ void node_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec);
 /* 2026-09-05 — 촬영주기와 동일 패턴(센스별 설정, device_config의 mac 키 슬롯에 저장 후
  * 그 mac에만 SENS_CONFIG_SET 재전송). 설정-측정기 목록에서 선택된 센서 하나에 적용 */
 void node_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec);
+
+/* 2026-10-13(사용자 지시) — 센서 보정 초기화(SCD41 공장 초기화 + ASC 끔)를 CASK 할일 큐에 넣음. 센스가 깨어나면 실행하고,
+ * 결과(SENS_CALIB_RESET_ACK)는 알림 목록에 기록(푸시 없음) */
+void node_hub_sens_calib_reset(const uint8_t *mac);
 /* 반환값(2026-08-10) — 지금 라디오레벨로 살아있는(paired==true) CAM이 하나라도 있어서 실제로
  * push_cam_config_to()를 시도했으면 true. false면 대상이 하나도 없어 아무 것도 안 보냈다는
  * 뜻 — 호출부(ui_main.c)가 이 경우 응답 대기 팝업을 띄우지 않고 "저장만 됨" 안내로 대체함

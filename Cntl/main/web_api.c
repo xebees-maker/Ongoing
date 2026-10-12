@@ -2,6 +2,7 @@
 #include "web_auth.h"
 #include "web_session.h"
 #include "node_hub.h"
+#include "sens_kind_store.h"
 #include "device_config.h"
 #include "power_relay.h"
 #include "storage_mgr.h"
@@ -491,6 +492,7 @@ static esp_err_t api_device_get_handler(httpd_req_t *req)
     } else {
         jb_printf(&b, ",\"interval_s\":%lu,\"opt_interval\":", (unsigned long)device_config_get_sens_sample_interval_sec(nd->mac));
         jb_values(&b, 0);
+        jb_printf(&b, ",\"calib\":%s", sens_kind_store_get(nd->mac) == SENSOR_KIND_SCD41 ? "true" : "false");   /* 2026-10-13 — 보정 초기화 버튼 */
     }
     jb_printf(&b, "}");
     esp_err_t ret = send_jbuf(req, &b);
@@ -510,6 +512,7 @@ static esp_err_t api_device_set_post_handler(httpd_req_t *req)
     static const struct { const char *key; ui_web_op_type_t type; } keys[] = {
         { "alias", UI_WEB_OP_ALIAS }, { "interval", UI_WEB_OP_SENS_INTERVAL }, { "capture", UI_WEB_OP_CAM_CAPTURE },
         { "agc", UI_WEB_OP_CAM_AGC }, { "aec", UI_WEB_OP_CAM_AEC }, { "xclk", UI_WEB_OP_CAM_XCLK }, { "light", UI_WEB_OP_CAM_LIGHT },
+        { "calib_reset", UI_WEB_OP_SENS_CALIB_RESET },   /* 2026-10-13 — val 무시 */
     };
     op->type = 0;
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) if (strcmp(s_w->key, keys[i].key) == 0) op->type = keys[i].type;

@@ -19,6 +19,7 @@ static const char *TAG = "SENS";
 #define CMD_GET_DATA_READY_STATUS       0xE4B8
 #define CMD_READ_MEASUREMENT            0xEC05
 #define CMD_REINIT                      0x3646
+#define CMD_PERFORM_FACTORY_RESET       0x3632  /* 2026-10-13 — 실행 1200ms */
 
 #define I2C_TIMEOUT_MS         1000
 #define REINIT_FAIL_THRESHOLD  3       /* 연속 통신 실패 횟수 — 도달 시 측정 재시작 시퀀스 재실행 */
@@ -387,6 +388,26 @@ void scd41_ensure_asc_off(void)
     bool rb_ok = read_words(0x2313, &after, 1);
     ESP_LOGW(TAG, "SCD4x ASC: was on -> set=%s persist=%s readback=%s%u",
              err == ESP_OK ? "ACK" : "NACK", persist_ok ? "ACK" : "NACK", rb_ok ? "" : "(fail) ", (unsigned)after);
+}
+
+/* 2026-10-13(사용자 지시 — 보정 이력이 +1000ppm으로 꼬였던 일) — perform_factory_reset(0x3632): EEPROM 설정과 FRC·ASC 이력을
+ * 지우고 공장 보정으로. 데이터시트: stop 뒤 500ms는 명령을 안 받음, 초기화 실행 1200ms. 초기화로 ASC가 다시 켜지므로 끄고 persist
+ * (scd41_ensure_asc_off — 이번 전원에서 이미 한 번 썼어도 이건 새 요청이라 다시 허용). 10-13 실기: 1400~1550 → 408~526ppm */
+bool scd41_factory_reset(uint8_t *asc_after)
+{
+    if (asc_after) *asc_after = 0xFF;
+    if (!s_dev) return false;
+    scd41_wake_up();
+    bool stop_ok = send_cmd(CMD_STOP_PERIODIC_MEASUREMENT);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    bool reset_ok = send_cmd(CMD_PERFORM_FACTORY_RESET);
+    vTaskDelay(pdMS_TO_TICKS(1200));
+    s_asc_write_tried = false;
+    scd41_ensure_asc_off();
+    uint16_t asc = 0xFFFF;
+    if (read_words(0x2313, &asc, 1) && asc_after) *asc_after = (uint8_t)asc;
+    ESP_LOGW(TAG, "SCD4x factory reset: stop=%s reset=%s asc=%u", stop_ok ? "ACK" : "NACK", reset_ok ? "ACK" : "NACK", (unsigned)asc);
+    return reset_ok;
 }
 
 /* 2026-10-06(시험 — Sensirion 단발 예제 그대로) — 공식 wakeUp(): 0x36F6을 보내고 결과는 무시, 30ms 대기.

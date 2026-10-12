@@ -214,6 +214,14 @@ static esp_err_t send_reply(const uint8_t *mac, const void *msg, size_t len)
     return err;
 }
 
+/* 2026-10-13 — 보정 초기화 결과 응답(실행 태스크 문맥에서 불림) */
+void esp_now_node_send_calib_ack(uint16_t seq, uint8_t result, uint8_t asc_after)
+{
+    esp_now_sens_calib_reset_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SENS_CALIB_RESET_ACK,
+                                           .seq = seq, .result = result, .asc_after = asc_after };
+    send_reply(s_hub_mac, &ack, sizeof(ack));
+}
+
 static void reply_task(void *arg)
 {
     (void)arg;
@@ -313,6 +321,14 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (s_conn_state != SENS_CONN_PAIRED || len < (int)sizeof(esp_now_cask_work_none_t)) return;
         esp_now_cask_work_none_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CASK_WORK_NONE_ACK };
         send_reply(s_hub_mac, &ack, sizeof(ack));
+        return;
+    }
+
+    /* 2026-10-13 — 센서 보정 초기화. 실행·응답은 sens_deep_sleep_node.c(같은 seq 재시도면 저장해 둔 결과로 다시 응답) */
+    if (msg_type == ESP_NOW_MSG_SENS_CALIB_RESET) {
+        if (s_conn_state != SENS_CONN_PAIRED || len < (int)sizeof(esp_now_sens_calib_reset_t)) return;
+        const esp_now_sens_calib_reset_t *msg = (const esp_now_sens_calib_reset_t *)data;
+        sens_node_calib_reset_request(msg->seq);
         return;
     }
 

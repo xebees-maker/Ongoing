@@ -398,6 +398,11 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_AGAR_SLOT_FMT]           = { "Agar %d",       "Agar %d" },
     [STR_LABEL_SCREEN_OFF]        = { "화면 자동 꺼짐", "Screen off" },
     [STR_OPT_SCREEN_OFF_LIST]     = { "끄기\n1분\n5분\n10분", "Off\n1 min\n5 min\n10 min" },
+    [STR_BTN_CALIB_RESET]         = { "보정 초기화",   "Calib Reset" },
+    [STR_MSG_CALIB_RESET_CONFIRM] = { "센서 보정을 공장 상태로 되돌릴까요?\n센스가 깨어나면 실행합니다.",
+                                      "Reset sensor calibration to factory?\nRuns when the sensor wakes." },
+    [STR_MSG_CALIB_RESET_QUEUED]  = { "센스가 깨어나면 실행합니다. 결과는 알림 목록에 남습니다.",
+                                      "Runs when the sensor wakes. The result goes to the alarm list." },
     [STR_LABEL_LIGHT_TEST]        = { "조명 테스트",   "Light Test" },
 };
 

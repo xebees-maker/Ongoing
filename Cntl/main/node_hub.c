@@ -23,6 +23,13 @@
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "esp_random.h"
+
+/* 2026-10-13 — seq는 요청마다 새로(시작값은 무작위 — 콘이 재부팅해도 센스가 RTC에 기억한 지난 seq와 겹치지 않게) */
+static uint16_t s_calib_seq = 0;
+static uint16_t s_calib_recorded_seq = 0;
+static bool     s_calib_recorded_valid = false;
+
 
 static const char *TAG = "CASK";
 static const char *TAG_LINK = "LINK";
@@ -620,6 +627,25 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             };
             can_bridge_relay_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
         }
+
+    } else if (msg_type == ESP_NOW_MSG_SENS_CALIB_RESET_ACK) {
+        /* 2026-10-13 — 센서 보정 초기화 결과. 같은 seq는 한 번만 기록(재시도 응답) */
+        if (len < (int)sizeof(esp_now_sens_calib_reset_ack_t)) return;
+        esp_now_sens_calib_reset_ack_t a;
+        memcpy(&a, data, sizeof(a));
+        if (s_calib_recorded_valid && a.seq == s_calib_recorded_seq) return;
+        s_calib_recorded_valid = true;
+        s_calib_recorded_seq = a.seq;
+        char nm[64] = "?";
+        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        node_hub_node_t *cn = find_node(info->src_addr);
+        if (cn) snprintf(nm, sizeof(nm), "%s", alarm_name(cn));
+        xSemaphoreGive(s_nodes_mutex);
+        static const char *const s_res[] = { "OK", "command failed", "not supported", "busy" };
+        const char *res = a.result < 4 ? s_res[a.result] : "?";
+        ESP_LOGW(TAG, "Calibration reset %s: %s (ASC %u)", nm, res, (unsigned)a.asc_after);
+        alarm_record(NOTIFY_TYPE_WARN, "Calibration reset", "%s sensor calibration reset: %s (ASC %s)", nm, res,
+                     a.asc_after == 0 ? "off" : a.asc_after == 1 ? "on" : "?");
 
     } else if (msg_type == ESP_NOW_MSG_LINK_DIAG) {
         /* 2026-10-08(사후 분석용) — 노드가 끊겼다 다시 붙으며 보낸 "끊긴 동안 요약". Dev Log + 알림 기록(푸시 없음) */
@@ -1222,6 +1248,16 @@ void node_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
 {
     /* 2026-09-26(사용자 설계) — 저장만. 캠이 깨어날 때 CASK CONFIG로 전달됨(push_cam_config_to 주석) */
     device_config_set_cam_capture_interval_sec(mac, sec);
+}
+
+void node_hub_sens_calib_reset(const uint8_t *mac)
+{
+    if (s_calib_seq == 0) s_calib_seq = (uint16_t)(esp_random() | 1u);
+    esp_now_sens_calib_reset_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SENS_CALIB_RESET, .seq = ++s_calib_seq };
+    static const uint8_t s_calib_ack_types[] = { ESP_NOW_MSG_SENS_CALIB_RESET_ACK };
+    /* 센스는 실행(약 2.5초)이 끝난 뒤 응답 — 한 번 기다리는 시간을 그보다 길게 */
+    node_hub_queue_action(mac, &msg, sizeof(msg), s_calib_ack_types, 1, 4000, 2, "Calib reset");
+    ESP_LOGI(TAG, "Calibration reset seq=%u queued", (unsigned)msg.seq);
 }
 
 void node_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec)

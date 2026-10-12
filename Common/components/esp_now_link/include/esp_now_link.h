@@ -174,6 +174,9 @@ typedef enum {
     ESP_NOW_MSG_CAM_LIGHT_ACK = 56,          /* CAM -> Cntl: 같은 구조체, msg_type만 바꿈 */
     /* 2026-10-08(사용자 지시 — 캠이 "콘 찾는 중" LED로 멈춰 콘·브가 아무것도 못 받은 일, 사후 분석용) */
     ESP_NOW_MSG_LINK_DIAG = 57,              /* CAM/Sens -> Cntl: 끊겼다 다시 붙을 때 끊긴 동안 요약(esp_now_link_diag_t), 응답 없음 */
+    /* 2026-10-13(사용자 지시 — SCD41 보정 이력이 +1000ppm으로 꼬였던 일, 펌웨어 다시 빌드 없이 되돌리기) — CASK 할일 큐로 전달 */
+    ESP_NOW_MSG_SENS_CALIB_RESET = 58,       /* Cntl -> Sens: esp_now_sens_calib_reset_t — 센서 공장 초기화 */
+    ESP_NOW_MSG_SENS_CALIB_RESET_ACK = 59,   /* Sens -> Cntl: esp_now_sens_calib_reset_ack_t — 실행 결과(실행이 끝난 뒤 응답) */
 } esp_now_msg_type_t;
 
 /* ESP_NOW_MSG_SLEEP_NOW 페이로드. ESP_NOW_MSG_SLEEP_NOW_ACK도 이 구조체를 msg_type만 바꿔
@@ -271,6 +274,29 @@ typedef struct __attribute__((packed)) {
     uint32_t ack_rx;       /* ADVERTISE_ACK 받음 */
     uint16_t sweeps;       /* 13채널 스윕 완료 수 */
 } esp_now_link_diag_t;
+
+/* ESP_NOW_MSG_SENS_CALIB_RESET(2026-10-13) — seq는 같은 요청의 재시도 구분용(센스는 이미 실행한 seq면 다시 하지 않고
+ * 저장해 둔 결과로 응답, 콘은 같은 seq의 결과를 한 번만 기록) */
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint16_t seq;
+} esp_now_sens_calib_reset_t;
+
+typedef enum {
+    SENS_CALIB_RESULT_OK          = 0,
+    SENS_CALIB_RESULT_CMD_FAIL    = 1,   /* 공장 초기화 명령 NACK */
+    SENS_CALIB_RESULT_UNSUPPORTED = 2,   /* 이 센스의 센서는 보정 초기화 없음 */
+    SENS_CALIB_RESULT_BUSY        = 3,   /* 실행 태스크를 못 만듦 */
+} sens_calib_result_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint16_t seq;
+    uint8_t  result;      /* sens_calib_result_t */
+    uint8_t  asc_after;   /* 초기화 뒤 ASC(0 꺼짐, 1 켜짐, 0xFF 못 읽음) */
+} esp_now_sens_calib_reset_ack_t;
 
 /* ESP_NOW_MSG_CAM_LIGHT_SET / _ACK(2026-09-29, 임시 시험용) */
 typedef struct __attribute__((packed)) {

@@ -40,6 +40,7 @@ typedef enum {
     UI_WEB_OP_CAM_AGC,         /* value = 0/1 */
     UI_WEB_OP_CAM_AEC,         /* value = 0/1 */
     UI_WEB_OP_CAM_XCLK,        /* value = MHz */
+    UI_WEB_OP_SENS_CALIB_RESET, /* 2026-10-13 — 센서 보정 초기화(콘 센서 팝업 버튼과 같은 명령) */
     UI_WEB_OP_CAM_LIGHT,       /* value = 0/1 — 캠 조명 시험(콘 Light Test 스위치와 같은 명령) */
     UI_WEB_OP_UNPAIR,          /* 연결 해제 */
     UI_WEB_OP_RELAY_ALIAS,     /* idx, text — 콘 릴레이 팝업 별명 Apply와 같음 */

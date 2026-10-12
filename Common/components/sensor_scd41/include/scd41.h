@@ -84,6 +84,8 @@ void scd41_diag_get(int *polls, uint16_t *last_status);
 void scd41_log_identity(void);
 /* 2026-10-05 — ASC가 켜져 있으면 끄고 persist(센서당 한 번). 유휴 상태에서 부를 것 */
 void scd41_ensure_asc_off(void);
+/* 2026-10-13 — 센서 공장 초기화(FRC·ASC 이력 지움) 후 ASC 끄고 persist. 약 2.5초 블로킹. asc_after = 끝난 뒤 ASC(0xFF 못 읽음) */
+bool scd41_factory_reset(uint8_t *asc_after);
 /* 2026-10-06(시험) — wake_up(결과 무시, 30ms) */
 void scd41_wake_up(void);
 void scd41_clear_fault(void);
