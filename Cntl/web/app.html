@@ -692,7 +692,9 @@
       h += '<div class="field"><label>' + esc(S('STR_LABEL_SENS_MEASURE_INTERVAL')) + '</label><select id="dInterval">' +
            optionsHtml('STR_OPT_SENS_MEASURE_INTERVAL_LIST', d.opt_interval, d.interval_s) + '</select></div>';
     }
-    h += '<div class="sfoot"><button id="dUnpair" class="danger">' + esc(S('STR_BTN_DISCONNECT')) + '</button></div>';
+    /* 10-13 — SCD41 센서면 맨 아래 줄 왼쪽에 보정 초기화(콘 센서 팝업과 같은 배치) */
+    h += '<div class="sfoot">' + (!cam && d.calib ? '<button id="dCalib">' + esc(S('STR_BTN_CALIB_RESET')) + '</button><span class="grow"></span>' : '') +
+         '<button id="dUnpair" class="danger">' + esc(S('STR_BTN_DISCONNECT')) + '</button></div>';
     $('sheetBody').innerHTML = h;
 
     function setKey(key, val) {
@@ -715,6 +717,12 @@
       $('dLight').addEventListener('change', function () { setKey('light', this.checked ? 1 : 0); });
     } else {
       $('dInterval').addEventListener('change', function () { d.interval_s = +this.value; setKey('interval', this.value); });
+      if ($('dCalib')) $('dCalib').addEventListener('click', function () {   /* 10-13 — 콘 cb_sens_calib_reset_clicked와 같음 */
+        if (!confirm((d.alias || d.name) + '\n' + S('STR_MSG_CALIB_RESET_CONFIRM'))) return;
+        post('api/device/set?mac=' + d.mac + '&key=calib_reset&val=1')
+          .then(function () { toast(S('STR_MSG_CALIB_RESET_QUEUED')); })
+          .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+      });
     }
     $('dUnpair').addEventListener('click', function () {
       if (!confirm((d.alias || d.name) + '\n' + S('STR_MSG_UNPAIR_CONFIRM'))) return;
@@ -1846,7 +1854,8 @@
            '>&gt;</button><button class="small" data-rpg="-10"' + (newer ? '' : ' disabled') + '>' + esc(S('STR_BTN_JUMP_NEXT10')) + '</button></div>';
     }
     $('sheetBody').innerHTML = h;
-    $('recBack').addEventListener('click', function () { openSheet(renderStats); startStatsTimer(); });   /* 콘: 기록 팝업을 닫으면 통계 팝업 */
+    /* 콘: 기록 팝업을 닫으면 통계 팝업. 10-13 — 표를 보는 동안엔 1분 갱신이 건너뛰므로 닫을 때 바로 다시 받음(콘은 타이머가 계속 돎) */
+    $('recBack').addEventListener('click', function () { openSheet(renderStats); loadStats(false); startStatsTimer(); });
     $('recDel').addEventListener('click', function () {
       if (!confirm(S('STR_CONFIRM_DELETE_STATS'))) return;
       post('api/stats/delete_all').then(function () { rec.page = 0; loadRecord(); }).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
