@@ -440,6 +440,28 @@ uint32_t stats_agg_read_window(uint8_t scale_idx, uint32_t window_start_unix, ui
     return picked;
 }
 
+/* 2026-10-14(진단, 임시) — stats_agg_dump(헤더 참고) */
+uint32_t stats_agg_dump(uint8_t scale_idx, uint32_t week, uint32_t start_idx, stats_bucket_t *out, uint32_t out_cap, uint32_t *total)
+{
+    *total = 0;
+    if (scale_idx >= STATS_SCALE_COUNT || !sd_storage_is_mounted()) return 0;
+    lock();
+    char path[48];
+    agg_path(scale_idx, week, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) { unlock(); return 0; }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    *total = (fsize > 0) ? (uint32_t)(fsize / (long)sizeof(stats_bucket_t)) : 0;
+    uint32_t got = 0;
+    if (start_idx < *total && fseek(f, (long)start_idx * (long)sizeof(stats_bucket_t), SEEK_SET) == 0) {
+        got = (uint32_t)fread(out, sizeof(stats_bucket_t), out_cap, f);
+    }
+    fclose(f);
+    unlock();
+    return got;
+}
+
 bool stats_store_had_io_error(void)
 {
     return s_last_io_error;

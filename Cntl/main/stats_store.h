@@ -199,6 +199,9 @@ typedef struct __attribute__((packed)) {
 uint32_t stats_agg_read_window(uint8_t scale_idx, uint32_t window_start_unix, uint32_t window_end_unix,
                                 stats_bucket_t *out, uint32_t out_cap);
 
+/* 2026-10-14(진단, 임시 — 1D/3D 그래프 공백) — 집계 파일(scale, week)을 위치 그대로 읽음. 반환 = 읽은 개수, *total = 파일 칸 수 */
+uint32_t stats_agg_dump(uint8_t scale_idx, uint32_t week, uint32_t start_idx, stats_bucket_t *out, uint32_t out_cap, uint32_t *total);
+
 #ifdef __cplusplus
 }
 #endif
