@@ -3,6 +3,7 @@
 #include "web_session.h"
 #include "node_hub.h"
 #include "sens_kind_store.h"
+#include "sd_health.h"
 #include "device_config.h"
 #include "power_relay.h"
 #include "storage_mgr.h"
@@ -532,6 +533,29 @@ static esp_err_t api_device_set_post_handler(httpd_req_t *req)
     }
     bool ok = ui_main_run_web_op(op, 2000);
     return send_simple(req, ok ? NULL : "400 Bad Request", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+/* 2026-10-14(SD 개선 1단계) — GET /api/sd/health: SD 상태·쓰기 카운터·최근 이상(sd_health_json). 콘 화면은 잠그지 않음 */
+static esp_err_t api_sd_health_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    const size_t cap = 6144;
+    char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    int n = sd_health_json(buf, cap);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t r = httpd_resp_send(req, buf, n);
+    heap_caps_free(buf);
+    return r;
+}
+
+/* 2026-10-14(시험, 임시 — 할 일 AF에서 제거) — POST /api/sdhealth_test: 이상 보고를 한 번 일으켜 5009·푸시·쓰기 중지·해제 경로 확인 */
+static esp_err_t api_sdhealth_test_post_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    sd_health_report(SDH_EV_TEST, "test", 0);
+    return send_simple(req, NULL, "{\"ok\":true}");
 }
 
 /* POST /api/device/unpair?mac= — 연결 해제(콘 Disconnect와 같음) */
@@ -1309,6 +1333,10 @@ void web_api_register_handlers(httpd_handle_t server)
     static const httpd_uri_t stats_delete_all_uri = { .uri = "/api/stats/delete_all", .method = HTTP_POST, .handler = api_stats_delete_all_post_handler };
     httpd_register_uri_handler(server, &stats_uri);
     httpd_register_uri_handler(server, &stats_records_uri);
+    static const httpd_uri_t sd_health_uri = { .uri = "/api/sd/health", .method = HTTP_GET, .handler = api_sd_health_get_handler };
+    httpd_register_uri_handler(server, &sd_health_uri);
+    static const httpd_uri_t sdhealth_test_uri = { .uri = "/api/sdhealth_test", .method = HTTP_POST, .handler = api_sdhealth_test_post_handler };   /* 시험, 임시 */
+    httpd_register_uri_handler(server, &sdhealth_test_uri);
     static const httpd_uri_t stats_aggdump_uri = { .uri = "/api/stats/aggdump", .method = HTTP_GET, .handler = api_stats_aggdump_get_handler };   /* 2026-10-14 진단, 임시 */
     httpd_register_uri_handler(server, &stats_aggdump_uri);
     httpd_register_uri_handler(server, &stats_delete_all_uri);

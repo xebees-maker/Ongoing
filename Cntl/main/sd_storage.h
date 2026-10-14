@@ -46,3 +46,6 @@ esp_err_t sd_storage_format(void);
 
 /* 지금 SD를 아예 못 쓰는 상태(미마운트)인지 — 주화면 상태표시용 */
 bool sd_storage_is_mounted(void);
+
+/* 2026-10-14(SD 개선 1단계) — 원본 섹터 읽기(sd_health의 FAT1/FAT2 비교용). 호출부가 재연결과 같은 잠금(사진 → 통계)을 잡은 상태 */
+esp_err_t sd_storage_read_sectors(void *dst, size_t start_sector, size_t count);

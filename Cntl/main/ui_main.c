@@ -10,6 +10,7 @@
 #include "photo_storage.h"
 #include "storage_mgr.h"
 #include "sens_kind_store.h"
+#include "sd_health.h"
 #include "photo_rx.h"
 #include "ui_log.h"
 #include "dev_log.h"
@@ -1823,6 +1824,7 @@ static void sync_error_warn_active_from_history(void)
  * (사용자 지시: "다른 에러가 있다면 정상으로 돌리면 안되고") */
 static void clear_sd_io_fail(void)
 {
+    sd_health_clear();   /* 2026-10-14(SD 개선 1단계) — 검증을 통과했으니 SD 쓰기 다시 허용 */
     s_sd_io_fail_active = false;
     ui_log_clear_one_error(UI_ERR_SD_MOUNT_FAILED);
     ui_log_clear_one_error(UI_ERR_SD_IO_FAIL);
@@ -5048,6 +5050,13 @@ static void refresh_dashboard(lv_timer_t *t)
     if (stats_store_take_write_io_error()) {
         mark_sd_io_fail("measurement save (write)");
         refresh_storage_status_label();
+    }
+    {   /* 2026-10-14(SD 개선 1단계) — sd_health가 잡은 이상(다시 읽기 불일치, FAT1/FAT2 불일치 등)도 같은 경로(5009 → ntfy 푸시) */
+        char why[64];
+        if (sd_health_take_pending(why, sizeof(why))) {
+            mark_sd_io_fail(why);
+            refresh_storage_status_label();
+        }
     }
 
     /* 2026-08-21 — 웹 대시보드 URL(사용자 지시). IP는 WiFi 재연결 등으로 바뀔 수 있어서

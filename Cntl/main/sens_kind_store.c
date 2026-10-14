@@ -1,4 +1,5 @@
 #include "sens_kind_store.h"
+#include "sd_health.h"
 #include "sd_storage.h"
 
 #include <stdio.h>
@@ -26,6 +27,7 @@ static sens_kind_entry_t s_entries[SENS_KIND_SLOTS];
 
 static void save(void)
 {
+    if (!sd_health_writes_allowed()) return;   /* 2026-10-14 — SD 고장 상태면 쓰지 않음 */
     FILE *f = fopen(SENS_KIND_FILE_PATH, "wb");
     if (!f) {
         ESP_LOGW(TAG, "Save failed (fopen): %s", SENS_KIND_FILE_PATH);

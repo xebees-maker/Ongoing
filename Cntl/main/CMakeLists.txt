@@ -14,6 +14,7 @@ idf_component_register(
         "rtc_sync.c"
         "device_config.c"
         "sd_storage.c"
+        "sd_health.c"
         "stats_store.c"
         "photo_storage.c"
         "storage_mgr.c"

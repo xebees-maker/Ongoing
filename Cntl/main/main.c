@@ -30,6 +30,7 @@
 #include "sens_kind_store.h"
 #include "notify.h"
 #include "alarm.h"
+#include "sd_health.h"
 #include "esp_system.h"
 #include "web_auth.h"
 #include "web_session.h"
@@ -1094,6 +1095,7 @@ void app_main(void)
     ESP_ERROR_CHECK(fs_init());
     notify_init();  /* 2026-10-03(할 일 AD) — 휴대폰 알림 보내기 태스크(설정 notify.cfg는 LittleFS) */
     alarm_init();   /* 2026-10-05(할 일 AD 5단계) — 알림 기록 큐(사건은 여기서부터 쌓이고 처리는 alarm_start 뒤) */
+    sd_health_init();   /* 2026-10-14(SD 개선 1단계) — LittleFS 뒤, SD 마운트 전(마운트 때 카드 CID를 받음) */
     web_auth_init();  /* 2026-10-03(할 일 AD) — 웹 로그인(web_auth.bin) */
     /* 2026-09-27(로그 정리) — 개발 로그: ESP_LOG 가로채기 시작 + 저장 문턱 적용(설정은 /assets/devlog.cfg라 fs 뒤) */
     dev_log_init();

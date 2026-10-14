@@ -51,6 +51,9 @@ void photo_storage_abort(photo_storage_writer_t *w);
  * 막고, 열린 저장 파일을 닫고 임시파일을 지움(그 저장기는 실패 처리 — 받던 사진은 버려짐). resume: 풀어 줌 */
 void photo_storage_io_suspend(void);
 void photo_storage_io_resume(void);
+/* 2026-10-14(SD 개선 1단계) — 열린 저장을 닫지 않고 잠깐 멈춤(sd_health FAT 비교 동안). 잠금 순서는 io_suspend와 같음 */
+void photo_storage_pause(void);
+void photo_storage_unpause(void);
 
 /* 모든 카메라 폴더를 합산한 총 사용 바이트 — 2026-09-26부터 폴더 스캔 없이 RAM 합계를 돌려줌
  * (저장/삭제/정리 때 더하고 뺌, photo_storage_rescan() 때 새로 계산). SD I/O 없음 */

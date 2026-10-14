@@ -11,6 +11,7 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "sd_health.h"
 #include "esp_vfs_fat.h"
 #include <stdbool.h>
 #include "driver/sdspi_host.h"
@@ -39,10 +40,13 @@ static void log_card_cid(const sdmmc_host_t *host, const sdspi_device_config_t *
         const sdmmc_cid_t *c = &card->cid;
         char name[sizeof(c->name) + 1] = { 0 };
         for (size_t i = 0; i < sizeof(c->name) && c->name[i]; i++) name[i] = (c->name[i] >= 32 && c->name[i] < 127) ? c->name[i] : '?';
-        ESP_LOGW(TAG, "SD card CID: MID=0x%02X OID=0x%04X PNM='%s' PRV=%d.%d PSN=0x%08X MDT=%d-%02d %lluMB",
+        char line[112];
+        snprintf(line, sizeof(line), "MID=0x%02X OID=0x%04X PNM='%s' PRV=%d.%d PSN=0x%08X MDT=%d-%02d %lluMB",
                  c->mfg_id, c->oem_id, name, (c->revision >> 4) & 0xF, c->revision & 0xF, (unsigned)c->serial,
                  2000 + ((c->date >> 4) & 0xFF), c->date & 0xF,
                  (unsigned long long)card->csd.capacity * card->csd.sector_size / (1024 * 1024));
+        ESP_LOGW(TAG, "SD card CID: %s", line);
+        sd_health_set_card(line);   /* 사후 분석 기록에 남김 */
     } else {
         ESP_LOGW(TAG, "SD card CID: card init failed (%s)", esp_err_to_name(e));
     }
@@ -116,7 +120,7 @@ esp_err_t sd_storage_init(void)
 
     esp_vfs_fat_mount_config_t mount_cfg = {
         .format_if_mount_failed = false,
-        .max_files              = 5,
+        .max_files              = 8,   /* 2026-10-14 — 5 → 8: 쓰고 다시 읽어 확인하는 핸들이 동시에 하나씩 더 열림(sd_health) */
         .allocation_unit_size   = 16 * 1024,
     };
 
@@ -233,4 +237,10 @@ esp_err_t sd_storage_format(void)
 bool sd_storage_is_mounted(void)
 {
     return s_card != NULL;
+}
+
+esp_err_t sd_storage_read_sectors(void *dst, size_t start_sector, size_t count)
+{
+    if (!s_card) return ESP_ERR_INVALID_STATE;
+    return sdmmc_read_sectors(s_card, dst, start_sector, count);
 }

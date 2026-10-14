@@ -27,6 +27,7 @@
 #include "memdiag.h"
 #include "sd_storage.h"
 #include "storage_mgr.h"
+#include "sd_health.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -220,8 +221,27 @@ typedef struct { uint8_t scale; uint32_t week; stats_bucket_t rec; } agg_pend_t;
 static agg_pend_t *s_agg_pend = NULL;   /* PSRAM, 처음 쓸 때 */
 static int         s_agg_pend_n = 0;
 
+/* 2026-10-14(SD 개선 1단계) — 방금 쓴 끝부분(end-len ~ end)을 새 핸들로 다시 읽어 비교. 1 같음, 0 다름, -1 확인 못 함 */
+static int verify_tail(const char *path, long end, const void *data, size_t len)
+{
+    if (len == 0 || end < (long)len) return -1;
+    FILE *v = fopen(path, "rb");
+    if (!v) return (errno == EMFILE || errno == ENFILE) ? -1 : 0;
+    uint8_t *buf = heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    if (!buf) { fclose(v); return -1; }
+    bool ok = fseek(v, end - (long)len, SEEK_SET) == 0 && fread(buf, 1, len, v) == len && memcmp(buf, data, len) == 0;
+    fclose(v);
+    heap_caps_free(buf);
+    if (!ok) ESP_LOGE(TAG, "Verify failed: %s (%u bytes ending at %ld)", path, (unsigned)len, end);
+    return ok ? 1 : 0;
+}
+
+static stats_bucket_t *s_agg_vbuf = NULL;   /* 2026-10-14 — 집계 쓰기 확인용(PSRAM, AGG_PEND_MAX칸) */
+
 static void agg_pending_write_locked(void)
 {
+    if (!sd_health_writes_allowed()) { s_agg_pend_n = 0; return; }   /* 2026-10-14 — SD 고장 상태면 쓰지 않음 */
+    if (!s_agg_vbuf) s_agg_vbuf = heap_caps_malloc(sizeof(stats_bucket_t) * AGG_PEND_MAX, MALLOC_CAP_SPIRAM);
     for (int i = 0; i < s_agg_pend_n; i++) {
         if (s_agg_pend[i].scale == 0xFF) continue;   /* 이미 같은 파일 묶음으로 씀 */
         uint8_t sc = s_agg_pend[i].scale;
@@ -231,12 +251,28 @@ static void agg_pending_write_locked(void)
         agg_path(sc, week, path, sizeof(path));
         FILE *f = (widx >= 0) ? fopen(path, "ab") : NULL;
         if (!f) ESP_LOGW(TAG, "Aggregate bucket open failed (scale=%u) - points lost", (unsigned)sc);
+        long start = -1;
+        if (f && fseek(f, 0, SEEK_END) == 0) start = ftell(f);
+        uint32_t nv = 0;
         for (int j = i; j < s_agg_pend_n; j++) {
             if (s_agg_pend[j].scale != sc || s_agg_pend[j].week != week) continue;
-            if (f && fwrite(&s_agg_pend[j].rec, sizeof(stats_bucket_t), 1, f) == 1) s_weeks[widx].agg_bytes += sizeof(stats_bucket_t);
+            if (f && fwrite(&s_agg_pend[j].rec, sizeof(stats_bucket_t), 1, f) == 1) {
+                s_weeks[widx].agg_bytes += sizeof(stats_bucket_t);
+                if (s_agg_vbuf) s_agg_vbuf[nv] = s_agg_pend[j].rec;
+                nv++;
+            }
             s_agg_pend[j].scale = 0xFF;
         }
-        if (f) close_synced(f);
+        if (f && close_synced(f) && nv > 0) {
+            size_t nb = nv * sizeof(stats_bucket_t);
+            sd_health_count(SDH_C_FSYNC, 1);
+            sd_health_count(SDH_C_BYTES, (uint32_t)nb);
+            if (s_agg_vbuf && start >= 0) {
+                int v = verify_tail(path, start + (long)nb, s_agg_vbuf, nb);
+                if (v == 0) sd_health_report(SDH_EV_VERIFY_AGG, path, (uint32_t)start);
+                else if (v > 0) sd_health_count(SDH_C_VERIFY_OK, 1);
+            }
+        }
     }
     s_agg_pend_n = 0;
 }
@@ -398,6 +434,7 @@ uint32_t stats_agg_read_window(uint8_t scale_idx, uint32_t window_start_unix, ui
     uint32_t w0 = window_start_unix / STATS_WEEK_SEC;
     uint32_t w1 = (window_end_unix - 1) / STATS_WEEK_SEC;
     uint32_t picked = 0;
+    bool bad_reported = false;   /* 2026-10-14 */
     for (uint32_t i = 0; i < s_week_count && picked < out_cap; i++) {
         uint32_t week = s_weeks[i].week;
         if (week < w0) continue;
@@ -429,6 +466,11 @@ uint32_t stats_agg_read_window(uint8_t scale_idx, uint32_t window_start_unix, ui
         size_t got;
         while (!done && picked < out_cap && (got = fread(s_bscratch, sizeof(stats_bucket_t), STATS_CHUNK, f)) > 0) {
             for (size_t k = 0; k < got && picked < out_cap; k++) {
+                if (!bad_reported && s_bscratch[k].bucket_start_unix / STATS_WEEK_SEC != week) {
+                    bad_reported = true;   /* 한 번 읽을 때 한 번만 */
+                    /* 2026-10-14(SD 개선 1단계) — 이 주 파일에 다른 주(0xFF·쓰레기 포함) 칸 = 파일 손상. 읽기 방식은 그대로 둠 */
+                    sd_health_report(SDH_EV_BAD_AGG_RECORD, path, (uint32_t)(ftell(f) / (long)sizeof(stats_bucket_t)));
+                }
                 if (s_bscratch[k].bucket_start_unix >= window_end_unix) { done = true; break; }
                 out[picked++] = s_bscratch[k];
             }
@@ -495,6 +537,7 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
     /* 2026-09-11(사용자 지적 — "마운트가 안됬는데 왜 리드라이트를 시도했지?") — 미마운트
      * 상태면 fopen 시도 자체를 안 함("I/O 실패"가 아니라 "애초에 시도 안 함") */
     if (!sd_storage_is_mounted()) return false;
+    if (!sd_health_writes_allowed()) return false;   /* 2026-10-14 — SD 고장 상태면 쓰지 않음(이 값은 잃음 — 2단계에서 PSRAM에 모음) */
 
     size_t before = MEMDIAG_HEAP();
     bool ok = true;
@@ -546,6 +589,14 @@ bool stats_store_append_batch(const stats_record_t *records, uint32_t count)
         bool synced = (fflush(f) == 0) && (fsync(fileno(f)) == 0);   /* 닫지 않음(위 s_raw_f 주석 참고) */
         t_close += esp_timer_get_time() - ta;
         if (written != j - i || !synced) raw_close_cached_locked();   /* 오류면 다음엔 새로 엶 */
+        if (written == j - i && synced) {
+            /* 2026-10-14(SD 개선 1단계) — 방금 쓴 끝부분을 다른 핸들로 다시 읽어 비교 */
+            sd_health_count(SDH_C_FSYNC, 1);
+            sd_health_count(SDH_C_BYTES, (uint32_t)(written * sizeof(stats_record_t)));
+            int v = verify_tail(path, fsize, &records[i], written * sizeof(stats_record_t));
+            if (v == 0) sd_health_report(SDH_EV_VERIFY_STATS, path, (uint32_t)fsize);
+            else if (v > 0) sd_health_count(SDH_C_VERIFY_OK, 1);
+        }
         if (written != j - i || !synced) {
             s_last_io_error = true;
             s_write_io_error_pending = true;

@@ -3,6 +3,7 @@
  * @brief   storage_mgr.h 구현 — 파일처리 태스크 1개, 태스크 알림 비트로만 깨어남(이벤트 방식)
  */
 #include "storage_mgr.h"
+#include "sd_health.h"
 #include "sd_storage.h"
 #include "photo_storage.h"
 #include "stats_store.h"
@@ -107,6 +108,7 @@ static void storage_task(void *arg)
         for (int a = 0; a < STORAGE_AREA_COUNT; a++) {
             uint64_t budget = total * s_areas[a].budget_pct / 100;
             if (budget == 0 || s_areas[a].used_bytes() * 100 / budget < TRIM_START_PCT) continue;
+            if (!sd_health_writes_allowed()) continue;   /* 2026-10-14 — SD 고장 상태면 지우기(쓰기)도 안 함 */
             uint32_t deleted = s_areas[a].trim_to(budget * TRIM_TARGET_PCT / 100);
             if (deleted > 0) {
                 taskENTER_CRITICAL(&s_snap_lock);

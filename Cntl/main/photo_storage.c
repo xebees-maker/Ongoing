@@ -12,8 +12,11 @@
 #include <time.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_rom_crc.h"
+#include "sd_health.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 static const char *TAG = "PHOTO";
 
@@ -271,6 +274,7 @@ struct photo_storage_writer {
     uint8_t  mac[6];   /* 2026-10-01 — 저장이 끝나면 색인에 넣으려고 */
     uint8_t  kind;
     bool     failed;
+    uint32_t crc;      /* 2026-10-14 — 쓴 내용의 CRC32(저장 뒤 다시 읽어 비교) */
     char     file_path[96];
     char     tmp_path[104];
     struct photo_storage_writer *next;  /* 열린 저장기 목록(s_writers) */
@@ -306,6 +310,39 @@ static void writer_unlink_locked(photo_storage_writer_t *w)
     }
 }
 
+/* 2026-10-14(SD 개선 1단계) — 저장한 파일을 다시 읽어 크기·CRC 비교. 1 같음, 0 다름(또는 파일 없음), -1 확인 못 함(열린 파일 수 한도 등) */
+static int verify_photo_file(const char *path, size_t size, uint32_t crc)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return (errno == EMFILE || errno == ENFILE) ? -1 : 0;
+    uint8_t *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    if (!buf) { fclose(f); return -1; }
+    uint32_t c = 0;
+    size_t total = 0, n;
+    while ((n = fread(buf, 1, 4096, f)) > 0) { c = esp_rom_crc32_le(c, buf, n); total += n; }
+    bool err = ferror(f) != 0;
+    fclose(f);
+    heap_caps_free(buf);
+    if (err || total != size || c != crc) {
+        ESP_LOGE(TAG, "Photo verify failed: %s (size %u/%u, crc %08X/%08X)", path, (unsigned)total, (unsigned)size, (unsigned)c, (unsigned)crc);
+        return 0;
+    }
+    return 1;
+}
+
+/* 2026-10-14 — 색인에 이 사진이 있는지(읽기 실패가 SD 이상인지 판단용) */
+static bool index_has(const uint8_t mac[6], uint8_t kind, uint32_t seq)
+{
+    bool has = false;
+    lock();
+    photo_idx_cam_t *c = cam_find_locked(mac, false, NULL);
+    for (uint32_t i = 0; c && i < c->count; i++) {
+        if (c->items[i].seq == seq && c->items[i].kind == kind) { has = true; break; }
+    }
+    unlock();
+    return has;
+}
+
 photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
 {
     if (!sd_storage_is_mounted()) {
@@ -314,6 +351,10 @@ photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
     }
     if (!is_valid_kind(kind)) {
         ESP_LOGW(TAG, "Save start failed - bad kind=%c", (char)kind);
+        return NULL;
+    }
+    if (!sd_health_writes_allowed()) {   /* 2026-10-14 — SD 고장 상태면 쓰지 않음(재연결/포맷 검증 뒤 풀림) */
+        ESP_LOGW(TAG, "Save start refused - SD faulted");
         return NULL;
     }
     char dir_path[64];
@@ -341,6 +382,7 @@ photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
         free(w);
         return NULL;
     }
+    sd_health_count(SDH_C_CREATE, 1);
     w->next = s_writers;
     s_writers = w;
     wunlock();
@@ -355,6 +397,8 @@ bool photo_storage_append(photo_storage_writer_t *w, const uint8_t *data, size_t
     if (len == 0) { wunlock(); return true; }
     size_t n = fwrite(data, 1, len, w->fp);
     w->written += n;
+    w->crc = esp_rom_crc32_le(w->crc, data, n);
+    sd_health_count(SDH_C_BYTES, (uint32_t)n);
     if (n != len) {
         ESP_LOGW(TAG, "Write failed (%u/%u bytes): %s", (unsigned)n, (unsigned)len, w->tmp_path);
         w->failed = true;
@@ -373,6 +417,7 @@ bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
     if (w->fp) {  /* NULL = 재마운트/포맷이 이미 닫고 임시파일을 지움(photo_storage_io_suspend) */
         synced = (fflush(w->fp) == 0) && (fsync(fileno(w->fp)) == 0);
         fclose(w->fp);
+        if (synced) sd_health_count(SDH_C_FSYNC, 1);
         w->fp = NULL;
     } else {
         w->failed = true;
@@ -392,6 +437,11 @@ bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
         free(w);
         return false;
     }
+    sd_health_count(SDH_C_RENAME, 1);
+    /* 2026-10-14(SD 개선 1단계) — 최종 파일을 다시 열어 크기·CRC 비교(10-13 손상 때는 저장 직후 읽어도 이미 없었음) */
+    int v = verify_photo_file(w->file_path, w->written, w->crc);
+    if (v == 0) sd_health_report(SDH_EV_VERIFY_PHOTO, w->file_path, (uint32_t)w->written);
+    else if (v > 0) sd_health_count(SDH_C_VERIFY_OK, 1);
     wunlock();
     lock();
     photo_idx_cam_t *c = cam_find_locked(w->mac, true, NULL);  /* begin에서 이미 만들어져 있음 */
@@ -441,6 +491,9 @@ void photo_storage_io_resume(void)
     unlock();
     wunlock();
 }
+
+void photo_storage_pause(void) { wlock(); lock(); }
+void photo_storage_unpause(void) { unlock(); wunlock(); }
 
 bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg, size_t len,
                          uint32_t *out_seq)
@@ -699,6 +752,10 @@ bool photo_storage_read_file(const uint8_t mac[6], uint8_t kind, uint32_t seq,
     struct stat st;
     if (stat(file_path, &st) != 0) {
         ESP_LOGW(TAG, "read_file: not found: %s", file_path);
+        /* 2026-10-14(SD 개선 1단계) — 목록엔 있는데 파일이 없으면 SD 이상. 지우는 중(파일 먼저 지우고 색인을 나중에 뺌)과
+         * 겹친 것일 수 있어 잠깐 뒤 다시 확인 */
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if (index_has(mac, kind, seq) && stat(file_path, &st) != 0) sd_health_report(SDH_EV_MISSING_PHOTO, file_path, seq);
         return false;
     }
     if ((size_t)st.st_size > buf_cap) {
