@@ -300,9 +300,9 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_TITLE_RECORD] = { "기록", "Record" },
     [STR_LABEL_PERIOD] = { "기간:", "Period:" },
     [STR_LABEL_STORAGE_LEGEND] = { "[사용 %(여유 MB)]", "[Used % (MB free)]" },
-    [STR_LABEL_FLASH]          = { "플래시", "Flash" },
-    [STR_FMT_FLASH_USAGE]      = { "앱 %s/%s, LittleFS %s/%s(통계 %s, 기타 %s, 여유 %s), nvs %s/%s, phy %s",
-                                   "App %s/%s, LittleFS %s/%s (Stats %s, Other %s, Free %s), nvs %s/%s, phy %s" },
+    [STR_LABEL_FLASH]          = { "플래시 [MB]", "Flash [MB]" },
+    [STR_FMT_FLASH_USAGE]      = { "앱 %s/%s, 데이터 %s/%s(통계 %s, 기타 %s, 여유 %s)",
+                                   "App %s/%s, Data %s/%s (Stats %s, Other %s, Free %s)" },
 
     /* 2026-09-16(SR/Power Control) */
     [STR_PANEL_POWER_CONTROL]  = { "전원제어", "Power Control" },

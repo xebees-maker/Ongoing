@@ -1853,14 +1853,11 @@ static const ui_str_id_t s_storage_area_name[STORAGE_AREA_COUNT] = {
     [STORAGE_AREA_MEASURE] = STR_LABEL_MEASURE_SHORT,
 };
 
-/* 2026-10-15 — 바이트를 "2.0MB"/"512KB"로(LVGL·printf %f 안 씀 — 정수 십분의 일) */
+/* 2026-10-15(사용자 지시 — 단위는 제목 "[MB]"에만) — 바이트를 MB 소수 한 자리 숫자로(%f 안 씀 — 정수 십분의 일) */
 static void fmt_size(char *buf, size_t n, uint32_t bytes)
 {
-    if (bytes < 1024u * 1024u) snprintf(buf, n, "%uKB", (unsigned)(bytes / 1024u));
-    else {
-        uint32_t t = (uint32_t)(((uint64_t)bytes * 10u + 512u * 1024u) / (1024u * 1024u));
-        snprintf(buf, n, "%u.%uMB", (unsigned)(t / 10u), (unsigned)(t % 10u));
-    }
+    uint32_t t = (uint32_t)(((uint64_t)bytes * 10u + 512u * 1024u) / (1024u * 1024u));
+    snprintf(buf, n, "%u.%u", (unsigned)(t / 10u), (unsigned)(t % 10u));
 }
 
 /* 2026-10-15(사용자 지시, 개발·시험용) — Summary "플래시:" 줄. flash_usage가 60초마다 계산해 둔 값을 복사만 함 */
@@ -1872,7 +1869,7 @@ static void refresh_flash_usage_label(void)
     flash_usage_get(&u);
     if (!u.valid || u.seq == s_shown_seq) return;
     s_shown_seq = u.seq;
-    char a[10][16];
+    char a[7][16];
     fmt_size(a[0], sizeof(a[0]), u.app_used);
     fmt_size(a[1], sizeof(a[1]), u.app_size);
     fmt_size(a[2], sizeof(a[2]), u.fs_used);
@@ -1880,11 +1877,8 @@ static void refresh_flash_usage_label(void)
     fmt_size(a[4], sizeof(a[4]), u.fs_stats);
     fmt_size(a[5], sizeof(a[5]), u.fs_used > u.fs_stats ? u.fs_used - u.fs_stats : 0);
     fmt_size(a[6], sizeof(a[6]), u.fs_size > u.fs_used ? u.fs_size - u.fs_used : 0);
-    snprintf(a[7], sizeof(a[7]), "%u", (unsigned)u.nvs_used);
-    snprintf(a[8], sizeof(a[8]), "%u", (unsigned)u.nvs_total);
-    fmt_size(a[9], sizeof(a[9]), u.phy_size);
-    char detail[200];
-    snprintf(detail, sizeof(detail), ui_str(STR_FMT_FLASH_USAGE), a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9]);
+    char detail[160];
+    snprintf(detail, sizeof(detail), ui_str(STR_FMT_FLASH_USAGE), a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
     lv_label_set_text_fmt(s_flash_usage_label, "%s: %s", ui_str(STR_LABEL_FLASH), detail);
 }
 
