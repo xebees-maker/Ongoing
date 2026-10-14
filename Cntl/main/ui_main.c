@@ -11,6 +11,7 @@
 #include "storage_mgr.h"
 #include "sens_kind_store.h"
 #include "sd_health.h"
+#include "flash_usage.h"
 #include "photo_rx.h"
 #include "ui_log.h"
 #include "dev_log.h"
@@ -103,6 +104,7 @@ static lv_obj_t          *s_web_url_label       = NULL;  /* 2026-08-21 — 요�
 static lv_obj_t          *s_web_row             = NULL;  /* 2026-09-09 — "Web " 접두문구+URL 둘로 분리(접두문구는 밑줄 없음) 위 행 래퍼 */
 static lv_obj_t          *s_web_prefix_label    = NULL;
 static lv_obj_t          *s_mem_status_label    = NULL;  /* 2026-08-21 — 요약 둘째줄, 여유 메모리 상시 표시(사용자 지시) */
+static lv_obj_t          *s_flash_usage_label = NULL;   /* 2026-10-15 — SD 줄 아래, 내부 플래시 영역별 사용량(개발·시험용) */
 static lv_obj_t          *s_storage_status_label = NULL;  /* 2026-09-10 — 메모리 줄 바로 아래, SD Storage(Picture/Measure/Total) 상시 표시(사용자 설계) */
 /* 2026-09-15(사용자 지시로 제거) — Summary 실시간 순시치 4라벨(s_summary_live_*)은
  * Sensor 판넬 행별 T/H/C/A 표시로 대체됨 */
@@ -1850,6 +1852,41 @@ static const ui_str_id_t s_storage_area_name[STORAGE_AREA_COUNT] = {
     [STORAGE_AREA_PICTURE] = STR_LABEL_PICTURE,
     [STORAGE_AREA_MEASURE] = STR_LABEL_MEASURE_SHORT,
 };
+
+/* 2026-10-15 — 바이트를 "2.0MB"/"512KB"로(LVGL·printf %f 안 씀 — 정수 십분의 일) */
+static void fmt_size(char *buf, size_t n, uint32_t bytes)
+{
+    if (bytes < 1024u * 1024u) snprintf(buf, n, "%uKB", (unsigned)(bytes / 1024u));
+    else {
+        uint32_t t = (uint32_t)(((uint64_t)bytes * 10u + 512u * 1024u) / (1024u * 1024u));
+        snprintf(buf, n, "%u.%uMB", (unsigned)(t / 10u), (unsigned)(t % 10u));
+    }
+}
+
+/* 2026-10-15(사용자 지시, 개발·시험용) — Summary "플래시:" 줄. flash_usage가 60초마다 계산해 둔 값을 복사만 함 */
+static void refresh_flash_usage_label(void)
+{
+    static uint32_t s_shown_seq = 0;
+    if (!s_flash_usage_label) return;
+    flash_usage_t u;
+    flash_usage_get(&u);
+    if (!u.valid || u.seq == s_shown_seq) return;
+    s_shown_seq = u.seq;
+    char a[10][16];
+    fmt_size(a[0], sizeof(a[0]), u.app_used);
+    fmt_size(a[1], sizeof(a[1]), u.app_size);
+    fmt_size(a[2], sizeof(a[2]), u.fs_used);
+    fmt_size(a[3], sizeof(a[3]), u.fs_size);
+    fmt_size(a[4], sizeof(a[4]), u.fs_stats);
+    fmt_size(a[5], sizeof(a[5]), u.fs_used > u.fs_stats ? u.fs_used - u.fs_stats : 0);
+    fmt_size(a[6], sizeof(a[6]), u.fs_size > u.fs_used ? u.fs_size - u.fs_used : 0);
+    snprintf(a[7], sizeof(a[7]), "%u", (unsigned)u.nvs_used);
+    snprintf(a[8], sizeof(a[8]), "%u", (unsigned)u.nvs_total);
+    fmt_size(a[9], sizeof(a[9]), u.phy_size);
+    char detail[200];
+    snprintf(detail, sizeof(detail), ui_str(STR_FMT_FLASH_USAGE), a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9]);
+    lv_label_set_text_fmt(s_flash_usage_label, "%s: %s", ui_str(STR_LABEL_FLASH), detail);
+}
 
 static void refresh_storage_status_label(void)
 {
@@ -5051,6 +5088,7 @@ static void refresh_dashboard(lv_timer_t *t)
         mark_sd_io_fail("measurement save (write)");
         refresh_storage_status_label();
     }
+    refresh_flash_usage_label();   /* 2026-10-15 — 값이 바뀐 때만 다시 그림 */
     {   /* 2026-10-14(SD 개선 1단계) — sd_health가 잡은 이상(다시 읽기 불일치, FAT1/FAT2 불일치 등)도 같은 경로(5009 → ntfy 푸시) */
         char why[64];
         if (sd_health_take_pending(why, sizeof(why))) {
@@ -7276,6 +7314,10 @@ void ui_init(void)
      * 문법을 쓰려면 반드시 이걸 켜야 함(전에 이걸 빠뜨려서 "#ff0000 ..." 이 그대로
      * 문자로 찍혔던 버그가 있었음, 이번엔 잊지 않음) */
     lv_label_set_recolor(s_storage_status_label, true);
+
+    s_flash_usage_label = lv_label_create(summary_top_box);   /* 2026-10-15 — 내부 플래시 영역별 사용량 */
+    lv_obj_set_style_text_font(s_flash_usage_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_flash_usage_label, "");
 
     /* 2026-09-16(SR/Power Control, 순수 대화로 설계) — Summary와 Sensor 사이. Sens/CAM과
      * 달리 페어링 목록이 아니라 콘 고정 GPIO 2개라 항상 2행 — Sensor 판넬처럼 매 틱 재구성할

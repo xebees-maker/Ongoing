@@ -4,6 +4,8 @@
 #include "node_hub.h"
 #include "sens_kind_store.h"
 #include "sd_health.h"
+#include "fs_bench.h"
+#include "flash_usage.h"
 #include "device_config.h"
 #include "power_relay.h"
 #include "storage_mgr.h"
@@ -151,6 +153,16 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
             jb_printf(&b, "]}");
         }
         heap_caps_free(sp);
+    }
+
+    {   /* 2026-10-15(사용자 지시, 개발·시험용) — 내부 플래시 영역별 사용량(바이트·nvs는 항목 수), 콘 Summary "플래시:" 줄과 같은 값 */
+        flash_usage_t fu;
+        flash_usage_get(&fu);
+        if (fu.valid) {
+            jb_printf(&b, ",\"flash\":{\"app\":%u,\"app_max\":%u,\"fs\":%u,\"fs_max\":%u,\"stats\":%u,\"nvs\":%u,\"nvs_max\":%u,\"phy\":%u}",
+                      (unsigned)fu.app_used, (unsigned)fu.app_size, (unsigned)fu.fs_used, (unsigned)fu.fs_size, (unsigned)fu.fs_stats,
+                      (unsigned)fu.nvs_used, (unsigned)fu.nvs_total, (unsigned)fu.phy_size);
+        }
     }
 
     /* 저장 공간 정리 안내 — 콘 화면이 띄우는 "오래된 파일 정리" 팝업과 같은 내용. 번호가 바뀌면 SPA가 안내 */
@@ -556,6 +568,20 @@ static esp_err_t api_sdhealth_test_post_handler(httpd_req_t *req)
     WEB_AUTH_REQUIRE(req);
     sd_health_report(SDH_EV_TEST, "test", 0);
     return send_simple(req, NULL, "{\"ok\":true}");
+}
+
+/* 2026-10-14(시험, 임시 — 할 일 AF에서 제거) — POST /api/fsbench 시작, GET /api/fsbench 결과(글자) */
+static esp_err_t api_fsbench_post_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    return send_simple(req, NULL, fs_bench_start() ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+static esp_err_t api_fsbench_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_sendstr(req, fs_bench_result());
 }
 
 /* POST /api/device/unpair?mac= — 연결 해제(콘 Disconnect와 같음) */
@@ -1337,6 +1363,10 @@ void web_api_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &sd_health_uri);
     static const httpd_uri_t sdhealth_test_uri = { .uri = "/api/sdhealth_test", .method = HTTP_POST, .handler = api_sdhealth_test_post_handler };   /* 시험, 임시 */
     httpd_register_uri_handler(server, &sdhealth_test_uri);
+    static const httpd_uri_t fsbench_post_uri = { .uri = "/api/fsbench", .method = HTTP_POST, .handler = api_fsbench_post_handler };   /* 시험, 임시 */
+    static const httpd_uri_t fsbench_get_uri = { .uri = "/api/fsbench", .method = HTTP_GET, .handler = api_fsbench_get_handler };     /* 시험, 임시 */
+    httpd_register_uri_handler(server, &fsbench_post_uri);
+    httpd_register_uri_handler(server, &fsbench_get_uri);
     static const httpd_uri_t stats_aggdump_uri = { .uri = "/api/stats/aggdump", .method = HTTP_GET, .handler = api_stats_aggdump_get_handler };   /* 2026-10-14 진단, 임시 */
     httpd_register_uri_handler(server, &stats_aggdump_uri);
     httpd_register_uri_handler(server, &stats_delete_all_uri);

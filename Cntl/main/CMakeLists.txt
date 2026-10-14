@@ -15,6 +15,8 @@ idf_component_register(
         "device_config.c"
         "sd_storage.c"
         "sd_health.c"
+        "fs_bench.c"
+        "flash_usage.c"
         "stats_store.c"
         "photo_storage.c"
         "storage_mgr.c"
@@ -35,6 +37,8 @@ idf_component_register(
         "../components"
     REQUIRES
         nvs_flash
+        app_update
+        bootloader_support
         esp_wifi
         esp_event
         esp_netif

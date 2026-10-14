@@ -64,6 +64,7 @@
   .val { font-size:14px; font-variant-numeric:tabular-nums; }
   .empty { color:var(--muted); font-size:14px; padding:6px 0; }
   .chev { color:var(--muted); }
+  h2.tap::after { content:" >"; color:var(--muted); }   /* 10-15(사용자 지시) — 누르면 팝업이 열리는 판넬 제목(콘은 역상으로 보임) */
   .sig { display:inline-flex; align-items:flex-end; gap:2px; height:16px; }
   .sig i { display:block; width:4px; background:var(--bar); border-radius:1px; }
   .pw { font-size:20px; line-height:1; }
@@ -262,6 +263,7 @@
       <h2 data-s="STR_PANEL_SUMMARY"></h2>
       <div id="sumMem" class="val"></div>
       <div id="sumSd" class="val"></div>
+      <div id="sumFlash" class="val"></div>
     </section>
     <section>
       <h2 data-s="STR_PANEL_POWER_CONTROL"></h2>
@@ -374,8 +376,19 @@
   function L(o, k) { var e = o[k + '_en']; return (lang === 'en' && e) ? e : o[k]; }
   function nodeName(n) { return L(n, 'alias') || n.name; }
 
+  /* 10-15 — 콘 fmt_size와 같게: 1 MB 미만은 KB 정수, 이상은 MB 소수 1자리 */
+  function fsize(b) { return b < 1048576 ? Math.floor(b / 1024) + 'KB' : (Math.round(b * 10 / 1048576) / 10).toFixed(1) + 'MB'; }
+  function renderFlash(f) {   /* 10-15(사용자 지시, 개발·시험용) — 콘 Summary "플래시:" 줄과 같은 틀(STR_FMT_FLASH_USAGE) */
+    var el = $('sumFlash');
+    if (!f) { el.textContent = ''; return; }
+    var v = [fsize(f.app), fsize(f.app_max), fsize(f.fs), fsize(f.fs_max), fsize(f.stats), fsize(Math.max(0, f.fs - f.stats)),
+             fsize(Math.max(0, f.fs_max - f.fs)), String(f.nvs), String(f.nvs_max), fsize(f.phy)], i = 0;
+    el.textContent = S('STR_LABEL_FLASH') + ': ' + S('STR_FMT_FLASH_USAGE').replace(/%s/g, function () { return v[i++]; });
+  }
+
   function renderSummary(d) {
     $('sumMem').textContent = S('STR_LABEL_MEMORY') + ': I = ' + bytesHuman(d.mem.i) + ' / P = ' + bytesHuman(d.mem.p);
+    renderFlash(d.flash);
     var sd = d.sd || {}, el = $('sumSd');
     el.className = 'val';
     if (sd.state === 'io_error') { el.textContent = 'SD: ' + S('STR_STATUS_SD_IO_ERROR_MSG'); el.className = 'val red'; return; }

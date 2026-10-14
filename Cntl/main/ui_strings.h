@@ -308,7 +308,9 @@ typedef enum {
     /* 2026-09-15(사용자 지시 — "SD: [%(Remain MB)]가... 좋은 표현이 있을까?" -> "SD: [Used
      * % (MB free)]") — SD 상태 라인의 범례(각 카테고리 뒤에 오는 "pct(remainMB)" 형식을
      * 설명하는 고정 텍스트, 실제 숫자 아님) */
-    STR_LABEL_STORAGE_LEGEND,    /* "[사용 %(여유 MB)]" / "[Used % (MB free)]" */
+    STR_LABEL_STORAGE_LEGEND,
+    STR_LABEL_FLASH,             /* 2026-10-15 — Summary 내부 플래시 줄 제목 */
+    STR_FMT_FLASH_USAGE,         /* 2026-10-15 — 앱/LittleFS(통계·기타·여유)/nvs/phy, %s 10개(웹도 같은 틀) */    /* "[사용 %(여유 MB)]" / "[Used % (MB free)]" */
 
     /* 2026-09-16(SR/Power Control, 사용자 설계 대화) */
     STR_PANEL_POWER_CONTROL,     /* 주화면 판넬 제목/팝업 제목: "전원제어" / "Power Control" */
