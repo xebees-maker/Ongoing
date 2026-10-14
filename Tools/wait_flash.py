@@ -1,8 +1,8 @@
 """보드 앱 플래시(0x10000만 — 전체 플래시는 LittleFS 설정을 지움). 포트가 나타날 때까지 기다렸다 플래시.
 
-사용: python wait_flash.py <포트> <bin> <대기초> [칩(기본 esp32s3)]
-2026-10-14(사용자 지시) — 콘 포트(CNTL_PORT)면 플래시 전에 반드시 Tools/cntl_predump.py로 콘 RAM 로그를 받아 두고,
-실패하면 플래시하지 않음(재시작하면 RAM 로그가 지워짐 — 사후 분석 자료). 상시 로그 수집기가 포트를 쥐고 있으면
+사용: python wait_flash.py <포트> <bin> <대기초> [칩(기본 esp32s3)] [--require-dump]
+2026-10-14(사용자 지시) — 콘 포트(CNTL_PORT)면 플래시 전에 Tools/cntl_predump.py로 콘 RAM 로그 받기를 시도.
+계획된 개발 중 리셋은 실패해도 계속. 문제 조사 중이면 --require-dump(실패하면 플래시하지 않음). 상시 로그 수집기가 포트를 쥐고 있으면
 <로그 폴더>/<이름>.pause 를 먼저 만들 것.
 """
 import os, subprocess, sys, time
@@ -14,15 +14,20 @@ PY = r"C:\Espressif\tools\python\v6.0.2\venv\Scripts\python.exe"
 
 port = sys.argv[1]
 binpath = sys.argv[2]
-CHIP = sys.argv[4] if len(sys.argv) > 4 else "esp32s3"
+CHIP = sys.argv[4] if len(sys.argv) > 4 and not sys.argv[4].startswith("--") else "esp32s3"
 deadline = time.time() + float(sys.argv[3])
 
+REQUIRE_DUMP = '--require-dump' in sys.argv
 if port.upper() == CNTL_PORT:
+    # 2026-10-14(사용자 지시) — 계획된 개발 중 리셋은 로그 확보·승인 없이 진행(받기는 시도만, 실패해도 계속).
+    # 문제를 조사하는 중(예상 못 한 에러·크래시를 분석 중)일 때만 --require-dump: 실패하면 플래시하지 않음.
     r = subprocess.run([sys.executable, os.path.join(HERE, 'cntl_predump.py')], capture_output=True, text=True)
     print(r.stdout.strip())
     if r.returncode != 0:
-        print("FLASH_ABORTED - Cntl RAM log dump failed (do not reset Cntl before the logs are saved)")
-        sys.exit(2)
+        if REQUIRE_DUMP:
+            print("FLASH_ABORTED - Cntl RAM log dump failed (--require-dump)")
+            sys.exit(2)
+        print("PREDUMP skipped (dump failed) - continuing (development reset)")
 
 while time.time() < deadline:
     if any(p.device == port for p in list_ports.comports()):

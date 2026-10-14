@@ -20,6 +20,6 @@
 ## 그 밖
 - 푸시는 사용자가 말할 때만. 스키매틱(References/)은 커밋하지 않음.
 - 콘은 앱만 플래시(0x10000) — 전체 플래시는 LittleFS의 설정 파일을 지움.
-- 콘을 리셋하는 일(플래시, /api/restart, SD 포맷·재마운트) 전에는 반드시 콘 RAM 로그부터 받음: `python Tools/cntl_predump.py`
-  (Tools/wait_flash.py는 콘 포트면 자동으로 받고, 실패하면 플래시하지 않음). .claude/settings.json 훅(Tools/cntl_reset_guard.py)이
-  10분 안에 받은 기록이 없으면 다른 경로의 리셋을 막음. 받기에 실패하면 리셋하기 전에 사용자에게 먼저 알림.
+- 문제를 조사하는 중(예상 못 한 에러·크래시를 분석 중)에 콘을 리셋(플래시, /api/restart, SD 포맷·재마운트)할 때는 먼저 콘 RAM
+  로그를 받음: `python Tools/cntl_predump.py`, 플래시는 `Tools/wait_flash.py ... --require-dump`(받기 실패면 플래시 안 함 → 사용자에게
+  먼저 알림). 계획된 개발 중 리셋은 로그 확보·승인 없이 진행(wait_flash.py가 받기를 시도만 함, 사용자 지시 10-14).
