@@ -24,5 +24,20 @@
       "Edit(C:\\Projects\\Ongoing\\.claude\\settings.local.json)",
       "Write(C:\\Projects\\Ongoing\\.claude\\settings.local.json)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python C:/Projects/Ongoing/Tools/cntl_reset_guard.py",
+            "timeout": 10,
+            "statusMessage": "Cntl reset guard"
+          }
+        ]
+      }
+    ]
   }
 }
