@@ -6,6 +6,7 @@
 #include "ui_log.h"
 #include "device_config.h"
 #include "photo_storage.h"
+#include "sd_health.h"
 #include "can_bridge_link.h"
 #include "esp_mac.h"
 
@@ -207,7 +208,8 @@ static void handle_sr_meta(const uint8_t *mac, const uint8_t *body, size_t len)
     int64_t tb = esp_timer_get_time();   /* 2026-10-08(진단, 임시) */
     s->writer = photo_storage_begin(mac, meta.kind);
     if (esp_timer_get_time() - tb >= 50000) ESP_LOGW(TAG, "PHOTOIO slow begin %ums", (unsigned)((esp_timer_get_time() - tb) / 1000));
-    if (!s->writer) ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)meta.file_id);
+    /* 2026-10-14 — SD 고장 상태로 거부한 것이면 이미 5009·푸시로 알렸으니 엉뚱한 5008(마운트 실패)을 또 올리지 않음 */
+    if (!s->writer && sd_health_writes_allowed()) ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)meta.file_id);
 }
 
 static void handle_sr_chunk(const uint8_t *mac, const uint8_t *body, size_t len)
