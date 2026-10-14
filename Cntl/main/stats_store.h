@@ -68,6 +68,14 @@ bool stats_store_post_job(stats_store_job_fn_t fn, const void *arg, size_t arg_l
 typedef void (*stats_store_appended_cb_t)(void);
 void stats_store_set_appended_cb(stats_store_appended_cb_t cb);
 
+/* 2026-10-15(SD 개선 2단계) — 부팅 때 LittleFS 마운트 뒤 한 번: 내부 플래시 날 파일 색인, 옮긴 위치 읽기,
+ * 화면용 집계 누적기 다시 채우기, 1분 타이머(버퍼 → 내부 플래시, 시가 바뀌면 → SD) */
+void stats_store_init(void);
+/* 다음 분 처리 때 시를 기다리지 않고 SD로 옮김(시험용 /api/stats/sync?now=1) */
+void stats_store_request_sync(void);
+/* 옮기기 상태 JSON(시험·확인용). 쓴 길이 반환 */
+int stats_store_sync_json(char *buf, size_t cap);
+
 /* 2026-09-30 — now_unix 기준으로 이미 끝난 칸 중 값이 있는데 아직 파일에 안 쓴 것을 모두 씀(값 없는 칸은 안 씀).
  * 통계 팝업이 그리기 직전(매분 타이머, 팝업 열 때)에 부름 */
 void stats_store_flush_ended_buckets(uint32_t now_unix);

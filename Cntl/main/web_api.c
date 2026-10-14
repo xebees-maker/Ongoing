@@ -1053,6 +1053,22 @@ static esp_err_t api_stats_aggdump_get_handler(httpd_req_t *req)
     return ret;
 }
 
+/* 2026-10-15(SD 개선 2단계, 시험·확인용) — GET /api/stats/sync[?now=1] : 내부 플래시·옮기기 상태. now=1이면 다음 분에 바로 옮김 */
+static esp_err_t api_stats_sync_get_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    if (query_int(s_w->query, "now", 0) == 1) stats_store_request_sync();
+    const size_t cap = 1024;
+    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
+    if (!b.p) { httpd_resp_send_500(req); return ESP_FAIL; }
+    int n = stats_store_sync_json(b.p, cap);
+    b.len = (n > 0 && (size_t)n < cap) ? (size_t)n : 0;
+    esp_err_t ret = send_jbuf(req, &b);
+    heap_caps_free(b.p);
+    return ret;
+}
+
 static esp_err_t api_stats_records_get_handler(httpd_req_t *req)
 {
     WEB_SCREEN_API_BEGIN(req);
@@ -1369,6 +1385,8 @@ void web_api_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &fsbench_get_uri);
     static const httpd_uri_t stats_aggdump_uri = { .uri = "/api/stats/aggdump", .method = HTTP_GET, .handler = api_stats_aggdump_get_handler };   /* 2026-10-14 진단, 임시 */
     httpd_register_uri_handler(server, &stats_aggdump_uri);
+    static const httpd_uri_t stats_sync_uri = { .uri = "/api/stats/sync", .method = HTTP_GET, .handler = api_stats_sync_get_handler };   /* 2026-10-15 시험용 */
+    httpd_register_uri_handler(server, &stats_sync_uri);
     httpd_register_uri_handler(server, &stats_delete_all_uri);
     static const httpd_uri_t settings_uri = { .uri = "/api/settings", .method = HTTP_GET, .handler = api_settings_get_handler };
     static const httpd_uri_t settings_set_uri = { .uri = "/api/settings/set", .method = HTTP_POST, .handler = api_settings_set_post_handler };
