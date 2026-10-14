@@ -10,6 +10,7 @@
 #include "waveshare_rgb_lcd_port.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_vfs_fat.h"
 #include <stdbool.h>
 #include "driver/sdspi_host.h"
@@ -21,6 +22,33 @@
 #include "freertos/task.h"
 
 static const char *TAG = "SYS";
+
+/* 2026-10-14(사용자 지시 — 카드 정체 확인, SD 손상 추적) — 마운트와 상관없이 카드 CID 전체를 로그에 남김. 예전엔
+ * 마운트 성공 뒤 sdmmc_card_print_info()만 찍어 제조사 ID·OEM·일련번호·제조 연월이 없었고, 마운트가 실패하는 카드
+ * (예: GPT로 포맷된 카드)는 IDF가 카드 정보를 지워 아무것도 안 남았음. 공개 API로 장치를 잠깐 붙여 초기화만 하고 뗌 */
+static void log_card_cid(const sdmmc_host_t *host, const sdspi_device_config_t *slot_cfg)
+{
+    sdmmc_card_t *card = heap_caps_calloc(1, sizeof(*card), MALLOC_CAP_SPIRAM);
+    if (!card) return;
+    sdspi_dev_handle_t h;
+    if (sdspi_host_init_device(slot_cfg, &h) != ESP_OK) { heap_caps_free(card); return; }
+    sdmmc_host_t hh = *host;
+    hh.slot = h;
+    esp_err_t e = sdmmc_card_init(&hh, card);
+    if (e == ESP_OK) {
+        const sdmmc_cid_t *c = &card->cid;
+        char name[sizeof(c->name) + 1] = { 0 };
+        for (size_t i = 0; i < sizeof(c->name) && c->name[i]; i++) name[i] = (c->name[i] >= 32 && c->name[i] < 127) ? c->name[i] : '?';
+        ESP_LOGW(TAG, "SD card CID: MID=0x%02X OID=0x%04X PNM='%s' PRV=%d.%d PSN=0x%08X MDT=%d-%02d %lluMB",
+                 c->mfg_id, c->oem_id, name, (c->revision >> 4) & 0xF, c->revision & 0xF, (unsigned)c->serial,
+                 2000 + ((c->date >> 4) & 0xFF), c->date & 0xF,
+                 (unsigned long long)card->csd.capacity * card->csd.sector_size / (1024 * 1024));
+    } else {
+        ESP_LOGW(TAG, "SD card CID: card init failed (%s)", esp_err_to_name(e));
+    }
+    sdspi_host_remove_device(h);
+    heap_caps_free(card);
+}
 
 #define SD_SPI_HOST     SPI2_HOST
 #define SD_PIN_MOSI     11
@@ -92,6 +120,7 @@ esp_err_t sd_storage_init(void)
         .allocation_unit_size   = 16 * 1024,
     };
 
+    log_card_cid(&host, &slot_cfg);   /* 2026-10-14 */
     err = esp_vfs_fat_sdspi_mount(SD_STORAGE_MOUNT_POINT, &host, &slot_cfg, &mount_cfg, &s_card);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "SD mount failed: %s", esp_err_to_name(err));
