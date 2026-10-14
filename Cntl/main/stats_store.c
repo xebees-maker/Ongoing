@@ -1161,7 +1161,20 @@ static void lfs_replay(uint32_t from, agg_state_t *st, bool lock_rbuf)
 {
     for (int i = 0; i < s_lfs_nd; i++) {
         if ((s_lfs_days[i].day + 1) * DAY_SEC <= from) continue;   /* 날 파일 D의 기록 시각은 D일 끝을 넘지 않음 */
-        for (uint32_t off = 0; off < s_lfs_days[i].count; ) {
+        /* 파일 안은 도착순 = 시간순 — 시각 >= from인 첫 레코드를 이진탐색(매시 하루 파일 전체를 읽지 않게) */
+        uint32_t off = 0;
+        if (s_lfs_days[i].day * DAY_SEC < from) {
+            uint32_t lo = 0, hi = s_lfs_days[i].count;
+            while (lo < hi) {
+                uint32_t mid = lo + (hi - lo) / 2;
+                stats_record_t r;
+                if (lfs_read_at(i, mid, &r, 1) != 1) { lo = 0; break; }
+                if (r.unix_time < from) lo = mid + 1;
+                else hi = mid;
+            }
+            off = lo;
+        }
+        while (off < s_lfs_days[i].count) {
             uint32_t want = s_lfs_days[i].count - off;
             if (want > SYNC_CHUNK) want = SYNC_CHUNK;
             uint32_t n = lfs_read_at(i, off, s_sync_buf, want);
