@@ -1252,6 +1252,7 @@ void app_main(void)
      * node_hub를 부름) */
     wifi_sta_init();  /* 내부에서 esp_netif_init()+esp_event_loop_create_default() 호출 —
                              아래 이벤트 등록은 반드시 그 다음이어야 함 */
+    notify_network_ready();   /* 2026-10-14 — 이제부터 푸시 알림 전송 가능(그 전 알림은 큐에서 대기) */
 
     /* SR(Power Control) 판정 루프 시작(2026-09-16) — GPIO 초기화 + 15초 주기 태스크.
      * ui_main_query_power_source_value()가 node_hub 노드 테이블/SD 집계를 읽으므로 그

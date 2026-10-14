@@ -38,6 +38,9 @@ typedef struct {
 
 /* 보내기 태스크 시작 — 부팅 때 한 번(LittleFS 마운트 뒤) */
 void notify_init(void);
+/* 2026-10-14(실기 — 부팅 중 푸시 알림이 네트워크 스택 시작 전에 나가려다 lwip assert "Invalid mbox"로 죽고, 그 크래시가 또 푸시
+ * 알림이 되어 부팅 반복) — main이 wifi_sta_init()(esp_netif_init) 뒤에 부름. 그 전엔 알림을 큐에 쌓아만 둠 */
+void notify_network_ready(void);
 
 /* 알림 하나를 큐에 넣고 바로 반환(네트워크 대기 없음). title·msg는 ASCII(화면 영문 원칙과 같음).
  * 큐가 가득 차거나 init 전이면 false */

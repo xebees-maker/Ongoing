@@ -111,9 +111,18 @@ static void send_one(const notify_item_t *it)
     }
 }
 
+static SemaphoreHandle_t s_net_ready = NULL;   /* 2026-10-14 — notify_network_ready()가 한 번 줌 */
+
+void notify_network_ready(void)
+{
+    if (s_net_ready) xSemaphoreGive(s_net_ready);
+}
+
 static void notify_task(void *arg)
 {
     (void)arg;
+    /* 네트워크 스택(esp_netif) 시작 전에는 보내지 않음 — 그동안 들어온 알림은 큐에 남아 있다가 시작 뒤 차례로 나감 */
+    if (s_net_ready) xSemaphoreTake(s_net_ready, portMAX_DELAY);
     for (;;) {
         if (xQueueReceive(s_q, s_item, portMAX_DELAY) == pdTRUE) send_one(s_item);
     }
@@ -129,9 +138,10 @@ void notify_init(void)
     s_cfg = heap_caps_calloc(1, sizeof(notify_cfg_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_send_cfg = heap_caps_calloc(1, sizeof(notify_cfg_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_cfg_mutex = xSemaphoreCreateMutex();
+    s_net_ready = xSemaphoreCreateBinary();   /* 2026-10-14 */
     s_url = heap_caps_malloc(NOTIFY_URL_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_line = heap_caps_malloc(NOTIFY_LINE_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!q_storage || !s_item || !s_staging || !s_send_mutex || !s_cfg || !s_send_cfg || !s_cfg_mutex || !s_url || !s_line) {
+    if (!q_storage || !s_item || !s_staging || !s_send_mutex || !s_cfg || !s_send_cfg || !s_cfg_mutex || !s_url || !s_line || !s_net_ready) {
         ESP_LOGE(TAG, "alloc failed - notifications disabled");
         return;
     }
