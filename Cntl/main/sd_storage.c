@@ -60,6 +60,8 @@ static void log_card_cid(const sdmmc_host_t *host, const sdspi_device_config_t *
 #define SD_PIN_SCK      12
 
 static sdmmc_card_t *s_card = NULL;
+/* 2026-10-15 — 포맷 요청 중에만 true: 마운트가 실패하면(FAT 없음·손상) 그 자리에서 FAT을 만들고 마운트(sd_storage_format) */
+static bool s_format_if_mount_failed = false;
 
 esp_err_t sd_storage_init(void)
 {
@@ -119,7 +121,7 @@ esp_err_t sd_storage_init(void)
     slot_cfg.gpio_cs = SDSPI_SLOT_NO_CS;
 
     esp_vfs_fat_mount_config_t mount_cfg = {
-        .format_if_mount_failed = false,
+        .format_if_mount_failed = s_format_if_mount_failed,
         .max_files              = 8,   /* 2026-10-14 — 5 → 8: 쓰고 다시 읽어 확인하는 핸들이 동시에 하나씩 더 열림(sd_health) */
         .allocation_unit_size   = 16 * 1024,
     };
@@ -189,10 +191,9 @@ esp_err_t sd_storage_reconnect(void)
  * photos 폴더를 sd_storage_init()과 동일하게 다시 만들어줌 */
 esp_err_t sd_storage_format(void)
 {
-    if (!s_card) {
-        ESP_LOGW(TAG, "Format failed - SD not mounted, reconnect first");
-        return ESP_ERR_INVALID_STATE;
-    }
+    /* 2026-10-15(실기 — FAT이 없는 카드는 마운트가 안 돼서 "SD not mounted, reconnect first"로 포맷 자체가 막혔음) —
+     * 예전엔 마운트된 카드만 포맷했음. 이제 아래 재연결을 "마운트가 실패하면 FAT을 만들고 마운트"로 함. 마운트가 된
+     * 카드(FAT 있음)는 그대로 마운트되므로 아래 포맷이 원래대로 진행됨(FAT이 없던 카드는 FAT을 만든 뒤 한 번 더 포맷) */
 
     /* 2026-09-11(실기에서 "포맷 실패" 재현 후 근본원인 확인 — f_mkfs failed (3), FatFs
      * ff.c의 f_mkfs()는 시작하자마자 disk_initialize(pdrv)를 부르고 STA_NOINIT이면 곧장
@@ -205,7 +206,9 @@ esp_err_t sd_storage_format(void)
      * SPI버스를 완전히 새로 초기화하고 카드에 CMD0(GO_IDLE_STATE)부터 다시 보내는 완전한
      * 재프로브라 이 상태를 확실히 리셋함 — 포맷 직전에 항상 한 번 거쳐서 깨끗한 상태에서
      * 시도하게 함 */
+    s_format_if_mount_failed = true;
     esp_err_t reconnect_err = sd_storage_reconnect();
+    s_format_if_mount_failed = false;
     if (reconnect_err != ESP_OK) {
         ESP_LOGE(TAG, "Format failed - reconnect before format failed: %s", esp_err_to_name(reconnect_err));
         return reconnect_err;
