@@ -291,6 +291,20 @@ bool sd_storage_is_mounted(void)
     return s_card != NULL;
 }
 
+esp_err_t sd_storage_full_erase(void)
+{
+    if (!s_card) return ESP_ERR_INVALID_STATE;
+    photo_storage_io_suspend();
+    stats_store_io_suspend();
+    int64_t t0 = esp_timer_get_time();
+    ESP_LOGW(TAG, "SD full erase start (%llu sectors)", (unsigned long long)s_card->csd.capacity);
+    esp_err_t err = sdmmc_full_erase(s_card);
+    ESP_LOGW(TAG, "SD full erase done: %s, %ums", esp_err_to_name(err), (unsigned)((esp_timer_get_time() - t0) / 1000));
+    stats_store_io_resume();
+    photo_storage_io_resume();
+    return err;
+}
+
 esp_err_t sd_storage_write_sectors(const void *src, size_t start_sector, size_t count)
 {
     if (!s_card) return ESP_ERR_INVALID_STATE;

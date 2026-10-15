@@ -304,8 +304,11 @@ static void handle_sr_done(const uint8_t *mac, const uint8_t *body, size_t len)
     } else if (!crc_ok) {
         ESP_LOGW(TAG, "CRC mismatch - photo dropped file_id=%u", (unsigned)file_id);
         ui_log_add_err(UI_ERR_CRC_MISMATCH, "Photo receive failed (CRC mismatch) file_id=%u", (unsigned)file_id);
-    } else {
+    } else if (sd_health_writes_allowed()) {
         ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)file_id);
+    } else {
+        /* 2026-10-15 — SD 고장 상태라 저장을 거부한 것(시작 단계와 같은 이유, 93a2fd3) — 이미 5009·푸시로 알렸으니 5008을 또 올리지 않음 */
+        ESP_LOGW(TAG, "Photo not saved - SD faulted file_id=%u", (unsigned)file_id);
     }
     finish_event(PHOTO_RX_STATE_ERROR);
 }

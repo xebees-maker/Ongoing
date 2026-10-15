@@ -578,6 +578,10 @@ static esp_err_t api_sdhealth_test_post_handler(httpd_req_t *req)
     httpd_req_get_url_query_str(req, q, sizeof(q));
     if (httpd_query_key_value(q, "check", v, sizeof(v)) == ESP_OK) { sd_health_check_now(false); return send_simple(req, NULL, "{\"ok\":true}"); }
     if (httpd_query_key_value(q, "flip", v, sizeof(v)) == ESP_OK) { sd_health_check_now(true); return send_simple(req, NULL, "{\"ok\":true}"); }
+    if (httpd_query_key_value(q, "erase", v, sizeof(v)) == ESP_OK) {   /* 2026-10-15 임시 — 카드 전체 지우기(뒤에 포맷 필요) */
+        esp_err_t e = sd_storage_full_erase();
+        return send_simple(req, NULL, e == ESP_OK ? "{\"ok\":true}" : "{\"ok\":false}");
+    }
     sd_health_report(SDH_EV_TEST, "test", 0);
     return send_simple(req, NULL, "{\"ok\":true}");
 }
