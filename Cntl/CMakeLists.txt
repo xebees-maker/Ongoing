@@ -32,3 +32,12 @@ execute_process(
     COMMAND ${python} "${CMAKE_SOURCE_DIR}/patches/fix_tiny_ttf_kerning.py"
             "${CMAKE_SOURCE_DIR}/managed_components/lvgl__lvgl/src/libs/tiny_ttf/lv_tiny_ttf.c"
 )
+
+# 2026-10-15(콘 크래시 — SD 재연결 중 마운트 실패 직후 웹 서버 태스크에서 LoadProhibited) — ESP-IDF v6.0.2
+# vfs_calls.c:660 esp_vfs_select()가 빈 VFS 칸(vfs == NULL)을 만나면 ESP_LOGD(..., vfs->offset)로 NULL을 읽음.
+# 빈 칸은 실행 중 SD 마운트가 실패하면 생김(esp_vfs_unregister가 칸을 NULL로 두고 개수는 안 줄임 — 부팅 때는 뒤에
+# 등록되는 것이 채움). 이 프로젝트는 CONFIG_LOG_MAXIMUM_LEVEL=DEBUG라 그 인자가 실제로 계산됨. IDF 원본은 안 고치고
+# vfs_calls.c만 컴파일 로그 상한을 INFO로 — 그 줄이 그냥 다음 칸으로 넘어감
+idf_component_get_property(vfs_dir vfs COMPONENT_DIR)
+set_source_files_properties("${vfs_dir}/vfs_calls.c" DIRECTORY "${vfs_dir}"
+                            PROPERTIES COMPILE_DEFINITIONS "LOG_LOCAL_LEVEL=ESP_LOG_INFO")
