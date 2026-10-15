@@ -22,6 +22,11 @@ typedef enum {
     SDH_EV_BAD_AGG_RECORD,     /* 집계 파일 안에 그 주에 속하지 않는 칸(0xFF·쓰레기) */
     SDH_EV_FAT_MISMATCH,       /* 정기 점검: FAT1과 FAT2가 다름(두 번 확인) */
     SDH_EV_TEST,               /* 시험용 명령(임시 API) */
+    /* 2026-10-15(MPIO 카드 손상 — 0번 섹터·디렉터리·통계가 8KB 단위로 바뀌었는데 아무 보고 없었음) — 아래는 값을 바꾸지 말고 뒤에만 추가 */
+    SDH_EV_LAYOUT,             /* 0번 섹터·부트 섹터를 못 읽거나 서명(55AA)이 없음 — 예전엔 FAT 검사가 말없이 건너뜀 */
+    SDH_EV_BOOT_AREA_CHANGED,  /* 콘이 쓰지 않는 영역(0번 섹터 ~ FAT 앞, FSInfo 제외)이 마운트 때와 다름 */
+    SDH_EV_BAD_DIR_ENTRY,      /* 사진·통계 폴더에 이름이 깨진 항목 */
+    SDH_EV_BAD_STATS_RECORD,   /* 통계 원시 기록에 그 주에 속하지 않는 레코드(0xFF·쓰레기) */
     SDH_EV_COUNT
 } sd_health_event_t;
 
@@ -52,6 +57,13 @@ void sd_health_clear(void);
 bool sd_health_take_pending(char *reason, size_t reason_len);
 
 void sd_health_count(sd_health_counter_t c, uint32_t n);
+
+/* 2026-10-15 — sd_storage가 마운트·포맷 성공 직후 부름: 부트 영역 기준값을 기록 태스크에서 새로 잡음 */
+void sd_health_on_mount(void);
+
+/* 2026-10-15(시험, 임시 — 할 일 AF에서 제거) — 1시간 점검을 지금 한 번(기록 태스크로).
+ * flip=true면 먼저 예약 영역의 안 쓰는 섹터(파티션 시작+2) 첫 바이트를 뒤집어 씀 — 부트 영역 감시 양성 시험(한 번 더 부르면 되돌아감) */
+void sd_health_check_now(bool flip);
 
 /* sd_storage가 마운트 직전에 읽은 카드 CID 한 줄 */
 void sd_health_set_card(const char *cid_line);

@@ -573,6 +573,11 @@ static esp_err_t api_sd_health_get_handler(httpd_req_t *req)
 static esp_err_t api_sdhealth_test_post_handler(httpd_req_t *req)
 {
     WEB_AUTH_REQUIRE(req);
+    /* 2026-10-15 — ?check=1: 1시간 점검을 지금, ?flip=1: 부트 영역 감시 양성 시험(예약 섹터 한 바이트 뒤집기 — 다시 부르면 되돌림) */
+    char q[32] = { 0 }, v[4] = { 0 };
+    httpd_req_get_url_query_str(req, q, sizeof(q));
+    if (httpd_query_key_value(q, "check", v, sizeof(v)) == ESP_OK) { sd_health_check_now(false); return send_simple(req, NULL, "{\"ok\":true}"); }
+    if (httpd_query_key_value(q, "flip", v, sizeof(v)) == ESP_OK) { sd_health_check_now(true); return send_simple(req, NULL, "{\"ok\":true}"); }
     sd_health_report(SDH_EV_TEST, "test", 0);
     return send_simple(req, NULL, "{\"ok\":true}");
 }

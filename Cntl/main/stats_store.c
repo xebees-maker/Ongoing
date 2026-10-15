@@ -856,6 +856,72 @@ uint32_t stats_store_get_count(void)
     return (total > UINT32_MAX) ? UINT32_MAX : (uint32_t)total;
 }
 
+/* 2026-10-15 — 레코드가 그 주 파일에 들어갈 수 있는 값인지(시각이 그 주, 채널 종류가 범위 안) */
+static bool record_ok(const stats_record_t *r, uint32_t week)
+{
+    return r->unix_time / STATS_WEEK_SEC == week && r->chan_type < STATS_AGG_MAX_CHAN_TYPES;
+}
+
+void stats_store_sd_check(void)
+{
+    if (!sd_storage_is_mounted()) return;
+    int64_t t0 = esp_timer_get_time();
+    uint32_t files = 0, recs = 0, bad = 0;
+    lock();
+    if (!ensure_alloc_locked()) { unlock(); return; }
+    uint32_t from = (s_week_count > 2) ? s_week_count - 2 : 0;
+    for (uint32_t i = from; i < s_week_count && sd_storage_is_mounted(); i++) {
+        uint32_t week = s_weeks[i].week;
+        char path[48];
+        /* 원시 */
+        raw_path(week, path, sizeof(path));
+        FILE *f = (s_weeks[i].raw_count > 0) ? fopen(path, "rb") : NULL;
+        if (f) {
+            files++;
+            uint32_t idx = 0, fb = 0;
+            size_t got;
+            while ((got = fread(s_scratch, sizeof(stats_record_t), STATS_CHUNK, f)) > 0) {
+                for (size_t k = 0; k < got; k++, idx++) {
+                    if (record_ok(&s_scratch[k], week)) continue;
+                    if (fb++ == 0) {
+                        ESP_LOGE(TAG, "SD check: bad record %u in %s (t=%u chan=%u)", (unsigned)idx, path,
+                                 (unsigned)s_scratch[k].unix_time, (unsigned)s_scratch[k].chan_type);
+                        sd_health_report(SDH_EV_BAD_STATS_RECORD, path, idx);
+                    }
+                }
+            }
+            fclose(f);
+            recs += idx;
+            if (fb) ESP_LOGE(TAG, "SD check: %s has %u bad records of %u", path, (unsigned)fb, (unsigned)idx);
+            bad += fb;
+        }
+        /* 집계(눈금 5개) — 칸 시작이 그 주가 아니면 손상 */
+        for (uint8_t sc = 0; sc < STATS_SCALE_COUNT; sc++) {
+            agg_path(sc, week, path, sizeof(path));
+            f = fopen(path, "rb");
+            if (!f) continue;
+            files++;
+            uint32_t idx = 0, fb = 0;
+            size_t got;
+            while ((got = fread(s_bscratch, sizeof(stats_bucket_t), STATS_CHUNK, f)) > 0) {
+                for (size_t k = 0; k < got; k++, idx++) {
+                    if (s_bscratch[k].bucket_start_unix / STATS_WEEK_SEC == week && s_bscratch[k].chan_type < STATS_AGG_MAX_CHAN_TYPES) continue;
+                    if (fb++ == 0) {
+                        ESP_LOGE(TAG, "SD check: bad bucket %u in %s (t=%u)", (unsigned)idx, path, (unsigned)s_bscratch[k].bucket_start_unix);
+                        sd_health_report(SDH_EV_BAD_AGG_RECORD, path, idx);
+                    }
+                }
+            }
+            fclose(f);
+            recs += idx;
+            bad += fb;
+        }
+    }
+    unlock();
+    ESP_LOGI(TAG, "SD check: %u files, %u records, %u bad, %ums", (unsigned)files, (unsigned)recs, (unsigned)bad,
+             (unsigned)((esp_timer_get_time() - t0) / 1000));
+}
+
 void stats_store_probe_io(void)
 {
     s_last_io_error = false;
@@ -888,6 +954,13 @@ static uint32_t sd_read_range_locked(uint64_t start_record, uint64_t end_record,
         fseek(f, (long)((from - w_start) * sizeof(stats_record_t)), SEEK_SET);
         size_t n = fread(&out[got], sizeof(stats_record_t), (size_t)(to - from), f);
         fclose(f);
+        /* 2026-10-15(MPIO 손상 — 표에 시각 1495542756·채널 249 같은 쓰레기가 그대로 보였는데 보고 없었음) — 그 주에 속하지
+         * 않는 레코드면 SD 이상(읽기 한 번에 한 번만). 보여 주는 방식은 그대로 */
+        for (size_t k = 0; k < n; k++) {
+            if (record_ok(&out[got + k], s_weeks[i].week)) continue;
+            sd_health_report(SDH_EV_BAD_STATS_RECORD, path, (uint32_t)(from - w_start + k));
+            break;
+        }
         got += (uint32_t)n;
         if (n != (size_t)(to - from)) { s_last_io_error = true; break; }
     }

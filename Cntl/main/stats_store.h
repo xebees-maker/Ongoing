@@ -68,6 +68,10 @@ bool stats_store_post_job(stats_store_job_fn_t fn, const void *arg, size_t arg_l
 typedef void (*stats_store_appended_cb_t)(void);
 void stats_store_set_appended_cb(stats_store_appended_cb_t cb);
 
+/* 2026-10-15(MPIO 카드 손상 대응) — 최근 두 주 SD 통계 파일(원시·집계)을 훑어 그 주에 속하지 않는 레코드(0xFF·쓰레기)가
+ * 있으면 SD 이상으로 보고(sd_health 1시간 점검이 기록 태스크에서 부름) */
+void stats_store_sd_check(void);
+
 /* 2026-10-15(SD 개선 2단계) — 부팅 때 LittleFS 마운트 뒤 한 번: 내부 플래시 날 파일 색인, 옮긴 위치 읽기,
  * 화면용 집계 누적기 다시 채우기, 1분 타이머(버퍼 → 내부 플래시, 시가 바뀌면 → SD) */
 void stats_store_init(void);

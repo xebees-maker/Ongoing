@@ -193,6 +193,7 @@ esp_err_t sd_storage_init(void)
     }
 
     ESP_LOGI(TAG, "SD mounted: %s", SD_STORAGE_MOUNT_POINT);
+    sd_health_on_mount();   /* 2026-10-15 — 부트 영역 기준값을 새로 잡음(손상 감시) */
     /* 2026-09-26 — 재연결로 다시 마운트된 경우 사용량 합계를 새로 만들게 함(부팅 때는 파일처리
      * 태스크가 아직 없어서 무시되고, 태스크가 시작하면서 어차피 재스캔함) */
     storage_mgr_request_rescan();
@@ -279,6 +280,7 @@ esp_err_t sd_storage_format(void)
         ESP_LOGW(TAG, "photos folder create failed (errno=%d)", errno);
     }
     ESP_LOGI(TAG, "SD format done");
+    sd_health_on_mount();   /* 2026-10-15 — 포맷으로 부트 영역이 바뀜 — 기준값 새로 */
     storage_mgr_request_rescan();  /* 포맷으로 전부 비었음 — 합계 새로 */
     return ESP_OK;
 }
@@ -287,6 +289,12 @@ esp_err_t sd_storage_format(void)
 bool sd_storage_is_mounted(void)
 {
     return s_card != NULL;
+}
+
+esp_err_t sd_storage_write_sectors(const void *src, size_t start_sector, size_t count)
+{
+    if (!s_card) return ESP_ERR_INVALID_STATE;
+    return sdmmc_write_sectors(s_card, src, start_sector, count);
 }
 
 esp_err_t sd_storage_read_sectors(void *dst, size_t start_sector, size_t count)

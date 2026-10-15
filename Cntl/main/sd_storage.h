@@ -50,5 +50,8 @@ bool sd_storage_is_mounted(void);
 /* 2026-10-14(SD 개선 1단계) — 원본 섹터 읽기(sd_health의 FAT1/FAT2 비교용). 호출부가 재연결과 같은 잠금(사진 → 통계)을 잡은 상태 */
 esp_err_t sd_storage_read_sectors(void *dst, size_t start_sector, size_t count);
 
+/* 2026-10-15(시험, 임시 — 할 일 AF에서 제거) — 원본 섹터 쓰기. 부트 영역 감시 양성 시험(sd_health_selftest)만 씀 */
+esp_err_t sd_storage_write_sectors(const void *src, size_t start_sector, size_t count);
+
 /* 2026-10-15 — 명령마다 CS 내리기·올리기 수치(/api/sd/health "cs"): 명령 수, CS 바꾸기 실패, 2ms 넘은 명령, 최대 us */
 void sd_storage_cs_stats(uint32_t *cmds, uint32_t *cs_fail, uint32_t *slow, uint32_t *cs_us_max);
