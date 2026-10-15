@@ -264,6 +264,8 @@
       <div id="sumMem" class="val"></div>
       <div id="sumSd" class="val"></div>
       <div id="sumFlash" class="val"></div>
+      <div id="sumBackup" class="val"></div>
+      <input type="file" id="restoreFile" accept=".bin,application/octet-stream" style="display:none">
     </section>
     <section>
       <h2 data-s="STR_PANEL_POWER_CONTROL"></h2>
@@ -502,8 +504,51 @@
   }
 
   var lastHeld = 0;   /* 10-15(SD 개선 4단계) — SD로 아직 안 옮긴 측정값 수(SD 조치 안내) */
+
+  /* 10-15(SD 개선 5단계, 사용자 설계 — 백업·복원은 브라우저에서만, 폰·PC 모두) — Summary "통계 백업: 날짜 [백업 받기] [복원]".
+   * 백업 = 콘이 주는 파일을 그대로 내려받음(브라우저 다운로드 폴더). 복원 = 파일을 골라 올림 → 콘이 합치는 동안 상태를 물어봄 */
+  var backupLast = null;
+  function loadBackupState() {
+    api('api/stats/restore').then(function (s) { backupLast = s.last_backup || 0; renderBackup(); }).catch(function () {});
+  }
+  function renderBackup() {
+    var el = $('sumBackup');
+    var day = backupLast ? new Date(backupLast * 1000).toISOString().slice(0, 10) : S('STR_LABEL_BACKUP_NEVER');   /* 콘 시각 = 지역시각 그대로 */
+    el.innerHTML = esc(S('STR_LABEL_BACKUP') + ': ' + day) + ' <button class="small" id="bkDl">' + esc(S('STR_BTN_STATS_BACKUP')) +
+      '</button> <button class="small" id="bkRs">' + esc(S('STR_BTN_STATS_RESTORE')) + '</button>';
+    $('bkDl').onclick = function () {
+      var a = document.createElement('a');
+      a.href = 'api/stats/backup';
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(loadBackupState, 15000);
+    };
+    $('bkRs').onclick = function () { $('restoreFile').value = ''; $('restoreFile').click(); };
+    $('restoreFile').onchange = function () { startRestore(this.files[0]); };
+  }
+  function restorePoll(s) {
+    if (s.state === 'running' || s.state === 'uploading') {
+      setTimeout(function () { api('api/stats/restore').then(restorePoll).catch(function () { restorePoll(s); }); }, 2000);
+      return;
+    }
+    busyEnd();
+    if (s.state === 'done') alert(S('STR_MSG_RESTORE_DONE').replace('%u', s.added).replace('%u', s.dup));
+    else alert(S('STR_MSG_RESTORE_FAIL').replace('%s', s.msg || s.state));
+  }
+  function startRestore(f) {
+    if (!f || !confirm(S('STR_MSG_RESTORE_CONFIRM'))) return;
+    busyStart('LOADING');
+    fetch('api/stats/restore', { method: 'POST', body: f, credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream' } })
+      .then(function (r) { return r.json(); })
+      .then(restorePoll)
+      .catch(function () { busyEnd(); alert(S('STR_MSG_RESTORE_FAIL').replace('%s', 'upload')); });
+  }
+
   function render(d) {
     lastHeld = d.held || 0;
+    if (backupLast === null) { backupLast = 0; loadBackupState(); }
     checkCleanup(d.cleanup);
     checkAlarms(d.alarm);
     recAutoRefresh(d.rec);   /* 10-09 — 기록 표를 맨 앞 페이지로 보고 있으면 새 기록이 들어올 때 다시 받음 */

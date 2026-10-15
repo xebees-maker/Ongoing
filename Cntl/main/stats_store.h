@@ -77,6 +77,20 @@ void stats_store_sd_check(void);
 void stats_store_init(void);
 /* 다음 분 처리 때 시를 기다리지 않고 SD로 옮김(시험용 /api/stats/sync?now=1) */
 void stats_store_request_sync(void);
+/* 2026-10-15(SD 개선 5단계, 사용자 설계 — 백업·복원은 브라우저에서만) — 백업: begin이 전체 개수와 파일 머리(32바이트)를 주고,
+ * backup_read로 기록 표 순서(SD → 내부 플래시 → RAM)의 [start, start+n)을 차례로 읽음. 끝까지 보냈으면 backup_done(알림 기준 시각).
+ * 파일 = 머리 + 레코드(17바이트씩) + 레코드 부분 CRC32(4바이트) */
+uint32_t stats_store_backup_begin(uint8_t hdr[32]);
+uint32_t stats_store_backup_read(uint32_t start, uint32_t n, stats_record_t *out);
+void stats_store_backup_done(void);
+uint32_t stats_store_last_backup(void);
+/* 복원: begin(파일 전체 크기) → write(받는 대로) → end(다 받았는지) — SD 임시 파일에 받고 머리·개수·CRC를 확인한 뒤 복원 태스크가
+ * 주마다 기존 기록과 시간순으로 합치고(같은 레코드는 하나만) 집계를 다시 계산. 진행·결과는 status_json */
+bool stats_store_restore_begin(uint32_t total_bytes);
+bool stats_store_restore_write(const uint8_t *data, size_t len);
+bool stats_store_restore_end(bool complete);
+int stats_store_restore_status_json(char *buf, size_t cap);
+
 /* 2026-10-15(SD 개선 4단계) — SD로 아직 안 옮긴 측정값 수(내부 플래시 + RAM 버퍼) — SD 조치 안내에 보여 줌 */
 uint32_t stats_store_get_unsynced(void);
 /* 옮기기 상태 JSON(시험·확인용). 쓴 길이 반환 */

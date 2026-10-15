@@ -252,6 +252,7 @@ typedef enum {
     STR_ERR_DESC_SD_MOUNT_FAILED,
     STR_ERR_DESC_UNKNOWN,  /* 테이블에 없는 코드용 폴백(원래 있었으면 안 되는 상황) */
     STR_WARN_DESC_SD_BAD_ENTRY,
+    STR_WARN_DESC_BACKUP_DUE,    /* 2026-10-15(SD 개선 5단계) */
     STR_WARN_DESC_UNKNOWN,
     /* 2026-09-10(SD 신뢰성 재설계, [[project_cntl_sd_reliability_redesign_2026_09_10]]) —
      * 주화면 SD 상태 라벨(짧은 문구) + 탭해서 여는 상태팝업(긴 설명) + 재연결/포맷 버튼과
@@ -309,7 +310,15 @@ typedef enum {
      * % (MB free)]") — SD 상태 라인의 범례(각 카테고리 뒤에 오는 "pct(remainMB)" 형식을
      * 설명하는 고정 텍스트, 실제 숫자 아님) */
     STR_LABEL_STORAGE_LEGEND,
-    STR_MSG_SD_RESOLVE_GUIDE,    /* 2026-10-15(SD 개선 4단계) — SD 조치 팝업 안내(%u = SD로 아직 안 옮긴 측정값 수, 웹도 같은 틀) */
+    STR_MSG_SD_RESOLVE_GUIDE,
+    STR_LABEL_BACKUP,            /* 2026-10-15(SD 개선 5단계) — 웹 Summary 백업 줄(마지막 백업 날짜) */
+    STR_BTN_STATS_BACKUP,
+    STR_BTN_STATS_RESTORE,
+    STR_MSG_RESTORE_CONFIRM,
+    STR_MSG_RESTORE_RUNNING,
+    STR_MSG_RESTORE_DONE,        /* %u 추가, %u 중복 */
+    STR_MSG_RESTORE_FAIL,        /* %s 이유 */
+    STR_LABEL_BACKUP_NEVER,    /* 2026-10-15(SD 개선 4단계) — SD 조치 팝업 안내(%u = SD로 아직 안 옮긴 측정값 수, 웹도 같은 틀) */
     STR_LABEL_FLASH,             /* 2026-10-15 — Summary 내부 플래시 줄 제목 */
     STR_FMT_FLASH_USAGE,         /* 2026-10-15 — 앱/데이터(통계·기타·여유), %s 7개(웹도 같은 틀) */    /* "[사용 %(여유 MB)]" / "[Used % (MB free)]" */
 

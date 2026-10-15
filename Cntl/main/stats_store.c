@@ -41,6 +41,8 @@
 #include "sd_health.h"
 #include "fs.h"
 #include "rtc_sync.h"
+#include "ui_log.h"
+#include "esp_rom_crc.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -217,6 +219,7 @@ static struct {
 } s_sy;
 static volatile bool s_sync_requested = false;
 static uint32_t s_last_sync_hour = 0;
+static SemaphoreHandle_t s_sync_mtx = NULL;   /* 2026-10-15(5단계) — 매시 옮기기 ↔ 복원(stats_store_init에서 만듦) */
 
 static uint32_t mark_crc(const sync_mark_t *m)
 {
@@ -1344,6 +1347,8 @@ static bool sync_run(void)
 
 /* 1분마다(타이머 → 기록 태스크) — 버퍼를 내부 플래시에, 시(時)가 바뀌었거나 요청이 있으면 SD로 옮김.
  * SD가 없거나 고장이면 옮기지 않고 다음 분에 다시 봄 */
+static void backup_remind_check(uint32_t now);   /* 아래(5단계) */
+
 static void minute_job(const uint8_t *arg)
 {
     (void)arg;
@@ -1353,11 +1358,14 @@ static void minute_job(const uint8_t *arg)
     uint32_t now = rtc_sync_get_unix_time();
     if (now == 0) return;
     uint32_t hour = now / 3600;
+    backup_remind_check(now);   /* 2026-10-15(5단계) — 백업할 때가 됐으면 하루에 한 번 경고 */
     if (hour == s_last_sync_hour && !s_sync_requested) return;
     if (!sd_storage_is_mounted() || !sd_health_writes_allowed()) return;
+    if (!s_sync_mtx || xSemaphoreTake(s_sync_mtx, 0) != pdTRUE) return;   /* 복원 중 — 끝나면 다음 분에 */
     s_sync_requested = false;
     s_last_sync_hour = hour;
     sync_run();   /* 실패하면 다음 시(時)에 다시(나쁜 카드를 매분 두드리지 않게) — 재연결하면 재검사가 다시 요청함 */
+    xSemaphoreGive(s_sync_mtx);
 }
 
 static esp_timer_handle_t s_minute_timer = NULL;
@@ -1400,9 +1408,403 @@ int stats_store_sync_json(char *buf, size_t cap)
     return n;
 }
 
+/* ════════════════════════════════════════════════════════════
+ * 2026-10-15(SD 개선 5단계, 사용자 설계 — 백업·복원은 브라우저에서만, 통계 원시 기록만, 사진은 안 함) — 백업·복원.
+ * 백업 파일 = 머리(32바이트) + 원시 레코드(17바이트씩, 기록 표와 같은 순서 — SD → 내부 플래시 → RAM) + CRC32(레코드 부분).
+ * 복원 = 브라우저가 올린 파일을 SD 임시 파일에 받고 확인 → 복원 태스크가 주마다 기존 기록과 시간순으로 합침(같은 레코드는
+ * 하나만) → 집계를 원시 기록 전체로 다시 계산. 그동안 매시 SD 옮기기·정리는 쉼(내부 플래시엔 계속 쌓임).
+ * 알림 = 마지막 백업에서 BACKUP_REMIND_SEC가 지나면 하루에 한 번 경고(W6003, 휴대폰 알림) — 사용자: 3개월, 시험 중엔 매일
+ * ════════════════════════════════════════════════════════════ */
+#define BACKUP_MAGIC        0x31425343u   /* "CSB1" */
+#define BACKUP_HDR_BYTES    32u
+#define BACKUP_REMIND_SEC   (1u * 86400u)    /* 시험 중 — 출시 때 90일(사용자 지시 "3개월마다, 테스트 단계에서는 매일") */
+#define BACKUP_STATE_PATH   FS_MOUNT_POINT "/backup.bin"
+#define RESTORE_TMP_PATH    SD_STORAGE_MOUNT_POINT "/restore.tmp"
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t rec_size;
+    uint32_t count;
+    uint32_t created;
+    uint32_t rsv[4];
+} backup_hdr_t;   /* 32바이트 */
+
+typedef struct { uint32_t magic, last_backup, last_remind; } backup_state_t;
+static backup_state_t s_bk = { 0, 0, 0 };
+
+static void backup_state_save(void)
+{
+    s_bk.magic = BACKUP_MAGIC;
+    FILE *f = fopen(BACKUP_STATE_PATH, "wb");
+    if (!f) return;
+    fwrite(&s_bk, sizeof(s_bk), 1, f);
+    fclose(f);
+}
+
+static void backup_state_load(void)
+{
+    FILE *f = fopen(BACKUP_STATE_PATH, "rb");
+    if (f) {
+        if (fread(&s_bk, sizeof(s_bk), 1, f) != 1 || s_bk.magic != BACKUP_MAGIC) memset(&s_bk, 0, sizeof(s_bk));
+        fclose(f);
+    }
+}
+
+uint32_t stats_store_last_backup(void) { return s_bk.last_backup; }
+
+/* 백업 — 전체 개수와 머리 */
+uint32_t stats_store_backup_begin(uint8_t hdr[32])
+{
+    uint32_t total = stats_store_get_count();
+    backup_hdr_t h = { .magic = BACKUP_MAGIC, .version = 1, .rec_size = sizeof(stats_record_t), .count = total,
+                       .created = rtc_sync_get_unix_time() };
+    memcpy(hdr, &h, sizeof(h));
+    return total;
+}
+
+/* 백업 — 전체(기록 표 순서) 중 [start, start+n)을 out에. 읽은 개수 반환(읽기 실패면 적게) */
+uint32_t stats_store_backup_read(uint32_t start, uint32_t n, stats_record_t *out)
+{
+    s_last_io_error = false;
+    lock();
+    if (!ensure_alloc_locked()) { unlock(); return 0; }
+    uint64_t sdn = sd_count_locked(), lfn = lfs_unsynced_locked();
+    uint64_t total = sdn + lfn + s_rbuf_n;
+    uint64_t end = (uint64_t)start + n;
+    if (end > total) end = total;
+    uint32_t got = 0;
+    uint64_t pos = start;
+    if (pos < sdn && pos < end) {
+        uint64_t e = (end < sdn) ? end : sdn;
+        uint32_t r = sd_read_range_locked(pos, e, out);
+        got += r;
+        if (r != (uint32_t)(e - pos)) { unlock(); return got; }
+        pos = e;
+    }
+    if (pos < end && pos < sdn + lfn) {
+        uint64_t e = (end < sdn + lfn) ? end : sdn + lfn;
+        uint32_t want = (uint32_t)(e - pos);
+        uint32_t r = lfs_read_unsynced_locked((uint32_t)(pos - sdn), want, out + got);
+        got += r;
+        if (r != want) { unlock(); return got; }
+        pos = e;
+    }
+    while (pos < end) { out[got++] = s_rbuf[pos - sdn - lfn]; pos++; }
+    unlock();
+    return got;
+}
+
+/* 백업을 끝까지 내려보냈을 때(웹) — 알림 기준 시각 */
+void stats_store_backup_done(void)
+{
+    s_bk.last_backup = rtc_sync_get_unix_time();
+    s_bk.last_remind = 0;
+    backup_state_save();
+    ESP_LOGI(TAG, "Statistics backup downloaded");
+}
+
+/* 1분 처리에서 — 백업할 때가 됐으면 하루에 한 번 경고 */
+static void backup_remind_check(uint32_t now)
+{
+    if (now < 1704067200u) return;   /* 시계가 안 맞음 */
+    if (s_bk.last_backup == 0) { s_bk.last_backup = now; backup_state_save(); return; }   /* 처음 — 지금부터 셈 */
+    if (now - s_bk.last_backup < BACKUP_REMIND_SEC) return;
+    if (s_bk.last_remind && now - s_bk.last_remind < 86400u) return;
+    s_bk.last_remind = now;
+    backup_state_save();
+    ui_log_add_warn(UI_WARN_BACKUP_DUE, "Statistics backup due (last %u days ago)", (unsigned)((now - s_bk.last_backup) / 86400u));
+}
+
+/* ── 복원 ── */
+typedef enum { RS_IDLE = 0, RS_UPLOADING, RS_RUNNING, RS_DONE, RS_FAILED } restore_state_t;
+static volatile restore_state_t s_rs = RS_IDLE;
+static volatile bool s_restore_active = false;   /* true면 SD 정리(오래된 주 지우기)를 쉼 */
+/* s_sync_mtx — 매시 옮기기와 복원이 겹치지 않게(아래 minute_job·restore_task). 1분 처리는 못 잡으면 옮기기만 건너뜀 */
+static FILE    *s_rs_f = NULL;
+static uint32_t s_rs_bytes = 0, s_rs_crc = 0, s_rs_count = 0;
+static uint8_t  s_rs_hdr[BACKUP_HDR_BYTES];
+static uint8_t  s_rs_tail[4];
+static uint32_t s_rs_added = 0, s_rs_dup = 0, s_rs_bad = 0, s_rs_weeks_done = 0, s_rs_weeks = 0;
+static char     s_rs_msg[48] = "";
+
+static void rs_fail(const char *msg)
+{
+    snprintf(s_rs_msg, sizeof(s_rs_msg), "%s", msg);
+    s_rs = RS_FAILED;
+    ESP_LOGE(TAG, "Restore failed: %s", msg);
+}
+
+bool stats_store_restore_begin(uint32_t total_bytes)
+{
+    if (s_rs == RS_UPLOADING || s_rs == RS_RUNNING) return false;
+    if (!sd_storage_is_mounted() || !sd_health_writes_allowed()) { rs_fail("SD not available"); return false; }
+    if (total_bytes < BACKUP_HDR_BYTES + 4 || (total_bytes - BACKUP_HDR_BYTES - 4) % sizeof(stats_record_t) != 0) {
+        rs_fail("not a backup file (size)");
+        return false;
+    }
+    s_rs_f = fopen(RESTORE_TMP_PATH, "wb");
+    if (!s_rs_f) { rs_fail("temp file open failed"); return false; }
+    s_rs_bytes = 0;
+    s_rs_crc = 0;
+    s_rs_count = (total_bytes - BACKUP_HDR_BYTES - 4) / sizeof(stats_record_t);
+    s_rs_added = s_rs_dup = s_rs_bad = s_rs_weeks_done = s_rs_weeks = 0;
+    s_rs_msg[0] = '\0';
+    s_rs = RS_UPLOADING;
+    return true;
+}
+
+/* 올라오는 대로 임시 파일에 씀 — 머리·꼬리(CRC)는 따로 떼어 두고 레코드 부분의 CRC를 셈 */
+bool stats_store_restore_write(const uint8_t *data, size_t len)
+{
+    if (s_rs != RS_UPLOADING || !s_rs_f) return false;
+    uint32_t rec_end = BACKUP_HDR_BYTES + s_rs_count * sizeof(stats_record_t);
+    for (size_t i = 0; i < len; ) {
+        uint32_t pos = s_rs_bytes;
+        if (pos < BACKUP_HDR_BYTES) {
+            size_t k = BACKUP_HDR_BYTES - pos; if (k > len - i) k = len - i;
+            memcpy(s_rs_hdr + pos, data + i, k);
+            s_rs_bytes += k; i += k;
+        } else if (pos < rec_end) {
+            size_t k = rec_end - pos; if (k > len - i) k = len - i;
+            if (fwrite(data + i, 1, k, s_rs_f) != k) { rs_fail("temp file write failed"); fclose(s_rs_f); s_rs_f = NULL; return false; }
+            s_rs_crc = esp_rom_crc32_le(s_rs_crc, data + i, k);
+            s_rs_bytes += k; i += k;
+        } else {
+            size_t k = rec_end + 4 - pos; if (k > len - i) k = len - i;
+            if (pos - rec_end + k > 4) { rs_fail("file longer than header says"); fclose(s_rs_f); s_rs_f = NULL; return false; }
+            memcpy(s_rs_tail + (pos - rec_end), data + i, k);
+            s_rs_bytes += k; i += k;
+        }
+    }
+    return true;
+}
+
+static void restore_task(void *arg);
+
+/* 다 받았으면 확인하고 복원 태스크 시작. false면 이유는 상태 JSON의 msg */
+bool stats_store_restore_end(bool complete)
+{
+    if (s_rs != RS_UPLOADING) return false;
+    bool ok = s_rs_f && fflush(s_rs_f) == 0 && fsync(fileno(s_rs_f)) == 0;
+    if (s_rs_f) fclose(s_rs_f);
+    s_rs_f = NULL;
+    backup_hdr_t h;
+    memcpy(&h, s_rs_hdr, sizeof(h));
+    uint32_t tail;
+    memcpy(&tail, s_rs_tail, 4);
+    if (!complete) { rs_fail("upload incomplete"); ok = false; }
+    else if (!ok) rs_fail("temp file sync failed");
+    else if (h.magic != BACKUP_MAGIC || h.version != 1 || h.rec_size != sizeof(stats_record_t)) { rs_fail("not a backup file (header)"); ok = false; }
+    else if (h.count != s_rs_count) { rs_fail("record count mismatch"); ok = false; }
+    else if (tail != s_rs_crc) { rs_fail("CRC mismatch - file damaged"); ok = false; }
+    if (!ok) { unlink(RESTORE_TMP_PATH); return false; }
+    s_rs = RS_RUNNING;
+    static StackType_t *s_rs_stack = NULL;   /* 한 번만 잡고 다시 씀(정적 태스크) */
+    static StaticTask_t s_rs_tcb;
+    if (!s_rs_stack) s_rs_stack = heap_caps_malloc(8192, MALLOC_CAP_SPIRAM);
+    if (!s_rs_stack || !xTaskCreateStaticPinnedToCore(restore_task, "stats_rs", 8192 / sizeof(StackType_t), NULL, 9, s_rs_stack, &s_rs_tcb, 1)) {
+        rs_fail("task start failed");
+        unlink(RESTORE_TMP_PATH);
+        return false;
+    }
+    ESP_LOGI(TAG, "Restore: %u records received, CRC ok - merging", (unsigned)s_rs_count);
+    return true;
+}
+
+int stats_store_restore_status_json(char *buf, size_t cap)
+{
+    static const char *const st[] = { "idle", "uploading", "running", "done", "failed" };
+    return snprintf(buf, cap, "{\"state\":\"%s\",\"records\":%u,\"added\":%u,\"dup\":%u,\"bad\":%u,\"weeks\":%u,\"weeks_done\":%u,"
+                    "\"msg\":\"%s\",\"last_backup\":%u}", st[s_rs], (unsigned)s_rs_count, (unsigned)s_rs_added, (unsigned)s_rs_dup,
+                    (unsigned)s_rs_bad, (unsigned)s_rs_weeks, (unsigned)s_rs_weeks_done, s_rs_msg, (unsigned)s_bk.last_backup);
+}
+
+/* 순차 레코드 읽기(파일 + PSRAM 덩어리) */
+typedef struct {
+    FILE *f;
+    stats_record_t *buf;
+    uint32_t n, i;
+    bool eof;
+} rec_reader_t;
+
+static bool rr_peek(rec_reader_t *r, stats_record_t *out)
+{
+    if (r->i >= r->n) {
+        if (r->eof || !r->f) return false;
+        r->n = (uint32_t)fread(r->buf, sizeof(stats_record_t), STATS_CHUNK, r->f);
+        r->i = 0;
+        if (r->n == 0) { r->eof = true; return false; }
+    }
+    *out = r->buf[r->i];
+    return true;
+}
+
+static void rr_next(rec_reader_t *r) { r->i++; }
+
+static bool rec_sane(const stats_record_t *r)
+{
+    return r->unix_time >= 1704067200u && r->unix_time < 4102444800u && r->chan_type < STATS_AGG_MAX_CHAN_TYPES;
+}
+
+/* 주 week의 기존 원시 파일과, 올린 파일에서 지금 위치부터 같은 주인 레코드를 시간순으로 합쳐 새 파일로 쓰고 바꿔 끼움.
+ * 같은 시각 묶음 안에서 17바이트가 모두 같은 레코드는 하나만. 새 파일 레코드 수 반환(실패하면 -1) */
+#define RS_GROUP_MAX 64
+static int64_t restore_merge_week(uint32_t week, rec_reader_t *in, stats_record_t *grp)
+{
+    char path[48], npath[52];
+    raw_path(week, path, sizeof(path));
+    snprintf(npath, sizeof(npath), "%s.new", path);
+    rec_reader_t ex = { .f = fopen(path, "rb"), .buf = heap_caps_malloc(sizeof(stats_record_t) * STATS_CHUNK, MALLOC_CAP_SPIRAM) };
+    FILE *o = fopen(npath, "wb");
+    if (!ex.buf || !o) { if (ex.f) fclose(ex.f); if (o) fclose(o); heap_caps_free(ex.buf); return -1; }
+    int64_t out_n = 0;
+    bool wok = true;
+    stats_record_t a, b;
+    for (;;) {
+        bool ha = rr_peek(&ex, &a);
+        bool hb = rr_peek(in, &b);
+        while (hb && !rec_sane(&b)) { s_rs_bad++; rr_next(in); hb = rr_peek(in, &b); }   /* 말이 안 되는 레코드는 버림 */
+        if (hb && b.unix_time / STATS_WEEK_SEC != week) hb = false;                        /* 다른 주 — 이 주는 끝 */
+        if (!ha && !hb) break;
+        if (ha && (!hb || a.unix_time < b.unix_time)) { wok &= fwrite(&a, sizeof(a), 1, o) == 1; out_n++; rr_next(&ex); continue; }
+        if (hb && (!ha || b.unix_time < a.unix_time)) { wok &= fwrite(&b, sizeof(b), 1, o) == 1; out_n++; s_rs_added++; rr_next(in); continue; }
+        /* 같은 시각 — 기존 쪽 묶음을 모아 쓰고, 올린 쪽은 묶음에 없는 것만 */
+        uint32_t t = a.unix_time, ng = 0;
+        while (rr_peek(&ex, &a) && a.unix_time == t) {
+            if (ng < RS_GROUP_MAX) grp[ng++] = a;
+            wok &= fwrite(&a, sizeof(a), 1, o) == 1; out_n++; rr_next(&ex);
+        }
+        while (rr_peek(in, &b) && b.unix_time == t) {
+            bool dup = false;
+            for (uint32_t k = 0; k < ng && !dup; k++) dup = memcmp(&grp[k], &b, sizeof(b)) == 0;
+            if (dup) s_rs_dup++;
+            else { wok &= fwrite(&b, sizeof(b), 1, o) == 1; out_n++; s_rs_added++; if (ng < RS_GROUP_MAX) grp[ng++] = b; }
+            rr_next(in);
+        }
+    }
+    if (ex.f) fclose(ex.f);
+    heap_caps_free(ex.buf);
+    wok = wok && fflush(o) == 0 && fsync(fileno(o)) == 0;
+    fclose(o);
+    if (!wok) { unlink(npath); return -1; }
+    /* 바꿔 끼움 — 색인과 함께(잠금 안에서) */
+    lock();
+    int widx = week_get_or_add_locked(week);
+    bool ok = widx >= 0 && (unlink(path) == 0 || errno == ENOENT) && rename(npath, path) == 0;
+    if (ok) {
+        s_total_raw = s_total_raw - s_weeks[widx].raw_count + (uint64_t)out_n;
+        s_weeks[widx].raw_count = (uint32_t)out_n;
+    }
+    unlock();
+    if (!ok) { ESP_LOGE(TAG, "Restore: week %u swap failed (errno=%d)", (unsigned)week, errno); return -1; }
+    sd_health_count(SDH_C_FSYNC, 1);
+    return out_n;
+}
+
+/* 집계를 SD 원시 기록 전체로 다시 계산 — 집계 파일을 다 지우고 옮기기용 누적기(s_regen)로 처음부터 */
+static bool restore_rebuild_aggregates(uint32_t now)
+{
+    lock();
+    for (uint32_t i = 0; i < s_week_count; i++) {
+        char path[48];
+        for (uint8_t sc = 0; sc < STATS_SCALE_COUNT; sc++) {
+            agg_path(sc, s_weeks[i].week, path, sizeof(path));
+            if (unlink(path) != 0 && errno != ENOENT) ESP_LOGW(TAG, "Restore: aggregate delete failed %s (errno=%d)", path, errno);
+        }
+        s_weeks[i].agg_bytes = 0;
+    }
+    uint32_t nweeks = s_week_count;
+    s_regen_gen = s_restore_gen;
+    unlock();
+    agg_state_reset(&s_regen);
+    s_regen_lo = 0;
+    s_regen_hi = now;
+    s_regen_n = 0;
+    s_regen_written = 0;
+    for (uint32_t i = 0; i < nweeks; i++) {
+        lock();
+        uint32_t week = (i < s_week_count) ? s_weeks[i].week : 0;
+        unlock();
+        char path[48];
+        raw_path(week, path, sizeof(path));
+        FILE *f = fopen(path, "rb");
+        if (!f) continue;
+        size_t got;
+        while ((got = fread(s_sync_buf, sizeof(stats_record_t), SYNC_CHUNK, f)) > 0) {
+            for (size_t k = 0; k < got; k++) agg_update(&s_regen, &s_sync_buf[k]);
+        }
+        fclose(f);
+    }
+    agg_flush_ended(&s_regen, now);
+    regen_flush();
+    lock();
+    bool ok = s_regen_gen == s_restore_gen;
+    if (ok) {
+        s_mark.agg_t = now;
+        mark_save_locked();
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < s_disp_n; i++) {
+            if (s_disp[i].rec.bucket_start_unix + scale_width(s_disp[i].scale) <= now) continue;
+            s_disp[k++] = s_disp[i];
+        }
+        s_disp_n = k;
+    }
+    unlock();
+    ESP_LOGI(TAG, "Restore: aggregates rebuilt for %u weeks (%u buckets)", (unsigned)nweeks, (unsigned)s_regen_written);
+    return ok;
+}
+
+static void restore_task(void *arg)
+{
+    (void)arg;
+    int64_t t0 = esp_timer_get_time();
+    s_restore_active = true;
+    xSemaphoreTake(s_sync_mtx, portMAX_DELAY);   /* 진행 중인 매시 옮기기가 끝나길 기다리고, 끝날 때까지 옮기기를 막음 */
+    if (!s_sync_buf) s_sync_buf = heap_caps_malloc(sizeof(stats_record_t) * SYNC_CHUNK, MALLOC_CAP_SPIRAM);
+    if (!s_regen_buf) s_regen_buf = heap_caps_malloc(sizeof(agg_pend_t) * REGEN_MAX, MALLOC_CAP_SPIRAM);
+    stats_record_t *grp = heap_caps_malloc(sizeof(stats_record_t) * RS_GROUP_MAX, MALLOC_CAP_SPIRAM);
+    rec_reader_t in = { .f = fopen(RESTORE_TMP_PATH, "rb"), .buf = heap_caps_malloc(sizeof(stats_record_t) * STATS_CHUNK, MALLOC_CAP_SPIRAM) };
+    bool ok = s_sync_buf && s_regen_buf && grp && in.f && in.buf;
+    if (!ok) rs_fail("memory or temp file");
+    /* 1) 내부 플래시에 있는 것부터 SD로(합칠 때 중복으로 걸러지게) */
+    if (ok) sync_run();
+    /* 2) 주마다 합침 — 올린 파일은 기록 순서(시간순)라 주가 바뀔 때마다 그 주를 합침. 같은 주가 뒤에 또 나오면 다시 합침 */
+    stats_record_t r;
+    while (ok && rr_peek(&in, &r)) {
+        if (!rec_sane(&r)) { s_rs_bad++; rr_next(&in); continue; }
+        uint32_t week = r.unix_time / STATS_WEEK_SEC;
+        s_rs_weeks++;
+        if (restore_merge_week(week, &in, grp) < 0) { rs_fail("week merge failed"); ok = false; break; }
+        s_rs_weeks_done++;
+        if (!sd_storage_is_mounted() || !sd_health_writes_allowed()) { rs_fail("SD stopped"); ok = false; }
+    }
+    if (in.f) fclose(in.f);
+    heap_caps_free(in.buf);
+    heap_caps_free(grp);
+    unlink(RESTORE_TMP_PATH);
+    /* 3) 집계를 다시 계산(합친 결과로) */
+    uint32_t now = rtc_sync_get_unix_time();
+    if (ok && now && !restore_rebuild_aggregates(now)) { rs_fail("aggregate rebuild interrupted"); ok = false; }
+    s_restore_active = false;
+    xSemaphoreGive(s_sync_mtx);
+    if (ok) {
+        snprintf(s_rs_msg, sizeof(s_rs_msg), "ok");
+        s_rs = RS_DONE;
+    }
+    ESP_LOGI(TAG, "Restore %s: %u records in file, %u added, %u duplicates, %u bad, %u weeks, %u s", ok ? "done" : "FAILED",
+             (unsigned)s_rs_count, (unsigned)s_rs_added, (unsigned)s_rs_dup, (unsigned)s_rs_bad, (unsigned)s_rs_weeks_done,
+             (unsigned)((esp_timer_get_time() - t0) / 1000000));
+    storage_mgr_notify_changed();
+    s_append_seq++;   /* 웹 기록 표 다시 읽게 */
+    vTaskDelete(NULL);
+}
+
 /* 부팅 때 한 번(LittleFS 마운트 뒤, SD·통신 시작 전) — 날 파일 색인, 옮긴 위치 읽기, 화면용 누적기 다시 채우기, 1분 타이머 */
 void stats_store_init(void)
 {
+    if (!s_sync_mtx) s_sync_mtx = xSemaphoreCreateMutex();
+    backup_state_load();
     lock();
     if (!ensure_alloc_locked()) { unlock(); return; }
     if (!s_rbuf) s_rbuf = heap_caps_malloc(sizeof(stats_record_t) * RBUF_MAX, MALLOC_CAP_SPIRAM);
@@ -1537,6 +1939,7 @@ uint64_t stats_store_get_used_bytes(void)
 uint32_t stats_store_trim_to(uint64_t target_bytes)
 {
     uint32_t deleted = 0, weeks = 0;
+    if (s_restore_active) return 0;   /* 2026-10-15 — 복원이 주 파일을 바꿔 끼우는 중 */
     lock();
     if (s_weeks) {
         /* 가장 오래된 주부터 통째로 지움(다시 쓰기 없음). 지금 기록 중인 가장 최근 주는 남김 */

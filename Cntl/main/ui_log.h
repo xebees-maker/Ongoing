@@ -114,6 +114,9 @@ void ui_log_clear_one_error(int code);
                                              뺐음(storage_mgr.c). 예전엔 이런 항목 하나가 사진
                                              사용량을 약 16EB로 부풀려 정리가 5초마다 계속 돌았음 */
 
+#define UI_WARN_BACKUP_DUE          6003  /* 2026-10-15(SD 개선 5단계) — 마지막 통계 백업에서 정한 기간이 지남(시험 중 하루,
+                                             출시 때 3개월 — stats_store.c BACKUP_REMIND_SEC). 하루에 한 번 */
+
 void ui_log_add_warn(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 bool ui_log_get_pending_warn(char *out, size_t out_cap);
 #define UI_WARN_HISTORY_CAP 16

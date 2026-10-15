@@ -254,6 +254,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_ERR_DESC_SD_MOUNT_FAILED]       = { "SD카드 마운트 실패",             "SD card mount failed" },
     [STR_ERR_DESC_UNKNOWN]               = { "알 수 없는 에러",               "Unknown error" },
     [STR_WARN_DESC_SD_BAD_ENTRY]         = { "SD 손상 의심 항목 제외됨",       "SD damaged entries skipped" },
+    [STR_WARN_DESC_BACKUP_DUE]           = { "통계 백업할 때가 됨(웹에서 백업 받기)", "Statistics backup due (download it from the web app)" },
     [STR_WARN_DESC_UNKNOWN]              = { "알 수 없는 워닝",               "Unknown warning" },
 
     [STR_STATUS_SD_IO_ERROR_MSG] = { "오류 - 상태버튼을 눌러 조치하세요",        "error - tap the status button to act" },
@@ -309,6 +310,15 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
                                    "To replace the card: take it out, insert another card, then tap Remount - kept measurements are moved to the new card automatically.\n"
                                    "Format only if Remount fails (it erases the card's photos and records)." },
     [STR_LABEL_FLASH]          = { "플래시 [MB]", "Flash [MB]" },
+    [STR_LABEL_BACKUP]         = { "통계 백업", "Stats backup" },
+    [STR_LABEL_BACKUP_NEVER]   = { "아직 없음", "never" },
+    [STR_BTN_STATS_BACKUP]     = { "백업 받기", "Download" },
+    [STR_BTN_STATS_RESTORE]    = { "복원", "Restore" },
+    [STR_MSG_RESTORE_CONFIRM]  = { "이 백업 파일의 측정값을 콘에 합칩니다(같은 값은 한 번만). 그래프 집계는 다시 계산됩니다. 계속할까요?",
+                                   "Merge the measurements in this backup file into the controller (same values only once). Graph aggregates are recalculated. Continue?" },
+    [STR_MSG_RESTORE_RUNNING]  = { "복원 중...", "Restoring..." },
+    [STR_MSG_RESTORE_DONE]     = { "복원 완료 - %u개 추가, %u개는 이미 있음", "Restore complete - %u added, %u already present" },
+    [STR_MSG_RESTORE_FAIL]     = { "복원 실패: %s", "Restore failed: %s" },
     [STR_FMT_FLASH_USAGE]      = { "앱 %s/%s, 데이터 %s/%s(통계 %s, 기타 %s, 여유 %s)",
                                    "App %s/%s, Data %s/%s (Stats %s, Other %s, Free %s)" },
 

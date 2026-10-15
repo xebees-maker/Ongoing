@@ -11,6 +11,8 @@
 #include "storage_mgr.h"
 #include "sd_storage.h"
 #include "rtc_sync.h"
+#include "esp_rom_crc.h"
+#include <time.h>
 #include "wifi_sta.h"
 #include "ui_main.h"
 #include "photo_storage.h"
@@ -1086,6 +1088,90 @@ static esp_err_t api_stats_sync_get_handler(httpd_req_t *req)
     return ret;
 }
 
+/* ── 2026-10-15(SD 개선 5단계, 사용자 설계 — 백업·복원은 브라우저에서만) ──
+ * GET /api/stats/backup : 통계 원시 기록 전체를 파일 하나로(머리 32 + 레코드 17바이트씩 + CRC32). 끝까지 보내면 마지막 백업 시각 기록.
+ * 웹 서버 태스크가 보내는 동안 다른 요청은 기다림(1년치 약 150MB) */
+static esp_err_t api_stats_backup_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    const uint32_t chunk = 1024;
+    stats_record_t *recs = heap_caps_malloc(sizeof(stats_record_t) * chunk, MALLOC_CAP_SPIRAM);
+    uint8_t *hdr = heap_caps_malloc(32, MALLOC_CAP_SPIRAM);
+    static char s_disp[80];   /* 헤더 값은 보낼 때까지 살아 있어야 함 */
+    if (!recs || !hdr) { heap_caps_free(recs); heap_caps_free(hdr); httpd_resp_send_500(req); return ESP_FAIL; }
+    uint32_t total = stats_store_backup_begin(hdr);
+    time_t now = (time_t)rtc_sync_get_unix_time();   /* 콘 시각 = 지역시각을 유닉스 수처럼 들고 있음 — gmtime으로 그대로 */
+    struct tm tmv;
+    gmtime_r(&now, &tmv);
+    snprintf(s_disp, sizeof(s_disp), "attachment; filename=\"cntl-stats-%04d%02d%02d-%02d%02d.bin\"",
+             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", s_disp);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    bool ok = httpd_resp_send_chunk(req, (const char *)hdr, 32) == ESP_OK;
+    uint32_t crc = 0, sent = 0;
+    while (ok && sent < total) {
+        uint32_t want = (total - sent < chunk) ? total - sent : chunk;
+        uint32_t n = stats_store_backup_read(sent, want, recs);
+        if (n == 0) break;
+        crc = esp_rom_crc32_le(crc, (const uint8_t *)recs, n * sizeof(stats_record_t));
+        ok = httpd_resp_send_chunk(req, (const char *)recs, n * sizeof(stats_record_t)) == ESP_OK;
+        sent += n;
+    }
+    heap_caps_free(recs);
+    heap_caps_free(hdr);
+    if (!ok || sent != total) {   /* 덜 보냈으면 꼬리(CRC)를 안 붙임 — 복원이 크기로 거절함 */
+        ESP_LOGW(TAG, "Stats backup incomplete (%u/%u records)", (unsigned)sent, (unsigned)total);
+        httpd_resp_send_chunk(req, NULL, 0);
+        return ok ? ESP_OK : ESP_FAIL;
+    }
+    httpd_resp_send_chunk(req, (const char *)&crc, 4);
+    httpd_resp_send_chunk(req, NULL, 0);
+    stats_store_backup_done();
+    ESP_LOGI(TAG, "Stats backup sent: %u records", (unsigned)total);
+    return ESP_OK;
+}
+
+static esp_err_t send_restore_status(httpd_req_t *req, const char *status)
+{
+    char *buf = heap_caps_malloc(320, MALLOC_CAP_SPIRAM);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    int n = stats_store_restore_status_json(buf, 320);
+    if (status) httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t r = httpd_resp_send(req, buf, (n > 0 && n < 320) ? n : 0);
+    heap_caps_free(buf);
+    return r;
+}
+
+/* POST /api/stats/restore : 본문 = 백업 파일. 다 받으면 확인 후 복원 시작(진행은 GET으로) */
+static esp_err_t api_stats_restore_post_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    size_t len = req->content_len;
+    if (!stats_store_restore_begin((uint32_t)len)) return send_restore_status(req, "409 Conflict");
+    uint8_t *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+    size_t left = len;
+    bool ok = buf != NULL;
+    while (ok && left > 0) {
+        int r = httpd_req_recv(req, (char *)buf, left < 4096 ? left : 4096);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) { ok = false; break; }
+        ok = stats_store_restore_write(buf, (size_t)r);
+        left -= (size_t)r;
+    }
+    heap_caps_free(buf);
+    stats_store_restore_end(ok && left == 0);
+    return send_restore_status(req, NULL);
+}
+
+static esp_err_t api_stats_restore_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    return send_restore_status(req, NULL);
+}
+
 static esp_err_t api_stats_records_get_handler(httpd_req_t *req)
 {
     WEB_SCREEN_API_BEGIN(req);
@@ -1404,6 +1490,13 @@ void web_api_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &stats_aggdump_uri);
     static const httpd_uri_t stats_sync_uri = { .uri = "/api/stats/sync", .method = HTTP_GET, .handler = api_stats_sync_get_handler };   /* 2026-10-15 시험용 */
     httpd_register_uri_handler(server, &stats_sync_uri);
+    /* 2026-10-15(SD 개선 5단계) — 통계 백업·복원 */
+    static const httpd_uri_t stats_backup_uri = { .uri = "/api/stats/backup", .method = HTTP_GET, .handler = api_stats_backup_get_handler };
+    static const httpd_uri_t stats_restore_post_uri = { .uri = "/api/stats/restore", .method = HTTP_POST, .handler = api_stats_restore_post_handler };
+    static const httpd_uri_t stats_restore_get_uri = { .uri = "/api/stats/restore", .method = HTTP_GET, .handler = api_stats_restore_get_handler };
+    httpd_register_uri_handler(server, &stats_backup_uri);
+    httpd_register_uri_handler(server, &stats_restore_post_uri);
+    httpd_register_uri_handler(server, &stats_restore_get_uri);
     httpd_register_uri_handler(server, &stats_delete_all_uri);
     static const httpd_uri_t settings_uri = { .uri = "/api/settings", .method = HTTP_GET, .handler = api_settings_get_handler };
     static const httpd_uri_t settings_set_uri = { .uri = "/api/settings/set", .method = HTTP_POST, .handler = api_settings_set_post_handler };
