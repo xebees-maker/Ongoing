@@ -2034,6 +2034,13 @@ static void cb_sd_resolve_tap(lv_event_t *e)
 
     add_page_popup_header(box, ui_str(STR_TITLE_SD_RESOLVE), cb_modal_close, NULL);
 
+    /* 2026-10-15(SD 개선 4단계) — 무엇을 하면 되는지 안내(전원을 끄지 말 것, 카드를 바꿔 끼우고 재마운트, 포맷은 마지막) */
+    lv_obj_t *guide = lv_label_create(box);
+    lv_obj_set_width(guide, LV_PCT(100));
+    lv_label_set_long_mode(guide, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(guide, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text_fmt(guide, ui_str(STR_MSG_SD_RESOLVE_GUIDE), (unsigned)stats_store_get_unsynced());
+
     lv_obj_t *btn_row = lv_obj_create(box);
     lv_obj_set_size(btn_row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);

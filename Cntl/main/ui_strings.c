@@ -263,8 +263,10 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_MSG_SD_FORMAT_CONFIRM]  = { "SD카드를 포맷하면 저장된 모든 사진/측정기록이 삭제됩니다. 계속하시겠습니까?",
                                       "Formatting the SD card will erase all stored photos and measurement records. Continue?" },
     [STR_MSG_SD_RECONNECT_OK]    = { "SD 재연결 성공",                 "SD reconnected successfully" },
-    [STR_MSG_SD_RECONNECT_FAIL]  = { "SD 재연결 실패 - 카드를 확인하거나 새 카드로 교체 후 콘을 재시작하세요",
-                                      "SD reconnect failed - check the card, or replace it and restart CNTL" },
+    /* 2026-10-15(SD 개선 4단계) — 예전엔 "콘을 재시작하세요" — 재연결이 카드를 처음부터 다시 잡으므로 재시작은 필요 없고, 전원을
+     * 끄면 아직 내부 플래시로 안 간 마지막 1분치를 잃음 */
+    [STR_MSG_SD_RECONNECT_FAIL]  = { "SD 재연결 실패 - 카드를 확인하거나 다른 카드를 꽂고 다시 재마운트하세요(전원은 끄지 마세요, 측정값은 보관 중)",
+                                      "SD reconnect failed - check the card, or insert another card and tap Remount again (don't power off - measurements are being kept)" },
     [STR_MSG_SD_FORMAT_OK]       = { "SD 포맷 완료",                   "SD format complete" },
     [STR_MSG_SD_FORMAT_FAIL]     = { "SD 포맷 실패",                   "SD format failed" },
     [STR_ERR_DESC_SD_IO_FAIL]    = { "SD 읽기/쓰기 오류",               "SD read/write failure" },
@@ -300,6 +302,12 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_TITLE_RECORD] = { "기록", "Record" },
     [STR_LABEL_PERIOD] = { "기간:", "Period:" },
     [STR_LABEL_STORAGE_LEGEND] = { "[사용 %(여유 MB)]", "[Used % (MB free)]" },
+    [STR_MSG_SD_RESOLVE_GUIDE] = { "콘 전원을 끄지 마세요. 측정값은 내부 플래시에 보관 중입니다(SD로 아직 안 옮긴 값 %u개, 최대 7일).\n"
+                                   "카드를 바꾸려면: 카드를 빼고 다른 카드를 꽂은 뒤 재마운트 — 새 카드에는 보관 중인 측정값이 자동으로 옮겨집니다.\n"
+                                   "재마운트가 안 될 때만 포맷하세요(카드의 사진·기록이 지워집니다).",
+                                   "Don't power off the controller. Measurements are being kept in internal flash (%u not yet on SD, up to 7 days).\n"
+                                   "To replace the card: take it out, insert another card, then tap Remount - kept measurements are moved to the new card automatically.\n"
+                                   "Format only if Remount fails (it erases the card's photos and records)." },
     [STR_LABEL_FLASH]          = { "플래시 [MB]", "Flash [MB]" },
     [STR_FMT_FLASH_USAGE]      = { "앱 %s/%s, 데이터 %s/%s(통계 %s, 기타 %s, 여유 %s)",
                                    "App %s/%s, Data %s/%s (Stats %s, Other %s, Free %s)" },

@@ -309,6 +309,7 @@ typedef enum {
      * % (MB free)]") — SD 상태 라인의 범례(각 카테고리 뒤에 오는 "pct(remainMB)" 형식을
      * 설명하는 고정 텍스트, 실제 숫자 아님) */
     STR_LABEL_STORAGE_LEGEND,
+    STR_MSG_SD_RESOLVE_GUIDE,    /* 2026-10-15(SD 개선 4단계) — SD 조치 팝업 안내(%u = SD로 아직 안 옮긴 측정값 수, 웹도 같은 틀) */
     STR_LABEL_FLASH,             /* 2026-10-15 — Summary 내부 플래시 줄 제목 */
     STR_FMT_FLASH_USAGE,         /* 2026-10-15 — 앱/데이터(통계·기타·여유), %s 7개(웹도 같은 틀) */    /* "[사용 %(여유 MB)]" / "[Used % (MB free)]" */
 

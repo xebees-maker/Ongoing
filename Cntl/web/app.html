@@ -501,7 +501,9 @@
     cleanupSeq = c.seq;
   }
 
+  var lastHeld = 0;   /* 10-15(SD 개선 4단계) — SD로 아직 안 옮긴 측정값 수(SD 조치 안내) */
   function render(d) {
+    lastHeld = d.held || 0;
     checkCleanup(d.cleanup);
     checkAlarms(d.alarm);
     recAutoRefresh(d.rec);   /* 10-09 — 기록 표를 맨 앞 페이지로 보고 있으면 새 기록이 들어올 때 다시 받음 */
@@ -1243,6 +1245,7 @@
   /* SD 해결 — 재마운트 / 포맷(확인). 결과는 콘과 같은 문구. 실패하면 이 선택창을 다시 띄움(콘: 해결 팝업이 남아 다른 조치를 고름) */
   function openSdResolve() {
     $('modalBox').innerHTML = '<div class="mtitle">' + esc(S('STR_TITLE_SD_RESOLVE')) + '</div>' +
+      '<div style="white-space:pre-line;margin:8px 0">' + esc(S('STR_MSG_SD_RESOLVE_GUIDE').replace('%u', String(lastHeld))) + '</div>' +
       '<div class="sfoot"><button data-m="no">' + esc(S('STR_BTN_CANCEL')) + '</button><button data-m="rec">' + esc(S('STR_BTN_SD_RECONNECT')) +
       '</button><button class="danger" data-m="fmt">' + esc(S('STR_BTN_SD_FORMAT')) + '</button></div>';
     $('modal').classList.remove('hidden');

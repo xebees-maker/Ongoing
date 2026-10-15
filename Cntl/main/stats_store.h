@@ -77,6 +77,8 @@ void stats_store_sd_check(void);
 void stats_store_init(void);
 /* 다음 분 처리 때 시를 기다리지 않고 SD로 옮김(시험용 /api/stats/sync?now=1) */
 void stats_store_request_sync(void);
+/* 2026-10-15(SD 개선 4단계) — SD로 아직 안 옮긴 측정값 수(내부 플래시 + RAM 버퍼) — SD 조치 안내에 보여 줌 */
+uint32_t stats_store_get_unsynced(void);
 /* 옮기기 상태 JSON(시험·확인용). 쓴 길이 반환 */
 int stats_store_sync_json(char *buf, size_t cap);
 

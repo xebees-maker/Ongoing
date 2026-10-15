@@ -1367,6 +1367,14 @@ static void minute_timer_cb(void *arg)
     stats_store_post_job(minute_job, NULL, 0);
 }
 
+uint32_t stats_store_get_unsynced(void)
+{
+    lock();
+    uint32_t n = lfs_unsynced_locked() + s_rbuf_n;
+    unlock();
+    return n;
+}
+
 void stats_store_request_sync(void)
 {
     s_sync_requested = true;
