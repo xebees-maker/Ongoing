@@ -555,6 +555,13 @@ static esp_err_t api_sd_health_get_handler(httpd_req_t *req)
     char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
     if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
     int n = sd_health_json(buf, cap);
+    if (n > 1 && (size_t)n < cap - 128 && buf[n - 1] == '}') {   /* 2026-10-15 — 명령마다 CS 수치를 끝에 붙임 */
+        uint32_t c, f, sl, mx;
+        sd_storage_cs_stats(&c, &f, &sl, &mx);
+        n--;
+        n += snprintf(buf + n, cap - n, ",\"cs\":{\"cmds\":%lu,\"fail\":%lu,\"slow\":%lu,\"max_us\":%lu}}",
+                      (unsigned long)c, (unsigned long)f, (unsigned long)sl, (unsigned long)mx);
+    }
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t r = httpd_resp_send(req, buf, n);

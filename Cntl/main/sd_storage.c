@@ -21,8 +21,58 @@
 #include <errno.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_timer.h"
 
 static const char *TAG = "SYS";
+
+/* ════════════════════════════════════════════════════════════
+ * 2026-10-15(SD 손상 대응, 사용자 결정 — "1번을 수정") — 명령마다 CS를 내렸다 올림.
+ * 예전(09-06~)엔 CS(CH422G EXIO4)를 마운트 때 한 번 LOW로 내린 뒤 계속 LOW로 두고 드라이버엔 SDSPI_SLOT_NO_CS를
+ * 줬음 — ESP-IDF sdspi 드라이버는 명령마다 CS를 올리고 내리는 걸 전제로 짜여 있는데(명령 뒤 "CS를 올린 채" 0xFF를
+ * 보내 MISO를 놓게 함, CMD0 앞 80클럭은 "CS를 내리기 전에"), 그 동작이 전부 아무 일도 안 했고 카드는 한 번도
+ * 선택 해제되지 않은 채 콘 리셋 동안의 SCK/MOSI 흔들림까지 명령 입력으로 받았음.
+ * 드라이버(IDF 원본)는 그대로 두고 호스트의 명령 실행 함수를 감싸서: 잠금 → CS LOW → 원래 함수 → CS HIGH → 풀기.
+ * CS를 못 내리면 그 명령은 보내지 않음(실패로 돌려줌 — 카드가 선택 안 된 채 보내면 응답이 없어 어차피 실패) */
+static SemaphoreHandle_t s_cs_mutex = NULL;
+static StaticSemaphore_t s_cs_mutex_buf;
+static struct {
+    uint32_t cmds, cs_fail, slow;   /* 명령 수, CS 바꾸기 실패, CS 처리에 2ms 넘게 걸린 명령 */
+    uint32_t cs_us_max;             /* CS 내리기+올리기에 걸린 최대 시간(us) */
+} s_cs;
+
+static esp_err_t sd_do_transaction_cs(int slot, sdmmc_command_t *cmd)
+{
+    xSemaphoreTake(s_cs_mutex, portMAX_DELAY);
+    int64_t t0 = esp_timer_get_time();
+    esp_err_t e = ch422g_set_io(CH422G_IO_SD_CS, false);   /* LOW = 선택 */
+    int64_t t1 = esp_timer_get_time();
+    if (e != ESP_OK) {
+        s_cs.cs_fail++;
+        ESP_LOGE(TAG, "SD_CS select failed (%s) - CMD%u not sent", esp_err_to_name(e), (unsigned)cmd->opcode);
+        xSemaphoreGive(s_cs_mutex);
+        return e;
+    }
+    esp_err_t r = sdspi_host_do_transaction(slot, cmd);
+    int64_t t2 = esp_timer_get_time();
+    e = ch422g_set_io(CH422G_IO_SD_CS, true);              /* HIGH = 해제 */
+    int64_t t3 = esp_timer_get_time();
+    if (e != ESP_OK) {
+        s_cs.cs_fail++;
+        ESP_LOGE(TAG, "SD_CS deselect failed (%s) after CMD%u - card stays selected", esp_err_to_name(e), (unsigned)cmd->opcode);
+    }
+    uint32_t cs_us = (uint32_t)((t1 - t0) + (t3 - t2));
+    s_cs.cmds++;
+    if (cs_us > s_cs.cs_us_max) s_cs.cs_us_max = cs_us;
+    if (cs_us > 2000) s_cs.slow++;
+    xSemaphoreGive(s_cs_mutex);
+    return r;
+}
+
+void sd_storage_cs_stats(uint32_t *cmds, uint32_t *cs_fail, uint32_t *slow, uint32_t *cs_us_max)
+{
+    *cmds = s_cs.cmds; *cs_fail = s_cs.cs_fail; *slow = s_cs.slow; *cs_us_max = s_cs.cs_us_max;
+}
 
 /* 2026-10-14(사용자 지시 — 카드 정체 확인, SD 손상 추적) — 마운트와 상관없이 카드 CID 전체를 로그에 남김. 예전엔
  * 마운트 성공 뒤 sdmmc_card_print_info()만 찍어 제조사 ID·OEM·일련번호·제조 연월이 없었고, 마운트가 실패하는 카드
@@ -97,15 +147,12 @@ esp_err_t sd_storage_init(void)
 
     vTaskDelay(pdMS_TO_TICKS(100));  /* CS HIGH인 채로 전원/신호 안정화 대기 */
 
-    err = ch422g_set_io(CH422G_IO_SD_CS, false);  /* LOW = select, 이제 명확한 엣지로 선택 */
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SD_CS assert failed: %s", esp_err_to_name(err));
-        spi_bus_free(SD_SPI_HOST);
-        return err;
-    }
+    /* 2026-10-15 — 여기서 CS를 LOW로 고정하던 것 없앰: 이제 명령마다 sd_do_transaction_cs가 내렸다 올림(위 설명) */
+    if (!s_cs_mutex) s_cs_mutex = xSemaphoreCreateMutexStatic(&s_cs_mutex_buf);
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SD_SPI_HOST;
+    host.do_transaction = sd_do_transaction_cs;   /* 2026-10-15 — 명령마다 CS */
     /* 2026-09-10(원복 — 짧은 타임아웃은 불필요했음) — 처음엔 실패를 빨리 포기시키려고
      * command_timeout_ms를 200ms로 줄였는데, 다시 짚어보니 필요 없었음: 기본값(1000ms)도
      * 어차피 결국은 리턴하는 fail이라 진짜 "행"이 아니었고, 실제 문제는 이 fail을 부르는
@@ -116,8 +163,8 @@ esp_err_t sd_storage_init(void)
 
     sdspi_device_config_t slot_cfg = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_cfg.host_id = SD_SPI_HOST;
-    /* CS는 위에서 CH422G로 이미 고정 LOW — 드라이버가 GPIO로 직접 토글하지 않게 함
-     * (SDSPI_SLOT_NO_CS는 GPIO_NUM_NC와 동일, esp_driver_sdspi가 공식 지원하는 값) */
+    /* CS는 GPIO가 아니라 CH422G라 드라이버엔 없음으로 줌(SDSPI_SLOT_NO_CS — 드라이버의 cs_low/cs_high는 아무 일도
+     * 안 함). 2026-10-15부터 그 일을 sd_do_transaction_cs가 명령마다 함 */
     slot_cfg.gpio_cs = SDSPI_SLOT_NO_CS;
 
     esp_vfs_fat_mount_config_t mount_cfg = {
