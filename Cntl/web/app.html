@@ -299,7 +299,7 @@
   /* 웹 전용 문구 */
   var W = {
     PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'],
-    LOCAL_IN_USE: ['콘에서 사용 중입니다', 'Cntl is being used on its screen'], RECONNECT: ['다시 연결', 'Reconnect'],
+    LOCAL_IN_USE: ['제어기 화면에서 사용 중입니다', 'CNTL is being used on its screen'], RECONNECT: ['다시 연결', 'Reconnect'],
     OFFLINE: ['연결 끊김', 'Offline'], WEB: ['웹', 'Web'],
     LOADING: ['받는 중', 'Loading'], CAPTURING: ['촬영 중', 'Capturing'], NO_PHOTO: ['사진이 오지 않았습니다', 'No photo arrived'],
     SEC: ['초', 's'],
@@ -510,7 +510,7 @@
    * 복원 = 목록에서 골라 콘으로 올림. 내보내기 = 공유 시트(파일 앱·다른 앱, 다른 기기 보관용) — 공유를 못 하는 브라우저(PC)는 다운로드.
    * 가져오기 = 내보낸 파일을 골라 이 저장소에 넣음. 웹앱을 지우면 이 저장소도 지워짐(화면에 안내) */
   var BK_KEEP = 5;
-  var bk = { list: [], last: 0 };
+  var bk = { list: [] };
   var CRC_T = null;
   function crc32(u8) {
     if (!CRC_T) {
@@ -574,12 +574,13 @@
   function openBackup() {
     openSheet(renderBackup);
     bkLoadList().then(function () { if (sheetRender === renderBackup) renderBackup(); }).catch(function () {});
-    api('api/stats/restore').then(function (s) { bk.last = s.last_backup || 0; if (sheetRender === renderBackup) renderBackup(); }).catch(function () {});
   }
+  /* 10-16(사용자 지시) — 첫 줄 한 줄로 "통계 백업: 3/5개 [지금 백업] [가져오기]"(몇 개까지 남는지 보이게, 최근 날짜는 안 씀), 그 아래 목록 */
   function renderBackup() {
-    var h = '<div class="shead"><h3 class="grow">' + esc(S('STR_LABEL_BACKUP')) + '</h3><button class="small" id="bkNow">' + esc(S('STR_BTN_STATS_BACKUP')) +
-            '</button><button class="xbtn" id="bkBack" aria-label="close">&#x2715;</button></div>';
-    h += '<div class="field"><span class="sub">' + esc(S('STR_LABEL_LAST_BACKUP') + ': ' + (bk.last ? bkWhen(bk.last) : S('STR_LABEL_BACKUP_NEVER'))) + '</span></div>';
+    var h = '<div class="shead"><h3 class="grow">' + esc(S('STR_LABEL_BACKUP')) + '</h3><button class="xbtn" id="bkBack" aria-label="close">&#x2715;</button></div>';
+    h += '<div class="field"><label>' + esc(S('STR_LABEL_BACKUP') + ': ' + S('STR_FMT_BACKUP_STATUS').replace('%u', bk.list.length).replace('%u', BK_KEEP)) +
+         '</label><span><button class="small" id="bkNow">' + esc(S('STR_BTN_STATS_BACKUP')) + '</button> <button class="small" id="bkImp">' +
+         esc(S('STR_BTN_IMPORT')) + '</button></span></div>';
     if (!bk.list.length) h += '<div class="field"><span class="sub">' + esc(S('STR_LABEL_BACKUP_LIST_EMPTY')) + '</span></div>';
     bk.list.forEach(function (b) {
       h += '<div class="field"><label>' + esc(bkWhen(b.created)) + ' <span class="sub">' + b.count + ' / ' + bytesHuman(b.size) + '</span></label><span>' +
@@ -588,7 +589,6 @@
            '<button class="small danger" data-bkd="' + b.id + '">' + esc(S('STR_BTN_DELETE')) + '</button></span></div>';
     });
     h += '<div class="field"><span class="sub">' + esc(S('STR_MSG_BACKUP_LOCAL_NOTE')) + '</span></div>';
-    h += '<div class="sfoot"><button id="bkImp">' + esc(S('STR_BTN_IMPORT')) + '</button></div>';
     $('sheetBody').innerHTML = h;
     $('bkBack').onclick = openStats;
     $('bkNow').onclick = backupNow;
@@ -612,10 +612,8 @@
     }).then(function (buf) {
       var info = bkCheck(buf);
       if (!info) throw new Error('bad');
-      bk.last = Math.floor(Date.now() / 1000);
       return bkSave(buf, info).then(function () {
         busyEnd();
-        api('api/stats/restore').then(function (s) { bk.last = s.last_backup || bk.last; renderBackup(); }).catch(function () {});
         toast(S('STR_MSG_BACKUP_SAVED').replace('%u', info.count));
         renderBackup();
       });

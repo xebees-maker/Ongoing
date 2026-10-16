@@ -303,10 +303,10 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_TITLE_RECORD] = { "기록", "Record" },
     [STR_LABEL_PERIOD] = { "기간:", "Period:" },
     [STR_LABEL_STORAGE_LEGEND] = { "[사용 %(여유 MB)]", "[Used % (MB free)]" },
-    [STR_MSG_SD_RESOLVE_GUIDE] = { "콘 전원을 끄지 마세요. 측정값은 내부 플래시에 보관 중입니다(SD로 아직 안 옮긴 값 %u개, 최대 7일).\n"
+    [STR_MSG_SD_RESOLVE_GUIDE] = { "제어기 전원을 끄지 마세요. 측정값은 내부 플래시에 보관 중입니다(SD로 아직 안 옮긴 값 %u개, 최대 7일).\n"
                                    "카드를 바꾸려면: 카드를 빼고 다른 카드를 꽂은 뒤 재마운트 — 새 카드에는 보관 중인 측정값이 자동으로 옮겨집니다.\n"
                                    "재마운트가 안 될 때만 포맷하세요(카드의 사진·기록이 지워집니다).",
-                                   "Don't power off the controller. Measurements are being kept in internal flash (%u not yet on SD, up to 7 days).\n"
+                                   "Don't power off the CNTL. Measurements are being kept in internal flash (%u not yet on SD, up to 7 days).\n"
                                    "To replace the card: take it out, insert another card, then tap Remount - kept measurements are moved to the new card automatically.\n"
                                    "Format only if Remount fails (it erases the card's photos and records)." },
     [STR_LABEL_FLASH]          = { "플래시 [MB]", "Flash [MB]" },
@@ -317,16 +317,18 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_BTN_EXPORT]           = { "내보내기", "Export" },
     [STR_BTN_IMPORT]           = { "가져오기", "Import" },
     [STR_BTN_DELETE]           = { "지우기", "Delete" },
-    [STR_LABEL_LAST_BACKUP]    = { "콘의 마지막 백업", "Last backup from controller" },
-    [STR_LABEL_BACKUP_LIST_EMPTY] = { "이 웹앱에 저장된 백업 없음", "No backups saved in this web app" },
+    /* 2026-10-16(사용자 지시 — "콘"은 개발자 용어, 사용자에겐 제어기/CNTL) — 백업 화면 첫 줄 "통계 백업: 3/5개 [지금 백업] [가져오기]"
+     * (최근 날짜는 뺌 — 목록에서 지울 수도 있어서, 사용자 지시) */
+    [STR_FMT_BACKUP_STATUS]    = { "%u/%u개", "%u/%u" },
+    [STR_LABEL_BACKUP_LIST_EMPTY] = { "저장된 백업 없음", "No backups saved" },
     [STR_MSG_BACKUP_LOCAL_NOTE] = { "이 목록은 이 웹앱 안에만 있습니다. 웹앱을 지우면 함께 지워지니, 가끔 내보내기로 다른 곳에도 저장하세요.",
                                     "These backups live only inside this web app and are deleted with it - export one now and then to keep a copy elsewhere." },
     [STR_MSG_BACKUP_SAVED]     = { "백업 저장됨 - %u개", "Backup saved - %u records" },
-    [STR_MSG_BACKUP_BAD_FILE]  = { "콘 통계 백업 파일이 아니거나 손상됨", "Not a controller stats backup, or it is damaged" },
+    [STR_MSG_BACKUP_BAD_FILE]  = { "통계 백업 파일이 아니거나 손상됨", "Not a stats backup file, or it is damaged" },
     [STR_MSG_BACKUP_DELETE_CONFIRM] = { "이 백업을 지울까요?", "Delete this backup?" },
     [STR_BTN_STATS_RESTORE]    = { "복원", "Restore" },
-    [STR_MSG_RESTORE_CONFIRM]  = { "이 백업 파일의 측정값을 콘에 합칩니다(같은 값은 한 번만). 그래프 집계는 다시 계산됩니다. 계속할까요?",
-                                   "Merge the measurements in this backup file into the controller (same values only once). Graph aggregates are recalculated. Continue?" },
+    [STR_MSG_RESTORE_CONFIRM]  = { "이 백업 파일의 측정값을 제어기에 합칩니다(같은 값은 한 번만). 그래프 집계는 다시 계산됩니다. 계속할까요?",
+                                   "Merge the measurements in this backup file into the CNTL (same values only once). Graph aggregates are recalculated. Continue?" },
     [STR_MSG_RESTORE_RUNNING]  = { "복원 중...", "Restoring..." },
     [STR_MSG_RESTORE_DONE]     = { "복원 완료 - %u개 추가, %u개는 이미 있음", "Restore complete - %u added, %u already present" },
     [STR_MSG_RESTORE_FAIL]     = { "복원 실패: %s", "Restore failed: %s" },

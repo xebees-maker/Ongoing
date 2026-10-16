@@ -323,7 +323,7 @@ typedef enum {
     STR_BTN_EXPORT,
     STR_BTN_IMPORT,
     STR_BTN_DELETE,
-    STR_LABEL_LAST_BACKUP,
+    STR_FMT_BACKUP_STATUS,       /* %u 개수, %u 최대 */
     STR_LABEL_BACKUP_LIST_EMPTY,
     STR_MSG_BACKUP_LOCAL_NOTE,
     STR_MSG_BACKUP_SAVED,        /* %u 개수 */
