@@ -581,6 +581,7 @@
     h += '<div class="field"><label>' + esc(S('STR_LABEL_BACKUP') + ': ' + S('STR_FMT_BACKUP_STATUS').replace('%u', bk.list.length).replace('%u', BK_KEEP)) +
          '</label><span><button class="small" id="bkNow">' + esc(S('STR_BTN_STATS_BACKUP')) + '</button> <button class="small" id="bkImp">' +
          esc(S('STR_BTN_IMPORT')) + '</button></span></div>';
+    h += '<div class="field"><span class="sub">' + esc(S('STR_MSG_BACKUP_LOCAL_NOTE')) + '</span></div>';   /* 10-16(사용자 지시) — 안내는 목록 위 */
     if (!bk.list.length) h += '<div class="field"><span class="sub">' + esc(S('STR_LABEL_BACKUP_LIST_EMPTY')) + '</span></div>';
     bk.list.forEach(function (b) {
       h += '<div class="field"><label>' + esc(bkWhen(b.created)) + ' <span class="sub">' + b.count + ' / ' + bytesHuman(b.size) + '</span></label><span>' +
@@ -588,7 +589,6 @@
            '<button class="small" data-bkx="' + b.id + '">' + esc(S('STR_BTN_EXPORT')) + '</button> ' +
            '<button class="small danger" data-bkd="' + b.id + '">' + esc(S('STR_BTN_DELETE')) + '</button></span></div>';
     });
-    h += '<div class="field"><span class="sub">' + esc(S('STR_MSG_BACKUP_LOCAL_NOTE')) + '</span></div>';
     $('sheetBody').innerHTML = h;
     $('bkBack').onclick = openStats;
     $('bkNow').onclick = backupNow;
