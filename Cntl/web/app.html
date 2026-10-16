@@ -264,7 +264,6 @@
       <div id="sumMem" class="val"></div>
       <div id="sumSd" class="val"></div>
       <div id="sumFlash" class="val"></div>
-      <div id="sumBackup" class="val"></div>
       <input type="file" id="restoreFile" accept=".bin,application/octet-stream" style="display:none">
     </section>
     <section>
@@ -505,28 +504,137 @@
 
   var lastHeld = 0;   /* 10-15(SD 개선 4단계) — SD로 아직 안 옮긴 측정값 수(SD 조치 안내) */
 
-  /* 10-15(SD 개선 5단계, 사용자 설계 — 백업·복원은 브라우저에서만, 폰·PC 모두) — Summary "통계 백업: 날짜 [백업 받기] [복원]".
-   * 백업 = 콘이 주는 파일을 그대로 내려받음(브라우저 다운로드 폴더). 복원 = 파일을 골라 올림 → 콘이 합치는 동안 상태를 물어봄 */
-  var backupLast = null;
-  function loadBackupState() {
-    api('api/stats/restore').then(function (s) { backupLast = s.last_backup || 0; renderBackup(); }).catch(function () {});
+  /* 10-16(사용자 설계 — 백업은 폰 웹앱만 아는 곳에, 다른 기기로는 내보내기) — 통계 → [백업] 화면.
+   * 백업 = 콘에서 받아 이 웹앱 전용 저장소(IndexedDB)에 그대로 넣음 — 위치 고르기·다른 앱 없이(아이폰 홈 화면 웹앱은 파일 링크를 열면
+   * 돌아올 길 없는 미리보기로 넘어가고, 폴더를 웹이 정할 수 없음). 최근 BK_KEEP개만 남김.
+   * 복원 = 목록에서 골라 콘으로 올림. 내보내기 = 공유 시트(파일 앱·다른 앱, 다른 기기 보관용) — 공유를 못 하는 브라우저(PC)는 다운로드.
+   * 가져오기 = 내보낸 파일을 골라 이 저장소에 넣음. 웹앱을 지우면 이 저장소도 지워짐(화면에 안내) */
+  var BK_KEEP = 5;
+  var bk = { list: [], last: 0 };
+  var CRC_T = null;
+  function crc32(u8) {
+    if (!CRC_T) {
+      CRC_T = new Uint32Array(256);
+      for (var n = 0; n < 256; n++) { var c = n; for (var k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; CRC_T[n] = c >>> 0; }
+    }
+    var x = 0xFFFFFFFF;
+    for (var i = 0; i < u8.length; i++) x = CRC_T[(x ^ u8[i]) & 0xFF] ^ (x >>> 8);
+    return (x ^ 0xFFFFFFFF) >>> 0;
+  }
+  /* 콘 백업 파일인지(머리·크기·CRC) — 맞으면 {count, created}, 아니면 null */
+  function bkCheck(buf) {
+    if (!buf || buf.byteLength < 36) return null;
+    var v = new DataView(buf);
+    if (v.getUint32(0, true) !== 0x31425343 || v.getUint16(4, true) !== 1 || v.getUint16(6, true) !== 17) return null;
+    var count = v.getUint32(8, true);
+    if (buf.byteLength !== 32 + count * 17 + 4) return null;
+    if (crc32(new Uint8Array(buf, 32, count * 17)) !== v.getUint32(buf.byteLength - 4, true)) return null;
+    return { count: count, created: v.getUint32(12, true) };
+  }
+  function bkDb() {
+    return new Promise(function (ok, no) {
+      var r = indexedDB.open('cntl', 1);
+      r.onupgradeneeded = function () { r.result.createObjectStore('backups', { keyPath: 'id', autoIncrement: true }); };
+      r.onsuccess = function () { ok(r.result); };
+      r.onerror = function () { no(r.error); };
+    });
+  }
+  function bkTx(mode, fn) {
+    return bkDb().then(function (db) {
+      return new Promise(function (ok, no) {
+        var tx = db.transaction('backups', mode), st = tx.objectStore('backups'), out = fn(st);
+        tx.oncomplete = function () { ok(out && out.result !== undefined ? out.result : out); };
+        tx.onerror = function () { no(tx.error); };
+      });
+    });
+  }
+  function bkLoadList() {
+    return bkTx('readonly', function (st) { return st.getAll(); }).then(function (all) {
+      bk.list = (all || []).map(function (b) { return { id: b.id, created: b.created, count: b.count, size: b.size }; })
+        .sort(function (a, b) { return b.created - a.created; });
+    });
+  }
+  function bkSave(buf, info) {
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist();   /* 저장 공간 정리 때 지우지 말라고 요청 */
+    return bkTx('readwrite', function (st) {
+      st.add({ created: info.created, count: info.count, size: buf.byteLength, data: buf });
+    }).then(bkLoadList).then(function () {   /* 최근 BK_KEEP개만 */
+      var old = bk.list.slice(BK_KEEP);
+      if (!old.length) return;
+      return bkTx('readwrite', function (st) { old.forEach(function (b) { st.delete(b.id); }); }).then(bkLoadList);
+    });
+  }
+  function bkGet(id) { return bkTx('readonly', function (st) { return st.get(id); }); }
+  function bkName(b) {
+    var t = new Date(b.created * 1000).toISOString();   /* 콘 시각 = 지역시각 그대로 */
+    return 'cntl-stats-' + t.substr(0, 10).replace(/-/g, '') + '-' + t.substr(11, 5).replace(':', '') + '.bin';
+  }
+  function bkWhen(t) { var s = new Date(t * 1000).toISOString(); return s.substr(0, 10) + ' ' + s.substr(11, 5); }
+
+  function openBackup() {
+    openSheet(renderBackup);
+    bkLoadList().then(function () { if (sheetRender === renderBackup) renderBackup(); }).catch(function () {});
+    api('api/stats/restore').then(function (s) { bk.last = s.last_backup || 0; if (sheetRender === renderBackup) renderBackup(); }).catch(function () {});
   }
   function renderBackup() {
-    var el = $('sumBackup');
-    var day = backupLast ? new Date(backupLast * 1000).toISOString().slice(0, 10) : S('STR_LABEL_BACKUP_NEVER');   /* 콘 시각 = 지역시각 그대로 */
-    el.innerHTML = esc(S('STR_LABEL_BACKUP') + ': ' + day) + ' <button class="small" id="bkDl">' + esc(S('STR_BTN_STATS_BACKUP')) +
-      '</button> <button class="small" id="bkRs">' + esc(S('STR_BTN_STATS_RESTORE')) + '</button>';
-    $('bkDl').onclick = function () {
-      var a = document.createElement('a');
-      a.href = 'api/stats/backup';
-      a.download = '';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(loadBackupState, 15000);
-    };
-    $('bkRs').onclick = function () { $('restoreFile').value = ''; $('restoreFile').click(); };
-    $('restoreFile').onchange = function () { startRestore(this.files[0]); };
+    var h = '<div class="shead"><h3 class="grow">' + esc(S('STR_LABEL_BACKUP')) + '</h3><button class="small" id="bkNow">' + esc(S('STR_BTN_STATS_BACKUP')) +
+            '</button><button class="xbtn" id="bkBack" aria-label="close">&#x2715;</button></div>';
+    h += '<div class="field"><span class="sub">' + esc(S('STR_LABEL_LAST_BACKUP') + ': ' + (bk.last ? bkWhen(bk.last) : S('STR_LABEL_BACKUP_NEVER'))) + '</span></div>';
+    if (!bk.list.length) h += '<div class="field"><span class="sub">' + esc(S('STR_LABEL_BACKUP_LIST_EMPTY')) + '</span></div>';
+    bk.list.forEach(function (b) {
+      h += '<div class="field"><label>' + esc(bkWhen(b.created)) + ' <span class="sub">' + b.count + ' / ' + bytesHuman(b.size) + '</span></label><span>' +
+           '<button class="small" data-bkr="' + b.id + '">' + esc(S('STR_BTN_STATS_RESTORE')) + '</button> ' +
+           '<button class="small" data-bkx="' + b.id + '">' + esc(S('STR_BTN_EXPORT')) + '</button> ' +
+           '<button class="small danger" data-bkd="' + b.id + '">' + esc(S('STR_BTN_DELETE')) + '</button></span></div>';
+    });
+    h += '<div class="field"><span class="sub">' + esc(S('STR_MSG_BACKUP_LOCAL_NOTE')) + '</span></div>';
+    h += '<div class="sfoot"><button id="bkImp">' + esc(S('STR_BTN_IMPORT')) + '</button></div>';
+    $('sheetBody').innerHTML = h;
+    $('bkBack').onclick = openStats;
+    $('bkNow').onclick = backupNow;
+    $('bkImp').onclick = function () { $('restoreFile').value = ''; $('restoreFile').click(); };
+    $('restoreFile').onchange = function () { importBackup(this.files[0]); };
+    $('sheetBody').querySelectorAll('[data-bkr]').forEach(function (b) { b.onclick = function () { restoreFrom(+b.getAttribute('data-bkr')); }; });
+    $('sheetBody').querySelectorAll('[data-bkx]').forEach(function (b) { b.onclick = function () { exportBackup(+b.getAttribute('data-bkx')); }; });
+    $('sheetBody').querySelectorAll('[data-bkd]').forEach(function (b) {
+      b.onclick = function () {
+        if (!confirm(S('STR_MSG_BACKUP_DELETE_CONFIRM'))) return;
+        bkTx('readwrite', function (st) { st.delete(+b.getAttribute('data-bkd')); }).then(bkLoadList).then(renderBackup);
+      };
+    });
+  }
+  function backupNow() {
+    busyStart('LOADING');
+    return fetch('api/stats/backup', { credentials: 'same-origin', cache: 'no-store' }).then(function (r) {
+      if (r.status === 401) { show('login'); throw { handled: true }; }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.arrayBuffer();
+    }).then(function (buf) {
+      var info = bkCheck(buf);
+      if (!info) throw new Error('bad');
+      bk.last = Math.floor(Date.now() / 1000);
+      return bkSave(buf, info).then(function () {
+        busyEnd();
+        api('api/stats/restore').then(function (s) { bk.last = s.last_backup || bk.last; renderBackup(); }).catch(function () {});
+        toast(S('STR_MSG_BACKUP_SAVED').replace('%u', info.count));
+        renderBackup();
+      });
+    }).catch(function (e) {
+      busyEnd();
+      if (e && e.handled) return;
+      alert(S('STR_MSG_RESTORE_FAIL').replace('%s', 'backup'));
+    });
+  }
+  function restoreFrom(id) {
+    if (!confirm(S('STR_MSG_RESTORE_CONFIRM'))) return;
+    return bkGet(id).then(function (b) {
+      if (!b || !bkCheck(b.data)) { alert(S('STR_MSG_BACKUP_BAD_FILE')); return; }
+      busyStart('LOADING');
+      return fetch('api/stats/restore', { method: 'POST', body: b.data, credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream' } })
+        .then(function (r) { return r.json(); })
+        .then(restorePoll)
+        .catch(function () { busyEnd(); alert(S('STR_MSG_RESTORE_FAIL').replace('%s', 'upload')); });
+    });
   }
   function restorePoll(s) {
     if (s.state === 'running' || s.state === 'uploading') {
@@ -537,18 +645,35 @@
     if (s.state === 'done') alert(S('STR_MSG_RESTORE_DONE').replace('%u', s.added).replace('%u', s.dup));
     else alert(S('STR_MSG_RESTORE_FAIL').replace('%s', s.msg || s.state));
   }
-  function startRestore(f) {
-    if (!f || !confirm(S('STR_MSG_RESTORE_CONFIRM'))) return;
-    busyStart('LOADING');
-    fetch('api/stats/restore', { method: 'POST', body: f, credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream' } })
-      .then(function (r) { return r.json(); })
-      .then(restorePoll)
-      .catch(function () { busyEnd(); alert(S('STR_MSG_RESTORE_FAIL').replace('%s', 'upload')); });
+  function exportBackup(id) {
+    bkGet(id).then(function (b) {
+      if (!b) return;
+      var name = bkName(b);
+      var file = new File([b.data], name, { type: 'application/octet-stream' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        navigator.share({ files: [file], title: name }).catch(function () {});   /* 공유 시트(파일에 저장·다른 앱) */
+        return;
+      }
+      var url = URL.createObjectURL(file), a = document.createElement('a');   /* PC — 다운로드 폴더로 */
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+    });
+  }
+  function importBackup(f) {
+    if (!f) return;
+    return f.arrayBuffer().then(function (buf) {
+      var info = bkCheck(buf);
+      if (!info) { alert(S('STR_MSG_BACKUP_BAD_FILE')); return; }
+      return bkSave(buf, info).then(function () { toast(S('STR_MSG_BACKUP_SAVED').replace('%u', info.count)); renderBackup(); });
+    }).catch(function () { alert(S('STR_MSG_BACKUP_BAD_FILE')); });
   }
 
   function render(d) {
     lastHeld = d.held || 0;
-    if (backupLast === null) { backupLast = 0; loadBackupState(); }
     checkCleanup(d.cleanup);
     checkAlarms(d.alarm);
     recAutoRefresh(d.rec);   /* 10-09 — 기록 표를 맨 앞 페이지로 보고 있으면 새 기록이 들어올 때 다시 받음 */
@@ -1669,6 +1794,7 @@
 
   function renderStats() {
     var h = '<div class="shead"><h3 class="grow">' + esc(S('STR_TAB_STATISTICS')) + '</h3><button class="small" id="stRec">' + esc(S('STR_BTN_RECORD')) +
+            '</button><button class="small" id="stBk">' + esc(S('STR_BTN_BACKUP')) +   /* 10-16 — 통계 백업(사용자 결정: 기록 보기 옆) */
             '</button><button class="xbtn" data-act="close" aria-label="close">&#x2715;</button></div>';
     h += '<div class="field"><strong>' + esc(S('STR_PANEL_STATS_OVERVIEW')) + '</strong><span>' + esc(S('STR_LABEL_PERIOD')) + ' <select id="stScale">' +
          S('STR_STATS_SCALE_OPTIONS').split('\n').map(function (t, i) { return '<option value="' + i + '"' + (i === st.scale ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('') +
@@ -1813,6 +1939,8 @@
     if (sc) sc.addEventListener('change', function () { st.scale = +this.value; st.offset = 0; loadStats(true); });   /* 콘: 기간을 바꾸면 지금 창으로 */
     var rb = $('stRec');
     if (rb) rb.addEventListener('click', openRecord);
+    var bb = $('stBk');
+    if (bb) bb.addEventListener('click', openBackup);
     body.querySelectorAll('[data-ov]').forEach(function (el) {
       el.addEventListener('click', function () {
         var k = el.getAttribute('data-ov');

@@ -318,7 +318,17 @@ typedef enum {
     STR_MSG_RESTORE_RUNNING,
     STR_MSG_RESTORE_DONE,        /* %u 추가, %u 중복 */
     STR_MSG_RESTORE_FAIL,        /* %s 이유 */
-    STR_LABEL_BACKUP_NEVER,    /* 2026-10-15(SD 개선 4단계) — SD 조치 팝업 안내(%u = SD로 아직 안 옮긴 측정값 수, 웹도 같은 틀) */
+    STR_LABEL_BACKUP_NEVER,
+    STR_BTN_BACKUP,              /* 2026-10-16 — 웹 통계 머리줄 [백업] 및 백업 화면(웹앱 저장소·내보내기·가져오기) */
+    STR_BTN_EXPORT,
+    STR_BTN_IMPORT,
+    STR_BTN_DELETE,
+    STR_LABEL_LAST_BACKUP,
+    STR_LABEL_BACKUP_LIST_EMPTY,
+    STR_MSG_BACKUP_LOCAL_NOTE,
+    STR_MSG_BACKUP_SAVED,        /* %u 개수 */
+    STR_MSG_BACKUP_BAD_FILE,
+    STR_MSG_BACKUP_DELETE_CONFIRM,    /* 2026-10-15(SD 개선 4단계) — SD 조치 팝업 안내(%u = SD로 아직 안 옮긴 측정값 수, 웹도 같은 틀) */
     STR_LABEL_FLASH,             /* 2026-10-15 — Summary 내부 플래시 줄 제목 */
     STR_FMT_FLASH_USAGE,         /* 2026-10-15 — 앱/데이터(통계·기타·여유), %s 7개(웹도 같은 틀) */    /* "[사용 %(여유 MB)]" / "[Used % (MB free)]" */
 
