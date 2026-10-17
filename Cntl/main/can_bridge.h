@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "can_bridge_link.h"   /* CAN_BRIDGE_MAX_BRIDGES */
 #include "esp_now.h"  /* esp_now_recv_info_t 타입만 재사용(콘의 recv_cb 시그니처 호환용) —
                           esp_now_init/send 등 실제 드라이버 함수는 전혀 안 씀 */
 
@@ -27,11 +28,16 @@ typedef void (*can_bridge_recv_cb_t)(const esp_now_recv_info_t *info, const uint
 void can_bridge_init(can_bridge_recv_cb_t recv_cb);
 
 /* 2026-09-26(설계 6단계) — 브 장애 처리. 콘이 2초마다 PING, PONG에 실린 브 부팅 ID가 바뀌면(=브 재부팅) cb를 부름
- * (ctrl_consume 태스크 문맥 — node_hub가 노드 상태를 처음으로 되돌림). 브에 맡긴 reliable 요청은 여기서 실패로 끝냄 */
-typedef void (*can_bridge_bridge_reset_cb_t)(void);
+ * (ctrl_consume 태스크 문맥 — node_hub가 노드 상태를 처음으로 되돌림). 브에 맡긴 reliable 요청은 여기서 실패로 끝냄.
+ * 2026-10-18(Docs/설계_보브_보릴_2026-10-18.md) — 브릿지 여러 대(번호 0 = 재브, 1 = 보브 — 화면·로그엔 번호+1). 모두 브릿지별 */
+typedef void (*can_bridge_bridge_reset_cb_t)(uint8_t bridge);
 void can_bridge_set_bridge_reset_cb(can_bridge_bridge_reset_cb_t cb);
 /* PONG이 BRIDGE_SILENT_MS(10초) 넘게 없으면 true — UI가 경고. 이때 콘은 RESET을 20초마다 보냄 */
-bool can_bridge_bridge_is_silent(void);
+bool can_bridge_bridge_is_silent(uint8_t bridge);
+/* 무응답을 감시하는 브릿지인지 — 0번은 늘, 나머지는 콘이 켜진 뒤 한 번 응답한 뒤부터(안 붙은 브릿지로 경고하지 않게) */
+bool can_bridge_bridge_watched(uint8_t bridge);
+/* 이 노드가 붙어 있는 브릿지 — 그 노드의 프레임이 마지막으로 들어온 브릿지(모르면 0). 콘→노드 송신은 이 브릿지로 감 */
+uint8_t can_bridge_bridge_of(const uint8_t *mac);
 
 /* esp_now_send(mac, data, len) 자리 — fire-and-forget, 브가 큐잉만 하고 바로 반환.
  * ADVERTISE_ACK처럼 응답을 기다리지 않는 단발 전송용.

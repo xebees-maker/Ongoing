@@ -404,13 +404,13 @@ esp_now_capture_stage_t photo_rx_get_capture_stage(void)
     return stage;
 }
 
-void photo_rx_reset_sessions(void)
+void photo_rx_reset_sessions(uint8_t bridge)
 {
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (int i = 0; i < SR_SESSIONS; i++) {
-        if (s_sessions[i].active) drop_session_locked(&s_sessions[i]);
+        if (s_sessions[i].active && can_bridge_bridge_of(s_sessions[i].mac) == bridge) drop_session_locked(&s_sessions[i]);
     }
-    s_capture_stage = PHOTO_RX_CAPTURE_STAGE_NONE;
+    if (can_bridge_bridge_of(s_capture_cam_mac) == bridge) s_capture_stage = PHOTO_RX_CAPTURE_STAGE_NONE;
     xSemaphoreGive(s_mutex);
 }
 

@@ -6786,14 +6786,17 @@ static void cb_adaptive_response_changed(lv_event_t *e)
 static void refresh_bridge_health(lv_timer_t *t)
 {
     (void)t;
-    static bool s_warned = false;
-    bool silent = can_bridge_bridge_is_silent();
-    if (silent && !s_warned) {
-        ui_log_add_err(UI_ERR_BRIDGE_NORESPONSE, "Bridge not responding - reset sent, power-cycle if it continues");
-        s_warned = true;
-    } else if (!silent && s_warned) {
-        ui_log_add("Bridge responding again");
-        s_warned = false;
+    /* 2026-10-18 — 브릿지마다(번호+1로 표시: Bridge 1 = 재브, Bridge 2 = 보브) */
+    static bool s_warned[CAN_BRIDGE_MAX_BRIDGES];
+    for (uint8_t b = 0; b < CAN_BRIDGE_MAX_BRIDGES; b++) {
+        bool silent = can_bridge_bridge_is_silent(b);
+        if (silent && !s_warned[b]) {
+            ui_log_add_err(UI_ERR_BRIDGE_NORESPONSE, "Bridge %u not responding - reset sent, power-cycle if it continues", (unsigned)b + 1);
+            s_warned[b] = true;
+        } else if (!silent && s_warned[b]) {
+            ui_log_add("Bridge %u responding again", (unsigned)b + 1);
+            s_warned[b] = false;
+        }
     }
 }
 

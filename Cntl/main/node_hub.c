@@ -466,11 +466,14 @@ static bool is_duplicate_hello_locked(node_hub_node_t *n, const uint8_t *data, i
 /* 2026-09-26(설계 §6, 6단계 — 사용자 설계: 브 재부팅은 복구하지 않고 콘/브/캠/센스를 최초 상태로, 콘에 저장된 것 제외) —
  * 노드 연결 상태·CASK 대기열·설정 적용 기록을 처음으로. 노드 목록(이름·종류) 자체는 화면용으로 남김. 캠은 WAKE_HELLO가
  * 무시되면(ever_paired=false) 스스로 재광고 → 자동연결 설정대로 다시 페어링 */
-void node_hub_on_bridge_reset(void)
+void node_hub_on_bridge_reset(uint8_t bridge)
 {
+    int reset = 0;
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count; i++) {
         node_hub_node_t *n = &s_nodes[i];
+        if (can_bridge_bridge_of(n->mac) != bridge) continue;   /* 2026-10-18 — 그 브릿지에 붙은 노드만 */
+        reset++;
         n->conn_state = NODE_CONN_ORPHAN;
         n->ever_paired = false;
         n->user_pair_wanted = false;
@@ -482,9 +485,9 @@ void node_hub_on_bridge_reset(void)
         n->cfg_applied_valid = false;
     }
     xSemaphoreGive(s_nodes_mutex);
-    photo_rx_reset_sessions();
-    ESP_LOGW(TAG, "Bridge rebooted - node state reset (%d nodes)", s_node_count);
-    alarm_record(NOTIFY_TYPE_CAN, "Bridge restarted", "Bridge restarted - node links reset (%d nodes)", s_node_count);  /* 2026-10-09 — 기록만 */
+    photo_rx_reset_sessions(bridge);
+    ESP_LOGW(TAG, "Bridge %u rebooted - node state reset (%d nodes)", (unsigned)bridge + 1, reset);
+    alarm_record(NOTIFY_TYPE_CAN, "Bridge restarted", "Bridge %u restarted - node links reset (%d nodes)", (unsigned)bridge + 1, reset);  /* 2026-10-09 — 기록만 */
 }
 
 static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int len)

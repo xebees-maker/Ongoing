@@ -1,0 +1,11 @@
+menu "Bridge"
+
+    config BRIDGE_INDEX
+        int "Bridge number (0 = jaebu, indoor antenna / 1 = bobu, outdoor antenna)"
+        range 0 1
+        default 0
+        help
+            2026-10-18(Docs/설계_보브_보릴_2026-10-18.md) — 브릿지 번호. 번호마다 CAN ID가 달라서(can_bridge_link.h) 같은 버스의
+            브릿지끼리 반드시 달라야 함. 재브 = 0(기본), 보브 = 1(Tools/bridge_variant.ps1 1).
+
+endmenu

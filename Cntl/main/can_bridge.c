@@ -38,13 +38,66 @@ static const char *TAG = "CAN";
 #define CAN_BRIDGE_BITRATE 1000000  /* 2026-09-26(사진 전송 CAN 개선 2단계) — 500k -> 1M, 브와 반드시 같은 값 */
 
 static twai_node_handle_t s_node = NULL;
-static can_bridge_ctx_t *s_data_ctx;
-static can_bridge_reassembly_t s_data_reasm;
-static can_bridge_queue_t s_data_complete_q;
-static can_bridge_ctx_t *s_ctrl_ctx;
-static can_bridge_reassembly_t s_ctrl_reasm;
-static can_bridge_queue_t s_ctrl_complete_q;
+/* 2026-10-18(Docs/설계_보브_보릴_2026-10-18.md §4.2) — 브릿지 여러 대(재브 0, 보브 1). 브릿지마다 송신 문맥·재조립·완성 큐를
+ * 따로 둠(브릿지별 ID로 들어오므로 섞이지 않음). 소비 태스크는 경로(Control/Data)마다 하나 — 두 브릿지 큐를 같이 비움 */
+#define NB CAN_BRIDGE_MAX_BRIDGES
+typedef struct {
+    can_bridge_ctx_t *ctx[2];               /* [P_CTRL], [P_DATA] — 콘→브 송신 */
+    can_bridge_reassembly_t reasm[2];
+    can_bridge_queue_t complete_q[2];
+    /* 생존(설계 6단계 — 브릿지마다) */
+    volatile int64_t last_pong_us;
+    uint32_t boot_id;                        /* 0 = 아직 모름 */
+    volatile bool silent;
+    volatile bool seen;                      /* 콘이 켜진 뒤 한 번이라도 응답함 — 0번은 늘 있다고 보고, 나머지는 한 번 본 뒤부터 감시 */
+} bridge_t;
+static bridge_t s_br[NB];
+#define P_CTRL 0
+#define P_DATA 1
 static can_bridge_recv_cb_t s_recv_cb;
+
+/* 노드 → 브릿지 기록 — 그 노드의 프레임이 마지막으로 들어온 브릿지로 보냄(모르면 0번). 노드 수가 적어 작은 표 */
+#define NODE_BR_SLOTS 16
+typedef struct { uint8_t used; uint8_t bridge; uint8_t mac[6]; int64_t t; } node_br_t;
+static node_br_t s_node_br[NODE_BR_SLOTS];
+static portMUX_TYPE s_node_br_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void note_node_bridge(const uint8_t *mac, uint8_t b)
+{
+    static const uint8_t zero[6] = { 0 };
+    if (memcmp(mac, zero, 6) == 0) return;
+    int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_node_br_lock);
+    int idx = -1, oldest = 0;
+    for (int i = 0; i < NODE_BR_SLOTS; i++) {
+        if (s_node_br[i].used && memcmp(s_node_br[i].mac, mac, 6) == 0) { idx = i; break; }
+        if (!s_node_br[i].used || s_node_br[i].t < s_node_br[oldest].t) oldest = i;
+    }
+    bool changed = false;
+    if (idx < 0) {
+        idx = oldest;
+        s_node_br[idx].used = 1;
+        memcpy(s_node_br[idx].mac, mac, 6);
+        s_node_br[idx].bridge = b;
+    } else if (s_node_br[idx].bridge != b) {
+        s_node_br[idx].bridge = b;
+        changed = true;
+    }
+    s_node_br[idx].t = now;
+    taskEXIT_CRITICAL(&s_node_br_lock);
+    if (changed) ESP_LOGI(TAG, "Node %02X%02X%02X now via bridge %u", mac[3], mac[4], mac[5], (unsigned)b + 1);
+}
+
+uint8_t can_bridge_bridge_of(const uint8_t *mac)
+{
+    uint8_t b = 0;
+    taskENTER_CRITICAL(&s_node_br_lock);
+    for (int i = 0; i < NODE_BR_SLOTS; i++) {
+        if (s_node_br[i].used && memcmp(s_node_br[i].mac, mac, 6) == 0) { b = s_node_br[i].bridge; break; }
+    }
+    taskEXIT_CRITICAL(&s_node_br_lock);
+    return b;
+}
 
 
 /* ---- 미결 reliable 요청 테이블 — MAC당 1개 원칙(esp_now_reliable과 동일 전제), 여러
@@ -69,8 +122,8 @@ typedef struct {
     uint8_t  data[8];
 } raw_frame_t;
 static QueueHandle_t s_raw_frame_q;
-static void note_bridge_alive(const uint8_t *body, size_t body_len);  /* 2026-09-26(설계 6단계) — 아래 정의 */
-static esp_err_t send_app_msg(const uint8_t *msg, size_t len);
+static void note_bridge_alive(uint8_t b, const uint8_t *body, size_t body_len);  /* 2026-09-26(설계 6단계) — 아래 정의 */
+static esp_err_t send_app_msg(uint8_t b, const uint8_t *msg, size_t len);
 static volatile uint32_t s_raw_drop = 0;  /* ISR 원시 프레임 큐가 차서 버린 수 */
 /* 2026-09-26(버스 에러 조사) — 에러를 트래픽 양으로 나눠 비교하려고 셈 */
 static volatile uint32_t s_rx_frames = 0, s_tx_frames = 0, s_bus_errs = 0, s_state_changes = 0;
@@ -133,20 +186,18 @@ static void can_rx_task(void *arg)
     for (;;) {
         if (xQueueReceive(s_raw_frame_q, &rf, portMAX_DELAY) != pdTRUE) continue;
 
-        /* 2026-09-26 — ID로 경로 선택. 받는 쪽 FC는 자기 경로의 송신 ID로(현행 원칙) */
-        can_bridge_ctx_t *ctx;
-        can_bridge_reassembly_t *reasm;
-        can_bridge_queue_t *complete_q;
-        uint32_t fc_id;
-        if (rf.id == CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL) {
-            ctx = s_ctrl_ctx; reasm = &s_ctrl_reasm; complete_q = &s_ctrl_complete_q;
-            fc_id = CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL;
-        } else if (rf.id == CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA) {
-            ctx = s_data_ctx; reasm = &s_data_reasm; complete_q = &s_data_complete_q;
-            fc_id = CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA;
-        } else {
-            continue;  /* 콘→브 방향 ID(자기 송신 에코 없음)나 모르는 ID */
+        /* 2026-09-26 — ID로 경로 선택. 받는 쪽 FC는 자기 경로의 송신 ID로(현행 원칙).
+         * 2026-10-18 — ID로 브릿지도 가림(브릿지별 ID) */
+        int b = -1, path = 0;
+        for (int i = 0; i < NB && b < 0; i++) {
+            if (rf.id == CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL(i)) { b = i; path = P_CTRL; }
+            else if (rf.id == CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA(i)) { b = i; path = P_DATA; }
         }
+        if (b < 0) continue;  /* 콘→브 방향 ID(자기 송신 에코 없음)나 모르는 ID */
+        can_bridge_ctx_t *ctx = s_br[b].ctx[path];
+        can_bridge_reassembly_t *reasm = &s_br[b].reasm[path];
+        can_bridge_queue_t *complete_q = &s_br[b].complete_q[path];
+        uint32_t fc_id = path == P_CTRL ? CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL(b) : CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA(b);
 
         uint8_t pci = (rf.len >= 1) ? ((rf.data[0] >> 4) & 0x0F) : 0xFF;
         if (pci == ISO_TP_PCI_FC) { can_bridge_ctx_notify_fc(ctx, rf.data); continue; }
@@ -210,13 +261,15 @@ static void deliver_reliable_result(const can_bridge_app_header_t *hdr, const ui
 /* 2026-09-25(사용자 지시 — 이벤트 방식) — 예전엔 큐가 비면 vTaskDelay(20ms) 후 다시 확인하는
  * 폴링이었음(지시는 이벤트였는데 잘못 구현). 이제 큐를 비운 뒤 태스크 알림을 기다림 — 알림은
  * can_bridge_queue_push()가 완성된 메시지를 넣을 때만 보냄(can_bridge_queue_set_notify_task) */
-/* 2026-09-26 — 경로마다 하나씩(arg = 그 경로의 완성 큐). 처리 내용은 같음(RELAY/RESULT) */
+/* 2026-09-26 — 경로마다 하나씩. 처리 내용은 같음(RELAY/RESULT).
+ * 2026-10-18 — arg = 경로(P_CTRL/P_DATA), 그 경로의 브릿지별 큐를 모두 비움(큐마다 이 태스크에 알림) */
 static void can_consume_task(void *arg)
 {
-    can_bridge_queue_t *q = (can_bridge_queue_t *)arg;
+    int path = (int)(intptr_t)arg;
     for (;;) {
         uint8_t *data; size_t len;
-        while (can_bridge_queue_pop(q, &data, &len)) {
+        for (uint8_t b = 0; b < NB; b++)
+        while (can_bridge_queue_pop(&s_br[b].complete_q[path], &data, &len)) {
             if (len > CAN_BRIDGE_APP_HEADER_LEN) {
                 can_bridge_app_header_t hdr;
                 memcpy(&hdr, data, sizeof(hdr));
@@ -224,12 +277,13 @@ static void can_consume_task(void *arg)
                 size_t body_len = len - CAN_BRIDGE_APP_HEADER_LEN;
 
                 MEMDIAG_BEGIN();  /* 2026-09-28(진단) — 메시지 처리 1건의 내부 RAM 변화 */
+                note_node_bridge(hdr.mac, b);   /* 2026-10-18 — 이 노드는 이 브릿지로(PONG 등 mac 0은 건너뜀) */
                 if (hdr.msg_type == CAN_DATA_RELAY) {
                     deliver_relay(&hdr, body, body_len);
                 } else if (hdr.msg_type == CAN_DATA_RELIABLE_RESULT) {
                     deliver_reliable_result(&hdr, body, body_len);
                 } else if (hdr.msg_type == CAN_CTRL_PONG || hdr.msg_type == CAN_CTRL_BRIDGE_BOOT) {
-                    note_bridge_alive(body, body_len);
+                    note_bridge_alive(b, body, body_len);
                 } else if (hdr.msg_type == CAN_DATA_SR_META || hdr.msg_type == CAN_DATA_SR_CHUNK ||
                            hdr.msg_type == CAN_DATA_SR_DONE) {
                     /* 2026-09-26(설계 §4, 4단계) — 브가 순서를 맞춘 사진 스트림(Data 경로 → data_consume) */
@@ -249,20 +303,18 @@ static void can_consume_task(void *arg)
 #define BRIDGE_PING_INTERVAL_MS  2000
 #define BRIDGE_SILENT_US         (10LL * 1000 * 1000)
 #define BRIDGE_RESET_REPEAT_US   (20LL * 1000 * 1000)
-static volatile int64_t s_last_pong_us = 0;
-static uint32_t s_bridge_boot_id = 0;          /* 0 = 아직 모름(콘이 브보다 늦게 떠도 첫 PONG에서 기록만) */
-static volatile bool s_bridge_silent = false;
 static can_bridge_bridge_reset_cb_t s_bridge_reset_cb = NULL;
 
 void can_bridge_set_bridge_reset_cb(can_bridge_bridge_reset_cb_t cb) { s_bridge_reset_cb = cb; }
-bool can_bridge_bridge_is_silent(void) { return s_bridge_silent; }
+bool can_bridge_bridge_is_silent(uint8_t b) { return b < NB && s_br[b].silent; }
+bool can_bridge_bridge_watched(uint8_t b) { return b == 0 || (b < NB && s_br[b].seen); }
 
-/* 브가 재부팅하면 브에 맡긴 reliable 요청은 영영 결과가 안 옴 — 기다리는 호출자를 실패로 깨움 */
-static void fail_all_pending(void)
+/* 브가 재부팅하면 브에 맡긴 reliable 요청은 영영 결과가 안 옴 — 기다리는 호출자를 실패로 깨움(그 브릿지 몫만) */
+static void fail_all_pending(uint8_t b)
 {
     xSemaphoreTake(s_pending_mutex, portMAX_DELAY);
     for (int i = 0; i < CAN_BRIDGE_MAX_PENDING; i++) {
-        if (s_pending[i].in_use && s_pending[i].done_sem) {
+        if (s_pending[i].in_use && s_pending[i].done_sem && can_bridge_bridge_of(s_pending[i].mac) == b) {
             s_pending[i].ok = 0;
             xSemaphoreGive(s_pending[i].done_sem);
         }
@@ -271,27 +323,33 @@ static void fail_all_pending(void)
 }
 
 /* PONG·BRIDGE_BOOT 수신(ctrl_consume 태스크) */
-static void note_bridge_alive(const uint8_t *body, size_t body_len)
+static void note_bridge_alive(uint8_t bi, const uint8_t *body, size_t body_len)
 {
     if (body_len < sizeof(can_bridge_ctrl_boot_t)) return;
+    bridge_t *br = &s_br[bi];
     can_bridge_ctrl_boot_t b;
     memcpy(&b, body, sizeof(b));
-    s_last_pong_us = esp_timer_get_time();
-    if (s_bridge_silent) {
-        s_bridge_silent = false;
-        ESP_LOGI(TAG, "Bridge responding again");
+    br->last_pong_us = esp_timer_get_time();
+    if (!br->seen) {
+        br->seen = true;
+        ESP_LOGI(TAG, "Bridge %u present (boot ID %08x)", (unsigned)bi + 1, (unsigned)b.boot_id);
     }
-    if (s_bridge_boot_id != 0 && b.boot_id != s_bridge_boot_id) {
-        ESP_LOGW(TAG, "Bridge reboot detected (boot ID %08x -> %08x) - resetting node state", (unsigned)s_bridge_boot_id, (unsigned)b.boot_id);
-        s_bridge_boot_id = b.boot_id;
-        fail_all_pending();
-        if (s_bridge_reset_cb) s_bridge_reset_cb();
+    if (br->silent) {
+        br->silent = false;
+        ESP_LOGI(TAG, "Bridge %u responding again", (unsigned)bi + 1);
+    }
+    if (br->boot_id != 0 && b.boot_id != br->boot_id) {
+        ESP_LOGW(TAG, "Bridge %u reboot detected (boot ID %08x -> %08x) - resetting its node state", (unsigned)bi + 1,
+                 (unsigned)br->boot_id, (unsigned)b.boot_id);
+        br->boot_id = b.boot_id;
+        fail_all_pending(bi);
+        if (s_bridge_reset_cb) s_bridge_reset_cb(bi);
         return;
     }
-    s_bridge_boot_id = b.boot_id;
+    br->boot_id = b.boot_id;
 }
 
-static void send_ctrl_to_bridge(uint8_t type, const void *body, size_t len)
+static void send_ctrl_to_bridge(uint8_t bi, uint8_t type, const void *body, size_t len)
 {
     uint8_t msg[CAN_BRIDGE_APP_HEADER_LEN + 8];
     if (len > 8) return;
@@ -299,29 +357,33 @@ static void send_ctrl_to_bridge(uint8_t type, const void *body, size_t len)
     memset(hdr.mac, 0, sizeof(hdr.mac));
     memcpy(msg, &hdr, CAN_BRIDGE_APP_HEADER_LEN);
     memcpy(msg + CAN_BRIDGE_APP_HEADER_LEN, body, len);
-    send_app_msg(msg, CAN_BRIDGE_APP_HEADER_LEN + len);  /* 실패해도 다음 주기에 다시 — 생존 판단은 PONG 수신으로만 */
+    send_app_msg(bi, msg, CAN_BRIDGE_APP_HEADER_LEN + len);  /* 실패해도 다음 주기에 다시 — 생존 판단은 PONG 수신으로만 */
 }
 
+/* 2026-10-18 — 모든 브릿지에 PING. 무응답 감시는 0번(재브)은 늘, 나머지는 한 번 응답한 뒤부터(없는 브릿지로 경고하지 않게) */
 static void bridge_ping_task(void *arg)
 {
     (void)arg;
     uint32_t seq = 0;
-    int64_t last_reset_us = 0;
-    s_last_pong_us = esp_timer_get_time();   /* 부팅 직후 유예 */
+    int64_t last_reset_us[NB] = { 0 };
+    for (int b = 0; b < NB; b++) s_br[b].last_pong_us = esp_timer_get_time();   /* 부팅 직후 유예 */
     for (;;) {
         seq++;
-        send_ctrl_to_bridge(CAN_CTRL_PING, &seq, sizeof(seq));
+        for (uint8_t b = 0; b < NB; b++) send_ctrl_to_bridge(b, CAN_CTRL_PING, &seq, sizeof(seq));
         vTaskDelay(pdMS_TO_TICKS(BRIDGE_PING_INTERVAL_MS));
         int64_t now = esp_timer_get_time();
-        if (now - s_last_pong_us > BRIDGE_SILENT_US) {
-            if (!s_bridge_silent) {
-                s_bridge_silent = true;
-                last_reset_us = 0;
-                ESP_LOGE(TAG, "Bridge not responding (no PONG for %llds) - sending RESET", (long long)((now - s_last_pong_us) / 1000000));
+        for (uint8_t b = 0; b < NB; b++) {
+            bridge_t *br = &s_br[b];
+            if (!can_bridge_bridge_watched(b) || now - br->last_pong_us <= BRIDGE_SILENT_US) continue;
+            if (!br->silent) {
+                br->silent = true;
+                last_reset_us[b] = 0;
+                ESP_LOGE(TAG, "Bridge %u not responding (no PONG for %llds) - sending RESET", (unsigned)b + 1,
+                         (long long)((now - br->last_pong_us) / 1000000));
             }
-            if (last_reset_us == 0 || now - last_reset_us > BRIDGE_RESET_REPEAT_US) {
-                send_ctrl_to_bridge(CAN_CTRL_RESET, &seq, sizeof(seq));
-                last_reset_us = now;
+            if (last_reset_us[b] == 0 || now - last_reset_us[b] > BRIDGE_RESET_REPEAT_US) {
+                send_ctrl_to_bridge(b, CAN_CTRL_RESET, &seq, sizeof(seq));
+                last_reset_us[b] = now;
             }
         }
     }
@@ -334,9 +396,14 @@ static void can_status_task(void *arg)
         twai_node_status_t status;
         if (twai_node_get_info(s_node, &status, NULL) == ESP_OK) {
             static const char *names[] = {"error_active", "error_warning", "error_passive", "bus_off"};
-            uint32_t q_count, q_hwm, cq_count, cq_hwm;
-            can_bridge_queue_get_stats(&s_data_complete_q, &q_count, &q_hwm);
-            can_bridge_queue_get_stats(&s_ctrl_complete_q, &cq_count, &cq_hwm);
+            uint32_t q_count = 0, q_hwm = 0, cq_count = 0, cq_hwm = 0;
+            for (int b = 0; b < NB; b++) {   /* 브릿지 합(최대는 큰 쪽) */
+                uint32_t c, h;
+                can_bridge_queue_get_stats(&s_br[b].complete_q[P_DATA], &c, &h);
+                q_count += c; if (h > q_hwm) q_hwm = h;
+                can_bridge_queue_get_stats(&s_br[b].complete_q[P_CTRL], &c, &h);
+                cq_count += c; if (h > cq_hwm) cq_hwm = h;
+            }
             /* 2026-09-27(로그 정리) — 주기 상태 줄은 D, 버스 상태가 바뀐 때만 W로 */
             static int s_last_state = -1;
             if (s_last_state >= 0 && s_last_state != (int)status.state) {
@@ -409,10 +476,11 @@ static void can_tx_task(void *arg)
     }
 }
 
-static esp_err_t send_app_msg(const uint8_t *msg, size_t len)
+static esp_err_t send_app_msg(uint8_t b, const uint8_t *msg, size_t len)
 {
+    if (b >= NB) return ESP_ERR_INVALID_ARG;
     bool control = (can_bridge_path_for_app_msg(msg, len) == CAN_BRIDGE_CAT_CONTROL);
-    can_bridge_ctx_t *ctx = control ? s_ctrl_ctx : s_data_ctx;
+    can_bridge_ctx_t *ctx = s_br[b].ctx[control ? P_CTRL : P_DATA];
     if (!ctx) return ESP_ERR_INVALID_STATE;
     if (xTaskGetCoreID(xTaskGetCurrentTaskHandle()) == 1) return can_bridge_send(ctx, msg, len);
 
@@ -436,7 +504,7 @@ esp_err_t can_bridge_relay_send(const uint8_t *mac, const void *data, size_t len
     memcpy(msg, &hdr, CAN_BRIDGE_APP_HEADER_LEN);
     memcpy(msg + CAN_BRIDGE_APP_HEADER_LEN, data, len);
 
-    esp_err_t err = send_app_msg(msg, CAN_BRIDGE_APP_HEADER_LEN + len);
+    esp_err_t err = send_app_msg(can_bridge_bridge_of(mac), msg, CAN_BRIDGE_APP_HEADER_LEN + len);
 
     free(msg);
     return err;
@@ -496,7 +564,7 @@ esp_err_t can_bridge_reliable_request(const uint8_t *peer_mac,
     memcpy(msg + off, &send_hdr, sizeof(send_hdr)); off += sizeof(send_hdr);
     memcpy(msg + off, req, req_len); off += req_len;
 
-    esp_err_t send_err = send_app_msg(msg, off);
+    esp_err_t send_err = send_app_msg(can_bridge_bridge_of(peer_mac), msg, off);
     free(msg);
 
     if (send_err != ESP_OK) {
@@ -542,16 +610,15 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     s_rx_frame.buffer = s_rx_buf;
     s_rx_frame.buffer_len = sizeof(s_rx_buf);
 
-    can_bridge_queue_init(&s_data_complete_q);
-    can_bridge_queue_init(&s_ctrl_complete_q);
-
     #define CAN_BRIDGE_DATA_BUF_LEN 1536
-    uint8_t *data_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!data_buf) data_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_8BIT);
-    can_bridge_reassembly_init(&s_data_reasm, data_buf, CAN_BRIDGE_DATA_BUF_LEN);
-    uint8_t *ctrl_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!ctrl_buf) ctrl_buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_8BIT);
-    can_bridge_reassembly_init(&s_ctrl_reasm, ctrl_buf, CAN_BRIDGE_DATA_BUF_LEN);
+    for (int b = 0; b < NB; b++) {
+        for (int path = 0; path < 2; path++) {
+            can_bridge_queue_init(&s_br[b].complete_q[path]);
+            uint8_t *buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!buf) buf = (uint8_t *)heap_caps_malloc(CAN_BRIDGE_DATA_BUF_LEN, MALLOC_CAP_8BIT);
+            can_bridge_reassembly_init(&s_br[b].reasm[path], buf, CAN_BRIDGE_DATA_BUF_LEN);
+        }
+    }
 
     /* 2026-09-26(사용자 설계 — CAN 관련은 전부 코어 1) — TWAI 인터럽트를 코어 1에 잡음(노드를 코어 1 태스크에서
      * 생성). 이 함수는 node_hub_init()→app_main(코어 0)에서 불림 */
@@ -587,8 +654,10 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     xTaskCreateStaticPinnedToCore(can_tx_task, "ctrl_tx", 3072 / sizeof(StackType_t), s_ctrl_tx_q, 17, ctrl_tx_stack, &s_ctrl_tx_tcb, 1);
     xTaskCreateStaticPinnedToCore(can_tx_task, "data_tx", 3072 / sizeof(StackType_t), s_data_tx_q, 15, data_tx_stack, &s_data_tx_tcb, 1);
 
-    s_data_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA);
-    s_ctrl_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL);
+    for (int b = 0; b < NB; b++) {
+        s_br[b].ctx[P_DATA] = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA(b));
+        s_br[b].ctx[P_CTRL] = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL(b));
+    }
     /* 2026-09-26(설계 6단계) — 브 생존 확인(코어 1 — CAN 송신은 코어 1에서) */
     /* 2026-10-01(사용자 지시 — 메모리 검토 N) — 다른 CAN 태스크처럼 스택을 PSRAM에(예전엔 이것만 내부 RAM 3KB).
      * XiP from PSRAM이라 플래시 쓰기 중에도 캐시가 꺼지지 않아 PSRAM 스택 제약 없음(ESP-IDF 외부 RAM 문서) */
@@ -607,10 +676,12 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     /* 소비 태스크를 먼저 만들고 알림 대상으로 등록한 뒤에 수신 태스크를 띄움 — 첫 push부터
      * 알림이 가도록(등록 전에 들어온 게 있어도 소비 태스크의 첫 비우기에서 처리됨) */
     /* 2026-09-26(설계 §3) — 경로별 소비 태스크: Control 17, Data(SR) 15 */
-    TaskHandle_t ctrl_task = xTaskCreateStaticPinnedToCore(can_consume_task, "ctrl_consume", 4096 / sizeof(StackType_t), &s_ctrl_complete_q, 17, ctrl_consume_stack, &s_ctrl_consume_tcb, 1);
-    can_bridge_queue_set_notify_task(&s_ctrl_complete_q, ctrl_task);
-    TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "data_consume", 4096 / sizeof(StackType_t), &s_data_complete_q, 15, can_consume_stack, &s_can_consume_tcb, 1);
-    can_bridge_queue_set_notify_task(&s_data_complete_q, consume_task);
+    TaskHandle_t ctrl_task = xTaskCreateStaticPinnedToCore(can_consume_task, "ctrl_consume", 4096 / sizeof(StackType_t), (void *)(intptr_t)P_CTRL, 17, ctrl_consume_stack, &s_ctrl_consume_tcb, 1);
+    TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "data_consume", 4096 / sizeof(StackType_t), (void *)(intptr_t)P_DATA, 15, can_consume_stack, &s_can_consume_tcb, 1);
+    for (int b = 0; b < NB; b++) {
+        can_bridge_queue_set_notify_task(&s_br[b].complete_q[P_CTRL], ctrl_task);
+        can_bridge_queue_set_notify_task(&s_br[b].complete_q[P_DATA], consume_task);
+    }
     xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
     s_status_task = xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 4096 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
     can_bridge_tx_pool_set_abort_notify_task(s_status_task);

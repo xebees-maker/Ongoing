@@ -10,6 +10,7 @@
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -38,6 +39,9 @@ static const char *TAG = "CAN";
 
 #define CAN_LINK_TX_GPIO GPIO_NUM_15
 #define CAN_LINK_RX_GPIO GPIO_NUM_16
+/* 2026-10-18 — 브릿지 번호(Kconfig BRIDGE_INDEX, can_bridge_link.h ID 배정) */
+#define BR CONFIG_BRIDGE_INDEX
+
 #define CAN_LINK_BITRATE 1000000  /* 2026-09-26(사진 전송 CAN 개선 2단계) — 500k -> 1M, 콘과 반드시 같은 값 */
 
 static twai_node_handle_t s_node = NULL;
@@ -137,14 +141,14 @@ static void can_rx_task(void *arg)
         can_bridge_reassembly_t *reasm;
         can_bridge_queue_t *complete_q;
         uint32_t fc_id;
-        if (rf.id == CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL) {
+        if (rf.id == CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL(BR)) {
             ctx = s_ctrl_ctx; reasm = &s_ctrl_reasm; complete_q = &s_ctrl_complete_q;
-            fc_id = CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL;
-        } else if (rf.id == CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA) {
+            fc_id = CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL(BR);
+        } else if (rf.id == CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA(BR)) {
             ctx = s_data_ctx; reasm = &s_data_reasm; complete_q = &s_data_complete_q;
-            fc_id = CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA;
+            fc_id = CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA(BR);
         } else {
-            continue;
+            continue;  /* 다른 브릿지 몫이거나 모르는 ID */
         }
 
         uint8_t pci = (rf.len >= 1) ? ((rf.data[0] >> 4) & 0x0F) : 0xFF;
@@ -392,8 +396,8 @@ void can_link_init(void)
         return;
     }
 
-    s_data_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA);
-    s_ctrl_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL);
+    s_data_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA(BR));
+    s_ctrl_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL(BR));
 
     static StaticTask_t s_can_rx_tcb, s_can_consume_tcb, s_ctrl_consume_tcb, s_can_status_tcb;
     StackType_t *can_rx_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
@@ -412,5 +416,8 @@ void can_link_init(void)
     xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
     s_status_task = xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
 
-    ESP_LOGI(TAG, "Bridge CAN link started (TX=%d RX=%d %dbps, CONTROL+DATA)", CAN_LINK_TX_GPIO, CAN_LINK_RX_GPIO, CAN_LINK_BITRATE);
+    ESP_LOGI(TAG, "Bridge %d CAN link started (TX=%d RX=%d %dbps, CONTROL+DATA, IDs 0x%03x/0x%03x/0x%03x/0x%03x)", BR + 1,
+             CAN_LINK_TX_GPIO, CAN_LINK_RX_GPIO, CAN_LINK_BITRATE, (unsigned)CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL(BR),
+             (unsigned)CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL(BR), (unsigned)CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA(BR),
+             (unsigned)CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA(BR));
 }

@@ -36,11 +36,16 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-/* ---- CAN ID 배정: CONTROL < DATA (낮은 ID = 높은 버스 우선순위, 사용자 지시) ---- */
-#define CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL   0x100
-#define CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL   0x101
-#define CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA      0x200
-#define CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA      0x201
+/* ---- CAN ID 배정: CONTROL < DATA (낮은 ID = 높은 버스 우선순위, 사용자 지시) ----
+ * 2026-10-18(Docs/설계_보브_보릴_2026-10-18.md §4.2) — 브릿지 여러 대. 브릿지 번호(빌드 변형 CONFIG_BRIDGE_INDEX — 재브 0,
+ * 보브 1)마다 ID 4개를 0x10 간격으로. 0번은 예전 ID 그대로(0x100/0x101/0x200/0x201). 같은 ID로 두 대가 보내면 버스 충돌이라
+ * 번호는 대마다 달라야 함. 화면·로그에는 번호+1("Bridge 1" = 재브, "Bridge 2" = 보브) */
+#define CAN_BRIDGE_MAX_BRIDGES   2
+#define CAN_BRIDGE_ID_STEP       0x10u
+#define CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL(n)   (0x100u + (uint32_t)(n) * CAN_BRIDGE_ID_STEP)
+#define CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL(n)   (0x101u + (uint32_t)(n) * CAN_BRIDGE_ID_STEP)
+#define CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA(n)      (0x200u + (uint32_t)(n) * CAN_BRIDGE_ID_STEP)
+#define CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA(n)      (0x201u + (uint32_t)(n) * CAN_BRIDGE_ID_STEP)
 
 typedef enum {
     CAN_BRIDGE_ROLE_CNTL = 0,   /* 콘: CNTL_TO_BRIDGE로 송신, BRIDGE_TO_CNTL로 수신 */
