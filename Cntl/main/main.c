@@ -32,6 +32,7 @@
 #include "alarm.h"
 #include "sd_health.h"
 #include "flash_usage.h"
+#include "net_diag.h"
 #include "esp_system.h"
 #include "web_auth.h"
 #include "web_session.h"
@@ -293,8 +294,19 @@ static esp_err_t api_devlog_dump_get_handler(httpd_req_t *req)
     WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     /* 2026-10-09 — ?lvl=we 면 경고·에러 링(2000줄) */
     char q[24] = "", lvl[8] = "";
-    bool we = httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
-              httpd_query_key_value(q, "lvl", lvl, sizeof(lvl)) == ESP_OK && strcmp(lvl, "we") == 0;
+    bool have_lvl = httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+                    httpd_query_key_value(q, "lvl", lvl, sizeof(lvl)) == ESP_OK;
+    bool we = have_lvl && strcmp(lvl, "we") == 0;
+    if (have_lvl && strcmp(lvl, "net") == 0) {   /* 2026-10-17(진단, 임시) — TCP 연결 목록·내부 힙(net_diag.h) */
+        const size_t ncap = 4096;
+        char *nb = heap_caps_malloc(ncap, MALLOC_CAP_SPIRAM);
+        if (!nb) { httpd_resp_send_500(req); return ESP_FAIL; }
+        size_t nl = net_diag_dump(nb, ncap);
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        esp_err_t r = httpd_resp_send(req, nb, nl);
+        heap_caps_free(nb);
+        return r;
+    }
     const size_t cap = we ? 2000 * 150 : 400 * 150;
     char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
     if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }

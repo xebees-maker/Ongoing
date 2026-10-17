@@ -12,6 +12,7 @@
 #include "sens_kind_store.h"
 #include "sd_health.h"
 #include "flash_usage.h"
+#include "net_diag.h"
 #include "photo_rx.h"
 #include "ui_log.h"
 #include "dev_log.h"
@@ -5148,6 +5149,10 @@ static void refresh_dashboard(lv_timer_t *t)
     if (++s_mem_log_tick >= 10) {
         s_mem_log_tick = 0;
         ESP_LOGD(TAG, "MEMDIAG periodic internal free=%u", (unsigned)free_internal_now);
+        /* 2026-10-17(진단, 임시) — 10초 사이 15K 넘게 줄면 그 순간의 TCP 연결 목록·힙을 Dev Log에(10-17 11:58 37K가 25분 묶인 일) */
+        static size_t s_mem_prev = 0;
+        if (s_mem_prev && s_mem_prev > free_internal_now + 15000) net_diag_log("internal RAM dropped >15K in 10s");
+        s_mem_prev = free_internal_now;
     }
 
     if (!s_dash_nodes || !s_dash_nodes_prev) return;  /* PSRAM 할당 실패 시(극히 드묾) */

@@ -17,6 +17,7 @@ idf_component_register(
         "sd_health.c"
         "fs_bench.c"
         "flash_usage.c"
+        "net_diag.c"
         "stats_store.c"
         "photo_storage.c"
         "storage_mgr.c"
