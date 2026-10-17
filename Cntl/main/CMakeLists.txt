@@ -19,6 +19,7 @@ idf_component_register(
         "flash_usage.c"
         "net_diag.c"
         "lv_mem_route.c"
+        "web_access_log.c"
         "stats_store.c"
         "photo_storage.c"
         "storage_mgr.c"
@@ -79,3 +80,5 @@ endif()
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=jpeg_calloc_inner" "-Wl,--wrap=jpeg_calloc_align_inner")
 # 2026-10-17(시험) — LVGL 할당을 화면 갱신 중이 아니면 PSRAM 우선으로(lv_mem_route.c)
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=lv_malloc_core" "-Wl,--wrap=lv_realloc_core")
+# 2026-10-17(A 목록 5) — 웹 접속 기록(web_access_log.c): 응답 함수 셋을 가로채 요청마다 IP·주소·상태·크기를 남김
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=httpd_resp_send" "-Wl,--wrap=httpd_resp_send_chunk" "-Wl,--wrap=httpd_resp_set_status")

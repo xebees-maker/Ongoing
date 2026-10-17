@@ -34,6 +34,7 @@
 #include "flash_usage.h"
 #include "net_diag.h"
 #include "lv_mem_route.h"
+#include "web_access_log.h"
 #include "esp_system.h"
 #include "web_auth.h"
 #include "web_session.h"
@@ -1013,6 +1014,7 @@ void web_dashboard_start(void)
         return;
     }
     ESP_LOGD(TAG, "Web: httpd_start SUCC");
+    web_access_log_register(server);
     static const httpd_uri_t root_uri = { .uri = "/", .method = HTTP_GET, .handler = root_get_handler };
     esp_err_t root_err = httpd_register_uri_handler(server, &root_uri);
     ESP_LOGD(TAG, "Web: '/' register %s", root_err == ESP_OK ? "SUCC" : "FAIL");
