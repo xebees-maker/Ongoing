@@ -46,7 +46,7 @@
 #define EXAMPLE_LCD_BIT_PER_PIXEL       (16)
 #define EXAMPLE_RGB_BIT_PER_PIXEL       (16)
 #define EXAMPLE_RGB_DATA_WIDTH          (16)
-#define EXAMPLE_RGB_BOUNCE_LINES        10
+#define EXAMPLE_RGB_BOUNCE_LINES        5    /* 2026-10-17 내부 RAM — 10→5(버퍼 2개 32K→16K) */
 #define EXAMPLE_RGB_BOUNCE_BUFFER_SIZE  (EXAMPLE_LCD_H_RES * EXAMPLE_RGB_BOUNCE_LINES)
 #define EXAMPLE_LCD_IO_RGB_DISP         (-1)             // -1 if not used
 #define EXAMPLE_LCD_IO_RGB_VSYNC        (GPIO_NUM_3)

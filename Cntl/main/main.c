@@ -298,7 +298,7 @@ static esp_err_t api_devlog_dump_get_handler(httpd_req_t *req)
                     httpd_query_key_value(q, "lvl", lvl, sizeof(lvl)) == ESP_OK;
     bool we = have_lvl && strcmp(lvl, "we") == 0;
     if (have_lvl && strcmp(lvl, "net") == 0) {   /* 2026-10-17(진단, 임시) — TCP 연결 목록·내부 힙(net_diag.h) */
-        const size_t ncap = 4096;
+        const size_t ncap = 16384;   /* 태스크별 힙 표까지 */
         char *nb = heap_caps_malloc(ncap, MALLOC_CAP_SPIRAM);
         if (!nb) { httpd_resp_send_500(req); return ESP_FAIL; }
         size_t nl = net_diag_dump(nb, ncap);
