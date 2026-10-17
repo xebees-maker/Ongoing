@@ -298,7 +298,7 @@
   var ERRDESC = /*@ERRDESC@*/;
   /* 웹 전용 문구 */
   var W = {
-    PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'],
+    PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'], LOGIN_LOCKED: ['로그인 시도가 너무 많습니다. 5분 뒤 다시 시도하세요', 'Too many attempts. Try again in 5 minutes'],
     LOCAL_IN_USE: ['제어기 화면에서 사용 중입니다', 'CNTL is being used on its screen'], RECONNECT: ['다시 연결', 'Reconnect'],
     OFFLINE: ['연결 끊김', 'Offline'], WEB: ['웹', 'Web'],
     LOADING: ['받는 중', 'Loading'], CAPTURING: ['촬영 중', 'Capturing'], NO_PHOTO: ['사진이 오지 않았습니다', 'No photo arrived'],
@@ -757,6 +757,7 @@
     $('loginMsg').textContent = '';
     fetch('api/login', { method: 'POST', body: $('pw').value, credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'text/plain' } })
       .then(function (r) {
+        if (r.status === 429) throw new Error('locked');
         if (!r.ok) throw new Error('login');
         $('pw').value = '';
         $('pw').type = 'password';
@@ -764,7 +765,7 @@
         show('main');
         poll();
       })
-      .catch(function () { $('loginMsg').textContent = Wt('LOGIN_FAILED'); });
+      .catch(function (e) { $('loginMsg').textContent = Wt(e.message === 'locked' ? 'LOGIN_LOCKED' : 'LOGIN_FAILED'); });
   });
 
   /* 비밀번호 보기/숨기기(눈 아이콘) — 사선이 있으면 숨김 상태 */

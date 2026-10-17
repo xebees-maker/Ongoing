@@ -52,7 +52,7 @@
 <script>
 (function () {
   var T = /*@LOGIN_TITLE@*/;
-  var W = { PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'] };
+  var W = { PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'], LOGIN_LOCKED: ['로그인 시도가 너무 많습니다. 5분 뒤 다시 시도하세요', 'Too many attempts. Try again in 5 minutes'] };
   var lang = 'ko';
   try { lang = localStorage.getItem('lang') || ((navigator.language || '').toLowerCase().indexOf('ko') === 0 ? 'ko' : 'en'); } catch (e) {}
   var li = lang === 'ko' ? 0 : 1;
@@ -72,10 +72,11 @@
     $('msg').textContent = '';
     fetch('api/login', { method: 'POST', body: $('pw').value, credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'text/plain' } })
       .then(function (r) {
+        if (r.status === 429) throw new Error('locked');
         if (!r.ok) throw new Error('login');
         location.replace('app');
       })
-      .catch(function () { $('msg').textContent = W.LOGIN_FAILED[li]; });
+      .catch(function (e) { $('msg').textContent = W[e.message === 'locked' ? 'LOGIN_LOCKED' : 'LOGIN_FAILED'][li]; });
   });
 })();
 </script>

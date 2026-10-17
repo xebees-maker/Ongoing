@@ -10,6 +10,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "esp_timer.h"
+#include "lwip/sockets.h"
 
 static const char *TAG = "WEBAUTH";
 
@@ -22,6 +24,11 @@ static const char *TAG = "WEBAUTH";
 #define WEB_AUTH_PW_MIN      4
 #define WEB_AUTH_PW_MAX      32
 #define WEB_AUTH_BODY_MAX    (WEB_AUTH_PW_MAX * 2 + 2)
+/* 2026-10-17(A 목록 4) — 로그인 시도 제한: 같은 IP에서 연속 LIMIT_FAILS번 틀리면 그 IP를 LIMIT_LOCK_SEC 동안 막음(비밀번호 확인 없이 바로 429).
+ * 예전엔 실패마다 vTaskDelay 1초 — httpd가 태스크 하나라 그동안 웹 전체가 멈췄음. IP는 최근 LIMIT_SLOTS개만 기억(가장 오래된 것부터 교체) */
+#define LIMIT_FAILS          5
+#define LIMIT_LOCK_SEC       300
+#define LIMIT_SLOTS          16
 
 typedef struct {
     uint32_t magic;
@@ -45,6 +52,13 @@ typedef struct {
     uint8_t digest[32];
     uint8_t tok[WEB_AUTH_TOKEN_LEN];
     uint8_t salt[16];
+    struct {
+        uint8_t  ip[16];        /* IPv6(IPv4는 ::ffff:a.b.c.d 그대로) — 전부 0이면 빈 자리 */
+        uint8_t  fails;
+        int64_t  last_s;        /* 마지막 시도(부팅 후 초) — 자리 교체 순서 */
+        int64_t  lock_until_s;
+    } limit[LIMIT_SLOTS];
+    char ip_str[48];
 } web_auth_work_t;
 static web_auth_work_t *s_work = NULL;
 
@@ -175,11 +189,41 @@ static bool issue_token_locked(httpd_req_t *req)
     return true;
 }
 
+/* 요청한 쪽 IP의 제한 자리(잠금 안에서). 없으면 빈 자리나 가장 오래된 자리를 새로 씀. s_work->ip_str에 문자열 */
+static int limit_slot_locked(httpd_req_t *req, int64_t now)
+{
+    struct sockaddr_in6 a = { 0 };
+    socklen_t len = sizeof(a);
+    if (getpeername(httpd_req_to_sockfd(req), (struct sockaddr *)&a, &len) != 0) return -1;
+    inet6_ntoa_r(a.sin6_addr, s_work->ip_str, sizeof(s_work->ip_str));
+    int free_i = -1, oldest = 0;
+    static const uint8_t zero[16] = { 0 };
+    for (int i = 0; i < LIMIT_SLOTS; i++) {
+        if (memcmp(s_work->limit[i].ip, &a.sin6_addr, 16) == 0) return i;
+        if (free_i < 0 && memcmp(s_work->limit[i].ip, zero, 16) == 0) free_i = i;
+        if (s_work->limit[i].last_s < s_work->limit[oldest].last_s) oldest = i;
+    }
+    int i = free_i >= 0 ? free_i : oldest;
+    memset(&s_work->limit[i], 0, sizeof(s_work->limit[i]));
+    memcpy(s_work->limit[i].ip, &a.sin6_addr, 16);
+    s_work->limit[i].last_s = now;
+    return i;
+}
+
 /* POST /api/login — 본문 = 비밀번호 그대로. 성공하면 토큰 쿠키 */
 static esp_err_t api_login_post_handler(httpd_req_t *req)
 {
     if (!s_auth) return send_json(req, "500 Internal Server Error", "{\"ok\":false}");
     lock();
+    int64_t now = esp_timer_get_time() / 1000000;
+    int li = limit_slot_locked(req, now);
+    if (li >= 0 && s_work->limit[li].lock_until_s > now) {
+        int64_t left = s_work->limit[li].lock_until_s - now;
+        ESP_LOGW(TAG, "Login blocked %s (%llds left)", s_work->ip_str, left);
+        unlock();
+        return send_json(req, "429 Too Many Requests", "{\"ok\":false,\"error\":\"locked\"}");
+    }
+    if (li >= 0) s_work->limit[li].last_s = now;
     bool ok = s_auth->has_password && read_body_locked(req);
     if (ok) {
         size_t pw_len = strlen(s_work->body);
@@ -191,12 +235,18 @@ static esp_err_t api_login_post_handler(httpd_req_t *req)
     if (ok) ok = issue_token_locked(req);
     esp_err_t ret;
     if (ok) {
+        if (li >= 0) s_work->limit[li].fails = 0;
         ret = send_json(req, NULL, "{\"ok\":true}");
-        ESP_LOGI(TAG, "Login OK");
+        ESP_LOGI(TAG, "Login OK %s", li >= 0 ? s_work->ip_str : "?");
     } else {
+        if (li >= 0 && ++s_work->limit[li].fails >= LIMIT_FAILS) {
+            s_work->limit[li].fails = 0;
+            s_work->limit[li].lock_until_s = now + LIMIT_LOCK_SEC;
+            ESP_LOGW(TAG, "Login failed %s - %d in a row, blocked %ds", s_work->ip_str, LIMIT_FAILS, LIMIT_LOCK_SEC);
+        } else {
+            ESP_LOGW(TAG, "Login failed %s (%u)", li >= 0 ? s_work->ip_str : "?", li >= 0 ? s_work->limit[li].fails : 0);
+        }
         unlock();
-        vTaskDelay(pdMS_TO_TICKS(1000));  /* 대입 공격 늦추기 */
-        ESP_LOGW(TAG, "Login failed");
         return send_json(req, "401 Unauthorized", "{\"ok\":false,\"error\":\"password\"}");
     }
     unlock();
