@@ -978,6 +978,11 @@ void web_dashboard_start(void)
     /* 2026-10-03(할 일 AD — 웹 접속은 한 곳) — 동시 연결 3개(브라우저 한 대가 여는 연결 몇 개), 넘치면 가장 오래 쉰 연결을 닫음.
      * 웹 전송 하나가 내부 RAM 약 20K를 잠깐 씀(10-01 실측) — 연결 수를 묶어 그 이상 커지지 않게 */
     config.max_open_sockets = 3;
+    /* 2026-10-17(사용자 결정) — 연결을 닫을 때 못 보낸 데이터가 남으면 2초만 기다리고 끊음(RST, lwIP 버퍼 바로 놓음).
+     * 예전엔 받다가 사라진(받기 창 0) 상대에게 보낼 46KB를 lwIP가 25분 동안 붙잡아 내부 RAM이 37~51K 묶였음(Docs 한일 10-17).
+     * 보내기가 막히면 httpd가 send_wait_timeout(5초) 뒤 닫고, 그때 이 2초가 적용됨. CONFIG_LWIP_SO_LINGER=y 필요(sdkconfig.defaults) */
+    config.enable_so_linger = true;
+    config.linger_timeout = 2;
     config.lru_purge_enable = true;
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);

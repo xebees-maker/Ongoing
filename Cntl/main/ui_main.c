@@ -5145,6 +5145,15 @@ static void refresh_dashboard(lv_timer_t *t)
     }
     /* 2026-09-07(임시 진단 — 내부RAM 서서히 감소 원인 추적) — 10초마다(이 틱이 1초 주기라
      * 10번째마다) 전체 추이를 로그로 남김. stats_store_append() 안쪽 진단과 대조용 */
+    {   /* 2026-10-17(진단, 임시) — 부팅 뒤 최저값이 2K 넘게 새로 내려가면 그 시각을 남김(10초 기록 사이의 순간 저점 원인 찾기) */
+        static size_t s_min_logged = SIZE_MAX;
+        size_t mn = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+        if (s_min_logged == SIZE_MAX || mn + 2048 < s_min_logged) {
+            ESP_LOGW(TAG, "MEMDIAG internal min_ever %u (was %u), free now %u", (unsigned)mn,
+                     (unsigned)(s_min_logged == SIZE_MAX ? 0 : s_min_logged), (unsigned)free_internal_now);
+            s_min_logged = mn;
+        }
+    }
     static int s_mem_log_tick = 0;
     if (++s_mem_log_tick >= 10) {
         s_mem_log_tick = 0;
