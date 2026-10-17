@@ -18,6 +18,7 @@ idf_component_register(
         "fs_bench.c"
         "flash_usage.c"
         "net_diag.c"
+        "lv_mem_route.c"
         "stats_store.c"
         "photo_storage.c"
         "storage_mgr.c"
@@ -76,3 +77,5 @@ endif()
 # 내부 RAM 45K를 잠깐 씀(웹 전송과 겹치면 바닥 근처). 라이브러리에 설정이 없어 할당 함수 두 개만 링커로 가로채 PSRAM 우선으로 바꿈
 # (__wrap_ 구현은 ui_main.c의 decode_jpeg_scaled 옆)
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=jpeg_calloc_inner" "-Wl,--wrap=jpeg_calloc_align_inner")
+# 2026-10-17(시험) — LVGL 할당을 화면 갱신 중이 아니면 PSRAM 우선으로(lv_mem_route.c)
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=lv_malloc_core" "-Wl,--wrap=lv_realloc_core")

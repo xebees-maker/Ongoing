@@ -33,6 +33,7 @@
 #include "sd_health.h"
 #include "flash_usage.h"
 #include "net_diag.h"
+#include "lv_mem_route.h"
 #include "esp_system.h"
 #include "web_auth.h"
 #include "web_session.h"
@@ -1247,6 +1248,7 @@ void app_main(void)
 
     lv_display_t *disp = esp_lv_adapter_register_display(&disp_config);
     assert(disp != NULL);
+    lv_mem_route_attach(disp);
 
     if (touch_handle != NULL) {
         esp_lv_adapter_touch_config_t touch_config = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(disp, touch_handle);
