@@ -138,6 +138,33 @@ def main():
     with open(os.path.join(OUT_DIR, 'app.html.gz'), 'wb') as f:
         f.write(gz)
     print('strings=%d html=%dB gz=%dB' % (len(table), len(html.encode('utf-8')), len(gz)))
+    build_login(table)
+
+
+def build_login(table):
+    """2026-10-17 — 로그인 전용 작은 페이지(login.html): 제목만 콘 문구 표에서 넣고 gzip → out/login.html.gz"""
+    src = os.path.join(HERE, 'login.html')
+    with open(src, encoding='utf-8') as f:
+        html = f.read()
+    marker = '/*@LOGIN_TITLE@*/'
+    if marker not in html:
+        sys.exit('marker %s not found in login.html' % marker)
+    html = html.replace(marker, json.dumps(table['STR_LOGO_TITLE'], ensure_ascii=False))
+    out = os.path.join(OUT_DIR, 'login.html')
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write(html)
+    import shutil
+    import subprocess
+    if shutil.which('node'):
+        chk = "const h=require('fs').readFileSync(process.argv[1],'utf8');" \
+              "[...h.matchAll(/<script>([\\s\\S]*?)<\\/script>/g)].forEach(x=>new Function(x[1]));"
+        r = subprocess.run(['node', '-e', chk, out], capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit('login.html JS syntax error:\n' + r.stderr[-800:])
+    gz = gzip.compress(html.encode('utf-8'), compresslevel=9, mtime=0)
+    with open(os.path.join(OUT_DIR, 'login.html.gz'), 'wb') as f:
+        f.write(gz)
+    print('login html=%dB gz=%dB' % (len(html.encode('utf-8')), len(gz)))
 
 
 if __name__ == '__main__':

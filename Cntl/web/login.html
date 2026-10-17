@@ -1,0 +1,83 @@
+<!doctype html>
+<!--
+  2026-10-17(사용자 결정 — 로그인 전에는 작은 로그인 페이지만) — /app을 로그인 없이 요청하면 콘이 웹앱(48KB) 대신 이 페이지를 줌.
+  인터넷 스캐너가 웹앱을 받다가 멈추면 그 연결이 콘 내부 RAM을 50K 넘게 붙잡았음(10-17 시험: 84K → 33K). 웹앱 로그인 화면과 같은 모양·동작:
+  POST api/login(본문 = 비밀번호) → 성공하면 app으로(쿠키가 생겨 이번엔 웹앱이 옴). 문구는 웹앱 W 표와 같은 값, 제목은 build_web.py가 콘 문구 표에서 넣음.
+  빌드·배포: python build_web.py → out/login.html.gz → /admin/upload?file=login.html.gz
+-->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>FlexFarm</title>
+<link rel="manifest" href="app.webmanifest">
+<link rel="apple-touch-icon" href="app_icon.png">
+<link rel="icon" href="app_icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="FlexFarm">
+<meta name="theme-color" content="#ffffff">
+<style>
+  :root { --bg:#e5e7eb; --card:#fff; --text:#1c1e21; --muted:#6b7280; --red:#dc2626; --blue:#2563eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --card:#1b1e24; --text:#e5e7eb; --muted:#9ca3af; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.4 -apple-system, system-ui, sans-serif; background:var(--bg); color:var(--text); -webkit-text-size-adjust:100%; }
+  header { padding:10px 12px; background:var(--card); border-bottom:1px solid rgba(127,127,127,.18); }
+  header h1 { font-size:20px; margin:0; font-weight:700; }
+  form { display:flex; flex-direction:column; align-items:center; gap:14px; padding:48px 16px; }
+  input { font:inherit; padding:10px 44px 10px 12px; border-radius:8px; border:1px solid rgba(127,127,127,.4); background:var(--card); color:var(--text); width:240px; }
+  button { font:inherit; padding:8px 14px; border-radius:8px; border:1px solid var(--blue); background:var(--blue); color:#fff; }
+  .pwwrap { position:relative; }
+  .eye { position:absolute; right:4px; top:50%; transform:translateY(-50%); border:none; background:transparent; padding:6px; color:var(--muted); line-height:0; }
+  .msg { font-size:13px; color:var(--red); min-height:18px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header><h1 id="ttl"></h1></header>
+<form id="f" autocomplete="on">
+  <input type="text" name="username" autocomplete="username" value="cntl" class="hidden" readonly>
+  <div class="pwwrap">
+    <input id="pw" type="password" name="password" autocomplete="current-password">
+    <button id="eye" type="button" class="eye" aria-label="show password">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>
+        <line id="slash" x1="3" y1="21" x2="21" y2="3"/>
+      </svg>
+    </button>
+  </div>
+  <button type="submit" id="go"></button>
+  <div id="msg" class="msg"></div>
+</form>
+<script>
+(function () {
+  var T = /*@LOGIN_TITLE@*/;
+  var W = { PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'] };
+  var lang = 'ko';
+  try { lang = localStorage.getItem('lang') || ((navigator.language || '').toLowerCase().indexOf('ko') === 0 ? 'ko' : 'en'); } catch (e) {}
+  var li = lang === 'ko' ? 0 : 1;
+  function $(i) { return document.getElementById(i); }
+  document.documentElement.lang = lang;
+  document.title = T[li];
+  $('ttl').textContent = T[li];
+  $('pw').placeholder = W.PASSWORD[li];
+  $('go').textContent = W.LOGIN[li];
+  $('eye').addEventListener('click', function () {
+    var shown = $('pw').type === 'password';
+    $('pw').type = shown ? 'text' : 'password';
+    $('slash').style.display = shown ? 'none' : '';
+  });
+  $('f').addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    $('msg').textContent = '';
+    fetch('api/login', { method: 'POST', body: $('pw').value, credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'text/plain' } })
+      .then(function (r) {
+        if (!r.ok) throw new Error('login');
+        location.replace('app');
+      })
+      .catch(function () { $('msg').textContent = W.LOGIN_FAILED[li]; });
+  });
+})();
+</script>
+</body>
+</html>

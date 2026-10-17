@@ -720,10 +720,18 @@ typedef struct {
 static const web_static_file_t s_static_app = { FS_MOUNT_POINT "/app.html.gz", FS_MOUNT_POINT "/app.html", "text/html; charset=utf-8" };
 static const web_static_file_t s_static_manifest = { NULL, FS_MOUNT_POINT "/app.webmanifest", "application/manifest+json" };
 static const web_static_file_t s_static_icon = { NULL, FS_MOUNT_POINT "/app_icon.png", "image/png" };
+/* 2026-10-17(사용자 결정) — 로그인 전에는 웹앱(48KB) 대신 이 작은 로그인 페이지(2KB대). 인터넷 스캐너가 로그인 없이 웹앱을 받다가
+ * 멈추면 그 연결이 lwIP 송신 버퍼(46KB)를 채운 채 남아 내부 RAM을 50K 넘게 붙잡았음(10-17 11:58 37K 25분, 시험 84K → 33K) */
+static const web_static_file_t s_static_login = { FS_MOUNT_POINT "/login.html.gz", FS_MOUNT_POINT "/login.html", "text/html; charset=utf-8" };
 
 static esp_err_t app_get_handler(httpd_req_t *req)
 {
     const web_static_file_t *sf = (const web_static_file_t *)req->user_ctx;
+    if (sf == &s_static_app && !web_auth_check(req)) {
+        struct stat lst;
+        /* 로그인 페이지가 아직 안 올라갔으면 예전처럼 웹앱을 줌(웹앱 안 로그인 화면) — 로그인할 길이 막히지 않게 */
+        if (stat(s_static_login.gz_path, &lst) == 0 || stat(s_static_login.path, &lst) == 0) sf = &s_static_login;
+    }
     const char *path = sf->gz_path;
     bool gz = (path != NULL);
     struct stat st;
