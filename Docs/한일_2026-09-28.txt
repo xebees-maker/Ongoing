@@ -2,6 +2,9 @@
    + W6002 원인 확인 + 4시간 무인 로그 (원래 PC, 사용자 부재 중 진행) ==
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
+- 2026-10-17 저녁: 원래 PC에서 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
+  메모리 변경 없음. sdkconfig.defaults: LWIP_SO_LINGER=y, TCP_SND_BUF 23040, LV_DRAW_SW_DRAW_UNIT_CNT=1(재구성해서 sdkconfig 반영됨).
+  git 밖: 콘 LittleFS에 login.html.gz 올림(로그인 전 작은 페이지). 콘 SD = MPIO 그대로, 캠 1분 촬영 계속.
 - 2026-10-16 오후: 원래 PC에서 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리: feedback_wrapup_includes_push 추가("마무리"는 늘 푸시 포함, claude_memory zip은 갱신 안 함 — 같은 PC). sdkconfig 변경 없음.
   git 밖: 콘 LittleFS app.html.gz를 10-16 14:2x SPA로 올림(통계 → 백업 화면). 콘 SD = MPIO(10-15 15:23 초기화), 캠 1분 촬영·로그 수집기 계속.
@@ -1072,7 +1075,22 @@ C14. 39af070 Wi-Fi 결함 수정 2개 동작 확인 — ① 연결 요청 거절
      SD 쓰기(10-16 00~13시, 13시간): fsync 57.5/h, 파일 만들기 0.77/h(사진 칸 파일 — 64분에 하나), 이름 바꾸기 0, 지우기 0, 4.3MB/h.
      예전: 2단계 전 통계만 fsync 약 500/h + 사진 만들기·이름 바꾸기 각 약 57/h(10-15 05~06시: fsync 63, create 57, rename 57 — 2단계 뒤·3단계 전).
      사진 칸 파일 20개(s0000~s0019), 칸 파일 하나 만드는 데 0.4초.
-[ 이어서 할 일 — 10-15 저녁 ]
+162. **10-17 내부 RAM 44K까지 떨어짐 — 원인과 막은 것**: 인터넷 스캐너가 로그인 없이 /app(48KB)을 받다 멈춤 → 보낼 데이터 46KB를 lwIP가
+     ~25분 쥠(내부 RAM 51K). 막은 것: ① 로그인 전 /app은 2.3KB 로그인 페이지(28a93ca, Cntl/web/login.html, build_web.py) ② httpd SO_LINGER 2초
+     (0da7ecf) ③ TCP 송신 버퍼 46080 → 23040(9efaf0a, 사용자 결정 — 46K로 두 배 빨라지지 않음). 진단: /api/devlog_dump?lvl=net(TCP 연결 목록·
+     내부 힙, 10초에 15K 넘게 줄면 자동 기록 — 임시). 웹 전송 한 번은 출처(LittleFS·SD·PSRAM)와 상관없이 내부 RAM 약 42K를 잠깐 씀(네트워크 경로).
+163. **내부 RAM 여유 늘림(10-17, 사용자 — "애시당초 여유가 워낙 적은 게 문제")**: 측정(태스크별 힙 추적, 블록 분포)으로 나눈 뒤:
+     ① LVGL 그리기 스레드 2 → 1(스택 8.7K) ② RGB bounce 버퍼 10줄 → 5줄(16K) — 769af46. 화면 이상 없음(사용자, 연속 전송 중 포함).
+     ③ JPEG 디코더(esp_new_jpeg, 바이너리) 작업 버퍼를 링커 --wrap으로 PSRAM 우선(5d11991) — 사진 디코드 때 잠깐 45K 쓰던 것 없어짐, 267 → 301ms.
+     ④ LVGL 할당을 "화면 갱신 중이면 내부 RAM(예전대로), 아니면 PSRAM 우선"으로(987e863, lv_mem_route.c, lv_malloc_core/lv_realloc_core --wrap).
+        09-06엔 크기 기준(SPIRAM_MALLOC_ALWAYSINTERNAL)으로 나눠 실패했음(그리기 임시 할당까지 PSRAM → 화면 깨짐). 웹 검색 — 같은 방식 사례 없음.
+     결과: 주화면 평소 여유 84.2K → 145.9K, 연속 웹 전송 중 최저 22.8K(화면 조작 겹치면 1.4~8K) → 약 81K, 카메라 팝업 23K(+여는 순간 45K) → 3K,
+     통계 팝업 22.6K·테이블 9K도 PSRAM으로. 화면 갱신 46 → 47ms, 팝업 첫 화면 335 → 360ms, 연속 전송 중 52~56ms. 화면·팝업 모두 정상(사용자).
+     **제 잘못**: 블록 분포 진단(힙 전체 훑기 — 힙 잠금 중 인터럽트 막힘)을 전송마다 불러 화면이 출렁였음 → 진단 뺌(01a07ea). 사진 API로 시험해
+     콘 화면이 웹 잠금됨(화면 API는 웹 세션을 잡음).
+164. **보일러(결정, A 목록 다음)**: XIAO(외장 안테나) + 3.3V High 트리거 릴레이 모듈, 상시 전원, 무선. 콘 쪽은 재브와 같은 기종(Waveshare
+     ESP32-S3-RS485-CAN, SMA 없는 기본형) 브릿지를 하나 더 CAN 데이지 체인으로. 이름: 기존 브릿지 = 재브, 새 브릿지 = 보브.
+[ 이어서 할 일 — 10-17 저녁 ]
  1. 효과 확인(Tools/sd_effect_check.py <기준 JSON>, 기준 = serial_logs\sd_effect\base_20261015_1651_sd_health.json):
     하루 SD 쓰기 — 10-16이 새 방식만의 첫 온전한 하루(10-17에 "yesterday"로), 그 전엔 시간당 비율로. 기대: create/rename 거의 0,
     fsync는 사진 1장당 1 + 매시 몇 번. MPIO 손상 재발 여부·감시 사건(부트 영역·디렉터리·통계·사진 CRC), CS 실패 0, 백업 알림 W6003
@@ -1083,3 +1101,9 @@ C14. 39af070 Wi-Fi 결함 수정 2개 동작 확인 — ① 연결 요청 거절
  4. 시험 끝나면 캠 주기촬영 간격을 30분~1시간으로(지금 시험용 1분).
  5. 할 일 AF: 시험용 웹 처리기·코드 지움(sdhealth_test(check/flip/erase), fsbench, stats/aggdump, stats/sync, statsfile, capture_now, devlog,
     sdtest, alarm_sim, SCD41 시험 코드, STATSIO/PHOTOIO 로그), 백업 알림 주기 90일로.
+    + 10-17 임시: net 진단(net_diag.c, lvl=net, 10초 자동 기록, 1초 min_ever 로그), 팝업별 메모리 로그(create_modal/create_page_popup),
+    /api/test/campopup + CAMPROBE 로그, LVRENDER 갱신 시간 로그(lv_mem_route.c — 할당 나누는 부분은 남김).
+ 6. A 목록(웹·메모리·보안) 남은 것: ④ 로그인 시도 제한(httpd를 막지 않게 — 지금은 실패마다 1초 vTaskDelay) ⑤ 접속 기록(IP·경로·크기)을 Dev Log로
+    ⑥ 콘이 넘겨받은 상태(OWNER_LOCAL)를 화면 꺼짐이나 1분쯤 조작 없음에 자동 해제(사용자 — "자동 해제가 좋겠네").
+ 7. 보일러(164): CAN 프로토콜·콘·브릿지 코드의 다중 브릿지 지원 조사 → 보브 펌웨어, 보일러 장치(켜기·끄기, 릴레이 상태 보고,
+    통신 끊김 때 동작 — 사용자 결정, UI 표시).
