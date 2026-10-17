@@ -71,3 +71,8 @@ endif()
 if(lvgl_lib)
     target_compile_options(${lvgl_lib} PRIVATE -Wno-format)
 endif()
+
+# 2026-10-17 내부 RAM — esp_new_jpeg(바이너리 전용)는 디코드 작업 버퍼를 내부 RAM 우선(모자라면 PSRAM)으로 잡아서, 사진 한 장 디코드에
+# 내부 RAM 45K를 잠깐 씀(웹 전송과 겹치면 바닥 근처). 라이브러리에 설정이 없어 할당 함수 두 개만 링커로 가로채 PSRAM 우선으로 바꿈
+# (__wrap_ 구현은 ui_main.c의 decode_jpeg_scaled 옆)
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=jpeg_calloc_inner" "-Wl,--wrap=jpeg_calloc_align_inner")

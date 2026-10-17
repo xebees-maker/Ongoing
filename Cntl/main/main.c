@@ -681,6 +681,20 @@ static esp_err_t api_photos_get_handler(httpd_req_t *req)
  * 행 탭을 합성하면(ui_main_inject_photo_select) 반환 시점에 이미 선택+판넬 표시까지
  * 동기로 끝나있음. 예전의 "캐시 우선 확인 -> 없으면 요청 후 25초 이벤트 대기"가 통째로
  * 불필요해짐(그건 CAM 응답을 기다려야 했던 시절 설계) */
+/* 2026-10-17(측정용, 임시 — 나중에 지움) — ?op=open|close: CNTL 카메라 팝업 열기/닫기 합성. 열 때 단계별 내부 RAM 최저값이
+ * Dev Log에 W "CAMPROBE"로 남음(ui_main_inject_camera_popup) */
+static esp_err_t api_test_campopup_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    char q[16] = "", op[8] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) httpd_query_key_value(q, "op", op, sizeof(op));
+    bool open = strcmp(op, "open") == 0;
+    if (!open && strcmp(op, "close") != 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "op=open|close");
+    bool ok = ui_main_inject_camera_popup(open);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
 static esp_err_t api_photo_fetch_get_handler(httpd_req_t *req)
 {
     WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
@@ -1052,6 +1066,9 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_photo_fetch_uri = { .uri = "/api/photo_fetch", .method = HTTP_GET,
                                                        .handler = api_photo_fetch_get_handler };
     httpd_register_uri_handler(server, &api_photo_fetch_uri);
+    static const httpd_uri_t api_test_campopup_uri = { .uri = "/api/test/campopup", .method = HTTP_GET,
+                                                         .handler = api_test_campopup_get_handler };
+    httpd_register_uri_handler(server, &api_test_campopup_uri);
     ESP_LOGD(TAG, "Web: API endpoints registered");
     static const httpd_uri_t app_uri = { .uri = "/app", .method = HTTP_GET, .handler = app_get_handler, .user_ctx = (void *)&s_static_app };
     httpd_register_uri_handler(server, &app_uri);
