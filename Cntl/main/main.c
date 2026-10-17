@@ -61,6 +61,7 @@ static void touch_activity_event_cb(lv_event_t *e)
 {
     (void)e;
     node_hub_note_user_action();
+    web_session_local_activity();
 }
 
 /* 2026-08-30(사용자 지시: "첫 페이지가, 장치목록/사진목록 보여주는 페이지가 의도한 거지?") —

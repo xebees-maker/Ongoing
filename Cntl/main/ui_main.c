@@ -979,6 +979,7 @@ static void screen_off(void)
     screen_backlight(false);
     if (s_screen_off_timer) lv_timer_pause(s_screen_off_timer);
     ESP_LOGI(TAG, "Screen off");
+    web_session_local_release();
 }
 
 /* 새 W/E — 꺼져 있으면 켜고 막도 치움(이번엔 터치로 깨운 게 아니므로 다음 터치는 정상 동작) */

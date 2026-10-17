@@ -27,6 +27,10 @@ bool web_session_gate(httpd_req_t *req);
 /* 콘 잠금 화면 버튼 — 웹 연결을 끊고 콘이 사용 */
 void web_session_takeover(void);
 
+/* 2026-10-17 — 넘겨받음 자동 해제: 콘 터치마다 activity(넘겨받은 상태일 때만 시각 갱신, 1분 없으면 풀림), 화면 꺼질 때 release */
+void web_session_local_activity(void);
+void web_session_local_release(void);
+
 /* 지금 웹이 주인(콘 잠금)인지 */
 bool web_session_web_active(void);
 

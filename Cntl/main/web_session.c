@@ -10,6 +10,9 @@ static const char *TAG = "WEBSESS";
 /* SPA는 5초마다 조회 — 4번 빠지면 접속 끝으로 봄 */
 #define WEB_SESSION_IDLE_MS   20000
 #define WEB_SESSION_CHECK_MS  2000
+/* 2026-10-17(A 목록 6, 사용자 — "자동 해제가 좋겠네") — 콘이 넘겨받은 뒤 이만큼 화면을 만지지 않거나 화면이 꺼지면 넘겨받음을 풂.
+ * 예전엔 웹이 claim하기 전까지 계속 넘겨받은 상태라, 콘을 안 쓰는데도 웹이 "제어기에서 사용 중"(409)으로 막혔음 */
+#define WEB_SESSION_LOCAL_IDLE_MS  60000
 
 typedef enum {
     OWNER_NONE = 0,   /* 웹 접속 없음 — 콘 평소대로 */
@@ -20,6 +23,7 @@ typedef enum {
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static owner_t s_owner = OWNER_NONE;
 static int64_t s_last_seen_us = 0;
+static int64_t s_local_seen_us = 0;   /* 넘겨받은 상태에서 마지막 콘 터치 */
 static web_session_lock_cb_t s_cb = NULL;
 static esp_timer_handle_t s_idle_timer = NULL;
 
@@ -45,14 +49,16 @@ static void idle_check_cb(void *arg)
 {
     (void)arg;
     taskENTER_CRITICAL(&s_lock);
-    bool expired = (s_owner == OWNER_WEB) &&
-                   (esp_timer_get_time() - s_last_seen_us > (int64_t)WEB_SESSION_IDLE_MS * 1000);
-    if (expired) s_owner = OWNER_NONE;
+    int64_t now = esp_timer_get_time();
+    bool expired = (s_owner == OWNER_WEB) && (now - s_last_seen_us > (int64_t)WEB_SESSION_IDLE_MS * 1000);
+    bool local_expired = (s_owner == OWNER_LOCAL) && (now - s_local_seen_us > (int64_t)WEB_SESSION_LOCAL_IDLE_MS * 1000);
+    if (expired || local_expired) s_owner = OWNER_NONE;
     taskEXIT_CRITICAL(&s_lock);
     if (expired) {
         ESP_LOGI(TAG, "Web idle %ds - session ended", WEB_SESSION_IDLE_MS / 1000);
         notify(false);
     }
+    if (local_expired) ESP_LOGI(TAG, "Cntl idle %ds - takeover released", WEB_SESSION_LOCAL_IDLE_MS / 1000);
 }
 
 void web_session_init(web_session_lock_cb_t cb)
@@ -100,7 +106,26 @@ bool web_session_touch(void)
 
 void web_session_takeover(void)
 {
+    taskENTER_CRITICAL(&s_lock);
+    s_local_seen_us = esp_timer_get_time();
+    taskEXIT_CRITICAL(&s_lock);
     set_owner(OWNER_LOCAL);
+}
+
+void web_session_local_activity(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    if (s_owner == OWNER_LOCAL) s_local_seen_us = esp_timer_get_time();
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+void web_session_local_release(void)
+{
+    taskENTER_CRITICAL(&s_lock);
+    bool was_local = (s_owner == OWNER_LOCAL);
+    if (was_local) s_owner = OWNER_NONE;
+    taskEXIT_CRITICAL(&s_lock);
+    if (was_local) ESP_LOGI(TAG, "Cntl screen off - takeover released");
 }
 
 bool web_session_web_active(void)
