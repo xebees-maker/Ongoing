@@ -278,9 +278,12 @@ static void can_consume_task(void *arg)
                 } else if (hdr.msg_type == CAN_DATA_RELIABLE_SEND) {
                     handle_reliable_send(&hdr, body, body_len);
                 } else if (hdr.msg_type == CAN_CTRL_PING) {
-                    /* 2026-09-26(설계 6단계) — 생존 확인 응답(부팅 ID 포함) */
-                    can_bridge_ctrl_boot_t pong = { .boot_id = s_boot_id };
+                    /* 2026-09-26(설계 6단계) — 생존 확인 응답(부팅 ID 포함). 2026-10-18 — 지금 채널도 */
+                    can_bridge_ctrl_pong_t pong = { .boot_id = s_boot_id, .channel = bridge_esp_now_channel() };
                     send_ctrl_to_cntl(CAN_CTRL_PONG, &pong, sizeof(pong));
+                } else if (hdr.msg_type == CAN_CTRL_SET_CHANNEL) {
+                    /* 2026-10-18(설계_보브_보릴 §4.3) — 채널은 콘이 정함(AP 채널에서 계산) */
+                    bridge_esp_now_set_channel(hdr.flags);
                 } else if (hdr.msg_type == CAN_CTRL_RESET) {
                     ESP_LOGW(TAG, "RESET requested by Cntl - restarting");
                     bridge_log_can("RESET by Cntl - restarting");
@@ -315,7 +318,7 @@ static void can_status_task(void *arg)
 {
     (void)arg;
     /* 2026-09-26(설계 6단계) — 부팅 알림 1회(콘이 아직 안 떴으면 못 받지만, 다음 PONG에 같은 부팅 ID가 실림) */
-    can_bridge_ctrl_boot_t boot = { .boot_id = s_boot_id };
+    can_bridge_ctrl_pong_t boot = { .boot_id = s_boot_id, .channel = bridge_esp_now_channel() };
     send_ctrl_to_cntl(CAN_CTRL_BRIDGE_BOOT, &boot, sizeof(boot));
     for (;;) {
         twai_node_status_t status;

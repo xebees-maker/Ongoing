@@ -14,6 +14,11 @@ void bridge_esp_now_init(void);
 /* 2026-09-26 — ESP-NOW 초기화가 끝났으면 true(그 전에 온 콘의 무선 송신 요청은 버림) */
 bool bridge_esp_now_is_ready(void);
 
+/* 2026-10-18(설계_보브_보릴 §4.3) — 콘이 정한 채널로 라디오를 옮김(CAN_CTRL_SET_CHANNEL). 이웃 채널 광고 필터도 새 채널 기준.
+ * 이 브에 붙은 노드는 채널을 잃고 다시 훑어 찾음. 지금 채널은 bridge_esp_now_channel() — PONG에 실어 콘에 알림 */
+void bridge_esp_now_set_channel(uint8_t channel);
+uint8_t bridge_esp_now_channel(void);
+
 /* can_link.c가 콘에서 받은 DATA 완성 메시지를 실제 ESP-NOW로 내보낼 때 씀 */
 void bridge_esp_now_send_raw(const uint8_t mac[6], const uint8_t *data, uint16_t len);
 

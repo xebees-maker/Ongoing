@@ -111,6 +111,14 @@ typedef struct __attribute__((packed)) {
     uint32_t boot_id;
 } can_bridge_ctrl_boot_t;
 
+/* 2026-10-18(Docs/설계_보브_보릴_2026-10-18.md §4.3) — PONG·BRIDGE_BOOT 본문에 브의 지금 ESP-NOW 채널을 덧붙임(끝에 1바이트 —
+ * 옛 브 펌웨어는 boot_id만 보내므로 콘은 길이로 구분). 콘은 이 값이 자기가 정한 채널과 다르면 SET_CHANNEL을 다시 보냄
+ * (브가 재부팅하면 기본 채널로 돌아가므로). SET_CHANNEL(콘→브)은 header.flags = 채널(1~13), 본문 1바이트(같은 채널 — 브 수신부는 헤더보다 긴 메시지만 처리) */
+typedef struct __attribute__((packed)) {
+    uint32_t boot_id;
+    uint8_t  channel;
+} can_bridge_ctrl_pong_t;
+
 /* DATA 카테고리 — 브릿지는 이 안의 CASK(esp_now_link.h) 내용을 해석하지 않는 투명 릴레이.
  * mac=상대 CAM/Sens MAC, payload=CASK 프레임 원본 바이트 그대로.
  *

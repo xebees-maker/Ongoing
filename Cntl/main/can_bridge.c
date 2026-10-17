@@ -3,6 +3,7 @@
 #include "can_bridge_link.h"
 #include "photo_rx.h"
 #include "ui_log.h"
+#include "esp_now_link.h"   /* ESP_NOW_MSG_ADVERTISE — 광고만 기기 종류로 브릿지를 가림 */
 
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
@@ -10,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_mac.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -50,6 +52,7 @@ typedef struct {
     uint32_t boot_id;                        /* 0 = 아직 모름 */
     volatile bool silent;
     volatile bool seen;                      /* 콘이 켜진 뒤 한 번이라도 응답함 — 0번은 늘 있다고 보고, 나머지는 한 번 본 뒤부터 감시 */
+    volatile uint8_t channel;                /* 브가 PONG으로 알려 준 지금 ESP-NOW 채널(0 = 모름, 옛 펌웨어) */
 } bridge_t;
 static bridge_t s_br[NB];
 #define P_CTRL 0
@@ -277,6 +280,19 @@ static void can_consume_task(void *arg)
                 size_t body_len = len - CAN_BRIDGE_APP_HEADER_LEN;
 
                 MEMDIAG_BEGIN();  /* 2026-09-28(진단) — 메시지 처리 1건의 내부 RAM 변화 */
+                /* 2026-10-18(설계_보브_보릴 §4.3) — 광고는 기기 종류에 맞는 브릿지가 전달한 것만 받음. 노드는 응답(ADVERTISE_ACK)을
+                 * 보낸 브릿지에 붙으므로, 다른 브릿지가 들은 광고에 응답하면 실내 센스·캠이 보브에 붙을 수 있음(실기 — 두 브릿지가
+                 * 같은 채널일 때 노드가 브릿지 1·2를 오감). 지금은 센스·캠뿐이라 모두 0번(재브) — 보릴 종류는 보브로(다음 단계).
+                 * 광고만이 아니라 노드가 보낸 프레임(전달·사진) 전부: 이미 다른 브릿지에 붙은 노드는 응답을 못 받아 다시 채널을
+                 * 찾고, 그때는 맞는 브릿지만 응답하므로 거기 붙음(실기 — 규칙 전에 보브에 붙은 노드가 CH11에서 보브와 통신) */
+                bool from_node = hdr.msg_type == CAN_DATA_RELAY || hdr.msg_type == CAN_DATA_SR_META ||
+                                 hdr.msg_type == CAN_DATA_SR_CHUNK || hdr.msg_type == CAN_DATA_SR_DONE;
+                if (from_node && b != 0) {
+                    LOG_W_RL(TAG, "Node %02X%02X%02X frame via bridge %u ignored (not its kind's bridge)", hdr.mac[3], hdr.mac[4],
+                             hdr.mac[5], (unsigned)b + 1);
+                    can_bridge_queue_pop_free(data);
+                    continue;
+                }
                 note_node_bridge(hdr.mac, b);   /* 2026-10-18 — 이 노드는 이 브릿지로(PONG 등 mac 0은 건너뜀) */
                 if (hdr.msg_type == CAN_DATA_RELAY) {
                     deliver_relay(&hdr, body, body_len);
@@ -330,6 +346,7 @@ static void note_bridge_alive(uint8_t bi, const uint8_t *body, size_t body_len)
     can_bridge_ctrl_boot_t b;
     memcpy(&b, body, sizeof(b));
     br->last_pong_us = esp_timer_get_time();
+    if (body_len >= sizeof(can_bridge_ctrl_pong_t)) br->channel = body[offsetof(can_bridge_ctrl_pong_t, channel)];
     if (!br->seen) {
         br->seen = true;
         ESP_LOGI(TAG, "Bridge %u present (boot ID %08x)", (unsigned)bi + 1, (unsigned)b.boot_id);
@@ -360,6 +377,95 @@ static void send_ctrl_to_bridge(uint8_t bi, uint8_t type, const void *body, size
     send_app_msg(bi, msg, CAN_BRIDGE_APP_HEADER_LEN + len);  /* 실패해도 다음 주기에 다시 — 생존 판단은 PONG 수신으로만 */
 }
 
+/* ---- 2026-10-18(Docs/설계_보브_보릴_2026-10-18.md §4.3~4.4) — 브릿지 채널을 콘이 정함 ----
+ * 보브(1번, 안테나가 AP·콘과 같은 실외)는 AP가 차지한 대역에서 가장 먼 채널, 재브(0번, 안테나 실내 — AP와 겹쳐도 됨)는 보브에서 가장
+ * 먼 채널. 1~11만 씀(12·13은 나라 설정에 따라 못 쓸 수 있어서 — 노드는 1~13을 훑으므로 상관없음). AP가 40MHz면 보조 채널 쪽으로
+ * 4칸 더 차지한 것으로 봄. AP가 채널을 바꿔도 바로 따라가지 않음: 보브 채널이 AP 대역과 5칸 미만으로 겹친 상태가 10분 계속될 때만
+ * 옮김(옮기면 그 브릿지의 노드가 채널을 잃고 다시 찾아야 해서). 브가 알려 준 채널(PONG)이 정한 값과 다르면 SET_CHANNEL을 다시 보냄
+ * (브는 재부팅하면 기본 채널로 돌아감) */
+#define CH_LO 1
+#define CH_HI 11
+#define CH_CLEAR 5                                /* 이만큼 떨어지면 안 겹침(20MHz 폭) */
+#define CH_MOVE_DELAY_US (10LL * 60 * 1000 * 1000)
+static uint8_t s_target_ch[NB];                   /* 0 = 아직 안 정함 */
+static int64_t s_overlap_since_us;
+
+static int ch_dist(int c, int lo, int hi) { return c < lo ? lo - c : (c > hi ? c - hi : 0); }
+
+/* AP가 차지한 대역(채널 lo~hi). 모르면 false — 공유기에 붙어 있으면 그 AP, 단독 AP 모드면 콘 자신의 채널 */
+static bool ap_band(int *lo, int *hi, uint8_t *primary_out)
+{
+    wifi_ap_record_t ap;
+    uint8_t primary = 0;
+    wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        primary = ap.primary;
+        second = ap.second;
+    } else {
+        wifi_mode_t mode;
+        if (esp_wifi_get_mode(&mode) != ESP_OK || mode != WIFI_MODE_AP) return false;
+        if (esp_wifi_get_channel(&primary, &second) != ESP_OK) return false;
+    }
+    if (primary < 1 || primary > 14) return false;
+    *lo = *hi = primary;
+    if (second == WIFI_SECOND_CHAN_ABOVE) *hi = primary + 4;
+    else if (second == WIFI_SECOND_CHAN_BELOW) *lo = primary - 4;
+    *primary_out = primary;
+    return true;
+}
+
+static void plan_channels(int lo, int hi, uint8_t out[NB])
+{
+    int best = CH_HI, best_d = -1;
+    for (int c = CH_HI; c >= CH_LO; c--) {
+        int d = ch_dist(c, lo, hi);
+        if (d > best_d) { best_d = d; best = c; }
+    }
+    out[1] = (uint8_t)best;                                    /* 보브 */
+    out[0] = (uint8_t)(best - CH_LO >= CH_HI - best ? CH_LO : CH_HI);   /* 재브 — 보브에서 먼 끝 */
+}
+
+static void update_channels(void)
+{
+    int lo, hi;
+    uint8_t primary;
+    int64_t now = esp_timer_get_time();
+    if (ap_band(&lo, &hi, &primary)) {
+        uint8_t ideal[NB];
+        plan_channels(lo, hi, ideal);
+        if (s_target_ch[0] == 0) {
+            memcpy(s_target_ch, ideal, sizeof(s_target_ch));
+            ESP_LOGI(TAG, "Channel plan: AP CH%u (band %d-%d) -> Bridge 1 CH%u, Bridge 2 CH%u", (unsigned)primary, lo, hi,
+                     (unsigned)s_target_ch[0], (unsigned)s_target_ch[1]);
+        } else if (memcmp(ideal, s_target_ch, sizeof(ideal)) != 0 && ch_dist(s_target_ch[1], lo, hi) < CH_CLEAR) {
+            if (s_overlap_since_us == 0) {
+                s_overlap_since_us = now;
+                ESP_LOGW(TAG, "AP now CH%u (band %d-%d) overlaps Bridge 2 CH%u - moving bridges in 10 min if it stays", (unsigned)primary,
+                         lo, hi, (unsigned)s_target_ch[1]);
+            } else if (now - s_overlap_since_us >= CH_MOVE_DELAY_US) {
+                memcpy(s_target_ch, ideal, sizeof(s_target_ch));
+                s_overlap_since_us = 0;
+                ESP_LOGW(TAG, "Channel plan changed: AP CH%u (band %d-%d) -> Bridge 1 CH%u, Bridge 2 CH%u - their nodes will rescan",
+                         (unsigned)primary, lo, hi, (unsigned)s_target_ch[0], (unsigned)s_target_ch[1]);
+            }
+        } else {
+            s_overlap_since_us = 0;
+        }
+    }
+    for (uint8_t b = 0; b < NB; b++) {
+        bridge_t *br = &s_br[b];
+        if (s_target_ch[b] == 0 || !br->seen || br->silent || br->channel == 0 || br->channel == s_target_ch[b]) continue;
+        ESP_LOGI(TAG, "Bridge %u on CH%u - setting CH%u", (unsigned)b + 1, (unsigned)br->channel, (unsigned)s_target_ch[b]);
+        /* 본문 1바이트(채널)를 붙임 — 브의 소비 태스크는 헤더보다 긴 메시지만 처리함(채널 값은 header.flags에서 읽음) */
+        uint8_t msg[CAN_BRIDGE_APP_HEADER_LEN + 1];
+        can_bridge_app_header_t hdr = { .msg_type = CAN_CTRL_SET_CHANNEL, .flags = s_target_ch[b] };
+        memset(hdr.mac, 0, sizeof(hdr.mac));
+        memcpy(msg, &hdr, CAN_BRIDGE_APP_HEADER_LEN);
+        msg[CAN_BRIDGE_APP_HEADER_LEN] = s_target_ch[b];
+        send_app_msg(b, msg, sizeof(msg));   /* 결과는 다음 PONG의 채널로 확인(같지 않으면 다음 주기에 다시) */
+    }
+}
+
 /* 2026-10-18 — 모든 브릿지에 PING. 무응답 감시는 0번(재브)은 늘, 나머지는 한 번 응답한 뒤부터(없는 브릿지로 경고하지 않게) */
 static void bridge_ping_task(void *arg)
 {
@@ -371,6 +477,7 @@ static void bridge_ping_task(void *arg)
         seq++;
         for (uint8_t b = 0; b < NB; b++) send_ctrl_to_bridge(b, CAN_CTRL_PING, &seq, sizeof(seq));
         vTaskDelay(pdMS_TO_TICKS(BRIDGE_PING_INTERVAL_MS));
+        update_channels();
         int64_t now = esp_timer_get_time();
         for (uint8_t b = 0; b < NB; b++) {
             bridge_t *br = &s_br[b];

@@ -41,9 +41,9 @@ static incoming_path_t s_data_in = { .name = "DATA" };
  * 복사하므로 1개면 충분(스택에 큰 버퍼를 두지 않음, feedback_never_put_large_data_on_stack) */
 static uint8_t *s_rx_buf;
 
-/* 2026-09-26 — 브 라디오의 현재 채널(wifi_bringup() 후 1회 읽음 — 브는 채널을 바꾸지 않음).
- * 0이면 아직 모름 → 광고 채널 필터 안 함 */
-static uint8_t  s_own_channel = 0;
+/* 2026-09-26 — 브 라디오의 현재 채널(wifi_bringup() 후 1회 읽음). 0이면 아직 모름 → 광고 채널 필터 안 함.
+ * 2026-10-18 — 콘의 SET_CHANNEL로 바뀜(bridge_esp_now_set_channel) */
+static volatile uint8_t s_own_channel = 0;
 /* 2026-09-26(실기 크래시 — 브 재부팅 루프) — main.c는 can_link_init()을 먼저 불러 CAN 수신이 먼저 시작됨. 그 사이 콘의
  * RELAY/RELIABLE_SEND가 오면 초기화 전 ESP-NOW를 건드려 크래시(esp_now_is_peer_exist). 준비 전엔 can_link가 버림 */
 static volatile bool s_ready = false;
@@ -243,6 +243,26 @@ static void wifi_bringup(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+}
+
+uint8_t bridge_esp_now_channel(void) { return s_own_channel; }
+
+void bridge_esp_now_set_channel(uint8_t channel)
+{
+    if (channel < 1 || channel > 13 || !s_ready) return;
+    if (channel == s_own_channel) return;
+    uint8_t old = s_own_channel;
+    esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    uint8_t primary = 0;
+    wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+    if (esp_wifi_get_channel(&primary, &second) == ESP_OK) s_own_channel = primary;
+    if (err != ESP_OK || s_own_channel != channel) {
+        ESP_LOGW(TAG, "Channel change CH%u -> CH%u failed: %s (now CH%u)", (unsigned)old, (unsigned)channel, esp_err_to_name(err),
+                 (unsigned)s_own_channel);
+        return;
+    }
+    ESP_LOGI(TAG, "Channel CH%u -> CH%u (set by Cntl) - nodes on this bridge will rescan", (unsigned)old, (unsigned)channel);
+    bridge_log_wireless("Channel CH%u -> CH%u", (unsigned)old, (unsigned)channel);
 }
 
 void bridge_esp_now_init(void)
