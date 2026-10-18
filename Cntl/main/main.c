@@ -698,6 +698,29 @@ static esp_err_t api_test_campopup_get_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
+/* 2026-10-18(측정용, 임시 — 6단계 화면이 생기면 지움) — ?on=0|1: 첫 보릴의 릴레이를 켜고 끔 */
+static esp_err_t api_test_boril_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    char q[16] = "", on[4] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) httpd_query_key_value(q, "on", on, sizeof(on));
+    if (on[0] != '0' && on[0] != '1') return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on=0|1");
+    node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
+    if (!nodes) return httpd_resp_send_500(req);
+    int n = node_hub_get_nodes(HUB_NODE_KIND_BORIL, nodes, NODE_HUB_MAX_NODES);
+    char body[96];
+    if (n <= 0) {
+        snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"no boril\"}");
+    } else {
+        esp_err_t err = node_hub_boril_set(nodes[0].mac, on[0] == '1');
+        snprintf(body, sizeof(body), "{\"ok\":%s,\"name\":\"%s\",\"err\":\"%s\"}", err == ESP_OK ? "true" : "false",
+                 nodes[0].name, esp_err_to_name(err));
+    }
+    heap_caps_free(nodes);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, body);
+}
+
 static esp_err_t api_photo_fetch_get_handler(httpd_req_t *req)
 {
     WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
@@ -1073,6 +1096,8 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_test_campopup_uri = { .uri = "/api/test/campopup", .method = HTTP_GET,
                                                          .handler = api_test_campopup_get_handler };
     httpd_register_uri_handler(server, &api_test_campopup_uri);
+    static const httpd_uri_t api_test_boril_uri = { .uri = "/api/test/boril", .method = HTTP_GET, .handler = api_test_boril_get_handler };
+    httpd_register_uri_handler(server, &api_test_boril_uri);
     ESP_LOGD(TAG, "Web: API endpoints registered");
     static const httpd_uri_t app_uri = { .uri = "/app", .method = HTTP_GET, .handler = app_get_handler, .user_ctx = (void *)&s_static_app };
     httpd_register_uri_handler(server, &app_uri);

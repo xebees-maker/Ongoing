@@ -177,7 +177,36 @@ typedef enum {
     /* 2026-10-13(사용자 지시 — SCD41 보정 이력이 +1000ppm으로 꼬였던 일, 펌웨어 다시 빌드 없이 되돌리기) — CASK 할일 큐로 전달 */
     ESP_NOW_MSG_SENS_CALIB_RESET = 58,       /* Cntl -> Sens: esp_now_sens_calib_reset_t — 센서 공장 초기화 */
     ESP_NOW_MSG_SENS_CALIB_RESET_ACK = 59,   /* Sens -> Cntl: esp_now_sens_calib_reset_ack_t — 실행 결과(실행이 끝난 뒤 응답) */
+    /* 2026-10-18(Docs/설계_보브_보릴_2026-10-18.md §4.5, 5단계) — 보릴(보일러 릴레이, 상시 전원). 보브를 거침 */
+    ESP_NOW_MSG_BORIL_STATUS = 60,           /* 보릴 -> Cntl: esp_now_boril_status_t — 10초마다 + 릴레이가 바뀔 때 */
+    ESP_NOW_MSG_BORIL_STATUS_ACK = 61,       /* Cntl -> 보릴: esp_now_boril_set_t(relay = BORIL_RELAY_KEEP) — 받음 + 끊김 시간 설정.
+                                                 보릴은 이 응답(또는 SET·PAIR_REQUEST)이 끊기면 통신 끊김으로 봄 */
+    ESP_NOW_MSG_BORIL_SET = 62,              /* Cntl -> 보릴: esp_now_boril_set_t — 켜기·끄기(신뢰 전송) */
+    ESP_NOW_MSG_BORIL_SET_ACK = 63,          /* 보릴 -> Cntl: esp_now_boril_status_t — 적용 뒤 상태 */
 } esp_now_msg_type_t;
+
+/* 2026-10-18 — 보릴 상태(STATUS, SET_ACK). 끊김 동작(사용자 결정): 통신이 끊기면 릴레이를 그대로 두다가 failsafe_min분 뒤 끔.
+ * 보릴이 재부팅하면 릴레이는 꺼진 채로 시작(콘이 다시 켜야 함) */
+#define ESP_NOW_BORIL_F_FAILSAFE_OFF  0x01   /* 끊긴 동안 시간이 지나 보릴이 스스로 껐음(다음 STATUS에 한 번 실림) */
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint8_t  relay_on;       /* 지금 출력: 0 꺼짐, 1 켜짐 */
+    uint8_t  flags;          /* ESP_NOW_BORIL_F_* */
+    uint16_t failsafe_min;   /* 보릴이 지금 쓰는 끊김 시간(분) */
+    uint32_t uptime_s;       /* 보릴 부팅 후 초 — 콘이 보릴 재부팅을 알아챔 */
+} esp_now_boril_status_t;
+
+#define BORIL_RELAY_OFF   0
+#define BORIL_RELAY_ON    1
+#define BORIL_RELAY_KEEP  2   /* 릴레이는 그대로(STATUS_ACK, 끊김 시간만 바꿀 때) */
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  msg_type;
+    uint8_t  relay;          /* BORIL_RELAY_* */
+    uint8_t  reserved;
+    uint16_t failsafe_min;   /* 0이면 그대로. 콘 설정(기본 10, 선택 10/30/60 — 사용자 결정) */
+} esp_now_boril_set_t;
 
 /* ESP_NOW_MSG_SLEEP_NOW 페이로드. ESP_NOW_MSG_SLEEP_NOW_ACK도 이 구조체를 msg_type만 바꿔
  * 그대로 재사용(2026-08-10, 이 코드베이스의 기존 관례 — PHOTO_DONE_ACK 등과 동일 원칙).

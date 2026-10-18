@@ -191,6 +191,13 @@ static void liveness_sweep_cb(void *arg)
     xSemaphoreGive(s_nodes_mutex);
 }
 
+/* 2026-10-18(5단계) — 보릴은 상시 전원이라 10초마다 상태를 보냄 → 35초(3번 넘게) 못 받으면 끊김 */
+#define BORIL_NODE_TIMEOUT_MS 35000U
+/* 보릴 끊김 시간(분) — 통신이 끊기면 보릴이 릴레이를 그대로 두다가 이만큼 지나면 끔(사용자 결정: 기본 10, 선택 10/30/60).
+ * 설정 화면은 6단계 — 그때 device_config로 */
+#define BORIL_FAILSAFE_MIN_DEFAULT 10
+static uint16_t boril_failsafe_min(void) { return BORIL_FAILSAFE_MIN_DEFAULT; }
+
 static hub_node_kind_t classify_name(const char *name)
 {
     /* 2026-08-22 — CAM 기본 이름 "Cam-XXXXXX" -> "CXXXXXX"로 축약(전력로그 폭 문제,
@@ -631,6 +638,45 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             };
             can_bridge_relay_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
         }
+
+    } else if (msg_type == ESP_NOW_MSG_BORIL_STATUS) {
+        /* 2026-10-18(5단계) — 보릴 상태(10초마다). 받았음 + 끊김 시간을 바로 돌려줌(보릴은 이 응답이 끊기면 통신 끊김으로 봄).
+         * 콘이 재부팅해 PAIRED가 아니면 다시 페어링(보릴은 상시 전원이라 광고 없이 상태만 계속 보냄) */
+        if (len < (int)sizeof(esp_now_boril_status_t)) return;
+        esp_now_boril_status_t st;
+        memcpy(&st, data, sizeof(st));
+        char nm[64] = "?";
+        bool changed = false, rebooted = false, repair = false, failsafe_new = false;
+        xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        node_hub_node_t *bn = find_node(info->src_addr);
+        if (!bn || bn->kind != HUB_NODE_KIND_BORIL) {
+            xSemaphoreGive(s_nodes_mutex);
+            return;
+        }
+        bn->last_seen_ms = now_ms;
+        changed = bn->boril_has_status && bn->boril_relay_on != (st.relay_on != 0);
+        rebooted = bn->boril_has_status && st.uptime_s < bn->boril_uptime_s;
+        bool failsafe = (st.flags & ESP_NOW_BORIL_F_FAILSAFE_OFF) != 0;
+        failsafe_new = failsafe && !bn->boril_failsafe_seen;
+        bn->boril_failsafe_seen = failsafe;
+        bn->boril_has_status = true;
+        bn->boril_relay_on = st.relay_on != 0;
+        bn->boril_failsafe_min = st.failsafe_min;
+        bn->boril_uptime_s = st.uptime_s;
+        repair = bn->conn_state != NODE_CONN_PAIRED && !bn->user_unpaired;
+        snprintf(nm, sizeof(nm), "%s", alarm_name(bn));
+        xSemaphoreGive(s_nodes_mutex);
+
+        esp_now_boril_set_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_BORIL_STATUS_ACK,
+                                    .relay = BORIL_RELAY_KEEP, .failsafe_min = boril_failsafe_min() };
+        can_bridge_relay_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
+        if (changed) ESP_LOGI(TAG, "%s relay %s", nm, st.relay_on ? "ON" : "OFF");
+        if (rebooted) ESP_LOGW(TAG, "%s restarted (uptime %lus) - relay %s", nm, (unsigned long)st.uptime_s, st.relay_on ? "ON" : "OFF");
+        if (failsafe_new) {
+            alarm_post(NOTIFY_TYPE_DISCONNECT, "Boiler turned off", "%s turned the boiler off - no communication for %u min", nm,
+                       (unsigned)st.failsafe_min);
+        }
+        if (repair) node_hub_pair(info->src_addr, false);
 
     } else if (msg_type == ESP_NOW_MSG_SENS_CALIB_RESET_ACK) {
         /* 2026-10-13 — 센서 보정 초기화 결과. 같은 seq는 한 번만 기록(재시도 응답) */
@@ -1101,6 +1147,7 @@ void node_hub_init(void)
  * 못 받음, 또는 CAM) 기존처럼 전역 응답성 설정으로 폴백 */
 uint32_t node_hub_node_timeout_ms(const node_hub_node_t *n)
 {
+    if (n && n->kind == HUB_NODE_KIND_BORIL) return BORIL_NODE_TIMEOUT_MS;
     uint32_t interval_sec = 0;
     if (n && n->kind == HUB_NODE_KIND_SENS && n->has_deepsleep_stats) {
         interval_sec = n->ds_last_sleep_interval_sec;
@@ -1362,4 +1409,33 @@ bool node_hub_wait_paired(const uint8_t *mac, uint32_t timeout_ms)
         if (now >= deadline) return false;  /* 타임아웃 자체가 "연결실패" 이벤트(사용자 설계) */
         xSemaphoreTake(s_connect_event_sem, deadline - now);
     }
+}
+
+/* 2026-10-18(5단계) — 보릴 켜기·끄기. 보릴이 SET_ACK에 실어 준 상태로 노드 정보도 갱신 */
+esp_err_t node_hub_boril_set(const uint8_t *mac, bool on)
+{
+    esp_now_boril_set_t req = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_BORIL_SET,
+                                .relay = on ? BORIL_RELAY_ON : BORIL_RELAY_OFF, .failsafe_min = boril_failsafe_min() };
+    static const uint8_t accept[] = { ESP_NOW_MSG_BORIL_SET_ACK };
+    esp_now_boril_status_t reply;
+    size_t reply_len = 0;
+    esp_err_t err = can_bridge_reliable_request(mac, &req, sizeof(req), accept, 1, 500, 4, &reply, sizeof(reply), &reply_len);
+    if (err != ESP_OK || reply_len < sizeof(reply)) {
+        ESP_LOGW(TAG, "Boril %02X%02X%02X set %s failed: %s", mac[3], mac[4], mac[5], on ? "ON" : "OFF",
+                 err != ESP_OK ? esp_err_to_name(err) : "short reply");
+        return err != ESP_OK ? err : ESP_FAIL;
+    }
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    node_hub_node_t *n = find_node(mac);
+    if (n) {
+        n->last_seen_ms = now_ms;
+        n->boril_has_status = true;
+        n->boril_relay_on = reply.relay_on != 0;
+        n->boril_failsafe_min = reply.failsafe_min;
+        n->boril_uptime_s = reply.uptime_s;
+    }
+    xSemaphoreGive(s_nodes_mutex);
+    ESP_LOGI(TAG, "Boril %02X%02X%02X relay %s (by Cntl)", mac[3], mac[4], mac[5], reply.relay_on ? "ON" : "OFF");
+    return (reply.relay_on != 0) == on ? ESP_OK : ESP_FAIL;
 }

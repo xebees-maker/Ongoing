@@ -1,5 +1,7 @@
 #pragma once
 
+#include "esp_err.h"
+
 /**
  * ESP-NOW 허브 — CAM/SENS 노드의 advertise 브로드캐스트 수신, 발견된 노드 테이블 유지,
  * 페어링(PAIR_REQUEST/ACK) 처리. 구 Cntl의 node_hub.c에서 페어링/노드테이블 부분만
@@ -175,6 +177,12 @@ typedef struct {
     /* 2026-09-05(사용자 지시) — 상황판 표시용 "Time: HH:MM:SS"의 기준 — 콘이 이 측정ID를
      * 처음 받은 시점의 콘 자체 벽시계 시각(그 순간의 rtc_sync_get_unix_time()) */
     uint32_t        sensor_last_update_unix_time;
+    /* 2026-10-18(Docs/설계_보브_보릴_2026-10-18.md 5단계) — 보릴(kind == BORIL)의 마지막 상태 보고(BORIL_STATUS/SET_ACK) */
+    bool            boril_has_status;
+    bool            boril_relay_on;
+    bool            boril_failsafe_seen;   /* 보릴이 "끊긴 동안 스스로 껐음"을 알린 것을 이미 기록함(같은 알림 반복 방지) */
+    uint16_t        boril_failsafe_min;    /* 보릴이 지금 쓰는 끊김 시간 */
+    uint32_t        boril_uptime_s;
 } node_hub_node_t;
 
 void node_hub_init(void);
@@ -314,4 +322,8 @@ void node_hub_on_bridge_reset(uint8_t bridge);
  * 계산(캠 전용 응답성 설정으로 재면 정상 수면 중에도 무응답 오판이 남) — n=NULL이면 기존
  * 전역 응답성 설정 기준(호환용) */
 uint32_t node_hub_node_timeout_ms(const node_hub_node_t *n);
+
+/* 2026-10-18(5단계) — 보릴 릴레이 켜기·끄기(신뢰 전송, 보릴의 SET_ACK까지 기다림 — 최대 약 2초). 보릴이 알려 준 결과가 요청과 같으면
+ * ESP_OK. 끊김 시간(분)도 함께 보냄 */
+esp_err_t node_hub_boril_set(const uint8_t *mac, bool on);
 
