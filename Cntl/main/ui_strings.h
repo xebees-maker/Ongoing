@@ -271,6 +271,7 @@ typedef enum {
     STR_ERR_DESC_BRIDGE_NORESPONSE,   /* 2026-10-01 — 5011, 같은 이유 */
     STR_ERR_DESC_CAN_BUS_OFF,         /* 2026-10-02 — 5012 */
     STR_ERR_DESC_CAN_TX_STUCK,        /* 2026-10-02 — 5013 */
+    STR_ERR_DESC_BRIDGE2_NORESPONSE,  /* 2026-10-18 — 5014 */
     STR_WEB_LOCK_MSG,                 /* 2026-10-03(할 일 AD) — 웹 접속 중 콘 잠금 화면 */
     STR_WEB_LOCK_TAKEOVER,
     STR_MSG_STATS_BLOCKED_SD_FAIL,

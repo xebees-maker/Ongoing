@@ -18,6 +18,7 @@ bool bridge_esp_now_is_ready(void);
  * 이 브에 붙은 노드는 채널을 잃고 다시 훑어 찾음. 지금 채널은 bridge_esp_now_channel() — PONG에 실어 콘에 알림 */
 void bridge_esp_now_set_channel(uint8_t channel);
 uint8_t bridge_esp_now_channel(void);
+bool bridge_esp_now_channel_set_by_cntl(void);
 
 /* can_link.c가 콘에서 받은 DATA 완성 메시지를 실제 ESP-NOW로 내보낼 때 씀 */
 void bridge_esp_now_send_raw(const uint8_t mac[6], const uint8_t *data, uint16_t len);

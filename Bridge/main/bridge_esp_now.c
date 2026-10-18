@@ -44,6 +44,9 @@ static uint8_t *s_rx_buf;
 /* 2026-09-26 — 브 라디오의 현재 채널(wifi_bringup() 후 1회 읽음). 0이면 아직 모름 → 광고 채널 필터 안 함.
  * 2026-10-18 — 콘의 SET_CHANNEL로 바뀜(bridge_esp_now_set_channel) */
 static volatile uint8_t s_own_channel = 0;
+/* 2026-10-18(실기 — 보브가 켜지자 기본 CH1에서 보릴이 먼저 붙었다가, 3초 뒤 콘이 CH13으로 옮겨 끊김 → 콘이 35초 뒤 잘못된 "연결 끊김"
+ * 알림) — 콘이 채널을 정해 주기(SET_CHANNEL) 전에는 노드의 광고를 콘으로 넘기지 않음 → 콘이 응답하지 않으니 노드가 이 채널에 붙지 않음 */
+static volatile bool s_channel_from_cntl = false;
 /* 2026-09-26(실기 크래시 — 브 재부팅 루프) — main.c는 can_link_init()을 먼저 불러 CAN 수신이 먼저 시작됨. 그 사이 콘의
  * RELAY/RELIABLE_SEND가 오면 초기화 전 ESP-NOW를 건드려 크래시(esp_now_is_peer_exist). 준비 전엔 can_link가 버림 */
 static volatile bool s_ready = false;
@@ -74,6 +77,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
      * 다르면 CAN으로 안 넘김 — 콘은 브 채널에서 보낸 광고에만 응답하게 되고, 그 응답이 노드가 다른
      * 채널로 넘어간 뒤 도착해서 엉뚱한 채널에 동기화될 위험도 없어짐. 필드 없는 옛 펌웨어의
      * 짧은 광고는 여기서 판단 안 하고 넘김(콘이 길이 검사로 거름) */
+    if (len >= 2 && data[1] == ESP_NOW_MSG_ADVERTISE && !s_channel_from_cntl) return;   /* 채널 받기 전 — 위 s_channel_from_cntl 주석 */
     if (len >= (int)sizeof(esp_now_advertise_t) && data[1] == ESP_NOW_MSG_ADVERTISE && s_own_channel != 0) {
         const esp_now_advertise_t *adv = (const esp_now_advertise_t *)data;
         if (adv->channel != s_own_channel) {
@@ -248,11 +252,16 @@ static void wifi_bringup(void)
 }
 
 uint8_t bridge_esp_now_channel(void) { return s_own_channel; }
+bool bridge_esp_now_channel_set_by_cntl(void) { return s_channel_from_cntl; }
 
 void bridge_esp_now_set_channel(uint8_t channel)
 {
     if (channel < 1 || channel > 13 || !s_ready) return;
-    if (channel == s_own_channel) return;
+    if (channel == s_own_channel) {
+        if (!s_channel_from_cntl) ESP_LOGI(TAG, "Channel CH%u confirmed by Cntl - relaying advertisements", (unsigned)channel);
+        s_channel_from_cntl = true;
+        return;
+    }
     uint8_t old = s_own_channel;
     esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
     uint8_t primary = 0;
@@ -263,6 +272,7 @@ void bridge_esp_now_set_channel(uint8_t channel)
                  (unsigned)s_own_channel);
         return;
     }
+    s_channel_from_cntl = true;
     ESP_LOGI(TAG, "Channel CH%u -> CH%u (set by Cntl) - nodes on this bridge will rescan", (unsigned)old, (unsigned)channel);
     bridge_log_wireless("Channel CH%u -> CH%u", (unsigned)old, (unsigned)channel);
 }

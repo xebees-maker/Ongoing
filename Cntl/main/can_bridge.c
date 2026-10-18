@@ -53,6 +53,7 @@ typedef struct {
     volatile bool silent;
     volatile bool seen;                      /* 콘이 켜진 뒤 한 번이라도 응답함 — 0번은 늘 있다고 보고, 나머지는 한 번 본 뒤부터 감시 */
     volatile uint8_t channel;                /* 브가 PONG으로 알려 준 지금 ESP-NOW 채널(0 = 모름, 옛 펌웨어) */
+    volatile bool channel_set;               /* 브가 이번 부팅에 콘의 채널을 받았음(PONG) — 안 받았으면 광고를 안 넘기므로 꼭 보내야 함 */
 } bridge_t;
 static bridge_t s_br[NB];
 #define P_CTRL 0
@@ -401,7 +402,10 @@ static void note_bridge_alive(uint8_t bi, const uint8_t *body, size_t body_len)
     can_bridge_ctrl_boot_t b;
     memcpy(&b, body, sizeof(b));
     br->last_pong_us = esp_timer_get_time();
-    if (body_len >= sizeof(can_bridge_ctrl_pong_t)) br->channel = body[offsetof(can_bridge_ctrl_pong_t, channel)];
+    if (body_len >= sizeof(can_bridge_ctrl_pong_t)) {
+        br->channel = body[offsetof(can_bridge_ctrl_pong_t, channel)];
+        br->channel_set = body[offsetof(can_bridge_ctrl_pong_t, channel_set)] != 0;
+    }
     if (!br->seen) {
         br->seen = true;
         ESP_LOGI(TAG, "Bridge %u present (boot ID %08x)", (unsigned)bi + 1, (unsigned)b.boot_id);
@@ -497,11 +501,18 @@ static int plan_score(const uint8_t ch[NB], int lo, int hi)
     return imin(ch_dist(ch[1], lo, hi), CH_CLEAR) * 100 + imin(jaebu_clear(ch[0], ch[1], lo, hi), CH_CLEAR);
 }
 
+/* AP를 모를 때(공유기에 아직 못 붙음 등) 기본 배정까지 기다리는 시간 — 브는 채널을 받기 전엔 광고를 안 넘기므로 무한정 기다리면 안 됨 */
+#define CH_NO_AP_FALLBACK_US (20LL * 1000 * 1000)
+
 static void update_channels(void)
 {
     int lo, hi;
     uint8_t primary;
     int64_t now = esp_timer_get_time();
+    if (s_target_ch[0] == 0 && now > CH_NO_AP_FALLBACK_US && !ap_band(&lo, &hi, &primary)) {
+        plan_channels(-100, -100, s_target_ch);   /* AP 없음으로 보고 계산(보브·재브를 양 끝으로) — AP를 알게 되면 점수로 다시 판단 */
+        ESP_LOGW(TAG, "Channel plan without AP info: Bridge 1 CH%u, Bridge 2 CH%u", (unsigned)s_target_ch[0], (unsigned)s_target_ch[1]);
+    }
     if (ap_band(&lo, &hi, &primary)) {
         uint8_t ideal[NB];
         plan_channels(lo, hi, ideal);
@@ -526,8 +537,10 @@ static void update_channels(void)
     }
     for (uint8_t b = 0; b < NB; b++) {
         bridge_t *br = &s_br[b];
-        if (s_target_ch[b] == 0 || !br->seen || br->silent || br->channel == 0 || br->channel == s_target_ch[b]) continue;
-        ESP_LOGI(TAG, "Bridge %u on CH%u - setting CH%u", (unsigned)b + 1, (unsigned)br->channel, (unsigned)s_target_ch[b]);
+        if (s_target_ch[b] == 0 || !br->seen || br->silent || br->channel == 0) continue;
+        if (br->channel == s_target_ch[b] && br->channel_set) continue;
+        ESP_LOGI(TAG, "Bridge %u on CH%u%s - setting CH%u", (unsigned)b + 1, (unsigned)br->channel,
+                 br->channel_set ? "" : " (not set by Cntl yet)", (unsigned)s_target_ch[b]);
         /* 본문 1바이트(채널)를 붙임 — 브의 소비 태스크는 헤더보다 긴 메시지만 처리함(채널 값은 header.flags에서 읽음) */
         uint8_t msg[CAN_BRIDGE_APP_HEADER_LEN + 1];
         can_bridge_app_header_t hdr = { .msg_type = CAN_CTRL_SET_CHANNEL, .flags = s_target_ch[b] };

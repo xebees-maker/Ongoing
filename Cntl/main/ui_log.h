@@ -81,6 +81,8 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
                                              계속되면 전원 리셋(브 자체 워치독도 재부팅 시도) */
 #define UI_ERR_CAN_BUS_OFF          5012  /* 2026-10-02(할 일 Q) — CAN 버스 오프. 콘이 즉시 복구 시도, 그동안 송신 실패 */
 #define UI_ERR_CAN_TX_STUCK         5013  /* 2026-10-02(할 일 Q) — CAN 송신에 ACK 없음(브 꺼짐·재부팅 등), 300ms마다 중단돼 송신 실패 */
+#define UI_ERR_BRIDGE2_NORESPONSE   5014  /* 2026-10-18(사용자 지시 — 에러 로그에 브릿지 번호) — 5011과 같음, Bridge 2(보브). 에러 목록은
+                                             코드별로 한 줄·코드의 설명으로 보여서 브릿지마다 코드를 따로 둠(5011 = Bridge 1, 재브) */
 
 void ui_log_add_err(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 /* 2026-10-05(할 일 AD 5단계) — 에러·경고 코드가 이력 목록에 새로 올라갈 때(이미 있으면 안 부름) 부를 함수 하나.

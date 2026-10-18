@@ -117,6 +117,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint32_t boot_id;
     uint8_t  channel;
+    uint8_t  channel_set;   /* 2026-10-18 — 1 = 콘이 이번 부팅에 채널을 정해 줌. 0이면 브가 노드 광고를 안 넘김(채널이 바뀌어 끊기지 않게) */
 } can_bridge_ctrl_pong_t;
 
 /* DATA 카테고리 — 브릿지는 이 안의 CASK(esp_now_link.h) 내용을 해석하지 않는 투명 릴레이.

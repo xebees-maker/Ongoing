@@ -1595,6 +1595,7 @@ static ui_str_id_t err_code_to_desc_str(int code)
         case UI_ERR_BRIDGE_NORESPONSE:     return STR_ERR_DESC_BRIDGE_NORESPONSE;
         case UI_ERR_CAN_BUS_OFF:           return STR_ERR_DESC_CAN_BUS_OFF;
         case UI_ERR_CAN_TX_STUCK:          return STR_ERR_DESC_CAN_TX_STUCK;
+        case UI_ERR_BRIDGE2_NORESPONSE:    return STR_ERR_DESC_BRIDGE2_NORESPONSE;
         default:                           return STR_ERR_DESC_UNKNOWN;
     }
 }
@@ -6791,7 +6792,8 @@ static void refresh_bridge_health(lv_timer_t *t)
     for (uint8_t b = 0; b < CAN_BRIDGE_MAX_BRIDGES; b++) {
         bool silent = can_bridge_bridge_is_silent(b);
         if (silent && !s_warned[b]) {
-            ui_log_add_err(UI_ERR_BRIDGE_NORESPONSE, "Bridge %u not responding - reset sent, power-cycle if it continues", (unsigned)b + 1);
+            ui_log_add_err(b == 0 ? UI_ERR_BRIDGE_NORESPONSE : UI_ERR_BRIDGE2_NORESPONSE,
+                           "Bridge %u not responding - reset sent, power-cycle if it continues", (unsigned)b + 1);
             s_warned[b] = true;
         } else if (!silent && s_warned[b]) {
             ui_log_add("Bridge %u responding again", (unsigned)b + 1);
