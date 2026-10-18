@@ -395,31 +395,6 @@ static void guard_job(const uint8_t *arg)
     guard_check();
 }
 
-/* 2026-10-15(시험, 임시) — sd_health_check_now 참고 */
-static void flip_job(const uint8_t *arg)
-{
-    (void)arg;
-    uint8_t *buf = heap_caps_malloc(512, MALLOC_CAP_SPIRAM);
-    uint32_t part, rsv, fatsz, fsinfo;
-    char why[40] = "";
-    if (buf && sd_storage_is_mounted() && read_layout(buf, &part, &rsv, &fatsz, &fsinfo, why, sizeof(why)) && rsv > 8 &&
-        part + 2 != fsinfo && sd_storage_read_sectors(buf, part + 2, 1) == ESP_OK) {
-        uint8_t before = buf[0];
-        buf[0] ^= 0xA5;
-        esp_err_t e = sd_storage_write_sectors(buf, part + 2, 1);
-        ESP_LOGW(TAG, "SELFTEST: sector %u byte0 %02X -> %02X (%s)", (unsigned)(part + 2), before, buf[0], esp_err_to_name(e));
-    } else {
-        ESP_LOGW(TAG, "SELFTEST: not done (%s)", why);
-    }
-    heap_caps_free(buf);
-}
-
-void sd_health_check_now(bool flip)
-{
-    if (flip) stats_store_post_job(flip_job, NULL, 0);
-    else stats_store_post_job(hourly_job, NULL, 0);
-}
-
 /* 마운트·포맷 직후(그 태스크에서) — 기준값은 기록 태스크에서 새로 잡음 */
 void sd_health_on_mount(void)
 {

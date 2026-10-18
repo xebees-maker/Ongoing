@@ -4,7 +4,6 @@
 #include "node_hub.h"
 #include "sens_kind_store.h"
 #include "sd_health.h"
-#include "fs_bench.h"
 #include "flash_usage.h"
 #include "device_config.h"
 #include "power_relay.h"
@@ -590,37 +589,6 @@ static esp_err_t api_sd_health_get_handler(httpd_req_t *req)
     return r;
 }
 
-/* 2026-10-14(시험, 임시 — 할 일 AF에서 제거) — POST /api/sdhealth_test: 이상 보고를 한 번 일으켜 5009·푸시·쓰기 중지·해제 경로 확인 */
-static esp_err_t api_sdhealth_test_post_handler(httpd_req_t *req)
-{
-    WEB_AUTH_REQUIRE(req);
-    /* 2026-10-15 — ?check=1: 1시간 점검을 지금, ?flip=1: 부트 영역 감시 양성 시험(예약 섹터 한 바이트 뒤집기 — 다시 부르면 되돌림) */
-    char q[32] = { 0 }, v[4] = { 0 };
-    httpd_req_get_url_query_str(req, q, sizeof(q));
-    if (httpd_query_key_value(q, "check", v, sizeof(v)) == ESP_OK) { sd_health_check_now(false); return send_simple(req, NULL, "{\"ok\":true}"); }
-    if (httpd_query_key_value(q, "flip", v, sizeof(v)) == ESP_OK) { sd_health_check_now(true); return send_simple(req, NULL, "{\"ok\":true}"); }
-    if (httpd_query_key_value(q, "erase", v, sizeof(v)) == ESP_OK) {   /* 2026-10-15 임시 — 카드 전체 지우기(뒤에 포맷 필요) */
-        esp_err_t e = sd_storage_full_erase();
-        return send_simple(req, NULL, e == ESP_OK ? "{\"ok\":true}" : "{\"ok\":false}");
-    }
-    sd_health_report(SDH_EV_TEST, "test", 0);
-    return send_simple(req, NULL, "{\"ok\":true}");
-}
-
-/* 2026-10-14(시험, 임시 — 할 일 AF에서 제거) — POST /api/fsbench 시작, GET /api/fsbench 결과(글자) */
-static esp_err_t api_fsbench_post_handler(httpd_req_t *req)
-{
-    WEB_AUTH_REQUIRE(req);
-    return send_simple(req, NULL, fs_bench_start() ? "{\"ok\":true}" : "{\"ok\":false}");
-}
-
-static esp_err_t api_fsbench_get_handler(httpd_req_t *req)
-{
-    WEB_AUTH_REQUIRE(req);
-    httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    return httpd_resp_sendstr(req, fs_bench_result());
-}
-
 /* POST /api/device/unpair?mac= — 연결 해제(콘 Disconnect와 같음) */
 static esp_err_t api_device_unpair_post_handler(httpd_req_t *req)
 {
@@ -1073,36 +1041,7 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
 }
 
 /* GET /api/stats/records?page= — 콘 Record 표 한 페이지(0 = 최신, 28개, 최신이 앞) */
-/* 2026-10-14(진단, 임시 — 1D/3D 그래프 공백, 할 일 AF에서 제거) — GET /api/stats/aggdump?scale=&week=&from= : 집계 파일을 위치 순서 그대로
- * 최대 200칸. 응답 = {"total":N,"from":i,"b":[[start,kind,chan,mac끝2바이트,n,value],...]} */
-static esp_err_t api_stats_aggdump_get_handler(httpd_req_t *req)
-{
-    WEB_SCREEN_API_BEGIN(req);
-    if (!work_ready(req)) return ESP_FAIL;
-    int scale = query_int(s_w->query, "scale", 0), week = query_int(s_w->query, "week", 0), from = query_int(s_w->query, "from", 0);
-    if (scale < 0 || scale >= STATS_SCALE_COUNT || week < 0 || from < 0) return send_simple(req, "400 Bad Request", "{\"error\":\"arg\"}");
-    const uint32_t n = 200;
-    stats_bucket_t *bk = heap_caps_malloc(sizeof(stats_bucket_t) * n, MALLOC_CAP_SPIRAM);
-    const size_t cap = 12288;
-    jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
-    if (!bk || !b.p) { heap_caps_free(bk); heap_caps_free(b.p); httpd_resp_send_500(req); return ESP_FAIL; }
-    uint32_t total = 0;
-    uint32_t got = stats_agg_dump((uint8_t)scale, (uint32_t)week, (uint32_t)from, bk, n, &total);
-    jb_printf(&b, "{\"total\":%lu,\"from\":%d,\"b\":[", (unsigned long)total, from);
-    for (uint32_t i = 0; i < got; i++) {
-        jb_printf(&b, "%s[%lu,%u,%u,\"%02X%02X\",%u,", i ? "," : "", (unsigned long)bk[i].bucket_start_unix, (unsigned)bk[i].kind,
-                  (unsigned)bk[i].chan_type, bk[i].mac[4], bk[i].mac[5], (unsigned)bk[i].sample_count);
-        jb_float(&b, bk[i].avg_value);
-        jb_printf(&b, "]");
-    }
-    jb_printf(&b, "]}");
-    heap_caps_free(bk);
-    esp_err_t ret = send_jbuf(req, &b);
-    heap_caps_free(b.p);
-    return ret;
-}
-
-/* 2026-10-15(SD 개선 2단계, 시험·확인용) — GET /api/stats/sync[?now=1] : 내부 플래시·옮기기 상태. now=1이면 다음 분에 바로 옮김 */
+/* 2026-10-15(SD 개선 2단계, 시험·확인용 — SD 효과 확인(Tools/sd_effect_check.py)이 씀, SD 확인이 끝나면 지움) — GET /api/stats/sync[?now=1] : 내부 플래시·옮기기 상태. now=1이면 다음 분에 바로 옮김 */
 static esp_err_t api_stats_sync_get_handler(httpd_req_t *req)
 {
     WEB_SCREEN_API_BEGIN(req);
@@ -1510,15 +1449,7 @@ void web_api_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &stats_records_uri);
     static const httpd_uri_t sd_health_uri = { .uri = "/api/sd/health", .method = HTTP_GET, .handler = api_sd_health_get_handler };
     httpd_register_uri_handler(server, &sd_health_uri);
-    static const httpd_uri_t sdhealth_test_uri = { .uri = "/api/sdhealth_test", .method = HTTP_POST, .handler = api_sdhealth_test_post_handler };   /* 시험, 임시 */
-    httpd_register_uri_handler(server, &sdhealth_test_uri);
-    static const httpd_uri_t fsbench_post_uri = { .uri = "/api/fsbench", .method = HTTP_POST, .handler = api_fsbench_post_handler };   /* 시험, 임시 */
-    static const httpd_uri_t fsbench_get_uri = { .uri = "/api/fsbench", .method = HTTP_GET, .handler = api_fsbench_get_handler };     /* 시험, 임시 */
-    httpd_register_uri_handler(server, &fsbench_post_uri);
-    httpd_register_uri_handler(server, &fsbench_get_uri);
-    static const httpd_uri_t stats_aggdump_uri = { .uri = "/api/stats/aggdump", .method = HTTP_GET, .handler = api_stats_aggdump_get_handler };   /* 2026-10-14 진단, 임시 */
-    httpd_register_uri_handler(server, &stats_aggdump_uri);
-    static const httpd_uri_t stats_sync_uri = { .uri = "/api/stats/sync", .method = HTTP_GET, .handler = api_stats_sync_get_handler };   /* 2026-10-15 시험용 */
+    static const httpd_uri_t stats_sync_uri = { .uri = "/api/stats/sync", .method = HTTP_GET, .handler = api_stats_sync_get_handler };   /* SD 확인 끝나면 지움 */
     httpd_register_uri_handler(server, &stats_sync_uri);
     /* 2026-10-15(SD 개선 5단계) — 통계 백업·복원 */
     static const httpd_uri_t stats_backup_uri = { .uri = "/api/stats/backup", .method = HTTP_GET, .handler = api_stats_backup_get_handler };

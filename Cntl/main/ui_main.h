@@ -176,7 +176,6 @@ bool ui_main_inject_delete_stats(void);
  * 읽는 동기 로컬 동작이라(더 이상 CAM 응답을 기다리는 ESP-NOW 왕복이 아님) 예전의 세대번호/
  * 비파괴적 완료-확인 채널이 필요 없어짐. 반환 시점에 이미 결과가 반영돼 있음 */
 bool ui_main_inject_list_refresh(void);
-bool ui_main_inject_camera_popup(bool open);   /* 2026-10-17(측정용, 임시) — /api/test/campopup */
 /* 새로고침된 목록을 그대로 복사(웹이 독자적으로 photo_storage를 다시 읽지 않고, 콘 화면이
  * 지금 보여주는 바로 그 배열을 읽어감 — "웹기생" 원칙) */
 int ui_main_get_photo_list(photo_storage_item_t *out, int out_cap);

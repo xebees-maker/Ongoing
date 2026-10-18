@@ -32,7 +32,6 @@
 #include "alarm.h"
 #include "sd_health.h"
 #include "flash_usage.h"
-#include "net_diag.h"
 #include "lv_mem_route.h"
 #include "web_access_log.h"
 #include "esp_system.h"
@@ -300,16 +299,6 @@ static esp_err_t api_devlog_dump_get_handler(httpd_req_t *req)
     bool have_lvl = httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
                     httpd_query_key_value(q, "lvl", lvl, sizeof(lvl)) == ESP_OK;
     bool we = have_lvl && strcmp(lvl, "we") == 0;
-    if (have_lvl && strcmp(lvl, "net") == 0) {   /* 2026-10-17(진단, 임시) — TCP 연결 목록·내부 힙(net_diag.h) */
-        const size_t ncap = 16384;   /* 태스크별 힙 표까지 */
-        char *nb = heap_caps_malloc(ncap, MALLOC_CAP_SPIRAM);
-        if (!nb) { httpd_resp_send_500(req); return ESP_FAIL; }
-        size_t nl = net_diag_dump(nb, ncap);
-        httpd_resp_set_type(req, "text/plain; charset=utf-8");
-        esp_err_t r = httpd_resp_send(req, nb, nl);
-        heap_caps_free(nb);
-        return r;
-    }
     const size_t cap = we ? 2000 * 150 : 400 * 150;
     char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
     if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
@@ -684,43 +673,6 @@ static esp_err_t api_photos_get_handler(httpd_req_t *req)
  * 행 탭을 합성하면(ui_main_inject_photo_select) 반환 시점에 이미 선택+판넬 표시까지
  * 동기로 끝나있음. 예전의 "캐시 우선 확인 -> 없으면 요청 후 25초 이벤트 대기"가 통째로
  * 불필요해짐(그건 CAM 응답을 기다려야 했던 시절 설계) */
-/* 2026-10-17(측정용, 임시 — 나중에 지움) — ?op=open|close: CNTL 카메라 팝업 열기/닫기 합성. 열 때 단계별 내부 RAM 최저값이
- * Dev Log에 W "CAMPROBE"로 남음(ui_main_inject_camera_popup) */
-static esp_err_t api_test_campopup_get_handler(httpd_req_t *req)
-{
-    WEB_AUTH_REQUIRE(req);
-    char q[16] = "", op[8] = "";
-    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) httpd_query_key_value(q, "op", op, sizeof(op));
-    bool open = strcmp(op, "open") == 0;
-    if (!open && strcmp(op, "close") != 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "op=open|close");
-    bool ok = ui_main_inject_camera_popup(open);
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, ok ? "{\"ok\":true}" : "{\"ok\":false}");
-}
-
-/* 2026-10-18(측정용, 임시 — 6단계 화면이 생기면 지움) — ?on=0|1: 첫 보릴의 릴레이를 켜고 끔 */
-static esp_err_t api_test_boril_get_handler(httpd_req_t *req)
-{
-    WEB_AUTH_REQUIRE(req);
-    char q[16] = "", on[4] = "";
-    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) httpd_query_key_value(q, "on", on, sizeof(on));
-    if (on[0] != '0' && on[0] != '1') return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on=0|1");
-    node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
-    if (!nodes) return httpd_resp_send_500(req);
-    int n = node_hub_get_nodes(HUB_NODE_KIND_BORIL, nodes, NODE_HUB_MAX_NODES);
-    char body[96];
-    if (n <= 0) {
-        snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"no boril\"}");
-    } else {
-        esp_err_t err = node_hub_boril_set(nodes[0].mac, on[0] == '1');
-        snprintf(body, sizeof(body), "{\"ok\":%s,\"name\":\"%s\",\"err\":\"%s\"}", err == ESP_OK ? "true" : "false",
-                 nodes[0].name, esp_err_to_name(err));
-    }
-    heap_caps_free(nodes);
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, body);
-}
-
 static esp_err_t api_photo_fetch_get_handler(httpd_req_t *req)
 {
     WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
@@ -1093,11 +1045,6 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_photo_fetch_uri = { .uri = "/api/photo_fetch", .method = HTTP_GET,
                                                        .handler = api_photo_fetch_get_handler };
     httpd_register_uri_handler(server, &api_photo_fetch_uri);
-    static const httpd_uri_t api_test_campopup_uri = { .uri = "/api/test/campopup", .method = HTTP_GET,
-                                                         .handler = api_test_campopup_get_handler };
-    httpd_register_uri_handler(server, &api_test_campopup_uri);
-    static const httpd_uri_t api_test_boril_uri = { .uri = "/api/test/boril", .method = HTTP_GET, .handler = api_test_boril_get_handler };
-    httpd_register_uri_handler(server, &api_test_boril_uri);
     ESP_LOGD(TAG, "Web: API endpoints registered");
     static const httpd_uri_t app_uri = { .uri = "/app", .method = HTTP_GET, .handler = app_get_handler, .user_ctx = (void *)&s_static_app };
     httpd_register_uri_handler(server, &app_uri);

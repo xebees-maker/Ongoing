@@ -61,9 +61,6 @@ void sd_health_count(sd_health_counter_t c, uint32_t n);
 /* 2026-10-15 — sd_storage가 마운트·포맷 성공 직후 부름: 부트 영역 기준값을 기록 태스크에서 새로 잡음 */
 void sd_health_on_mount(void);
 
-/* 2026-10-15(시험, 임시 — 할 일 AF에서 제거) — 1시간 점검을 지금 한 번(기록 태스크로).
- * flip=true면 먼저 예약 영역의 안 쓰는 섹터(파티션 시작+2) 첫 바이트를 뒤집어 씀 — 부트 영역 감시 양성 시험(한 번 더 부르면 되돌아감) */
-void sd_health_check_now(bool flip);
 
 /* sd_storage가 마운트 직전에 읽은 카드 CID 한 줄 */
 void sd_health_set_card(const char *cid_line);

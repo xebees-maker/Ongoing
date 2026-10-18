@@ -12,7 +12,6 @@
 #include "sens_kind_store.h"
 #include "sd_health.h"
 #include "flash_usage.h"
-#include "net_diag.h"
 #include "photo_rx.h"
 #include "ui_log.h"
 #include "dev_log.h"
@@ -1345,76 +1344,10 @@ static void cb_modal_close(lv_event_t *e)
  * 없어 동기적으로 이어짐) 이 안에서 확인 버튼을 찾아 또 탭 합성하는 데 씀 */
 static lv_obj_t *s_last_modal = NULL;
 
-/* 2026-10-17(측정용, 임시) — 팝업마다 내부 RAM을 얼마나 쓰는지. 만들 때 여유를 기억했다가 내용이 다 채워진 뒤(같은 LVGL 처리가
- * 끝난 다음 — lv_async_call)에 차이를 남기고, 닫힐 때(DELETE)도 지워진 뒤에 차이를 남김. Dev Log 수준 D일 때만 */
-static size_t s_popup_mem_before;
-static size_t s_popup_close_before;
-
-static const char *popup_first_label(lv_obj_t *o, int depth)
-{
-    if (lv_obj_check_type(o, &lv_label_class)) return lv_label_get_text(o);
-    if (depth > 4) return NULL;
-    for (uint32_t i = 0; i < lv_obj_get_child_count(o); i++) {
-        const char *t = popup_first_label(lv_obj_get_child(o, (int32_t)i), depth + 1);
-        if (t && t[0]) return t;
-    }
-    return NULL;
-}
-
-static void popup_mem_closed_async(void *arg)
-{
-    (void)arg;
-    size_t after = MEMDIAG_HEAP();
-    ESP_LOGD(TAG, "MEMDIAG popup close: internal %u -> %u (freed %d)", (unsigned)s_popup_close_before, (unsigned)after,
-             (int)after - (int)s_popup_close_before);
-}
-
-static void popup_mem_delete_cb(lv_event_t *e)
-{
-    (void)e;
-    if (!memdiag_enabled()) return;
-    s_popup_close_before = MEMDIAG_HEAP();
-    lv_async_call(popup_mem_closed_async, NULL);
-}
-
-static void popup_mem_opened_async(void *arg)
-{
-    lv_obj_t *overlay = arg;
-    if (!lv_obj_is_valid(overlay)) return;
-    size_t after = MEMDIAG_HEAP();
-    const char *name = popup_first_label(overlay, 0);
-    ESP_LOGD(TAG, "MEMDIAG popup open \"%.24s\": internal %u -> %u (used %d)", name ? name : "?",
-             (unsigned)s_popup_mem_before, (unsigned)after, (int)s_popup_mem_before - (int)after);
-}
-
-/* 2026-10-17(측정용, 임시) — 카메라 팝업을 여는 과정의 단계별 내부 RAM 최저값. /api/test/campopup이 켬. 단계마다 그
- * 구간의 최저값을 남기고 감시를 다시 시작함(heap_caps_monitor_local_minimum_free_size_*). 다른 태스크 할당도 섞임 */
-static bool s_campop_probe;
-
-static void campop_probe_mark(const char *stage)
-{
-    if (!s_campop_probe) return;
-    size_t m = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-    size_t f = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    heap_caps_monitor_local_minimum_free_size_stop();
-    heap_caps_monitor_local_minimum_free_size_start();
-    ESP_LOGW(TAG, "CAMPROBE %-12s min %6u  free after %6u", stage, (unsigned)m, (unsigned)f);
-}
-
-static void popup_mem_track(lv_obj_t *overlay, size_t before)
-{
-    if (!memdiag_enabled()) return;
-    s_popup_mem_before = before;
-    lv_obj_add_event_cb(overlay, popup_mem_delete_cb, LV_EVENT_DELETE, NULL);
-    lv_async_call(popup_mem_opened_async, overlay);
-}
-
 static lv_obj_t *create_modal(void)
 {
-    size_t mem_before = MEMDIAG_HEAP();
     pause_bg_timers();
     lv_obj_t *overlay = lv_obj_create(lv_screen_active());
-    popup_mem_track(overlay, mem_before);
     lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
     /* 2026-09-07(사용자 지시 — malloc 멈춤 근본원인) — 반투명(LV_OPA_50)이면 뒤 화면과
@@ -1494,9 +1427,7 @@ static void create_modal_title(lv_obj_t *box, ui_str_id_t title_id, modal_kind_t
  * 진입/이탈 UI를 제공함(닫기 버튼) */
 static lv_obj_t *create_page_popup(void)
 {
-    size_t mem_before = MEMDIAG_HEAP();
     lv_obj_t *overlay = lv_obj_create(lv_screen_active());
-    popup_mem_track(overlay, mem_before);
     lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(overlay, 0, 0);
@@ -2742,7 +2673,6 @@ static void refresh_photo_list_ui(int select_index)
                                                           PHOTO_LIST_PAGE_SIZE, s_current_list,
                                                           PHOTO_LIST_PAGE_SIZE);
     MEMDIAG_END(TAG, "photo list: SD count+read_page (%d items)", s_current_list_count);
-    campop_probe_mark("list SD read");
     update_list_info_label();
     update_photo_page_nav(s_photo_page_index, total_pages);
 
@@ -2837,7 +2767,6 @@ static void refresh_photo_list_ui(int select_index)
             s_selected_row = row;
         }
     }
-    campop_probe_mark("rows+select");
     size_t _rows_after = MEMDIAG_HEAP();
     ESP_LOGD(TAG, "MEMDIAG photo list: %d rows: internal %u -> %u (used %d)", s_current_list_count,
              (unsigned)_rows_before, (unsigned)_rows_after, (int)_rows_before - (int)_rows_after);
@@ -2996,8 +2925,6 @@ static void display_photo(uint8_t kind, uint32_t seq)
     }
     s_photo_raw_len = jpeg_len;
     ESP_LOGD(TAG, "DISPLAY kind=%c seq=%u jpeg_len=%u", (char)kind, (unsigned)seq, (unsigned)jpeg_len);
-    campop_probe_mark("photo SD read");
-    int64_t dec_t0 = esp_timer_get_time();
 
     uint16_t w = 0, h = 0;
     size_t pixel_len = 0;
@@ -3008,9 +2935,6 @@ static void display_photo(uint8_t kind, uint32_t seq)
         return;
     }
     ESP_LOGD(TAG, "DISPLAY decode OK kind=%c seq=%u w=%u h=%u", (char)kind, (unsigned)seq, w, h);
-    if (s_campop_probe) ESP_LOGW(TAG, "CAMPROBE decode time %lld us (%u bytes -> %ux%u)", esp_timer_get_time() - dec_t0,
-                                 (unsigned)jpeg_len, w, h);
-    campop_probe_mark("jpeg decode");
 
     fill_rgb565_dsc(&s_photo_dsc, s_photo_jpeg_buf, w, h, pixel_len);
     /* 버퍼 내용은 바뀌었지만 &s_photo_dsc 주소는 고정이라, LVGL의 이미지 캐시가 그 주소를
@@ -5277,23 +5201,10 @@ static void refresh_dashboard(lv_timer_t *t)
     }
     /* 2026-09-07(임시 진단 — 내부RAM 서서히 감소 원인 추적) — 10초마다(이 틱이 1초 주기라
      * 10번째마다) 전체 추이를 로그로 남김. stats_store_append() 안쪽 진단과 대조용 */
-    {   /* 2026-10-17(진단, 임시) — 부팅 뒤 최저값이 2K 넘게 새로 내려가면 그 시각을 남김(10초 기록 사이의 순간 저점 원인 찾기) */
-        static size_t s_min_logged = SIZE_MAX;
-        size_t mn = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-        if (s_min_logged == SIZE_MAX || mn + 2048 < s_min_logged) {
-            ESP_LOGW(TAG, "MEMDIAG internal min_ever %u (was %u), free now %u", (unsigned)mn,
-                     (unsigned)(s_min_logged == SIZE_MAX ? 0 : s_min_logged), (unsigned)free_internal_now);
-            s_min_logged = mn;
-        }
-    }
     static int s_mem_log_tick = 0;
     if (++s_mem_log_tick >= 10) {
         s_mem_log_tick = 0;
         ESP_LOGD(TAG, "MEMDIAG periodic internal free=%u", (unsigned)free_internal_now);
-        /* 2026-10-17(진단, 임시) — 10초 사이 15K 넘게 줄면 그 순간의 TCP 연결 목록·힙을 Dev Log에(10-17 11:58 37K가 25분 묶인 일) */
-        static size_t s_mem_prev = 0;
-        if (s_mem_prev && s_mem_prev > free_internal_now + 15000) net_diag_log("internal RAM dropped >15K in 10s");
-        s_mem_prev = free_internal_now;
     }
 
     if (!s_dash_nodes || !s_dash_nodes_prev) return;  /* PSRAM 할당 실패 시(극히 드묾) */
@@ -7139,37 +7050,6 @@ bool ui_main_inject_photo_select(uint8_t kind, uint32_t seq)
     return run_on_lvgl_task(inject_fn_photo_select, &packed_copy, 1000);
 }
 
-/* 2026-10-17(측정용, 임시 — 나중에 지움) — 카메라 팝업 열기/닫기 합성 + 여는 과정 단계별 최저값(campop_probe_mark) */
-static void campop_probe_end_cb(lv_timer_t *t)
-{
-    campop_probe_mark("render 3s");
-    heap_caps_monitor_local_minimum_free_size_stop();
-    s_campop_probe = false;
-    lv_timer_delete(t);
-}
-
-static bool inject_fn_camera_popup(void *arg)
-{
-    if (!*(bool *)arg) {
-        teardown_camera_tab();
-        return true;
-    }
-    if (s_camera_popup || s_campop_probe) return false;
-    ESP_LOGW(TAG, "CAMPROBE start        free %6u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    if (heap_caps_monitor_local_minimum_free_size_start() != ESP_OK) return false;
-    s_campop_probe = true;
-    build_camera_tab();
-    campop_probe_mark("build end");
-    lv_timer_create(campop_probe_end_cb, 3000, NULL);
-    return true;
-}
-
-bool ui_main_inject_camera_popup(bool open)
-{
-    static bool open_copy;
-    open_copy = open;
-    return run_on_lvgl_task(inject_fn_camera_popup, &open_copy, 1000);
-}
 
 /* 2026-09-19 — 웹의 "원본 그대로 보기"(/photo, /api/photo_fetch)가 씀. 로컬 SD 읽기라
  * ui_main_inject_photo_select()가 반환한 시점엔 이미 display_photo()까지 동기로 끝나있어서
