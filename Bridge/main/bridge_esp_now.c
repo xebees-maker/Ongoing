@@ -236,6 +236,8 @@ static void wifi_bringup(void)
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    /* 2026-10-18(사용자 지시) — 국가 KR(채널 1~13) 명시. 기본 "01"은 1~11로 보고되는데 13으로 옮겨지기도 해서 애매했음 */
+    ESP_ERROR_CHECK(esp_wifi_set_country_code("KR", false));
     /* AP에 접속하지 않는 순수 STA(ESP-NOW 전용 라디오). 캠이 실제로 이 보드를 바라보게 하려면
      * 캠과 같은 채널이어야 하는데, 지금은 캠이 아직 콘(COM19)에 페어링되어 있어 이 보드로는
      * 안 옴(유니캐스트라 안 보임, ADVERTISE 브로드캐스트로 재광고해야 관측 가능) — 채널은

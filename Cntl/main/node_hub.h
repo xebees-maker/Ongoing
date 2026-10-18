@@ -26,6 +26,7 @@ typedef enum {
     HUB_NODE_KIND_UNKNOWN = 0,
     HUB_NODE_KIND_CAM,
     HUB_NODE_KIND_SENS,
+    HUB_NODE_KIND_BORIL,   /* 2026-10-18 — 보일러 릴레이(이름 "B…", 보브를 거침 — Docs/설계_보브_보릴_2026-10-18.md) */
 } hub_node_kind_t;
 
 /* 2026-08-23(사용자 지시) — 노드 연결 상태를 하나의 변수로만 관리(캠 쪽 s_conn_state와

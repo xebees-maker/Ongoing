@@ -199,6 +199,7 @@ static hub_node_kind_t classify_name(const char *name)
      * 대체(esp_now_node.c/esp_now_node_cask.c:resolve_name 참고) */
     if (strncmp(name, "C", 1) == 0) return HUB_NODE_KIND_CAM;
     if (strncmp(name, "S", 1) == 0) return HUB_NODE_KIND_SENS;
+    if (strncmp(name, "B", 1) == 0) return HUB_NODE_KIND_BORIL;   /* 2026-10-18 — 보릴 */
     return HUB_NODE_KIND_UNKNOWN;
 }
 

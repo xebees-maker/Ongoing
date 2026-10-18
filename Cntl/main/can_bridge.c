@@ -61,7 +61,13 @@ static can_bridge_recv_cb_t s_recv_cb;
 
 /* 노드 → 브릿지 기록 — 그 노드의 프레임이 마지막으로 들어온 브릿지로 보냄(모르면 0번). 노드 수가 적어 작은 표 */
 #define NODE_BR_SLOTS 16
-typedef struct { uint8_t used; uint8_t bridge; uint8_t mac[6]; int64_t t; } node_br_t;
+typedef struct {
+    uint8_t used;
+    uint8_t bridge;      /* 마지막으로 프레임이 들어온 브릿지 — 콘→노드 송신 경로 */
+    uint8_t want;        /* 기기 종류가 정하는 브릿지(광고 이름으로 앎) — 다른 브릿지로 온 노드 프레임은 무시 */
+    uint8_t mac[6];
+    int64_t t;
+} node_br_t;
 static node_br_t s_node_br[NODE_BR_SLOTS];
 static portMUX_TYPE s_node_br_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -89,6 +95,41 @@ static void note_node_bridge(const uint8_t *mac, uint8_t b)
     s_node_br[idx].t = now;
     taskEXIT_CRITICAL(&s_node_br_lock);
     if (changed) ESP_LOGI(TAG, "Node %02X%02X%02X now via bridge %u", mac[3], mac[4], mac[5], (unsigned)b + 1);
+}
+
+/* 2026-10-18(설계_보브_보릴 §4.3) — 기기 종류 → 브릿지. 광고 이름 첫 글자: "B…" 보릴 → 1(보브), 그 밖(캠 "C…", 센스 "S…") → 0(재브) */
+static uint8_t kind_bridge_for_name(char first) { return first == 'B' ? 1 : 0; }
+
+static void note_node_want(const uint8_t *mac, uint8_t want)
+{
+    int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_node_br_lock);
+    int idx = -1, oldest = 0;
+    for (int i = 0; i < NODE_BR_SLOTS; i++) {
+        if (s_node_br[i].used && memcmp(s_node_br[i].mac, mac, 6) == 0) { idx = i; break; }
+        if (!s_node_br[i].used || s_node_br[i].t < s_node_br[oldest].t) oldest = i;
+    }
+    if (idx < 0) {
+        idx = oldest;
+        s_node_br[idx].used = 1;
+        memcpy(s_node_br[idx].mac, mac, 6);
+        s_node_br[idx].bridge = want;
+        s_node_br[idx].t = now;
+    }
+    s_node_br[idx].want = want;
+    taskEXIT_CRITICAL(&s_node_br_lock);
+}
+
+/* 모르는 노드(콘이 켜진 뒤 광고를 아직 못 봄)는 0번 — 보릴은 응답을 못 받으면 다시 광고하므로 그때 알게 됨 */
+static uint8_t node_want(const uint8_t *mac)
+{
+    uint8_t w = 0;
+    taskENTER_CRITICAL(&s_node_br_lock);
+    for (int i = 0; i < NODE_BR_SLOTS; i++) {
+        if (s_node_br[i].used && memcmp(s_node_br[i].mac, mac, 6) == 0) { w = s_node_br[i].want; break; }
+    }
+    taskEXIT_CRITICAL(&s_node_br_lock);
+    return w;
 }
 
 uint8_t can_bridge_bridge_of(const uint8_t *mac)
@@ -282,14 +323,28 @@ static void can_consume_task(void *arg)
                 MEMDIAG_BEGIN();  /* 2026-09-28(진단) — 메시지 처리 1건의 내부 RAM 변화 */
                 /* 2026-10-18(설계_보브_보릴 §4.3) — 광고는 기기 종류에 맞는 브릿지가 전달한 것만 받음. 노드는 응답(ADVERTISE_ACK)을
                  * 보낸 브릿지에 붙으므로, 다른 브릿지가 들은 광고에 응답하면 실내 센스·캠이 보브에 붙을 수 있음(실기 — 두 브릿지가
-                 * 같은 채널일 때 노드가 브릿지 1·2를 오감). 지금은 센스·캠뿐이라 모두 0번(재브) — 보릴 종류는 보브로(다음 단계).
-                 * 광고만이 아니라 노드가 보낸 프레임(전달·사진) 전부: 이미 다른 브릿지에 붙은 노드는 응답을 못 받아 다시 채널을
-                 * 찾고, 그때는 맞는 브릿지만 응답하므로 거기 붙음(실기 — 규칙 전에 보브에 붙은 노드가 CH11에서 보브와 통신) */
+                 * 같은 채널일 때 노드가 브릿지 1·2를 오감). 기기 종류는 광고 이름으로(kind_bridge_for_name) — 센스·캠은 0번(재브),
+                 * 보릴은 1번(보브). 광고만이 아니라 노드가 보낸 프레임(전달·사진) 전부: 이미 다른 브릿지에 붙은 노드는 응답을 못 받아
+                 * 다시 채널을 찾고, 그때는 맞는 브릿지만 응답하므로 거기 붙음(실기 — 규칙 전에 보브에 붙은 노드가 CH11에서 보브와 통신) */
                 bool from_node = hdr.msg_type == CAN_DATA_RELAY || hdr.msg_type == CAN_DATA_SR_META ||
                                  hdr.msg_type == CAN_DATA_SR_CHUNK || hdr.msg_type == CAN_DATA_SR_DONE;
-                if (from_node && b != 0) {
-                    LOG_W_RL(TAG, "Node %02X%02X%02X frame via bridge %u ignored (not its kind's bridge)", hdr.mac[3], hdr.mac[4],
-                             hdr.mac[5], (unsigned)b + 1);
+                bool adv = hdr.msg_type == CAN_DATA_RELAY && body_len >= sizeof(esp_now_advertise_t) && body[1] == ESP_NOW_MSG_ADVERTISE;
+                uint8_t want;
+                if (adv) {
+                    want = kind_bridge_for_name((char)body[offsetof(esp_now_advertise_t, name)]);
+                    note_node_want(hdr.mac, want);
+                } else {
+                    want = node_want(hdr.mac);
+                }
+                if (from_node && b != want) {
+                    /* 광고는 두 브릿지가 다 들을 수 있어 흔함 → D. 그 밖(이미 다른 브릿지에 붙은 노드의 프레임)은 W */
+                    if (adv) {
+                        ESP_LOGD(TAG, "Advertise %02X%02X%02X via bridge %u ignored (its kind uses bridge %u)", hdr.mac[3], hdr.mac[4],
+                                 hdr.mac[5], (unsigned)b + 1, (unsigned)want + 1);
+                    } else {
+                        LOG_W_RL(TAG, "Node %02X%02X%02X frame via bridge %u ignored (its kind uses bridge %u)", hdr.mac[3], hdr.mac[4],
+                                 hdr.mac[5], (unsigned)b + 1, (unsigned)want + 1);
+                    }
                     can_bridge_queue_pop_free(data);
                     continue;
                 }
