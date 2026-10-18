@@ -269,6 +269,13 @@ void bridge_esp_now_init(void)
 {
     wifi_bringup();
 
+    /* 2026-10-18(사용자 지시 — 12·13번 채널은 추측으로 막지 말고 확인) — 국가 설정(허용 채널 범위)을 부팅 때 남김 */
+    wifi_country_t country;
+    if (esp_wifi_get_country(&country) == ESP_OK) {
+        ESP_LOGI(TAG, "Wi-Fi country %.2s: channels %u-%u, policy %s", country.cc, (unsigned)country.schan,
+                 (unsigned)(country.schan + country.nchan - 1), country.policy == WIFI_COUNTRY_POLICY_AUTO ? "auto" : "manual");
+    }
+
     uint8_t primary = 0;
     wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
     if (esp_wifi_get_channel(&primary, &second) == ESP_OK) {

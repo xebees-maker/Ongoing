@@ -378,13 +378,13 @@ static void send_ctrl_to_bridge(uint8_t bi, uint8_t type, const void *body, size
 }
 
 /* ---- 2026-10-18(Docs/설계_보브_보릴_2026-10-18.md §4.3~4.4) — 브릿지 채널을 콘이 정함 ----
- * 보브(1번, 안테나가 AP·콘과 같은 실외)는 AP가 차지한 대역에서 가장 먼 채널, 재브(0번, 안테나 실내 — AP와 겹쳐도 됨)는 보브에서 가장
- * 먼 채널. 1~11만 씀(12·13은 나라 설정에 따라 못 쓸 수 있어서 — 노드는 1~13을 훑으므로 상관없음). AP가 40MHz면 보조 채널 쪽으로
- * 4칸 더 차지한 것으로 봄. AP가 채널을 바꿔도 바로 따라가지 않음: 보브 채널이 AP 대역과 5칸 미만으로 겹친 상태가 10분 계속될 때만
- * 옮김(옮기면 그 브릿지의 노드가 채널을 잃고 다시 찾아야 해서). 브가 알려 준 채널(PONG)이 정한 값과 다르면 SET_CHANNEL을 다시 보냄
- * (브는 재부팅하면 기본 채널로 돌아감) */
+ * 보브(1번, 안테나가 AP·콘과 같은 실외)는 AP가 차지한 대역에서 가장 먼 채널(우선). 재브(0번, 안테나 실내)는 AP 대역과 보브 둘 다에서
+ * 최대한 먼 채널(둘까지 거리 중 작은 쪽이 가장 큰 채널 — 사용자 10-18: 다른 방이라도 다른 채널이 나음). 1~13(브의 국가 설정은 부팅
+ * 로그로 확인, 채널 변경이 실패하면 브가 로그로 알림). AP가 40MHz면 보조 채널 쪽으로 4칸 더 차지한 것으로 봄. AP가 채널을 바꿔도 바로
+ * 따라가지 않음: 새 계획이 지금보다 나은 상태가 10분 계속될 때만 옮김(옮기면 그 브릿지의 노드가 채널을 잃고 다시 찾아야 해서).
+ * 브가 알려 준 채널(PONG)이 정한 값과 다르면 SET_CHANNEL을 다시 보냄(브는 재부팅하면 기본 채널로 돌아감) */
 #define CH_LO 1
-#define CH_HI 11
+#define CH_HI 13
 #define CH_CLEAR 5                                /* 이만큼 떨어지면 안 겹침(20MHz 폭) */
 #define CH_MOVE_DELAY_US (10LL * 60 * 1000 * 1000)
 static uint8_t s_target_ch[NB];                   /* 0 = 아직 안 정함 */
@@ -414,15 +414,32 @@ static bool ap_band(int *lo, int *hi, uint8_t *primary_out)
     return true;
 }
 
+static int imin(int a, int b) { return a < b ? a : b; }
+static int iabs(int a) { return a < 0 ? -a : a; }
+
+/* 재브 채널 j의 떨어짐 = AP 대역까지와 보브까지 중 작은 쪽 */
+static int jaebu_clear(int j, int bobu, int lo, int hi) { return imin(ch_dist(j, lo, hi), iabs(j - bobu)); }
+
 static void plan_channels(int lo, int hi, uint8_t out[NB])
 {
-    int best = CH_HI, best_d = -1;
+    int bobu = CH_HI, best_d = -1;
     for (int c = CH_HI; c >= CH_LO; c--) {
         int d = ch_dist(c, lo, hi);
-        if (d > best_d) { best_d = d; best = c; }
+        if (d > best_d) { best_d = d; bobu = c; }
     }
-    out[1] = (uint8_t)best;                                    /* 보브 */
-    out[0] = (uint8_t)(best - CH_LO >= CH_HI - best ? CH_LO : CH_HI);   /* 재브 — 보브에서 먼 끝 */
+    int jaebu = CH_LO, best_j = -1;
+    for (int c = CH_LO; c <= CH_HI; c++) {
+        int d = jaebu_clear(c, bobu, lo, hi);
+        if (d > best_j) { best_j = d; jaebu = c; }
+    }
+    out[1] = (uint8_t)bobu;
+    out[0] = (uint8_t)jaebu;
+}
+
+/* 계획의 점수(보브 떨어짐 우선, 다음 재브 떨어짐 — 둘 다 CH_CLEAR 넘으면 같은 값). 지금 계획보다 새 계획이 클 때만 옮길 이유가 있음 */
+static int plan_score(const uint8_t ch[NB], int lo, int hi)
+{
+    return imin(ch_dist(ch[1], lo, hi), CH_CLEAR) * 100 + imin(jaebu_clear(ch[0], ch[1], lo, hi), CH_CLEAR);
 }
 
 static void update_channels(void)
@@ -437,11 +454,11 @@ static void update_channels(void)
             memcpy(s_target_ch, ideal, sizeof(s_target_ch));
             ESP_LOGI(TAG, "Channel plan: AP CH%u (band %d-%d) -> Bridge 1 CH%u, Bridge 2 CH%u", (unsigned)primary, lo, hi,
                      (unsigned)s_target_ch[0], (unsigned)s_target_ch[1]);
-        } else if (memcmp(ideal, s_target_ch, sizeof(ideal)) != 0 && ch_dist(s_target_ch[1], lo, hi) < CH_CLEAR) {
+        } else if (plan_score(ideal, lo, hi) > plan_score(s_target_ch, lo, hi)) {
             if (s_overlap_since_us == 0) {
                 s_overlap_since_us = now;
-                ESP_LOGW(TAG, "AP now CH%u (band %d-%d) overlaps Bridge 2 CH%u - moving bridges in 10 min if it stays", (unsigned)primary,
-                         lo, hi, (unsigned)s_target_ch[1]);
+                ESP_LOGW(TAG, "AP now CH%u (band %d-%d) - Bridge 1 CH%u / Bridge 2 CH%u could be better (CH%u / CH%u), moving in 10 min if it stays",
+                         (unsigned)primary, lo, hi, (unsigned)s_target_ch[0], (unsigned)s_target_ch[1], (unsigned)ideal[0], (unsigned)ideal[1]);
             } else if (now - s_overlap_since_us >= CH_MOVE_DELAY_US) {
                 memcpy(s_target_ch, ideal, sizeof(s_target_ch));
                 s_overlap_since_us = 0;
