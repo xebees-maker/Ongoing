@@ -1,0 +1,4 @@
+# 보릴 파티션 테이블 — XIAO ESP32-C6, 4MB 플래시. 설정 저장 없음(NVS는 Wi-Fi 드라이버용) — 앱 하나를 크게(2026-10-18, 기본 1MB 앱의 85%를 써서 늘림)
+nvs,        data, nvs,      0x9000,     0x6000,
+phy_init,   data, phy,      0xF000,     0x1000,
+app,        app,  factory,  0x10000,    0x3F0000,
