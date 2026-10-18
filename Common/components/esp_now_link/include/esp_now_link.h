@@ -195,6 +195,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  flags;          /* ESP_NOW_BORIL_F_* */
     uint16_t failsafe_min;   /* 보릴이 지금 쓰는 끊김 시간(분) */
     uint32_t uptime_s;       /* 보릴 부팅 후 초 — 콘이 보릴 재부팅을 알아챔 */
+    uint8_t  reset_reason;   /* 2026-10-18 — 이번 부팅의 esp_reset_reason_t(스스로 재부팅하는 원인 조사 — 부팅 직후 USB 로그는 잘림) */
 } esp_now_boril_status_t;
 
 #define BORIL_RELAY_OFF   0

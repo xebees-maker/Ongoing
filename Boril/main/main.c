@@ -24,6 +24,7 @@
 #include "esp_mac.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "driver/gpio.h"
 #include "esp_now_link.h"
 
@@ -150,6 +151,7 @@ static void fill_status(esp_now_boril_status_t *st, uint8_t type)
     st->flags = s_failsafe_fired ? ESP_NOW_BORIL_F_FAILSAFE_OFF : 0;
     st->failsafe_min = s_failsafe_min;
     st->uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    st->reset_reason = (uint8_t)esp_reset_reason();
 }
 
 static void send_status(void)
@@ -246,6 +248,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 void app_main(void)
 {
     pins_init();
+    /* 2026-10-18(실기 — 스스로 재부팅 3번, 11:38·11:40·13:26) — 원인을 남김 */
+    static const char *const s_rst[] = { "unknown", "power-on", "external", "software", "panic", "int-wdt", "task-wdt", "wdt",
+                                         "deep-sleep", "brownout", "sdio", "usb", "jtag", "efuse", "pwr-glitch", "cpu-lockup" };
+    esp_reset_reason_t rr = esp_reset_reason();
+    ESP_LOGW(TAG, "Boot - reset reason: %s (%d)", (unsigned)rr < sizeof(s_rst) / sizeof(s_rst[0]) ? s_rst[rr] : "?", (int)rr);
 
     esp_err_t ret = nvs_flash_init();   /* Wi-Fi 드라이버가 씀(설정 저장 아님 — 저장은 RAM) */
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

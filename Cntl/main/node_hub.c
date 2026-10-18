@@ -671,7 +671,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                                     .relay = BORIL_RELAY_KEEP, .failsafe_min = boril_failsafe_min() };
         can_bridge_relay_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
         if (changed) ESP_LOGI(TAG, "%s relay %s", nm, st.relay_on ? "ON" : "OFF");
-        if (rebooted) ESP_LOGW(TAG, "%s restarted (uptime %lus) - relay %s", nm, (unsigned long)st.uptime_s, st.relay_on ? "ON" : "OFF");
+        if (rebooted) {
+            /* esp_reset_reason_t 번호 — 1 전원, 3 소프트웨어, 4 패닉, 5·6·7 워치독, 9 브라운아웃, 11 USB, 14 전원 글리치 */
+            ESP_LOGW(TAG, "%s restarted (uptime %lus, reset reason %u) - relay %s", nm, (unsigned long)st.uptime_s,
+                     (unsigned)st.reset_reason, st.relay_on ? "ON" : "OFF");
+        }
         if (failsafe_new) {
             alarm_post(NOTIFY_TYPE_DISCONNECT, "Boiler turned off", "%s turned the boiler off - no communication for %u min", nm,
                        (unsigned)st.failsafe_min);

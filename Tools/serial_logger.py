@@ -14,6 +14,8 @@ BOARDS = {                      # USB 일련번호 → 이름
     'E8:F6:0A:8E:86:68': 'cntl',
     'B8:1F:3F:C8:B5:84': 'bridge',
     '28:84:85:49:86:40': 'cam',
+    'B8:1F:3F:C8:B3:48': 'bobu',    # 2026-10-18 — 브릿지 2(보브)
+    '10:BD:A3:9D:99:FC': 'boril',   # 2026-10-18 — 보일러 릴레이(XIAO C6). 스스로 재부팅하는 원인 조사(포트를 늘 열어 둠)
 }
 LOG_ROOT = sys.argv[1] if len(sys.argv) > 1 else r'C:/Projects/serial_logs'
 KEEP_DAYS = 7
