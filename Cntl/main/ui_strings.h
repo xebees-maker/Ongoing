@@ -336,6 +336,20 @@ typedef enum {
     /* 2026-09-16(SR/Power Control, 사용자 설계 대화) */
     STR_PANEL_POWER_CONTROL,     /* 주화면 판넬 제목/팝업 제목: "전원제어" / "Power Control" */
     STR_RELAY_DEFAULT_NAME_FMT,  /* Alias 미지정 시 기본표시(snprintf용): "릴레이 %d" / "Relay %d" */
+    /* 2026-10-18(보릴 6단계) — 원격릴레이(보일러, 무선) */
+    STR_RELAY_REMOTE_NAME,          /* 원격릴레이 기본 이름(별명 없을 때) */
+    STR_RELAY_REMOTE_PENDING,       /* 명령을 보냈고 보릴의 확인을 기다림 */
+    STR_RELAY_REMOTE_DISCONNECTED,  /* 보릴이 없거나 연결 끊김 */
+    STR_LABEL_REMOTE_FAILSAFE,      /* 팝업: 통신이 끊기면 이 시간 뒤 끔 */
+    STR_OPT_REMOTE_FAILSAFE_LIST,   /* 10분/30분/1시간 */
+    /* 2026-10-18 — 요약의 브릿지 줄: "브릿지1: CH 9, 정상 | 브릿지2: CH 13, 정상" */
+    STR_FMT_BRIDGE_ITEM,            /* "브릿지%u: CH %u, %s" — 채널 모르면 CH 칸 대신 상태만(STR_FMT_BRIDGE_ITEM_NOCH) */
+    STR_FMT_BRIDGE_ITEM_NOCH,       /* "브릿지%u: %s" */
+    STR_BRIDGE_STATE_OK,
+    STR_BRIDGE_STATE_SETTING,
+    STR_BRIDGE_STATE_NORESP,
+    STR_BRIDGE_STATE_ABSENT,
+    STR_BRIDGE_STATE_CANERR,
     STR_STATUS_RELAY_ON,         /* "On" / "On" */
     STR_STATUS_RELAY_OFF,        /* "Off" / "Off" */
     STR_RELAY_NOT_CONFIGURED,    /* 주화면 요약칸: 아직 Apply 전(configured=false)일 때 표시(2026-09-17) */

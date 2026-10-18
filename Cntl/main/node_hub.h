@@ -326,4 +326,6 @@ uint32_t node_hub_node_timeout_ms(const node_hub_node_t *n);
 /* 2026-10-18(5단계) — 보릴 릴레이 켜기·끄기(신뢰 전송, 보릴의 SET_ACK까지 기다림 — 최대 약 2초). 보릴이 알려 준 결과가 요청과 같으면
  * ESP_OK. 끊김 시간(분)도 함께 보냄 */
 esp_err_t node_hub_boril_set(const uint8_t *mac, bool on);
+/* 2026-10-18(6단계) — 보릴(한 대 전제) 노드 정보를 out에 복사. PAIRED이고 살아 있으면 true */
+bool node_hub_get_boril(node_hub_node_t *out);
 

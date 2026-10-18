@@ -22,7 +22,11 @@
 extern "C" {
 #endif
 
-#define POWER_RELAY_COUNT           2
+/* 2026-10-18(Docs/설계_보브_보릴_2026-10-18.md 6단계) — 릴레이 3개: 0·1 = 콘 보드 출력(DOUT0/1), 2 = 원격릴레이(보릴 — 보일러,
+ * 무선). 판정(자동 규칙·수동·타이머)은 셋이 같고 출력만 다름. 화면에서는 원격릴레이가 맨 위 */
+#define POWER_RELAY_COUNT           3
+#define POWER_RELAY_LOCAL_COUNT     2
+#define POWER_RELAY_REMOTE_IDX      2
 #define POWER_RELAY_ALIAS_MAX_LEN   32
 
 /* 기준값 소스 종류 — 어제/오늘 대화로 확정: 그룹 계열 통계, 또는 특정 개별 장치 실측값 */
@@ -146,6 +150,26 @@ void power_relay_set_config(int idx, const power_relay_config_t *cfg);
 /* 소프트웨어가 판단한 현재 명령 상태(물리 확인 불가 — SSR-DK25DA는 피드백 없음, 2026-09-16
  * 사용자 확인) */
 bool power_relay_get_commanded_on(int idx);
+
+/* 2026-10-18 — 원격릴레이(보릴). 화면은 보릴이 확인한 실제 상태만 보여 줌(사용자 결정) */
+typedef enum {
+    POWER_REMOTE_DISCONNECTED = 0,   /* 보릴이 없거나 연결이 끊김 */
+    POWER_REMOTE_PENDING,            /* 명령과 보릴이 알려 준 상태가 아직 다름(확인 중) */
+    POWER_REMOTE_OK,                 /* 보릴이 확인한 상태 = 명령 */
+} power_remote_state_t;
+typedef struct {
+    power_remote_state_t state;
+    bool    actual_on;      /* 보릴이 알려 준 출력(state != DISCONNECTED일 때 의미) */
+    bool    has_rssi;
+    int8_t  rssi;
+    bool    near_orphan;    /* 응답이 끊기기 직전(센스·캠 신호 아이콘과 같은 빨강 규칙) */
+} power_remote_status_t;
+void power_relay_get_remote_status(power_remote_status_t *out);
+/* 통신이 끊기면 보릴이 릴레이를 그대로 두다가 이만큼(분) 지나면 끔 — 기본 10, 선택 10/30/60(사용자 결정). 설정 파일에 저장 */
+uint16_t power_relay_get_remote_failsafe_min(void);
+void power_relay_set_remote_failsafe_min(uint16_t min);
+/* 기본 이름(별명 없을 때) — "릴레이 %d"가 아니라 원격릴레이 */
+bool power_relay_is_remote(int idx);
 
 #ifdef __cplusplus
 }

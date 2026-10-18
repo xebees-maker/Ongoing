@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "ch422g.h"
+#include "node_hub.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -21,7 +22,7 @@ static const char *TAG = "RELAY";
 /* 2026-10-02(SSR 연결) — 릴레이 출력 = 보드 절연 출력 DOUT0/DOUT1(CH422G OC0/OC1 → 포토커플러 → NPN 오픈컬렉터).
  * 예전 자리표시(GPIO_NUM_NC)를 대체. 배선(SSR마다): SSR 입력 + → 전압원, SSR 입력 − → DOUT. 출력은 GND로 당기기만
  * 함(Waveshare 사양 5~36V, 450mA). CH422G OC가 Low일 때 켜짐(ch422g_set_do 주석) */
-static const uint8_t s_relay_do_bit[POWER_RELAY_COUNT] = { CH422G_OD_DO0, CH422G_OD_DO1 };
+static const uint8_t s_relay_do_bit[POWER_RELAY_LOCAL_COUNT] = { CH422G_OD_DO0, CH422G_OD_DO1 };
 
 #define POWER_RELAY_FILE_PATH   FS_MOUNT_POINT "/power_relay.bin"
 /* 2026-09-18(실기에서 발견된 버그 — "저장된 값이 아니라 오버라이드 문구가 뜬다") —
@@ -31,7 +32,8 @@ static const uint8_t s_relay_do_bit[POWER_RELAY_COUNT] = { CH422G_OD_DO0, CH422G
  * 불일치로 안 걸러지고, 그 구버전 byte들이(예: 예전 ai_mode 값) 새 필드 자리로 그대로
  * 재해석돼 엉뚱한 값(Override=true)이 됐음. 구조체를 바꿀 때마다(오늘 이미 y_rises/
  * z_turns_on도 안 올렸었음) 반드시 버전을 올려서 이 클래스의 버그를 원천 차단 */
-#define POWER_RELAY_FILE_VERSION 2
+#define POWER_RELAY_FILE_VERSION 3   /* 2026-10-18 — 릴레이 3개(원격릴레이) + 끊김 시간. 버전 2(릴레이 2개)는 앞 두 칸으로 옮김 */
+#define POWER_REMOTE_FAILSAFE_DEFAULT_MIN 10
 
 /* 판정 주기(ms) — 응답성 설정과 무관한 이 모듈만의 독립 주기. 짧을수록 반응이 빠르지만
  * stats_agg 집계 버킷(1H 스케일=60초 폭)보다 훨씬 짧게 돌려봤자 대부분 같은 값을 다시
@@ -57,19 +59,31 @@ typedef struct {
 typedef struct __attribute__((packed)) {
     uint32_t version;
     power_relay_config_t relays[POWER_RELAY_COUNT];
+    uint16_t remote_failsafe_min;
 } power_relay_file_t;
+/* 버전 2(10-17까지) — 옮기기용 */
+typedef struct __attribute__((packed)) {
+    uint32_t version;
+    power_relay_config_t relays[POWER_RELAY_LOCAL_COUNT];
+} power_relay_file_v2_t;
+static uint16_t s_remote_failsafe_min = POWER_REMOTE_FAILSAFE_DEFAULT_MIN;
 
 static power_relay_config_t s_relay_cfg[POWER_RELAY_COUNT];
 
 /* ── 2026-10-09 릴레이 타이머(할 일 AG, power_relay.h 참고) ── */
 #define POWER_RELAY_TIMER_PATH    FS_MOUNT_POINT "/power_relay_timer.bin"
-#define POWER_RELAY_TIMER_VERSION 1
+#define POWER_RELAY_TIMER_VERSION 2   /* 2026-10-18 — 타이머 3개(원격릴레이) */
 #define CLOCK_VALID_MIN_UNIX      1704067200u   /* 2024-01-01 — 이보다 작으면 콘 시계가 아직 안 맞은 것 */
 #define UPTIME_UNTIL_FLAG         0x80000000u
+#define POWER_RELAY_TIMER_VERSION_V1 1   /* 10-17까지 — 타이머 2개 */
 typedef struct __attribute__((packed)) {
     uint32_t version;
     power_relay_timer_t timers[POWER_RELAY_COUNT];
 } power_relay_timer_file_t;
+typedef struct __attribute__((packed)) {
+    uint32_t version;
+    power_relay_timer_t timers[POWER_RELAY_LOCAL_COUNT];
+} power_relay_timer_file_v1_t;
 static power_relay_timer_t s_timer[POWER_RELAY_COUNT];
 
 static void timer_defaults(power_relay_timer_t *t)
@@ -99,10 +113,17 @@ static void timer_load(void)
     FILE *f = fopen(POWER_RELAY_TIMER_PATH, "rb");
     if (!f) return;
     power_relay_timer_file_t s = { 0 };
-    bool ok = (fread(&s, sizeof(s), 1, f) == 1) && s.version == POWER_RELAY_TIMER_VERSION;
+    size_t got = fread(&s, 1, sizeof(s), f);
     fclose(f);
-    if (ok) memcpy(s_timer, s.timers, sizeof(s_timer));
-    else ESP_LOGW(TAG, "Timer file format mismatch - keeping defaults");
+    if (got == sizeof(s) && s.version == POWER_RELAY_TIMER_VERSION) {
+        memcpy(s_timer, s.timers, sizeof(s_timer));
+    } else if (got == sizeof(power_relay_timer_file_v1_t) && s.version == POWER_RELAY_TIMER_VERSION_V1) {
+        memcpy(s_timer, s.timers, sizeof(power_relay_timer_t) * POWER_RELAY_LOCAL_COUNT);   /* 2026-10-18 — 앞 두 칸 그대로 */
+        ESP_LOGI(TAG, "Timer file v1 (2 relays) migrated");
+        timer_save();
+    } else {
+        ESP_LOGW(TAG, "Timer file format mismatch - keeping defaults");
+    }
 }
 
 static bool clock_valid(uint32_t *out_now)
@@ -227,10 +248,14 @@ static void power_relay_save(void)
         ESP_LOGW(TAG, "Save failed (fopen): %s", POWER_RELAY_FILE_PATH);
         return;
     }
-    power_relay_file_t s = { .version = POWER_RELAY_FILE_VERSION };
-    memcpy(s.relays, s_relay_cfg, sizeof(s.relays));
-    fwrite(&s, sizeof(s), 1, f);
+    power_relay_file_t *s = heap_caps_calloc(1, sizeof(*s), MALLOC_CAP_SPIRAM);
+    if (!s) { fclose(f); return; }
+    s->version = POWER_RELAY_FILE_VERSION;
+    memcpy(s->relays, s_relay_cfg, sizeof(s->relays));
+    s->remote_failsafe_min = s_remote_failsafe_min;
+    fwrite(s, sizeof(*s), 1, f);
     fclose(f);
+    heap_caps_free(s);
 }
 
 void power_relay_load(void)
@@ -253,20 +278,35 @@ void power_relay_load(void)
     timer_load();   /* 2026-10-09 — 타이머 설정(따로 저장) */
     FILE *f = fopen(POWER_RELAY_FILE_PATH, "rb");
     if (!f) return;
-    power_relay_file_t s = { 0 };
-    bool ok = (fread(&s, sizeof(s), 1, f) == 1) && s.version == POWER_RELAY_FILE_VERSION;
+    power_relay_file_t *s = heap_caps_calloc(1, sizeof(*s), MALLOC_CAP_SPIRAM);   /* 릴레이 3개 — 스택에 두지 않음 */
+    if (!s) { fclose(f); return; }
+    size_t got = fread(s, 1, sizeof(*s), f);
     fclose(f);
-    if (!ok) {
+    if (got == sizeof(*s) && s->version == POWER_RELAY_FILE_VERSION) {
+        memcpy(s_relay_cfg, s->relays, sizeof(s_relay_cfg));
+        if (s->remote_failsafe_min == 10 || s->remote_failsafe_min == 30 || s->remote_failsafe_min == 60) {
+            s_remote_failsafe_min = s->remote_failsafe_min;
+        }
+    } else if (got == sizeof(power_relay_file_v2_t) && s->version == 2) {
+        /* 2026-10-18 — 릴레이 2개 시절 파일: 앞 두 칸은 그대로, 원격릴레이는 기본값 */
+        memcpy(s_relay_cfg, s->relays, sizeof(power_relay_config_t) * POWER_RELAY_LOCAL_COUNT);
+        ESP_LOGI(TAG, "Config file v2 (2 relays) migrated");
+        heap_caps_free(s);
+        for (int i = 0; i < POWER_RELAY_COUNT; i++) relay_alias_disp_refresh(i);
+        power_relay_save();
+        return;
+    } else {
         ESP_LOGW(TAG, "Config file format mismatch - keeping defaults");
+        heap_caps_free(s);
         return;
     }
+    heap_caps_free(s);
     for (int i = 0; i < POWER_RELAY_COUNT; i++) {
-        s.relays[i].alias[sizeof(s.relays[i].alias) - 1] = '\0';
+        s_relay_cfg[i].alias[sizeof(s_relay_cfg[i].alias) - 1] = '\0';
+        relay_alias_disp_refresh(i);
     }
-    memcpy(s_relay_cfg, s.relays, sizeof(s_relay_cfg));
-    for (int i = 0; i < POWER_RELAY_COUNT; i++) relay_alias_disp_refresh(i);
-    ESP_LOGI(TAG, "Config restored (relay0.configured=%d relay1.configured=%d)",
-             (int)s_relay_cfg[0].configured, (int)s_relay_cfg[1].configured);
+    ESP_LOGI(TAG, "Config restored (configured: %d %d remote %d, remote failsafe %u min)", (int)s_relay_cfg[0].configured,
+             (int)s_relay_cfg[1].configured, (int)s_relay_cfg[POWER_RELAY_REMOTE_IDX].configured, (unsigned)s_remote_failsafe_min);
 }
 
 const char *power_relay_get_alias_display(int idx)
@@ -320,10 +360,78 @@ bool power_relay_get_commanded_on(int idx)
     return s_commanded_on[idx];
 }
 
+/* 2026-10-18 — 원격릴레이는 출력이 무선이라 여기선 명령만 바꾸고 판정 태스크를 깨움 — 실제 전송·확인(보릴의 SET_ACK)은 remote_sync()가
+ * 판정 태스크에서 함(신뢰 전송이 최대 약 2초 걸려서, 화면 태스크에서 부르면 화면이 멈춤) */
 static void relay_set_output(int idx, bool on)
 {
+    if (idx >= POWER_RELAY_LOCAL_COUNT) {
+        power_relay_kick();
+        return;
+    }
     esp_err_t err = ch422g_set_do(s_relay_do_bit[idx], !on);  /* Low = 켜짐 */
     if (err != ESP_OK) ESP_LOGE(TAG, "Relay%d: DO write failed (%s)", idx, esp_err_to_name(err));
+}
+
+bool power_relay_is_remote(int idx) { return idx == POWER_RELAY_REMOTE_IDX; }
+uint16_t power_relay_get_remote_failsafe_min(void) { return s_remote_failsafe_min; }
+
+void power_relay_set_remote_failsafe_min(uint16_t min)
+{
+    if (min != 10 && min != 30 && min != 60) return;
+    if (min == s_remote_failsafe_min) return;
+    s_remote_failsafe_min = min;
+    power_relay_save();
+    ESP_LOGI(TAG, "Remote relay failsafe %u min", (unsigned)min);   /* 보릴은 다음 STATUS_ACK(10초 안)로 받음 */
+}
+
+/* 원격릴레이 상태 — 보릴 노드 정보(node_hub)와 명령을 견줌 */
+static bool     s_remote_adopted;      /* 콘 부팅 후 보릴이 알려 준 상태를 명령으로 받아들였음 — 콘 재부팅으로 보일러가 꺼지지 않게 */
+static uint32_t s_remote_last_try_ms;
+
+void power_relay_get_remote_status(power_remote_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    node_hub_node_t *n = heap_caps_malloc(sizeof(*n), MALLOC_CAP_SPIRAM);
+    if (!n) return;
+    if (node_hub_get_boril(n) && n->boril_has_status) {
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        uint32_t timeout_ms = node_hub_node_timeout_ms(n);
+        uint32_t elapsed = now_ms - n->last_seen_ms;
+        out->actual_on = n->boril_relay_on;
+        out->has_rssi = n->has_rssi;
+        out->rssi = n->rssi;
+        out->near_orphan = (uint64_t)elapsed * 10 >= (uint64_t)timeout_ms * 8;
+        out->state = (n->boril_relay_on == s_commanded_on[POWER_RELAY_REMOTE_IDX] || !s_remote_adopted) ? POWER_REMOTE_OK
+                                                                                                         : POWER_REMOTE_PENDING;
+    }
+    heap_caps_free(n);
+}
+
+/* 판정 태스크에서 — 명령과 보릴의 실제 상태가 다르면 보냄(보릴 재부팅으로 꺼진 채 돌아온 경우도 맞춰짐). 5초에 한 번까지 */
+static void remote_sync(uint32_t now_ms)
+{
+    node_hub_node_t *n = heap_caps_malloc(sizeof(*n), MALLOC_CAP_SPIRAM);
+    if (!n) return;
+    if (!node_hub_get_boril(n) || !n->boril_has_status) {
+        heap_caps_free(n);
+        return;
+    }
+    int r = POWER_RELAY_REMOTE_IDX;
+    if (!s_remote_adopted) {
+        s_remote_adopted = true;
+        s_commanded_on[r] = n->boril_relay_on;
+        s_ever_on_since_boot[r] = n->boril_relay_on;
+        s_last_transition_ms[r] = now_ms;
+        ESP_LOGI(TAG, "Remote relay state adopted from boril: %s", n->boril_relay_on ? "On" : "Off");
+    }
+    bool mismatch = n->boril_relay_on != s_commanded_on[r];
+    uint8_t mac[6];
+    memcpy(mac, n->mac, 6);
+    heap_caps_free(n);
+    if (!mismatch || (s_remote_last_try_ms && now_ms - s_remote_last_try_ms < 5000)) return;
+    s_remote_last_try_ms = now_ms;
+    esp_err_t err = node_hub_boril_set(mac, s_commanded_on[r]);
+    if (err != ESP_OK) ESP_LOGW(TAG, "Remote relay %s not confirmed (%s) - retrying", s_commanded_on[r] ? "On" : "Off", esp_err_to_name(err));
 }
 
 static void power_relay_command_ex(int idx, bool on, uint32_t now_ms, bool by_timer)
@@ -336,6 +444,7 @@ static void power_relay_command_ex(int idx, bool on, uint32_t now_ms, bool by_ti
     /* 2026-10-09 — 타이머 전환은 주기가 짧으면 알림이 많아져 기록만(푸시 없음) */
     void (*post)(notify_type_t, const char *, const char *, ...) = by_timer ? alarm_record : alarm_post;
     if (s_relay_cfg[idx].alias[0]) post(NOTIFY_TYPE_RELAY, on ? "Relay ON" : "Relay OFF", "%s %s%s", s_relay_cfg[idx].alias, on ? "ON" : "OFF", by_timer ? " (timer)" : "");
+    else if (idx == POWER_RELAY_REMOTE_IDX) post(NOTIFY_TYPE_RELAY, on ? "Relay ON" : "Relay OFF", "Remote relay %s%s", on ? "ON" : "OFF", by_timer ? " (timer)" : "");
     else post(NOTIFY_TYPE_RELAY, on ? "Relay ON" : "Relay OFF", "Relay %d %s%s", idx + 1, on ? "ON" : "OFF", by_timer ? " (timer)" : "");
 }
 
@@ -541,9 +650,13 @@ static void power_relay_task(void *arg)
     (void)arg;
     for (;;) {
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        /* 2026-10-18 — 원격릴레이는 보릴 상태를 받아들인 뒤부터 판정(콘 부팅 직후 보일러를 꺼 버리지 않게) */
+        remote_sync(now_ms);
         for (int i = 0; i < POWER_RELAY_COUNT; i++) {
+            if (i == POWER_RELAY_REMOTE_IDX && !s_remote_adopted) continue;
             evaluate_relay(i, now_ms);
         }
+        remote_sync(now_ms);
         /* 2026-10-09 — 타이머는 초 단위라 15초 주기 대신 다음 전환 시각에 맞춰 깸(+0.2초 여유). 설정이 바뀌면
          * power_relay_kick()이 바로 깨움 */
         uint32_t wait_ms = POWER_RELAY_EVAL_INTERVAL_MS;
@@ -553,6 +666,9 @@ static void power_relay_task(void *arg)
             power_relay_timer_state(&s_timer[i], &next);
             if (next != UINT32_MAX && next * 1000u + 200u < wait_ms) wait_ms = next * 1000u + 200u;
         }
+        power_remote_status_t rs;
+        power_relay_get_remote_status(&rs);
+        if (rs.state == POWER_REMOTE_PENDING && wait_ms > 5200) wait_ms = 5200;   /* 확인 중 — 5초 뒤 다시 보냄 */
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms));
     }
 }
@@ -565,7 +681,7 @@ void power_relay_start(void)
      * 내부RAM을 얼마나 쓰는지 추측 대신 실측(기존 MEMDIAG 관례와 동일) */
     size_t before = MEMDIAG_HEAP();
     /* 부팅 시 두 출력 모두 꺼짐으로 확정(CH422G 기본도 꺼짐 — 2026-10-02 실측: SSR LED 꺼짐) */
-    for (int i = 0; i < POWER_RELAY_COUNT; i++) relay_set_output(i, false);
+    for (int i = 0; i < POWER_RELAY_LOCAL_COUNT; i++) relay_set_output(i, false);
     /* 2026-09-09 CNTL 태스크 우선순위 체계(project_cntl_task_priority_scheme) — 통신17/
      * SR제어15/파일처리10 중 SR제어 자리를 여기서 처음 실사용.
      * 2026-09-16(실기 크래시 조사) — evaluate_relay()가 ui_main_query_power_source_value()를

@@ -181,6 +181,8 @@ static lv_obj_t *s_power_dash_row_status[POWER_RELAY_COUNT];
 /* 2026-09-17(사용자 지시 — "센서처럼 설정된 값이 나열되야되") — Sensor 판넬의 값 라벨과
  * 동일 패턴(라벨은 고정폭, value는 flex_grow+우측정렬로 ">" 앞까지 밀착) */
 static lv_obj_t *s_power_dash_row_value[POWER_RELAY_COUNT];
+static lv_obj_t *s_power_dash_row_signal[POWER_RELAY_COUNT];   /* 2026-10-18 — 원격릴레이만(나머지는 같은 폭의 빈칸 — 글자 시작 맞춤) */
+static lv_obj_t *s_bridge_status_label;                        /* 2026-10-18 — 요약: 웹 줄 아래 "브릿지1: CH x, 상태 | 브릿지2: …" */
 static char      s_power_dash_row_last_text[POWER_RELAY_COUNT][96];
 
 static uint8_t            s_selected_cam_mac[6];
@@ -306,6 +308,7 @@ static void cb_camera_btn_tap(lv_event_t *e);
  * 옮겨오는 것뿐, 로직 자체는 안 바뀜)하므로 그보다 뒤에 정의되지만 여기서 fwd 필요 */
 static void build_device_popup(const uint8_t *mac, const char *name, bool is_sensor);
 static void build_relay_popup(int idx);  /* 2026-09-16(SR/Power Control) */
+static void relay_default_name(int idx, char *out, size_t cap);   /* 2026-10-18 — 원격릴레이 기본 이름 */
 static void teardown_relay_popup(void);  /* 2026-09-17 — Apply 클릭 시 팝업 닫기용 fwd */
 static void cb_power_dash_row_clicked(lv_event_t *e);
 static void refresh_power_control_panel(void);
@@ -5117,9 +5120,20 @@ static void refresh_power_control_panel(void)
         if (!s_power_dash_row_label[i]) continue;
         const power_relay_config_t *cfg = power_relay_get_config(i);
         char default_name[POWER_RELAY_ALIAS_MAX_LEN];
-        snprintf(default_name, sizeof(default_name), ui_str(STR_RELAY_DEFAULT_NAME_FMT), i + 1);
+        relay_default_name(i, default_name, sizeof(default_name));
         const char *disp = (cfg && cfg->alias[0] != '\0') ? power_relay_get_alias_display(i) : default_name;  /* 10-05 — 로마자 */
         bool on = power_relay_get_commanded_on(i);
+        /* 2026-10-18(보릴 6단계) — 원격릴레이는 보릴이 확인한 실제 상태만(사용자 결정). 확인 전 "확인 중", 끊기면 "연결 끊김" */
+        power_remote_status_t rs = { 0 };
+        bool remote = power_relay_is_remote(i);
+        if (remote) {
+            power_relay_get_remote_status(&rs);
+            on = rs.state != POWER_REMOTE_DISCONNECTED && rs.actual_on;
+            if (s_power_dash_row_signal[i]) {
+                update_signal_widget(s_power_dash_row_signal[i], rs.state != POWER_REMOTE_DISCONNECTED && rs.has_rssi, rs.rssi, false,
+                                     rs.state == POWER_REMOTE_DISCONNECTED || rs.near_orphan);
+            }
+        }
 
         /* 2026-09-17(사용자 지시 — "센서처럼 설정된 값이 나열되야되... Turn ~ Up to [값]까지만") —
          * 문장형 골격을 짧게 요약(오차/단위는 제외). 팝업 문장과 순서 일치시킴(build_relay_popup
@@ -5159,6 +5173,11 @@ static void refresh_power_control_panel(void)
             /* 2026-09-17(사용자 지시 — "빈 칸에 '아직 설정 전'이라는 표기라도 하지") */
             snprintf(value_buf, sizeof(value_buf), "%s", ui_str(STR_RELAY_NOT_CONFIGURED));
         }
+        if (remote && rs.state == POWER_REMOTE_DISCONNECTED) {
+            snprintf(value_buf, sizeof(value_buf), "%s", ui_str(STR_RELAY_REMOTE_DISCONNECTED));
+        } else if (remote && rs.state == POWER_REMOTE_PENDING) {
+            snprintf(value_buf, sizeof(value_buf), "%s", ui_str(STR_RELAY_REMOTE_PENDING));
+        }
 
         char buf[160];
         snprintf(buf, sizeof(buf), "%s|%d|%s", disp, on ? 1 : 0, value_buf);
@@ -5174,10 +5193,31 @@ static void refresh_power_control_panel(void)
     }
 }
 
+/* 2026-10-18 — 요약의 브릿지 줄. CAN 버스 문제면 두 줄 모두 "CAN 오류"(브릿지별 문제가 아님) */
+static void refresh_bridge_status_line(void)
+{
+    if (!s_bridge_status_label) return;
+    char buf[128];
+    int n = 0;
+    bool bus_err = can_bridge_bus_error();
+    for (uint8_t b = 0; b < CAN_BRIDGE_MAX_BRIDGES && n < (int)sizeof(buf); b++) {
+        uint8_t ch = 0;
+        can_bridge_state_t st = can_bridge_bridge_state(b, &ch);
+        static const ui_str_id_t s_st[] = { STR_BRIDGE_STATE_OK, STR_BRIDGE_STATE_SETTING, STR_BRIDGE_STATE_NORESP, STR_BRIDGE_STATE_ABSENT };
+        const char *stxt = ui_str(bus_err ? STR_BRIDGE_STATE_CANERR : s_st[st]);
+        if (b) n += snprintf(buf + n, sizeof(buf) - (size_t)n, " | ");
+        if (n >= (int)sizeof(buf)) break;
+        if (ch) n += snprintf(buf + n, sizeof(buf) - (size_t)n, ui_str(STR_FMT_BRIDGE_ITEM), (unsigned)b + 1, (unsigned)ch, stxt);
+        else n += snprintf(buf + n, sizeof(buf) - (size_t)n, ui_str(STR_FMT_BRIDGE_ITEM_NOCH), (unsigned)b + 1, stxt);
+    }
+    if (strcmp(lv_label_get_text(s_bridge_status_label), buf) != 0) lv_label_set_text(s_bridge_status_label, buf);
+}
+
 static void refresh_dashboard(lv_timer_t *t)
 {
     (void)t;
     refresh_power_control_panel();
+    refresh_bridge_status_line();
 
     /* 2026-09-11(SD 신뢰성 재설계 항목4) — 쓰기경로(node_hub.c recv_cb, LVGL 태스크 아님)가
      * SD I/O 실패를 만났으면 여기(LVGL 태스크, 매 틱)서 test-and-clear로 가져와 회로차단기를
@@ -7452,6 +7492,11 @@ void ui_init(void)
      * MB)는 앞 괄호 라벨 한 번만 쓰고 값 뒤에는 반복 안 함(사용자 지시).
      * 2026-09-10(사용자 지시 — "웹 메모리(1줄) 스토리지(1줄)") — summary_top_box의 둘째 줄
      * (summary_top_row의 형제) */
+    /* 2026-10-18(보릴 6단계, 사용자 설계) — 웹 줄 아래: 브릿지1·2의 채널과 상태 */
+    s_bridge_status_label = lv_label_create(summary_top_box);
+    lv_obj_set_style_text_font(s_bridge_status_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_label_set_text(s_bridge_status_label, "");
+
     s_storage_status_label = lv_label_create(summary_top_box);
     lv_obj_set_style_text_font(s_storage_status_label, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_label_set_text(s_storage_status_label, "");
@@ -7477,7 +7522,11 @@ void ui_init(void)
     lv_obj_set_style_bg_opa(power_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_pad_all(power_list, 0, 0);
     lv_obj_set_style_pad_row(power_list, 10, 0);
-    for (int i = 0; i < POWER_RELAY_COUNT; i++) {
+    /* 2026-10-18(보릴 6단계, 사용자 설계) — 원격릴레이를 맨 위에. 전원 아이콘 옆에 신호 세기(센스·캠과 같은 아이콘), 보드 릴레이는 같은
+     * 폭의 빈칸을 둬서 이름 글자 시작을 맞춤 */
+    static const int s_power_row_order[POWER_RELAY_COUNT] = { POWER_RELAY_REMOTE_IDX, 0, 1 };
+    for (int oi = 0; oi < POWER_RELAY_COUNT; oi++) {
+        int i = s_power_row_order[oi];
         lv_obj_t *row = lv_obj_create(power_list);
         lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
         lv_obj_set_style_border_width(row, 0, 0);
@@ -7510,6 +7559,14 @@ void ui_init(void)
         lv_obj_add_flag(status, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_user_data(status, (void *)(uintptr_t)i);
         s_power_dash_row_status[i] = status;
+
+        if (power_relay_is_remote(i)) {
+            s_power_dash_row_signal[i] = create_signal_widget(row);
+        } else {
+            lv_obj_t *gap = lv_obj_create(row);   /* create_signal_widget과 같은 폭(28) */
+            lv_obj_remove_style_all(gap);
+            lv_obj_set_size(gap, 28, 16);
+        }
 
         lv_obj_t *label = lv_label_create(row);
         lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -10041,6 +10098,20 @@ static void relay_build_override_box(lv_obj_t *parent, const power_relay_config_
     lv_dropdown_set_selected(s_relay_ovr_rel_dd, (uint16_t)(ri >= 0 ? ri : 0));
 }
 
+/* 2026-10-18 — 별명이 없을 때 이름: 보드 릴레이 "릴레이 N", 원격릴레이 "원격릴레이" */
+static void relay_default_name(int idx, char *out, size_t cap)
+{
+    if (power_relay_is_remote(idx)) snprintf(out, cap, "%s", ui_str(STR_RELAY_REMOTE_NAME));
+    else snprintf(out, cap, ui_str(STR_RELAY_DEFAULT_NAME_FMT), idx + 1);
+}
+
+static void cb_relay_remote_failsafe_changed(lv_event_t *e)
+{
+    static const uint16_t s_min[] = { 10, 30, 60 };
+    uint32_t sel = lv_dropdown_get_selected(lv_event_get_target(e));
+    if (sel < 3) power_relay_set_remote_failsafe_min(s_min[sel]);
+}
+
 static void build_relay_popup(int idx)
 {
     if (s_relay_popup) return;  /* 이미 열려있음 */
@@ -10062,7 +10133,7 @@ static void build_relay_popup(int idx)
     lv_obj_set_style_pad_hor(popup, 12, 0);
 
     char default_name[POWER_RELAY_ALIAS_MAX_LEN];
-    snprintf(default_name, sizeof(default_name), ui_str(STR_RELAY_DEFAULT_NAME_FMT), idx + 1);
+    relay_default_name(idx, default_name, sizeof(default_name));
 
     /* Alias 행 — build_device_popup()과 동일 패턴(즉시 Apply) */
     lv_obj_t *alias_row = lv_obj_create(popup);
@@ -10097,6 +10168,16 @@ static void build_relay_popup(int idx)
     lv_obj_t *alias_apply_lbl = lv_label_create(s_relay_alias_apply_btn);
     lv_label_set_text(alias_apply_lbl, ui_str(STR_BTN_APPLY));
     lv_obj_set_style_text_font(alias_apply_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-10-18(보릴 6단계, 사용자 결정) — 원격릴레이만: 통신이 끊기면 보릴이 이 시간 뒤 끔(10분/30분/1시간). 고르면 바로 저장
+     * (보릴에는 다음 상태 응답 — 10초 안 — 으로 전달) */
+    if (power_relay_is_remote(idx)) {
+        lv_obj_t *fs_row = relay_make_pair_row(popup);
+        lv_obj_t *fs_dd = relay_popup_dropdown_field(fs_row, STR_LABEL_REMOTE_FAILSAFE, ui_str(STR_OPT_REMOTE_FAILSAFE_LIST),
+                                                     cb_relay_remote_failsafe_changed);
+        uint16_t fm = power_relay_get_remote_failsafe_min();
+        lv_dropdown_set_selected(fs_dd, fm == 60 ? 2 : fm == 30 ? 1 : 0);
+    }
 
     if (!s_relay_keyboard) {
         s_relay_keyboard = lv_keyboard_create(lv_screen_active());

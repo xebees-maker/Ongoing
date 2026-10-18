@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include "photo_rx.h"
 #include "can_bridge.h"
+#include "power_relay.h"
 #include "node_request.h"
 #include "rtc_sync.h"
 #include "ui_log.h"
@@ -147,6 +148,11 @@ static esp_timer_handle_t s_liveness_sweep_timer = NULL;
 /* 2026-10-05(할 일 AD 5단계) — 알림에 쓸 장치 이름(Alias 우선). 노드 뮤텍스 안에서 불러도 됨(alarm_post는 큐에만 넣음) */
 static const char *alarm_name(const node_hub_node_t *n)
 {
+    /* 2026-10-18(사용자 — 알림에 "B9D99FC"가 나오면 무슨 기기인지 모름) — 보릴은 원격릴레이 이름(별명이 있으면 그것) */
+    if (n->kind == HUB_NODE_KIND_BORIL) {
+        const power_relay_config_t *rc = power_relay_get_config(POWER_RELAY_REMOTE_IDX);
+        return (rc && rc->alias[0]) ? rc->alias : "Remote relay";
+    }
     const char *alias = device_config_get_alias(n->mac);
     return alias[0] ? alias : n->name;
 }
@@ -194,9 +200,8 @@ static void liveness_sweep_cb(void *arg)
 /* 2026-10-18(5단계) — 보릴은 상시 전원이라 10초마다 상태를 보냄 → 35초(3번 넘게) 못 받으면 끊김 */
 #define BORIL_NODE_TIMEOUT_MS 35000U
 /* 보릴 끊김 시간(분) — 통신이 끊기면 보릴이 릴레이를 그대로 두다가 이만큼 지나면 끔(사용자 결정: 기본 10, 선택 10/30/60).
- * 설정 화면은 6단계 — 그때 device_config로 */
-#define BORIL_FAILSAFE_MIN_DEFAULT 10
-static uint16_t boril_failsafe_min(void) { return BORIL_FAILSAFE_MIN_DEFAULT; }
+ * 값은 원격릴레이 팝업에서 정하고 power_relay 설정 파일에 저장 */
+static uint16_t boril_failsafe_min(void) { return power_relay_get_remote_failsafe_min(); }   /* 6단계 — 전력 제어 설정(파일) */
 
 static hub_node_kind_t classify_name(const char *name)
 {
@@ -1442,4 +1447,21 @@ esp_err_t node_hub_boril_set(const uint8_t *mac, bool on)
     xSemaphoreGive(s_nodes_mutex);
     ESP_LOGI(TAG, "Boril %02X%02X%02X relay %s (by Cntl)", mac[3], mac[4], mac[5], reply.relay_on ? "ON" : "OFF");
     return (reply.relay_on != 0) == on ? ESP_OK : ESP_FAIL;
+}
+
+bool node_hub_get_boril(node_hub_node_t *out)
+{
+    bool found = false;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_node_count; i++) {
+        node_hub_node_t *n = &s_nodes[i];
+        if (n->kind != HUB_NODE_KIND_BORIL) continue;
+        if (n->conn_state != NODE_CONN_PAIRED || elapsed_ms(now_ms, n->last_seen_ms) > node_hub_node_timeout_ms(n)) continue;
+        *out = *n;
+        found = true;
+        break;
+    }
+    xSemaphoreGive(s_nodes_mutex);
+    return found;
 }

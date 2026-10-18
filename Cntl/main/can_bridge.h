@@ -39,6 +39,17 @@ bool can_bridge_bridge_watched(uint8_t bridge);
 /* 이 노드가 붙어 있는 브릿지 — 그 노드의 프레임이 마지막으로 들어온 브릿지(모르면 0). 콘→노드 송신은 이 브릿지로 감 */
 uint8_t can_bridge_bridge_of(const uint8_t *mac);
 
+/* 2026-10-18(보릴 6단계 — 요약의 브릿지 줄) */
+typedef enum {
+    CAN_BRIDGE_ST_OK = 0,      /* 응답함, 콘이 정한 채널로 설정됨 */
+    CAN_BRIDGE_ST_SETTING,     /* 응답하지만 아직 콘의 채널을 안 받음(켜진 직후 — 이 동안 기기 연결을 안 받음) */
+    CAN_BRIDGE_ST_NORESP,      /* PONG 10초 넘게 없음(RESET을 보내는 중) */
+    CAN_BRIDGE_ST_ABSENT,      /* 콘이 켜진 뒤 한 번도 응답 안 함(브릿지 2만 — 1은 처음부터 감시해서 NORESP) */
+} can_bridge_state_t;
+can_bridge_state_t can_bridge_bridge_state(uint8_t bridge, uint8_t *channel_out);   /* channel_out: 0 = 모름 */
+/* CAN 버스 문제(버스 오프 또는 송신에 ACK 없음) 중이면 true — 브릿지별이 아니라 버스 전체 */
+bool can_bridge_bus_error(void);
+
 /* esp_now_send(mac, data, len) 자리 — fire-and-forget, 브가 큐잉만 하고 바로 반환.
  * ADVERTISE_ACK처럼 응답을 기다리지 않는 단발 전송용.
  * 이름이 can_bridge_send가 아니라 can_bridge_relay_send인 이유: 공유 라이브러리

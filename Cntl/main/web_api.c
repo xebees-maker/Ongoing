@@ -8,6 +8,7 @@
 #include "flash_usage.h"
 #include "device_config.h"
 #include "power_relay.h"
+#include "can_bridge.h"
 #include "storage_mgr.h"
 #include "sd_storage.h"
 #include "rtc_sync.h"
@@ -185,6 +186,14 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
         jb_str(&b, c ? c->alias : "");
         jb_en(&b, "alias", c ? c->alias : "");
         jb_printf(&b, ",\"on\":%s", power_relay_get_commanded_on(i) ? "true" : "false");
+        if (power_relay_is_remote(i)) {
+            /* 2026-10-18(보릴 6단계) — 원격릴레이: rst 0 끊김 / 1 확인 중 / 2 정상, act = 보릴이 확인한 출력(화면은 이것만 보여 줌) */
+            power_remote_status_t rs;
+            power_relay_get_remote_status(&rs);
+            jb_printf(&b, ",\"remote\":true,\"rst\":%d,\"act\":%s,\"near\":%s", (int)rs.state, rs.actual_on ? "true" : "false",
+                      rs.near_orphan ? "true" : "false");
+            if (rs.state != POWER_REMOTE_DISCONNECTED && rs.has_rssi) jb_printf(&b, ",\"rssi\":%d", (int)rs.rssi);
+        }
         if (c) {
             jb_printf(&b, ",\"configured\":%s,\"override\":%s,\"override_on\":%s,\"turns_on\":%s,\"rises\":%s,\"chan\":%u,\"center\":",
                       c->configured ? "true" : "false", c->manual_override ? "true" : "false",
@@ -199,6 +208,15 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
             }
         }
         jb_printf(&b, "}");
+    }
+    jb_printf(&b, "]");
+
+    /* 2026-10-18(보릴 6단계) — 요약의 브릿지 줄: st 0 정상 / 1 채널 설정 중 / 2 응답 없음 / 3 연결 안 됨, ch 0 = 모름, canerr = CAN 버스 문제 */
+    jb_printf(&b, ",\"canerr\":%s,\"bridges\":[", can_bridge_bus_error() ? "true" : "false");
+    for (uint8_t bi = 0; bi < CAN_BRIDGE_MAX_BRIDGES; bi++) {
+        uint8_t ch = 0;
+        can_bridge_state_t st = can_bridge_bridge_state(bi, &ch);
+        jb_printf(&b, "%s{\"st\":%d,\"ch\":%u}", bi ? "," : "", (int)st, (unsigned)ch);
     }
     jb_printf(&b, "]");
 
@@ -676,6 +694,7 @@ static esp_err_t api_relay_get_handler(httpd_req_t *req)
     int gc = (c->group == POWER_GROUP_AGAR) ? 2 : (c->precise ? 1 : 0);
     jb_printf(&b, "{\"idx\":%d,\"alias\":", idx);
     jb_str(&b, c->alias);
+    if (power_relay_is_remote(idx)) jb_printf(&b, ",\"remote\":true,\"fs\":%u", (unsigned)power_relay_get_remote_failsafe_min());   /* 10-18 */
     jb_printf(&b, ",\"alias_max\":%d,\"configured\":%s,\"ai\":%s,\"manual\":%s,\"manual_on\":%s,\"chan\":%u,"
                   "\"y\":%s,\"z\":%s,\"center\":", POWER_RELAY_ALIAS_MAX_LEN - 1,
               c->configured ? "true" : "false", c->ai_mode ? "true" : "false", c->manual_override ? "true" : "false",
@@ -801,6 +820,17 @@ static esp_err_t api_relay_alias_post_handler(httpd_req_t *req)
     op->type = UI_WEB_OP_RELAY_ALIAS;
     bool ok = ui_main_run_web_op(op, 2000);
     return send_simple(req, ok ? NULL : "400 Bad Request", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+/* POST /api/relay/failsafe?min=10|30|60 — 2026-10-18(보릴 6단계) 원격릴레이 끊김 시간(콘 팝업 드롭다운과 같음, 바로 저장) */
+static esp_err_t api_relay_failsafe_post_handler(httpd_req_t *req)
+{
+    WEB_SCREEN_API_BEGIN(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    int min = query_int(s_w->query, "min", 0);
+    if (min != 10 && min != 30 && min != 60) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    power_relay_set_remote_failsafe_min((uint16_t)min);
+    return send_simple(req, NULL, "{\"ok\":true}");
 }
 
 /* POST /api/relay/override?idx=&on=0|1 — 수동 조작(콘 전원 아이콘 확인 팝업 Yes와 같음) */
@@ -1532,6 +1562,8 @@ void web_api_register_handlers(httpd_handle_t server)
     static const httpd_uri_t relay_apply_uri = { .uri = "/api/relay/apply", .method = HTTP_POST, .handler = api_relay_apply_post_handler };
     static const httpd_uri_t relay_alias_uri = { .uri = "/api/relay/alias", .method = HTTP_POST, .handler = api_relay_alias_post_handler };
     static const httpd_uri_t relay_override_uri = { .uri = "/api/relay/override", .method = HTTP_POST, .handler = api_relay_override_post_handler };
+    static const httpd_uri_t relay_failsafe_uri = { .uri = "/api/relay/failsafe", .method = HTTP_POST, .handler = api_relay_failsafe_post_handler };
+    httpd_register_uri_handler(server, &relay_failsafe_uri);
     httpd_register_uri_handler(server, &relay_uri);
     httpd_register_uri_handler(server, &relay_apply_uri);
     httpd_register_uri_handler(server, &relay_alias_uri);

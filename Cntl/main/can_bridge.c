@@ -381,6 +381,20 @@ void can_bridge_set_bridge_reset_cb(can_bridge_bridge_reset_cb_t cb) { s_bridge_
 bool can_bridge_bridge_is_silent(uint8_t b) { return b < NB && s_br[b].silent; }
 bool can_bridge_bridge_watched(uint8_t b) { return b == 0 || (b < NB && s_br[b].seen); }
 
+static volatile bool s_bus_err_now;   /* can_status_task가 갱신 — 버스 오프 또는 송신 ACK 없음 */
+bool can_bridge_bus_error(void) { return s_bus_err_now; }
+
+can_bridge_state_t can_bridge_bridge_state(uint8_t b, uint8_t *channel_out)
+{
+    if (channel_out) *channel_out = 0;
+    if (b >= NB) return CAN_BRIDGE_ST_ABSENT;
+    const bridge_t *br = &s_br[b];
+    if (!br->seen) return b == 0 ? CAN_BRIDGE_ST_NORESP : CAN_BRIDGE_ST_ABSENT;
+    if (channel_out) *channel_out = br->channel;
+    if (br->silent) return CAN_BRIDGE_ST_NORESP;
+    return br->channel_set ? CAN_BRIDGE_ST_OK : CAN_BRIDGE_ST_SETTING;
+}
+
 /* 브가 재부팅하면 브에 맡긴 reliable 요청은 영영 결과가 안 옴 — 기다리는 호출자를 실패로 깨움(그 브릿지 몫만) */
 static void fail_all_pending(uint8_t b)
 {
@@ -634,6 +648,7 @@ static void can_status_task(void *arg)
             }
             s_last_aborts = aborts;
             s_last_tx = tx;
+            s_bus_err_now = s_bus_off_warned || s_stuck_warned;   /* 2026-10-18 — 요약의 브릿지 줄 */
         }
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));  /* 5초 주기, 버스 오프·막힘이면 즉시 */
     }
