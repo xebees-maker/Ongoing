@@ -79,9 +79,8 @@ bool scd41_poll_single_shot(int *co2_ppm, float *temperature, float *humidity, b
 /* 2026-09-29(측정 실패 진단) — 마지막 실패 원인. 값은 esp_now_link.h의 sensor_fault_t와 같음
  * (0=없음, 1=명령 NACK, 3=CRC, 4=수신 실패). "타임아웃까지 준비 안 됨"(2)은 드라이버가 아니라 대기하는 호출부가 판단 */
 int scd41_last_fault(void);
-/* 2026-10-05(진단, 임시) */
-void scd41_diag_get(int *polls, uint16_t *last_status);
-void scd41_log_identity(void);
+/* 2026-10-18(시험) — reinit 직후 일련번호·종류·ASC를 읽기만(로그 없음, scd41.c 주석) */
+void scd41_read_identity(void);
 /* 2026-10-05 — ASC가 켜져 있으면 끄고 persist(센서당 한 번). 유휴 상태에서 부를 것 */
 void scd41_ensure_asc_off(void);
 /* 2026-10-13 — 센서 공장 초기화(FRC·ASC 이력 지움) 후 ASC 끄고 persist. 약 2.5초 블로킹. asc_after = 끝난 뒤 ASC(0xFF 못 읽음) */

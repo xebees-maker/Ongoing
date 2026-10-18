@@ -111,9 +111,8 @@ static const char *TAG = "sens_deep_sleep_node";
  * (사용자 지시: 온습도~100ms, CO2~1초, 암모니아~3초) — 이 값은 SCD41 전용, MQ137은 AO/DO를
  * 그냥 즉시 읽으면 되므로(트리거+폴링 자체가 없음) 이 타임아웃이 필요 없음 */
 /* 2026-10-05(사용자 결정 — SCD41 개선 1단계) — Sensirion 공식 드라이버(measureAndReadSingleShot)처럼 5초 뒤부터 100ms마다,
- * 준비될 때까지 기다림. 공식은 제한 없음 — 여기선 RWDT 예산·전력 때문에 상한 15초(예전 6초에 포기 → 다음 측정이 남은 결과를 읽던 패턴) */
-#define SCD41_MEASURE_POLL_MS    100
-#define SCD41_MEASURE_TIMEOUT_MS 15000
+ * 준비될 때까지 기다림. 공식은 제한 없음 — 여기선 RWDT 예산·전력 때문에 상한 15초(measure_scd41 안). 예전 6초에 포기 → 다음 측정이
+ * 남은 결과를 읽던 패턴 */
 /* 2026-09-14(사용자 지적 "SCD41 값 못읽은 거 왜 안 찾았냐" 재조사 — Sensirion SCD4x
  * 공식 매뉴얼 v1.7 확인) — measure_single_shot(0x219d)의 실행시간은 정확히 5000ms
  * (Table 9)이고, Section 3.4: "실행시간이 명시된 명령은 그 실행시간 동안 추가 명령을
@@ -375,7 +374,7 @@ static void pm_lock_no_light_sleep_release(void) {}
 #endif
 
 #if CONFIG_SENS_SENSOR_SCD41
-/* SCD41 single-shot 판독 — 트리거 후 최대 SCD41_MEASURE_TIMEOUT_MS까지 블로킹 폴링.
+/* SCD41 single-shot 판독 — 트리거 후 최대 15초까지 블로킹 폴링.
  * 예전 sensor_node.c는 이걸 여러 esp_timer 틱에 걸쳐 논블로킹으로 했는데(계속실행 전제),
  * 딥슬립은 부팅마다 한 번뿐이라 "다음 틱"이 없음 — CAM의 촬영 대기 패턴과 동일하게
  * 한 부팅 안에서 블로킹으로 끝냄(scd41.c의 trigger/poll API 자체는 안 건드림) */
@@ -404,12 +403,10 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
     /* 2026-10-06(사용자 결정 — Sensirion 단발 예제 그대로 시험) — exampleScd41SingleShot.ino loop():
      * wakeUp() → measureSingleShot()(5초, 결과 버림) → measureAndReadSingleShot()(트리거 → 5초 → 100ms마다 data-ready, 준비되면 읽기).
      * wake_up은 이 함수 맨 앞, 위의 트리거가 "버리는 측정". 공식은 무한정 기다림 — RWDT 예산 때문에 두 번째 트리거 뒤 15초 상한(시험, 임시) */
-    static RTC_DATA_ATTR uint32_t s_mfr_n = 0, s_mfr_ok = 0;
     vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_MIN_WAIT_MS));  /* 첫 측정(버림) — 공식 measureSingleShot() 안의 delay(5000) */
     scd41_clear_fault();
     bool ok = false;
     uint32_t waited_ms = 0;
-    int diag_polls = 0; uint16_t diag_status = 0xFFFF;
     if (!scd41_trigger_single_shot()) {
         s_attempt_fault = SENSOR_FAULT_CMD_NACK;
     } else {
@@ -431,13 +428,7 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
             }
         }
         if (!done) s_attempt_fault = scd41_last_fault() ? (uint8_t)scd41_last_fault() : SENSOR_FAULT_NOT_READY;
-        scd41_diag_get(&diag_polls, &diag_status);
     }
-    s_mfr_n++;
-    if (ok) s_mfr_ok++;
-    ESP_LOGW(TAG, "SCD41 MFR n=%u %s ready_ms=%u polls=%d status=0x%04X fault=%u (ok total %u/%u)",
-             (unsigned)s_mfr_n, ok ? "OK" : "FAIL", (unsigned)(ok ? waited_ms : 0), diag_polls, (unsigned)diag_status,
-             (unsigned)(ok ? 0 : s_attempt_fault), (unsigned)s_mfr_ok, (unsigned)s_mfr_n);
     return ok;
 }
 #endif
@@ -718,7 +709,7 @@ void app_main(void)
     if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
         scd41_wake_up();
         scd41_reinit();
-        scd41_log_identity();  /* 2026-10-05(진단, 임시) */
+        scd41_read_identity();   /* 2026-10-18(시험) — 예전 순서 그대로(scd41.c 주석) */
         scd41_ensure_asc_off();  /* 2026-10-05(SCD41 개선 3단계) */
     }
 #elif CONFIG_SENS_SENSOR_SHT45

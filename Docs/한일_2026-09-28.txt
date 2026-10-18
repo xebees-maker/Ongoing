@@ -428,6 +428,9 @@ C8. f417d1a(09-29) 확인 — 실패 원인(명령 NACK/데이터 준비 안 됨
     풀리면 데이터시트 마지막 단계(SCD41 전원 차단)가 필요 — 이 보드는 3.3V 직결이라 하드웨어 변경(MOSFET 스위칭 등) 검토.
     [발동 10-18] S023E04: 00:38 측정 8051 뒤 노드 재부팅(USB 선 정리 중), 그 뒤 매 주기 "data not ready" 12:35까지 1760번 연속(측정 번호 0),
     3회마다 재초기화로도 회복 안 됨. 사용자 판단 — 접촉 불량, 다시 연결해 정상(12:4x).
+    관찰 중(10-18 사용자 — 그대로 두고 관찰): 12:46부터 측정은 되지만 약 45초마다 "data not ready"가 한 번씩 섞임. 시험 코드 정리 뒤 리셋 부팅에서
+    첫 성공까지 약 4분(11주기 실패) — 재초기화 직후 읽기 3개(일련번호·종류·ASC, scd41_read_identity)를 되돌린 펌웨어는 약 1분. 한 번씩이라
+    원인으로 단정 못 함 — 읽기는 Sensirion 예제 순서와 같아 그대로 둠.
 [조건: 개발 완료 후 상용화할 때 — 사용자 10-01: 그때 제거]
 C9. 임시 테스트 API 4개 제거(capture_now, devlog, sdtest, statsfile — 예전 할 일 F). /api/devlog_dump는 C5 확보용이라 대상 아님.
     + 시험용 API /api/notify_test(10-03, 할 일 AD 1단계 알림 시험용) 제거.
@@ -1135,11 +1138,11 @@ C14. 39af070 Wi-Fi 결함 수정 2개 동작 확인 — ① 연결 요청 거절
     지운 뒤 복원해야 해서 안 함 — 할지 사용자 결정).
  3. 쓴 뒤 손상 복구(사용자 — 지금은 보류): SD 원시 기록을 내부 플래시 7일치와 대조, 다르거나 빠진 구간을 다시 씀.
  4. 시험 끝나면 캠 주기촬영 간격을 30분~1시간으로(지금 시험용 1분).
- 5. 할 일 AF: 시험용 웹 처리기·코드 지움(sdhealth_test(check/flip/erase), fsbench, stats/aggdump, stats/sync, statsfile, capture_now, devlog,
-    sdtest, alarm_sim, SCD41 시험 코드, STATSIO/PHOTOIO 로그), 백업 알림 주기 90일로.
+ 5. 할 일 AF — 10-18 끝(70b4e11, 센스 SCD41 시험 코드 포함). 남긴 것: capture_now·devlog·sdtest·statsfile·notify/test·alarm_sim(C9 — 상용화 때),
+    devlog_dump, stats/sync(Tools/sd_effect_check.py — SD 확인이 끝나면 지움). 백업 알림 90일. 캠 촬영 간격은 사진 링 확인 뒤(4번).
     + 10-17 임시: net 진단(net_diag.c, lvl=net, 10초 자동 기록, 1초 min_ever 로그), 팝업별 메모리 로그(create_modal/create_page_popup),
     /api/test/campopup + CAMPROBE 로그, LVRENDER 갱신 시간 로그(lv_mem_route.c — 할당 나누는 부분은 남김).
  6. (A 목록 끝 — 165)
  7. 보브·보릴 1~6단계 끝(166). 남은 것: 보릴 스스로 재부팅 원인(다시 나면 콘 로그 "restarted (reset reason N)"·logs/boril).
  8. (끝 — 5014, 166 ②)  9. (끝 — 요약 브릿지 줄, 166 ④)
- 10. 할 일 AF에 더함: /api/test/boril(6단계 화면이 생겨 필요 없음).
+ 10. (끝 — /api/test/boril 지움)

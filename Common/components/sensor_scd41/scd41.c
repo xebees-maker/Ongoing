@@ -48,10 +48,6 @@ static int s_last_fault = 0;
 
 int scd41_last_fault(void) { return s_last_fault; }
 
-/* 2026-10-05(진단, 임시 — SCD41 단발 측정이 계속 NOT_READY) — 이번 트리거 뒤 data_ready 폴 횟수·마지막 상태 원값 */
-static int      s_diag_polls = 0;
-static uint16_t s_diag_status = 0xFFFF;  /* 0xFFFF = 상태를 한 번도 못 받음 */
-void scd41_diag_get(int *polls, uint16_t *last_status) { *polls = s_diag_polls; *last_status = s_diag_status; }
 void scd41_clear_fault(void) { s_last_fault = 0; }
 
 static bool start_measurement_sequence(void);
@@ -256,8 +252,6 @@ static bool data_ready(void)
     }
 
     uint16_t status = ((uint16_t)resp[0] << 8) | resp[1];
-    s_diag_polls++;
-    s_diag_status = status;
     bool ready = (status & 0x07FF) != 0;
     ESP_LOGD(TAG, "data_ready: status=0x%04X ready=%d", status, ready);
     if (!ready) check_stale();
@@ -348,20 +342,16 @@ static bool read_words(uint16_t cmd, uint16_t *w, int n)
     return true;
 }
 
-void scd41_log_identity(void)
+/* 2026-10-18(시험 — 정리에서 일련번호·종류·ASC 읽기를 빼자 리셋 뒤 측정이 계속 "준비 안 됨") — 예전 scd41_log_identity의 읽기 3개만
+ * 그대로(로그 없이). Sensirion 단발 예제 setup()도 reinit 뒤 일련번호를 읽음. 이것으로 회복되면 reinit 직후 순서가 원인 */
+void scd41_read_identity(void)
 {
     if (!s_dev) return;
-    uint16_t sn[3] = { 0 }, var = 0;
+    uint16_t sn[3] = { 0 }, var = 0, asc = 0;
     bool sn_ok = read_words(0x3682, sn, 3);
     bool var_ok = read_words(0x202F, &var, 1);
-    ESP_LOGW(TAG, "SCD4x identity: serial=%s%04X%04X%04X variant=%s0x%04X",
-             sn_ok ? "" : "(fail)", sn[0], sn[1], sn[2], var_ok ? "" : "(fail)", var);
-
-    /* 2026-10-05(사용자 지시 — 읽기만) — get_automatic_self_calibration_enabled(0x2313): 1 = ASC 켜짐, 0 = 꺼짐 */
-    uint16_t asc = 0xFFFF;
     bool asc_ok = read_words(0x2313, &asc, 1);
-    ESP_LOGW(TAG, "SCD4x ASC: %s%u", asc_ok ? "" : "(read fail) ", (unsigned)asc);
-
+    ESP_LOGD(TAG, "SCD4x identity read: sn %d var %d asc %d", sn_ok, var_ok, asc_ok);
 }
 
 /* 2026-10-05(사용자 결정 — SCD41 개선 3단계) — ASC 끄기 + persist_settings, 센서당 한 번만.
@@ -423,8 +413,6 @@ void scd41_wake_up(void)
 bool scd41_trigger_single_shot(void)
 {
     if (!s_dev) return false;
-    s_diag_polls = 0;
-    s_diag_status = 0xFFFF;
     if (!send_cmd(CMD_MEASURE_SINGLE_SHOT)) return false;
     s_single_shot_pending = true;
     return true;
