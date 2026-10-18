@@ -206,7 +206,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  msg_type;
     uint8_t  relay;          /* BORIL_RELAY_* */
     uint8_t  reserved;
-    uint16_t failsafe_min;   /* 0이면 그대로. 콘 설정(기본 10, 선택 10/30/60 — 사용자 결정) */
+    uint16_t failsafe_min;   /* 0이면 그대로. 콘 설정(기본 10, 선택 1/10/30/60 — 사용자 결정, 1은 시험용) */
 } esp_now_boril_set_t;
 
 /* ESP_NOW_MSG_SLEEP_NOW 페이로드. ESP_NOW_MSG_SLEEP_NOW_ACK도 이 구조체를 msg_type만 바꿔

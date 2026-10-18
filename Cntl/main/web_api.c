@@ -822,13 +822,13 @@ static esp_err_t api_relay_alias_post_handler(httpd_req_t *req)
     return send_simple(req, ok ? NULL : "400 Bad Request", ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
-/* POST /api/relay/failsafe?min=10|30|60 — 2026-10-18(보릴 6단계) 원격릴레이 끊김 시간(콘 팝업 드롭다운과 같음, 바로 저장) */
+/* POST /api/relay/failsafe?min=1|10|30|60 — 2026-10-18(보릴 6단계) 원격릴레이 끊김 시간(콘 팝업 드롭다운과 같음, 바로 저장) */
 static esp_err_t api_relay_failsafe_post_handler(httpd_req_t *req)
 {
     WEB_SCREEN_API_BEGIN(req);
     if (!work_ready(req)) return ESP_FAIL;
     int min = query_int(s_w->query, "min", 0);
-    if (min != 10 && min != 30 && min != 60) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    if (min != 1 && min != 10 && min != 30 && min != 60) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
     power_relay_set_remote_failsafe_min((uint16_t)min);
     return send_simple(req, NULL, "{\"ok\":true}");
 }

@@ -165,7 +165,7 @@ typedef struct {
     bool    near_orphan;    /* 응답이 끊기기 직전(센스·캠 신호 아이콘과 같은 빨강 규칙) */
 } power_remote_status_t;
 void power_relay_get_remote_status(power_remote_status_t *out);
-/* 통신이 끊기면 보릴이 릴레이를 그대로 두다가 이만큼(분) 지나면 끔 — 기본 10, 선택 10/30/60(사용자 결정). 설정 파일에 저장 */
+/* 통신이 끊기면 보릴이 릴레이를 그대로 두다가 이만큼(분) 지나면 끔 — 기본 10, 선택 1/10/30/60(사용자 결정, 1은 시험용 10-18). 설정 파일에 저장 */
 uint16_t power_relay_get_remote_failsafe_min(void);
 void power_relay_set_remote_failsafe_min(uint16_t min);
 /* 기본 이름(별명 없을 때) — "릴레이 %d"가 아니라 원격릴레이 */

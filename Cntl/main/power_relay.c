@@ -284,7 +284,7 @@ void power_relay_load(void)
     fclose(f);
     if (got == sizeof(*s) && s->version == POWER_RELAY_FILE_VERSION) {
         memcpy(s_relay_cfg, s->relays, sizeof(s_relay_cfg));
-        if (s->remote_failsafe_min == 10 || s->remote_failsafe_min == 30 || s->remote_failsafe_min == 60) {
+        if (s->remote_failsafe_min == 1 || s->remote_failsafe_min == 10 || s->remote_failsafe_min == 30 || s->remote_failsafe_min == 60) {
             s_remote_failsafe_min = s->remote_failsafe_min;
         }
     } else if (got == sizeof(power_relay_file_v2_t) && s->version == 2) {
@@ -377,7 +377,7 @@ uint16_t power_relay_get_remote_failsafe_min(void) { return s_remote_failsafe_mi
 
 void power_relay_set_remote_failsafe_min(uint16_t min)
 {
-    if (min != 10 && min != 30 && min != 60) return;
+    if (min != 1 && min != 10 && min != 30 && min != 60) return;
     if (min == s_remote_failsafe_min) return;
     s_remote_failsafe_min = min;
     power_relay_save();

@@ -27,12 +27,18 @@
 #include "esp_system.h"
 #include "driver/gpio.h"
 #include "esp_now_link.h"
+#include "status_led.h"
 
 static const char *TAG = "BORIL";
 
 #define RF_SWITCH_POWER_GPIO   GPIO_NUM_3    /* 0 = RF 스위치 켜짐 */
 #define RF_ANT_SELECT_GPIO     GPIO_NUM_14   /* 1 = 외장(U.FL) */
 #define RELAY_GPIO             GPIO_NUM_18   /* D10 — HIGH = SSR 켜짐 */
+/* 2026-10-18(사용자 — 센스 보드처럼 광고 중/연결 후를 구분해 깜빡임) — 보드의 노란 LED(D4): 3V3 → 1.5k → LED → GPIO15, LOW = 켜짐.
+ * GPIO15는 스트래핑 핀이라 부팅이 끝난 뒤(app_main)에만 출력으로 씀. status_led의 사용자 정의 출력으로 켜고 끄는 방향을 뒤집음 */
+#define LED_GPIO               GPIO_NUM_15
+#define LED_ID                 ((gpio_num_t)(GPIO_NUM_MAX + 1))
+#define UNPAIRED_FAILED_US     (30 * 1000 * 1000)   /* 이만큼 못 찾으면 느린 깜빡임(광고는 계속) — 센스 esp_now_node.c와 같음 */
 
 #define SCAN_CHANNEL_MIN    1
 #define SCAN_CHANNEL_MAX    13
@@ -49,7 +55,7 @@ static volatile bool s_paired;
 static volatile bool s_channel_locked;
 static uint8_t s_scan_channel = SCAN_CHANNEL_MIN;
 static bool    s_first_tick;      /* 광고를 막 시작함 — 첫 틱은 채널을 옮기지 않음 */
-static esp_timer_handle_t s_adv_timer, s_status_timer;
+static esp_timer_handle_t s_adv_timer, s_status_timer, s_unpaired_timer;
 static const uint8_t s_broadcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
 static volatile bool     s_relay_on;
@@ -101,8 +107,30 @@ static void wifi_init(void)
     }
 }
 
+static void led_write(bool on) { gpio_set_level(LED_GPIO, on ? 0 : 1); }
+
+/* 광고를 오래 못 끝냄 — 느린 깜빡임(광고는 계속) */
+static void unpaired_timer_cb(void *arg)
+{
+    (void)arg;
+    if (!s_paired) status_led_set_pattern(LED_ID, LED_PATTERN_BLINK_SLOW);
+}
+
+/* LED: 광고 시작은 빠른 깜빡임 → 30초 못 붙으면 느린 깜빡임. 연결돼 있다가 끊긴 경우는 바로 느린 깜빡임(센스와 같음) */
+static void enter_advertising_led(bool was_linked)
+{
+    esp_timer_stop(s_unpaired_timer);
+    if (was_linked) {
+        status_led_set_pattern(LED_ID, LED_PATTERN_BLINK_SLOW);
+    } else {
+        status_led_set_pattern(LED_ID, LED_PATTERN_BLINK_FAST);
+        esp_timer_start_once(s_unpaired_timer, UNPAIRED_FAILED_US);
+    }
+}
+
 static void enter_advertising(void)
 {
+    enter_advertising_led(s_paired);
     s_paired = false;
     s_channel_locked = false;
     s_scan_channel = SCAN_CHANNEL_MIN;
@@ -215,6 +243,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         esp_now_pair_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PAIR_ACK };
         memcpy(ack.node_mac, s_mac, 6);
         esp_err_t err = esp_now_send(s_hub_mac, (const uint8_t *)&ack, sizeof(ack));
+        esp_timer_stop(s_unpaired_timer);
+        status_led_set_pattern(LED_ID, LED_PATTERN_HEARTBEAT);
         if (!was_paired) {
             uint8_t ch = 0;
             wifi_second_chan_t sec;
@@ -271,6 +301,13 @@ void app_main(void)
     add_peer(s_broadcast);
     const esp_timer_create_args_t a = { .callback = adv_timer_cb, .name = "adv" };
     ESP_ERROR_CHECK(esp_timer_create(&a, &s_adv_timer));
+    gpio_config_t lc = { .pin_bit_mask = 1ULL << LED_GPIO, .mode = GPIO_MODE_OUTPUT };
+    gpio_set_level(LED_GPIO, 1);
+    gpio_config(&lc);
+    gpio_set_level(LED_GPIO, 1);   /* 꺼짐 */
+    status_led_init_custom(LED_ID, led_write);
+    const esp_timer_create_args_t ut = { .callback = unpaired_timer_cb, .name = "unpaired" };
+    ESP_ERROR_CHECK(esp_timer_create(&ut, &s_unpaired_timer));
     const esp_timer_create_args_t st = { .callback = status_timer_cb, .name = "status" };
     ESP_ERROR_CHECK(esp_timer_create(&st, &s_status_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(s_status_timer, 1000 * 1000));

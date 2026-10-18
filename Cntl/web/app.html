@@ -262,7 +262,7 @@
     <section>
       <h2 data-s="STR_PANEL_SUMMARY"></h2>
       <div id="sumMem" class="val"></div>
-      <div id="sumBridge" class="val"></div>
+      <div id="sumBridge" class="val" style="display:flex;gap:12px"><span id="sumBr0" style="flex:1"></span><span id="sumBr1" style="flex:1"></span></div>
       <div id="sumSd" class="val"></div>
       <div id="sumFlash" class="val"></div>
       <input type="file" id="restoreFile" accept=".bin,application/octet-stream" style="display:none">
@@ -393,10 +393,10 @@
     /* 10-18(보릴 6단계) — 브릿지 줄(콘 refresh_bridge_status_line과 같은 규칙) */
     if (d.bridges) {
       var bst = ['STR_BRIDGE_STATE_OK', 'STR_BRIDGE_STATE_SETTING', 'STR_BRIDGE_STATE_NORESP', 'STR_BRIDGE_STATE_ABSENT'];
-      $('sumBridge').textContent = d.bridges.map(function (b, i) {
-        var st = S(d.canerr ? 'STR_BRIDGE_STATE_CANERR' : bst[b.st]);
-        return b.ch ? fmt(S('STR_FMT_BRIDGE_ITEM'), i + 1, b.ch, st) : fmt(S('STR_FMT_BRIDGE_ITEM_NOCH'), i + 1, st);
-      }).join(' | ');
+      d.bridges.forEach(function (b, i) {   /* 두 칸(콘의 웹·메모리 줄과 같은 칸 나눔) */
+        var st = S(d.canerr ? 'STR_BRIDGE_STATE_CANERR' : bst[b.st]), el = $('sumBr' + i);
+        if (el) el.textContent = b.ch ? fmt(S('STR_FMT_BRIDGE_ITEM'), i + 1, b.ch, st) : fmt(S('STR_FMT_BRIDGE_ITEM_NOCH'), i + 1, st);
+      });
     }
     renderFlash(d.flash);
     var sd = d.sd || {}, el = $('sumSd');
@@ -446,8 +446,10 @@
       var sig = r.remote ? signalHtml({ rssi: r.rssi, near_orphan: r.rst === 0 || r.near, status: 'paired' })
                          : '<span class="sig" style="visibility:hidden"><i></i><i></i><i></i><i></i><i></i></span>';
       var val = r.remote && r.rst === 0 ? S('STR_RELAY_REMOTE_DISCONNECTED') : r.remote && r.rst === 1 ? S('STR_RELAY_REMOTE_PENDING') : relaySummary(r);
-      return '<div class="row tap" data-relay="' + r.idx + '"><span class="pw" style="color:' + (on ? 'var(--green)' : 'var(--grey)') + ';padding:4px 8px">&#x23FB;</span>' +
-        sig + '<span>' + esc(relayName(r)) + '</span><span class="grow val" style="text-align:right">' + esc(val) + '</span>' +
+      /* 10-18(사용자 지시) — 신호 왼쪽, 전원 오른쪽, 둘은 붙임 */
+      return '<div class="row tap" data-relay="' + r.idx + '">' + sig + '<span class="pw" style="color:' + (on ? 'var(--green)' : 'var(--grey)') +
+        ';padding:4px 8px 4px 2px;margin-left:-8px">&#x23FB;</span>' +
+        '<span>' + esc(relayName(r)) + '</span><span class="grow val" style="text-align:right">' + esc(val) + '</span>' +
         '<span class="chev">&gt;</span></div>';
     }).join('');
   }
@@ -978,7 +980,7 @@
     h += '<div class="field"><label for="rAlias">' + esc(S('STR_LABEL_ALIAS')) + '</label><input type="text" id="rAlias" maxlength="' + d.alias_max +
          '" value="' + esc(rl.alias) + '" placeholder="' + esc(name) + '"><button id="rAliasApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
     /* 10-18(보릴 6단계) — 원격릴레이만: 통신이 끊기면 보릴이 이 시간 뒤 끔(고르면 바로 저장 — 콘 팝업과 같음) */
-    if (d.remote) h += '<div class="field"><label>' + esc(S('STR_LABEL_REMOTE_FAILSAFE')) + '</label>' + sel('rFs', 'STR_OPT_REMOTE_FAILSAFE_LIST', [10, 30, 60], d.fs) + '</div>';
+    if (d.remote) h += '<div class="field"><label>' + esc(S('STR_LABEL_REMOTE_FAILSAFE')) + '</label>' + sel('rFs', 'STR_OPT_REMOTE_FAILSAFE_LIST', [1, 10, 30, 60], d.fs) + '</div>';
     /* 10-09(사용자 설계) — 맨 위 줄: 방식(강제 / 타이머 / 센서 AI / 센서 수동) + 적용(바뀐 게 있을 때만 켜짐) */
     var mode = f.manual ? 0 : (f.tm ? 1 : (f.ai ? 2 : 3));
     h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_MODE')) + '</label>' +

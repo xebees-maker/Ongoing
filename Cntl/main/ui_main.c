@@ -182,7 +182,7 @@ static lv_obj_t *s_power_dash_row_status[POWER_RELAY_COUNT];
  * 동일 패턴(라벨은 고정폭, value는 flex_grow+우측정렬로 ">" 앞까지 밀착) */
 static lv_obj_t *s_power_dash_row_value[POWER_RELAY_COUNT];
 static lv_obj_t *s_power_dash_row_signal[POWER_RELAY_COUNT];   /* 2026-10-18 — 원격릴레이만(나머지는 같은 폭의 빈칸 — 글자 시작 맞춤) */
-static lv_obj_t *s_bridge_status_label;                        /* 2026-10-18 — 요약: 웹 줄 아래 "브릿지1: CH x, 상태 | 브릿지2: …" */
+static lv_obj_t *s_bridge_status_label[CAN_BRIDGE_MAX_BRIDGES]; /* 2026-10-18 — 요약: 웹 줄 아래, 웹·메모리 줄과 같은 두 칸(사용자 지시) */
 static char      s_power_dash_row_last_text[POWER_RELAY_COUNT][96];
 
 static uint8_t            s_selected_cam_mac[6];
@@ -5196,21 +5196,18 @@ static void refresh_power_control_panel(void)
 /* 2026-10-18 — 요약의 브릿지 줄. CAN 버스 문제면 두 줄 모두 "CAN 오류"(브릿지별 문제가 아님) */
 static void refresh_bridge_status_line(void)
 {
-    if (!s_bridge_status_label) return;
-    char buf[128];
-    int n = 0;
     bool bus_err = can_bridge_bus_error();
-    for (uint8_t b = 0; b < CAN_BRIDGE_MAX_BRIDGES && n < (int)sizeof(buf); b++) {
+    for (uint8_t b = 0; b < CAN_BRIDGE_MAX_BRIDGES; b++) {
+        if (!s_bridge_status_label[b]) continue;
+        char buf[64];
         uint8_t ch = 0;
         can_bridge_state_t st = can_bridge_bridge_state(b, &ch);
         static const ui_str_id_t s_st[] = { STR_BRIDGE_STATE_OK, STR_BRIDGE_STATE_SETTING, STR_BRIDGE_STATE_NORESP, STR_BRIDGE_STATE_ABSENT };
         const char *stxt = ui_str(bus_err ? STR_BRIDGE_STATE_CANERR : s_st[st]);
-        if (b) n += snprintf(buf + n, sizeof(buf) - (size_t)n, " | ");
-        if (n >= (int)sizeof(buf)) break;
-        if (ch) n += snprintf(buf + n, sizeof(buf) - (size_t)n, ui_str(STR_FMT_BRIDGE_ITEM), (unsigned)b + 1, (unsigned)ch, stxt);
-        else n += snprintf(buf + n, sizeof(buf) - (size_t)n, ui_str(STR_FMT_BRIDGE_ITEM_NOCH), (unsigned)b + 1, stxt);
+        if (ch) snprintf(buf, sizeof(buf), ui_str(STR_FMT_BRIDGE_ITEM), (unsigned)b + 1, (unsigned)ch, stxt);
+        else snprintf(buf, sizeof(buf), ui_str(STR_FMT_BRIDGE_ITEM_NOCH), (unsigned)b + 1, stxt);
+        if (strcmp(lv_label_get_text(s_bridge_status_label[b]), buf) != 0) lv_label_set_text(s_bridge_status_label[b], buf);
     }
-    if (strcmp(lv_label_get_text(s_bridge_status_label), buf) != 0) lv_label_set_text(s_bridge_status_label, buf);
 }
 
 static void refresh_dashboard(lv_timer_t *t)
@@ -7492,10 +7489,21 @@ void ui_init(void)
      * MB)는 앞 괄호 라벨 한 번만 쓰고 값 뒤에는 반복 안 함(사용자 지시).
      * 2026-09-10(사용자 지시 — "웹 메모리(1줄) 스토리지(1줄)") — summary_top_box의 둘째 줄
      * (summary_top_row의 형제) */
-    /* 2026-10-18(보릴 6단계, 사용자 설계) — 웹 줄 아래: 브릿지1·2의 채널과 상태 */
-    s_bridge_status_label = lv_label_create(summary_top_box);
-    lv_obj_set_style_text_font(s_bridge_status_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_label_set_text(s_bridge_status_label, "");
+    /* 2026-10-18(보릴 6단계, 사용자 설계) — 웹 줄 아래: 브릿지1·2의 채널과 상태. 위 줄(웹 | 메모리)과 같은 두 칸 — 칸마다 flex_grow(1),
+     * 간격 12(summary_top_row와 같음) */
+    lv_obj_t *bridge_row = lv_obj_create(summary_top_box);
+    lv_obj_set_size(bridge_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(bridge_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_border_width(bridge_row, 0, 0);
+    lv_obj_set_style_pad_all(bridge_row, 0, 0);
+    lv_obj_set_style_pad_column(bridge_row, 12, 0);
+    lv_obj_clear_flag(bridge_row, LV_OBJ_FLAG_SCROLLABLE);
+    for (int b = 0; b < CAN_BRIDGE_MAX_BRIDGES; b++) {
+        s_bridge_status_label[b] = lv_label_create(bridge_row);
+        lv_obj_set_flex_grow(s_bridge_status_label[b], 1);
+        lv_obj_set_style_text_font(s_bridge_status_label[b], ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_label_set_text(s_bridge_status_label[b], "");
+    }
 
     s_storage_status_label = lv_label_create(summary_top_box);
     lv_obj_set_style_text_font(s_storage_status_label, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -7551,22 +7559,29 @@ void ui_init(void)
          * 안 켜면 자식 이벤트가 부모로 안 올라가므로(lv_obj.h 확인), 여기 안 켜면 행 전체
          * 클릭(설정 팝업 열기)과 자동으로 안 섞임 — 별도 처리 불필요. 탭 영역 확보용으로
          * 역상 컨트롤과 동일한 패딩만 추가(색은 아래서 계속 토글하므로 배경색은 안 씀) */
+        /* 2026-10-18(사용자 지시) — 신호 세기를 왼쪽, 전원 아이콘을 오른쪽에, 둘 사이는 붙임(행의 칸 간격을 음수 여백으로 상쇄,
+         * 전원 아이콘 왼쪽 안쪽 여백도 뺌). 보드 릴레이는 신호 자리에 같은 폭(28) 빈칸 — 이름 시작이 원격릴레이와 맞음 */
+        lv_obj_t *sig_slot;
+        if (power_relay_is_remote(i)) {
+            sig_slot = create_signal_widget(row);
+            s_power_dash_row_signal[i] = sig_slot;
+        } else {
+            sig_slot = lv_obj_create(row);
+            lv_obj_remove_style_all(sig_slot);
+            lv_obj_set_size(sig_slot, 28, 16);
+        }
+        lv_obj_set_style_margin_left(sig_slot, 4, 0);
+        lv_obj_set_style_margin_right(sig_slot, -8, 0);
+
         lv_obj_t *status = lv_label_create(row);
         lv_obj_set_style_text_font(status, ui_font_get(UI_FONT_SIZE_18), 0);
-        lv_obj_set_style_pad_hor(status, 8, 0);
+        lv_obj_set_style_pad_left(status, 4, 0);
+        lv_obj_set_style_pad_right(status, 8, 0);
         lv_obj_set_style_pad_ver(status, 4, 0);
         lv_label_set_text(status, LV_SYMBOL_POWER);
         lv_obj_add_flag(status, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_user_data(status, (void *)(uintptr_t)i);
         s_power_dash_row_status[i] = status;
-
-        if (power_relay_is_remote(i)) {
-            s_power_dash_row_signal[i] = create_signal_widget(row);
-        } else {
-            lv_obj_t *gap = lv_obj_create(row);   /* create_signal_widget과 같은 폭(28) */
-            lv_obj_remove_style_all(gap);
-            lv_obj_set_size(gap, 28, 16);
-        }
 
         lv_obj_t *label = lv_label_create(row);
         lv_obj_set_style_text_font(label, ui_font_get(UI_FONT_SIZE_18), 0);
@@ -10107,9 +10122,9 @@ static void relay_default_name(int idx, char *out, size_t cap)
 
 static void cb_relay_remote_failsafe_changed(lv_event_t *e)
 {
-    static const uint16_t s_min[] = { 10, 30, 60 };
+    static const uint16_t s_min[] = { 1, 10, 30, 60 };   /* STR_OPT_REMOTE_FAILSAFE_LIST 순서 */
     uint32_t sel = lv_dropdown_get_selected(lv_event_get_target(e));
-    if (sel < 3) power_relay_set_remote_failsafe_min(s_min[sel]);
+    if (sel < 4) power_relay_set_remote_failsafe_min(s_min[sel]);
 }
 
 static void build_relay_popup(int idx)
@@ -10176,7 +10191,7 @@ static void build_relay_popup(int idx)
         lv_obj_t *fs_dd = relay_popup_dropdown_field(fs_row, STR_LABEL_REMOTE_FAILSAFE, ui_str(STR_OPT_REMOTE_FAILSAFE_LIST),
                                                      cb_relay_remote_failsafe_changed);
         uint16_t fm = power_relay_get_remote_failsafe_min();
-        lv_dropdown_set_selected(fs_dd, fm == 60 ? 2 : fm == 30 ? 1 : 0);
+        lv_dropdown_set_selected(fs_dd, fm == 60 ? 3 : fm == 30 ? 2 : fm == 1 ? 0 : 1);
     }
 
     if (!s_relay_keyboard) {
