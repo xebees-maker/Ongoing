@@ -339,6 +339,14 @@ static void can_status_task(void *arg)
                      names[status.state], (unsigned)status.tx_error_count, (unsigned)status.rx_error_count,
                      (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm, (unsigned)s_raw_drop,
                      (unsigned)s_rx_frames, (unsigned)s_tx_frames, (unsigned)s_bus_errs, (unsigned)s_state_changes);
+            /* 2026-10-20(링크 확인·재전송) — 브가 보낸 쪽 재전송/최종 실패, 받은 쪽 재전송 요청/중복 */
+            uint32_t rs_c = 0, f_c = 0, rs_d = 0, f_d = 0;
+            can_bridge_ctx_get_link_stats(s_ctrl_ctx, &rs_c, &f_c);
+            can_bridge_ctx_get_link_stats(s_data_ctx, &rs_d, &f_d);
+            ESP_LOGD(TAG, "LINK tx resend ctrl=%u data=%u fail ctrl=%u data=%u | rx nack ctrl=%u data=%u dup ctrl=%u data=%u",
+                     (unsigned)rs_c, (unsigned)rs_d, (unsigned)f_c, (unsigned)f_d,
+                     (unsigned)s_ctrl_reasm.nack_count, (unsigned)s_data_reasm.nack_count,
+                     (unsigned)s_ctrl_reasm.dup_count, (unsigned)s_data_reasm.dup_count);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
         }
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));  /* 5초 주기, 버스 오프면 즉시 */

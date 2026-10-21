@@ -3,8 +3,11 @@
 #include "hal/wdt_hal.h"
 #include "esp_clk_tree.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "SYS";
+/* 2026-10-21 — 마지막 무장 때 정한 마감 시각(부팅 뒤 us). 0 = 아직 무장 안 함 */
+static int64_t s_deadline_us = 0;
 
 void rwdt_guard_arm(uint32_t total_budget_sec)
 {
@@ -27,5 +30,11 @@ void rwdt_guard_arm(uint32_t total_budget_sec)
     wdt_hal_enable(&rwdt);
     wdt_hal_write_protect_enable(&rwdt);
 
+    s_deadline_us = esp_timer_get_time() + (int64_t)total_budget_sec * 1000000;
     ESP_LOGI(TAG, "RWDT armed: %us budget (slow_clk=%uHz)", (unsigned)total_budget_sec, (unsigned)slow_clk_hz);
+}
+
+int64_t rwdt_guard_remaining_us(void)
+{
+    return s_deadline_us ? s_deadline_us - esp_timer_get_time() : INT64_MAX;
 }

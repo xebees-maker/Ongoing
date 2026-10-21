@@ -18,6 +18,12 @@ bool cam_node_get_auto_capture(void);
 
 /** @brief JPEG 화질(0~63, 낮을수록 고화질) 런타임 변경 — 개발 콘솔의 q 명령용 */
 bool cam_node_set_jpeg_quality(int quality);
+/* 2026-10-19 — 목표 해상도(framesize_t 번호, -1 = 기본 CAM_FRAME_SIZE). 센서 최대보다 크면 최대로. 딥슬립 뒤에도 유지 */
+bool cam_node_set_frame_size(int fs);
+/* 2026-10-20 — 사진 버퍼 재설계: 센서 PID·최대 해상도(0 = 모름), 지금 목표 해상도 설정(-1 = 기본) */
+uint16_t cam_node_get_sensor_pid(void);
+uint8_t cam_node_get_sensor_max_framesize(void);
+int cam_node_get_frame_size_setting(void);
 
 /** @brief XCLK(MHz) 런타임 변경 후 PLL 재계산까지 수행 — 개발 콘솔의 xclk 명령용 */
 bool cam_node_set_xclk(int mhz);
@@ -40,6 +46,8 @@ uint32_t cam_node_get_response_interval_sec(void);
  *         시엔 그 순간의 자동값에 고정될 뿐, 별도 수동 게인/노출값을 지정하지 않음 */
 void cam_node_set_agc_enable(bool enable);
 void cam_node_set_aec_enable(bool enable);
+/* 2026-10-21 — AGC·AEC 끔일 때 쓰는 수동값(esp_now_cam_config_t man_*). 0인 값은 그대로 둠 */
+void cam_node_set_manual_image(uint16_t exposure, uint16_t gain, const uint16_t awb[3]);
 
 /** @brief XCLK(MHz) 원격 설정(1~40) — 2026-08-21, 화질/노이즈 진단용. 카메라가 이미
  *         초기화돼 있으면 즉시 반영(PLL 재계산), 아니면 다음 필요시 초기화 때 적용됨.

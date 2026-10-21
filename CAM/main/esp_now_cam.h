@@ -61,6 +61,8 @@ void esp_now_cam_set_status_led(gpio_num_t pin);
  * @param kind CAM_CAPTURE_KIND_MANUAL/AUTO — CNTL이 파일명(M/T 접두사)을 정하는 데 씀
  * @return 전송(META~DONE_ACK) 성공 여부
  */
+/* 2026-10-20 — 시험 조명을 캠이 스스로 끌 때 부름(콘 스위치 동기화, esp_now_cam.c 주석) */
+void esp_now_cam_notify_light_off(void);
 bool esp_now_cam_push_captured_photo(const uint8_t *buf, size_t len, cam_capture_kind_t kind);
 
 /**

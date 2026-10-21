@@ -49,14 +49,22 @@ void     device_config_set_adaptive_response_sec(uint32_t sec);
 /* AGC(자동게인)/AEC(자동노출) On/Off(2026-08-21, 세로줄 노이즈 진단용) — 카메라별(mac)
  * 설정, 기본값 true. 2026-09-18: mac 키 슬롯 방식(위 촬영주기와 동일 이유) */
 bool device_config_get_agc_enable(const uint8_t *mac);
-void device_config_set_agc_enable(const uint8_t *mac, bool enable);
 bool device_config_get_aec_enable(const uint8_t *mac);
-void device_config_set_aec_enable(const uint8_t *mac, bool enable);
 
 /* XCLK(MHz) 프리셋(2026-08-21, 화질/노이즈 진단용) — 카메라별(mac) 설정, 기본값 10.
  * 2026-09-18: mac 키 슬롯 방식(위와 동일 이유) */
 uint8_t device_config_get_xclk_mhz(const uint8_t *mac);
 void    device_config_set_xclk_mhz(const uint8_t *mac, uint8_t mhz);
+
+/* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — "자동 노출/색"(AGC·AEC 함께, 캠은 끄면 AWB도 끔)과 그때 쓰는 수동값.
+ * 수동값 순서: [0] 노출(줄) [1] 게인(×16) [2..4] AWB R·G·B(×1024). 기본 = 노출 885, 게인 1.0배, AWB 맑음 프리셋(R 1.47·G 1.02·B 1.31) */
+#define DEVICE_CONFIG_MAN_COUNT 5
+bool device_config_get_cam_auto_image(const uint8_t *mac);
+void device_config_set_cam_auto_image(const uint8_t *mac, bool on);
+void device_config_get_cam_manual(const uint8_t *mac, uint16_t out[DEVICE_CONFIG_MAN_COUNT]);
+void device_config_set_cam_manual(const uint8_t *mac, const uint16_t v[DEVICE_CONFIG_MAN_COUNT]);
+/* 2026-10-22 — 캠이 센서 종류(PID)를 알려 올 때(PAIR_ACK). 처음 보는 캠이면 센서별 수동 노출 기본값으로 설정 칸을 만듦 */
+void device_config_note_cam_sensor(const uint8_t *mac, uint16_t pid);
 
 /* WiFi 모드(2026-08-29) — false=종속(STA, 기존 WIFI_SSID/PASSWORD 또는 아래 sta_ssid로 접속),
  * true=독립(AP, node_hub.c의 CNTL_AP_SSID/PASSWORD/CHANNEL로 자체 AP). 기본값 false(STA) —

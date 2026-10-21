@@ -37,8 +37,8 @@ typedef enum {
     UI_WEB_OP_ALIAS = 1,       /* text */
     UI_WEB_OP_SENS_INTERVAL,   /* value = 초 */
     UI_WEB_OP_CAM_CAPTURE,     /* value = 초 */
-    UI_WEB_OP_CAM_AGC,         /* value = 0/1 */
-    UI_WEB_OP_CAM_AEC,         /* value = 0/1 */
+    UI_WEB_OP_CAM_AUTO_IMAGE,  /* value = 0/1 — 2026-10-21 자동 노출/색(AGC·AEC·AWB 함께) */
+    UI_WEB_OP_CAM_MANUAL_IMAGE,/* text = "노출,게인,R,G,B" 레지스터 값 — 2026-10-21 */
     UI_WEB_OP_CAM_XCLK,        /* value = MHz */
     UI_WEB_OP_SENS_CALIB_RESET, /* 2026-10-13 — 센서 보정 초기화(콘 센서 팝업 버튼과 같은 명령) */
     UI_WEB_OP_CAM_LIGHT,       /* value = 0/1 — 캠 조명 시험(콘 Light Test 스위치와 같은 명령) */
@@ -181,7 +181,10 @@ bool ui_main_inject_list_refresh(void);
 int ui_main_get_photo_list(photo_storage_item_t *out, int out_cap);
 bool ui_main_inject_photo_select(uint8_t kind, uint32_t seq);
 /* 선택된 사진의 원본(압축 해제 전) JPEG 바이트 — 웹의 "원본 그대로 보기"가 씀 */
-bool ui_main_get_selected_photo_raw(const uint8_t **out_data, size_t *out_len);
+/* 2026-10-20 — 지금 화면에 선택된 사진(카메라 MAC, kind, seq). 웹이 저장소에서 직접 읽음 */
+bool ui_main_get_selected_photo_ref(uint8_t out_mac[6], uint8_t *out_kind, uint32_t *out_seq);
+/* 2026-10-20 — 캠이 알려 온 조명 상태(node_hub가 부름, 아무 태스크) — 열린 장치 팝업 스위치에 반영 */
+void ui_main_on_cam_light(const uint8_t *mac, bool on);
 /* 지금 선택된 사진의 (kind,seq) — 웹이 자신의 요청과 "지금 화면이 보여주는 것"이 같은지
  * 확인하는 용도(/photo 핸들러 참고) */
 bool ui_main_get_selected_photo_id(uint8_t *out_kind, uint32_t *out_seq);

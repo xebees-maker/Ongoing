@@ -622,7 +622,22 @@ static void can_status_task(void *arg)
                      (unsigned)cq_count, (unsigned)cq_hwm, (unsigned)q_count, (unsigned)q_hwm, (unsigned)s_raw_drop,
                      (unsigned)s_rx_frames, (unsigned)s_tx_frames, (unsigned)s_bus_errs, (unsigned)s_state_changes);
             if (status.state == TWAI_ERROR_BUS_OFF) twai_node_recover(s_node);
-
+            /* 2026-10-20(링크 확인·재전송) — 브릿지별: 콘이 보낸 쪽 재전송/최종 실패, 받은 쪽 재전송 요청/중복 */
+            for (int b = 0; b < NB; b++) {
+                uint32_t rs_c = 0, f_c = 0, rs_d = 0, f_d = 0;
+                can_bridge_ctx_get_link_stats(s_br[b].ctx[P_CTRL], &rs_c, &f_c);
+                can_bridge_ctx_get_link_stats(s_br[b].ctx[P_DATA], &rs_d, &f_d);
+                if (rs_c || f_c || rs_d || f_d || s_br[b].reasm[P_CTRL].nack_count || s_br[b].reasm[P_DATA].nack_count ||
+                    s_br[b].reasm[P_CTRL].dup_count || s_br[b].reasm[P_DATA].dup_count) {
+                    ESP_LOGD(TAG, "LINK bridge%d tx resend ctrl=%u data=%u fail ctrl=%u data=%u | rx nack ctrl=%u data=%u dup ctrl=%u data=%u",
+                             b + 1, (unsigned)rs_c, (unsigned)rs_d, (unsigned)f_c, (unsigned)f_d,
+                             (unsigned)s_br[b].reasm[P_CTRL].nack_count, (unsigned)s_br[b].reasm[P_DATA].nack_count,
+                             (unsigned)s_br[b].reasm[P_CTRL].dup_count, (unsigned)s_br[b].reasm[P_DATA].dup_count);
+                }
+            }
+            /* 2026-10-20(실측 — 교훈) — 이 태스크(코어 1)에서 heap_caps_get_largest_free_block()·heap_caps_get_info()처럼 힙을 훑는 호출을
+             * 하지 말 것: 힙 잠금(크리티컬 섹션) 안에서 PSRAM 블록을 전부 훑어 인터럽트를 약 0.5ms 막고, 그 사이 들어오던 CAN 프레임이
+             * 수신 FIFO에서 넘쳐 CF가 빠졌음(10분에 16번). 여유·최저치(heap_caps_get_free_size 등)는 카운터만 읽어 괜찮음 */
             /* 2026-10-02(할 일 Q — 09-26 18번 앱 알림) — 송신 실패 자체는 호출부가 이미 정해진 시간 안에 받음
              * (버스 오프 중 즉시, 막힘 중 300ms 중단). 여기선 사용자에게 한 번씩만 알림: 들어갈 때 에러, 풀리면 정보 로그 */
             static bool s_bus_off_warned = false;

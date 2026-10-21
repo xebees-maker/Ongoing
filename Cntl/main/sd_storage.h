@@ -50,6 +50,10 @@ bool sd_storage_is_mounted(void);
 /* 2026-10-14(SD 개선 1단계) — 원본 섹터 읽기(sd_health의 FAT1/FAT2 비교용). 호출부가 재연결과 같은 잠금(사진 → 통계)을 잡은 상태 */
 esp_err_t sd_storage_read_sectors(void *dst, size_t start_sector, size_t count);
 
+/* 2026-10-21(SD 손상 — 통계 기록 50,461개가 빈 클러스터로 바뀜) — 이미 있는 SD 파일에 쓰기 전에 부름. 클러스터 연결이 파일 크기만큼
+ * 온전하면 true(파일이 없어도 true). 끊겼으면 SD 이상으로 보고(쓰기 중지)하고 false — 호출부는 그 파일에 쓰지 말 것 */
+bool sd_storage_chain_ok(const char *path);
+
 
 /* 2026-10-15 — 명령마다 CS 내리기·올리기 수치(/api/sd/health "cs"): 명령 수, CS 바꾸기 실패, 2ms 넘은 명령, 최대 us */
 void sd_storage_cs_stats(uint32_t *cmds, uint32_t *cs_fail, uint32_t *slow, uint32_t *cs_us_max);

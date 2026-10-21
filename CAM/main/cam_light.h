@@ -7,7 +7,7 @@
 
 #include <stdbool.h>
 
-/* app_main 맨 앞에서 한 번 — GPIO44를 출력 LOW(끔)로. 실패하면 false */
+/* app_main 맨 앞에서 한 번 — GPIO44를 출력 끔으로(2026-10-19부터 HIGH = 끔, cam_light.c 주석). 실패하면 false */
 bool cam_light_init(void);
 
 /* 켜기/끄기 */

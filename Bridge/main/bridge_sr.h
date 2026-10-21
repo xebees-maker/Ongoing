@@ -16,6 +16,8 @@ extern "C" {
 void bridge_sr_init(void);
 
 /* recv_cb에서 매 수신마다 — SR 7종이면 처리하고 true(콘으로 RELAY하지 않음), 아니면 false */
+/* 2026-10-20 — 그 캠에서 아무 프레임이나 받았을 때(recv_cb). 진행 중인 사진 세션의 유휴 시간을 갱신(bridge_sr.c 주석) */
+void bridge_sr_note_alive(const uint8_t *mac);
 bool bridge_sr_on_recv(const uint8_t *src_mac, const uint8_t *data, int len);
 
 /* Data 릴레이 태스크가 CAN으로 하나 보낼 때마다 — 흐름 제어로 미뤄 둔 WINDOW_STATUS_ACK를 큐가 빠지면 보냄 */

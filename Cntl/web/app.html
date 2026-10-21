@@ -487,12 +487,11 @@
   function renderCams(nodes) {
     var list = nodes.filter(function (n) { return n.kind === 'cam' && n.status !== 'waiting'; });
     if (!list.length) { $('cams').innerHTML = '<div class="empty">' + esc(S('STR_PANEL_NO_CAMERA')) + '</div>'; return; }
-    /* 콘 주화면 카메라 행과 같게: "이름 / P 촬영주기 / Bat% / AGC / AEC"(AGC·AEC는 켜졌을 때만), 상태는 신호 색으로만 */
+    /* 콘 주화면 카메라 행과 같게: "이름 / P 촬영주기 / Bat% / Automatic|Manual"(10-21), 상태는 신호 색으로만 */
     $('cams').innerHTML = list.map(function (n) {
       var t = nodeName(n) + ' / ' + S('STR_LABEL_CAPTURE_TINY') + ' ' + captureText(n.capture_s);
       if (n.battery !== undefined) t += ' / ' + S('STR_LABEL_BATTERY_TINY') + ' ' + n.battery + '%';
-      if (n.agc) t += ' / ' + S('STR_LABEL_AGC_TINY');
-      if (n.aec) t += ' / ' + S('STR_LABEL_AEC_TINY');
+      t += ' / ' + S(n.auto_img ? 'STR_LABEL_IMG_AUTO_TINY' : 'STR_LABEL_IMG_MANUAL_TINY');   /* 10-21 — 자동 노출/색 */
       return '<div class="row tap" data-dev="' + esc(n.mac) + '">' + signalHtml(n) + '<div class="grow">' + esc(t) + '</div><span class="chev">&gt;</span></div>';
     }).join('');
   }
@@ -693,6 +692,7 @@
     checkCleanup(d.cleanup);
     checkAlarms(d.alarm);
     recAutoRefresh(d.rec);   /* 10-09 — 기록 표를 맨 앞 페이지로 보고 있으면 새 기록이 들어올 때 다시 받음 */
+    photoAutoRefresh(d.ph);  /* 10-21 — 카메라 팝업이 열려 있으면 사진이 들어오거나 지워질 때 목록을 다시 받음 */
     syncCamStatus(d.nodes);   /* 10-05 — 카메라 팝업이 열려 있으면 지금 촬영 버튼도 바로 */
     renderHeader(d);
     renderSummary(d);
@@ -863,6 +863,12 @@
       return '<option value="' + v + '"' + (v === current ? ' selected' : '') + '>' + esc(labels[i] || String(v)) + '</option>';
     }).join('');
   }
+  /* 10-21 — 수동값 표시(콘 man_value_text와 같음): 0 노출 줄, 1 게인 ×16, 2~4 AWB ×1024 */
+  function manText(i, v) {
+    if (i === 0) return String(v);
+    return (Math.round(v * 100 / (i === 1 ? 16 : 1024)) / 100).toFixed(2);
+  }
+
   function toggleHtml(id, on) {
     return '<label class="tg"><input type="checkbox" id="' + id + '"' + (on ? ' checked' : '') + '><span></span></label>';
   }
@@ -885,11 +891,18 @@
     if (cam) {
       h += '<div class="field"><label>' + esc(S('STR_LABEL_CAPTURE_INTERVAL')) + '</label><select id="dCapture">' +
            optionsHtml('STR_OPT_CAPTURE_INTERVAL_LIST', d.opt_capture, d.capture_s) + '</select></div>';
-      h += '<div class="field"><label>' + esc(S('STR_LABEL_AGC')) + '</label>' + toggleHtml('dAgc', d.agc) + '</div>';
-      h += '<div class="field"><label>' + esc(S('STR_LABEL_AEC')) + '</label>' + toggleHtml('dAec', d.aec) + '</div>';
       h += '<div class="field"><label>' + esc(S('STR_LABEL_XCLK')) + '</label><select id="dXclk">' +
            optionsHtml('STR_OPT_XCLK_LIST', d.opt_xclk, d.xclk) + '</select></div>';
-      h += '<div class="field"><label>' + esc(S('STR_LABEL_LIGHT_TEST')) + '</label>' + toggleHtml('dLight', false) + '</div>';
+      /* 10-21 — 자동 노출/색(AGC·AEC·AWB 함께), 끄면 수동값(콘 장치 팝업과 같음, 표시는 배율·줄) */
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_AUTO_IMAGE')) + '</label>' + toggleHtml('dAuto', d.auto_img) + '</div>';
+      /* 수동값 — 릴레이 값처럼 값 버튼을 누르면 롤러, 확인하면 바로 저장. 첫 줄 노출·게인, 둘째 줄 AWB R·G·B */
+      function mb(i) { return '<button class="vbtn" data-man="' + i + '">' + manText(i, d.man[i]) + '</button>'; }
+      h += '<div id="dManBox"' + (d.auto_img ? ' hidden' : '') + '>' +
+           '<div class="field"><label>' + esc(S('STR_LABEL_MAN_EXPOSURE')) + '</label>' + mb(0) +
+           '<label>' + esc(S('STR_LABEL_MAN_GAIN')) + '</label>' + mb(1) + '</div>' +
+           '<div class="field"><label>' + esc(S('STR_LABEL_MAN_AWB')) + '</label>' +
+           esc(S('STR_LABEL_MAN_AWB_R')) + mb(2) + esc(S('STR_LABEL_MAN_AWB_G')) + mb(3) + esc(S('STR_LABEL_MAN_AWB_B')) + mb(4) + '</div></div>';
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_LIGHT_TEST')) + '</label>' + toggleHtml('dLight', !!d.light) + '</div>';
     } else {
       h += '<div class="field"><label>' + esc(S('STR_LABEL_SENS_MEASURE_INTERVAL')) + '</label><select id="dInterval">' +
            optionsHtml('STR_OPT_SENS_MEASURE_INTERVAL_LIST', d.opt_interval, d.interval_s) + '</select></div>';
@@ -913,8 +926,23 @@
     });
     if (cam) {
       $('dCapture').addEventListener('change', function () { d.capture_s = +this.value; setKey('capture', this.value); });
-      $('dAgc').addEventListener('change', function () { d.agc = this.checked; setKey('agc', this.checked ? 1 : 0); });
-      $('dAec').addEventListener('change', function () { d.aec = this.checked; setKey('aec', this.checked ? 1 : 0); });
+      $('dAuto').addEventListener('change', function () {
+        d.auto_img = this.checked;
+        $('dManBox').hidden = this.checked;
+        setKey('auto_img', this.checked ? 1 : 0);
+      });
+      [].forEach.call(document.querySelectorAll('[data-man]'), function (btn) {
+        btn.addEventListener('click', function () {
+          var i = +btn.getAttribute('data-man');
+          openManRoller(i, d.man[i], function (raw) {
+            var nv = d.man.slice();
+            nv[i] = raw;
+            post('api/device/set?mac=' + d.mac + '&key=manual', nv.join(','))
+              .then(function () { d.man = nv; btn.textContent = manText(i, raw); toast(S('STR_BTN_APPLY') + ' \u2713'); })
+              .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+          });
+        });
+      });
       $('dXclk').addEventListener('change', function () { d.xclk = +this.value; setKey('xclk', this.value); });
       $('dLight').addEventListener('change', function () { setKey('light', this.checked ? 1 : 0); });
     } else {
@@ -1090,6 +1118,51 @@
                            : colValue('rcT', 0) * 1000 + colValue('rcH', 0) * 100 + colValue('rcE', 0) * 10;
         if (nv > hi || nv < lo) { nv = Math.min(hi, Math.max(lo, nv)); toast(S('STR_MSG_RELAY_VALUE_CLAMPED')); }
         onOk(Number(nv.toFixed(sp[3])));
+      }
+      $('modal').classList.add('hidden');
+      $('modal').onclick = null;
+    };
+  }
+
+  /* 10-21 — 카메라 수동값 롤러(콘 cb_man_value_tap과 같음): 노출 = [천][백][십][일], 게인 = [1~63].[0~9][0~9], AWB = [0~3].[0~9][0~9].
+   * 확인하면 레지스터 값(노출 줄, 게인 ×16, AWB ×1024)을 범위로 잘라 onOk */
+  function openManRoller(i, raw, onOk) {
+    var cols, h;
+    if (i === 0) {
+      var x = Math.min(9999, raw);
+      cols = [['rmA', rollCol('rmA', 0, 9, Math.floor(x / 1000))], ['rmB', rollCol('rmB', 0, 9, Math.floor(x / 100) % 10)],
+              ['rmC', rollCol('rmC', 0, 9, Math.floor(x / 10) % 10)], ['rmD', rollCol('rmD', 0, 9, x % 10)]];
+      h = cols.map(function (c) { return c[1].html; }).join('');
+    } else {
+      var den = i === 1 ? 16 : 1024, x100 = Math.round(raw * 100 / den), lo = i === 1 ? 1 : 0, hi = i === 1 ? 63 : 3;
+      cols = [['rmA', rollCol('rmA', lo, hi, Math.floor(x100 / 100))], ['rmB', rollCol('rmB', 0, 9, Math.floor(x100 / 10) % 10)],
+              ['rmC', rollCol('rmC', 0, 9, x100 % 10)]];
+      h = cols[0][1].html + '<span class="rfix">.</span>' + cols[1][1].html + cols[2][1].html;
+    }
+    var title = ['STR_LABEL_MAN_EXPOSURE', 'STR_LABEL_MAN_GAIN', 'STR_LABEL_MAN_AWB_R', 'STR_LABEL_MAN_AWB_G', 'STR_LABEL_MAN_AWB_B'][i];
+    $('modalBox').innerHTML = '<div class="mtitle" style="background:var(--blue);color:#fff">' + esc(i >= 2 ? S('STR_LABEL_MAN_AWB') + ' ' + S(title) : S(title)) + '</div>' +
+      '<div class="roll"><div class="band"></div>' + h + '</div>' +
+      '<div class="sfoot"><button data-m="no">' + esc(S('STR_BTN_CANCEL')) + '</button><button class="primary" data-m="yes">' + esc(S('STR_BTN_CONFIRM')) + '</button></div>';
+    $('modal').classList.remove('hidden');
+    cols.forEach(function (c) {
+      var el = $(c[0]);
+      el.scrollTop = (c[1].cur - c[1].a) * ROW;
+      markCol(c[0]);
+      el.addEventListener('scroll', function () { markCol(c[0]); }, { passive: true });
+    });
+    $('modal').onclick = function (ev) {
+      var m = ev.target.closest('[data-m]');
+      if (!m) return;
+      if (m.getAttribute('data-m') === 'yes') {
+        var r;
+        if (i === 0) {
+          r = Math.max(1, colValue('rmA', 0) * 1000 + colValue('rmB', 0) * 100 + colValue('rmC', 0) * 10 + colValue('rmD', 0));
+        } else {
+          var den2 = i === 1 ? 16 : 1024, v100 = colValue('rmA', cols[0][1].a) * 100 + colValue('rmB', 0) * 10 + colValue('rmC', 0);
+          r = Math.round(v100 * den2 / 100);
+          r = Math.min(i === 1 ? 1023 : 4095, Math.max(i === 1 ? 16 : 1, r));
+        }
+        onOk(r);
       }
       $('modal').classList.add('hidden');
       $('modal').onclick = null;
@@ -2021,6 +2094,15 @@
   }
   /* 10-09(사용자 지시) — 콘 화면처럼 새 기록이 들어오면 표를 갱신. 주화면 내용(WebSocket)의 rec(기록 번호)가 바뀌었고, 기록 표를
    * 맨 앞(최신) 페이지로 보고 있을 때만 조용히 다시 받음(옛 페이지를 보는 중엔 그대로) */
+  /* 10-21(사용자 — 주기·수동 촬영 뒤 목록이 그대로) — 주화면 내용의 ph(사진 목록 번호)가 바뀌면 카메라 팝업 목록을 다시 받음.
+   * 맨 앞 페이지를 보고 있을 때만(옛 페이지를 넘겨 보는 중엔 그대로). 고른 사진은 남아 있으면 그대로 */
+  var phSeq = null;
+  function photoAutoRefresh(seq) {
+    if (seq == null) return;
+    var changed = phSeq !== null && seq !== phSeq;
+    phSeq = seq;
+    if (changed && sheetRender === renderCamera && cam && cam.page === 0 && cam.data) loadPhotos();
+  }
   var recSeq = null;
   function recAutoRefresh(seq) {
     if (seq == null) return;

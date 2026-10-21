@@ -2,6 +2,7 @@
 #include "memdiag.h"
 #include <stdlib.h>
 #include "photo_rx.h"
+#include "ui_main.h"   /* ui_main_on_cam_light — 2026-10-20 */
 #include "can_bridge.h"
 #include "power_relay.h"
 #include "node_request.h"
@@ -403,7 +404,7 @@ static void push_cam_config_to(const uint8_t *mac, node_hub_node_t *locked_node)
     esp_now_cam_config_t cfg = {
         .version                = ESP_NOW_LINK_VERSION,
         .msg_type               = ESP_NOW_MSG_CAM_CONFIG_SET,
-        .wb_mode                = CAM_WB_AUTO,
+        .wb_mode                = CAM_WB_AUTO,   /* 2026-10-21 — 자동이면 AWB 자동, 수동(AGC·AEC 끔)이면 캠이 아래 man_awb를 씀 */
         .capture_interval_sec   = device_config_get_cam_capture_interval_sec(mac),
         .response_interval_sec  = device_config_get_response_interval_sec(),
         .agc_enable             = device_config_get_agc_enable(mac) ? 1 : 0,
@@ -414,7 +415,15 @@ static void push_cam_config_to(const uint8_t *mac, node_hub_node_t *locked_node)
          * 사이클 무조건 나가니 몇 바이트 더 싣는 게 별도 왕복 하나를 통째로 없애는 것보다
          * 쌈(esp_now_link.h의 esp_now_cam_config_t.unix_time 주석 참고) */
         .unix_time              = rtc_sync_get_unix_time(),
+        .frame_size             = photo_rx_cam_frame_size(mac),   /* 2026-10-20 — 사진 버퍼 재설계(photo_rx.c) */
     };
+    {   /* 2026-10-21 — 수동값(자동 노출/색을 끈 캠이 씀) */
+        uint16_t mv[DEVICE_CONFIG_MAN_COUNT];
+        device_config_get_cam_manual(mac, mv);
+        cfg.man_exposure = mv[0];
+        cfg.man_gain = mv[1];
+        for (int k = 0; k < 3; k++) cfg.man_awb[k] = mv[2 + k];
+    }
     static const uint8_t s_config_ack_types[] = { ESP_NOW_MSG_CAM_CONFIG_ACK };
     if (locked_node) {
         locked_node->cfg_sent = cfg;
@@ -726,8 +735,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                      (unsigned long)d.ack_rx, (unsigned)d.sweeps);
 
     } else if (msg_type == ESP_NOW_MSG_PAIR_ACK) {
-        if (len < (int)sizeof(esp_now_pair_ack_t)) return;
+        if (len < (int)ESP_NOW_PAIR_ACK_BASE_LEN) return;   /* 2026-10-20 — 옛 펌웨어는 캠 정보 필드 없이 짧게 보냄 */
         const esp_now_pair_ack_t *ack = (const esp_now_pair_ack_t *)data;
+        /* 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 캠이 보낸 센서 PID·최대 해상도로 그 캠의 사진 수신 버퍼를 정함(잠금 밖) */
+        bool cam_info = len >= (int)sizeof(esp_now_pair_ack_t) && ack->cam_pid != 0;
+        uint16_t cam_pid = cam_info ? ack->cam_pid : 0;
+        uint8_t cam_max_fs = cam_info ? ack->cam_max_framesize : 0;
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
         node_hub_node_t *n = find_node(info->src_addr);
@@ -801,6 +814,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             }
         }
         xSemaphoreGive(s_nodes_mutex);
+        if (cam_info && kind_copy == HUB_NODE_KIND_CAM && ack_full == NODE_QUOTA_NONE) {
+            photo_rx_cam_info(info->src_addr, cam_pid, cam_max_fs);   /* 2026-10-20 — 사진 버퍼 재설계(photo_rx.c) */
+            device_config_note_cam_sensor(info->src_addr, cam_pid);   /* 2026-10-22 — 센서별 수동 노출 기본값 */
+        }
         if (ack_full != NODE_QUOTA_NONE) {
             if (reject_unpair) {
                 esp_now_unpair_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_UNPAIR };
@@ -1084,6 +1101,13 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * photo_rx.c로 넘김(2026-09-26 — 캠 SD 제거로 목록/삭제 메시지는 삭제) */
         photo_rx_on_recv(msg_type, info ? info->src_addr : NULL, data, len);
 
+    } else if (msg_type == ESP_NOW_MSG_CAM_LIGHT_STATE) {
+        /* 2026-10-20(사용자 결정) — 캠이 시험 조명을 스스로 끈 알림(node_hub.h 주석) */
+        if (len < (int)sizeof(esp_now_cam_light_t) || !info) return;
+        const esp_now_cam_light_t *lm = (const esp_now_cam_light_t *)data;
+        node_hub_set_cam_light(info->src_addr, lm->on != 0);
+        ui_main_on_cam_light(info->src_addr, lm->on != 0);
+
     } else if (msg_type == ESP_NOW_MSG_CAM_CONFIG_ACK) {
         /* esp_now_reliable_on_recv(위)가 이미 node_request 태스크를 깨워서 재시도 루프를
          * 끝내지만, 그건 node_request 모듈 내부 상태일 뿐이라 UI(설정탭 Apply 진행팝업)가
@@ -1327,14 +1351,15 @@ void node_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec)
 }
 
 /* 2026-08-21 — AGC/AEC On/Off(세로줄 노이즈 진단용), 촬영주기와 같은 카메라별 설정 패턴 */
-void node_hub_apply_cam_agc_enable(const uint8_t *mac, bool enable)
+/* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — 자동 노출/색 켜고 끔, 수동값 — 저장만(캠이 깨어날 때 CONFIG로 감) */
+void node_hub_apply_cam_auto_image(const uint8_t *mac, bool on)
 {
-    device_config_set_agc_enable(mac, enable);  /* 저장만 — 위 촬영주기와 같음 */
+    device_config_set_cam_auto_image(mac, on);
 }
 
-void node_hub_apply_cam_aec_enable(const uint8_t *mac, bool enable)
+void node_hub_apply_cam_manual_image(const uint8_t *mac, const uint16_t v[DEVICE_CONFIG_MAN_COUNT])
 {
-    device_config_set_aec_enable(mac, enable);  /* 저장만 */
+    device_config_set_cam_manual(mac, v);
 }
 
 void node_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz)
@@ -1369,8 +1394,26 @@ bool node_hub_get_cam_applied_config(const uint8_t *mac, esp_now_cam_config_t *o
     return ok;
 }
 
+void node_hub_set_cam_light(const uint8_t *mac, bool on)
+{
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    node_hub_node_t *n = find_node(mac);
+    if (n) n->light_on = on;
+    xSemaphoreGive(s_nodes_mutex);
+}
+
+bool node_hub_get_cam_light(const uint8_t *mac)
+{
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    node_hub_node_t *n = find_node(mac);
+    bool on = n && n->light_on;
+    xSemaphoreGive(s_nodes_mutex);
+    return on;
+}
+
 void node_hub_unpair(const uint8_t *mac)
 {
+    photo_rx_cam_forget(mac);   /* 2026-10-20 — 캠이면 사진 버퍼를 놓고 남은 캠 해상도를 다시 정함(캠이 아니면 아무 일 없음) */
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     node_hub_node_t *n = find_node(mac);
     char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };

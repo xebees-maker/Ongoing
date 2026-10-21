@@ -39,6 +39,14 @@ void photo_rx_on_recv(uint8_t msg_type, const uint8_t *src_mac, const uint8_t *d
  * Data 소비 태스크가 부름. 캠별 세션, 받는 대로 SD에 이어 쓰고 DONE에서 CRC 검증 후 저장 */
 void photo_rx_on_sr_stream(uint8_t app_type, const uint8_t *mac, const uint8_t *body, size_t len);
 
+/* 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 캠별 사진 수신 버퍼(photo_rx.c 주석).
+ * photo_rx_cam_info: PAIR_ACK에서 캠이 알려 준 센서 PID·최대 해상도(framesize_t)로 버퍼·해상도를 다시 정함.
+ * photo_rx_cam_frame_size: 콘이 정한 그 캠의 해상도(CAM_CONFIG_SET.frame_size로 보냄), 정해 줄 수 없으면 0xFF.
+ * photo_rx_cam_forget: 연결 해제된 캠의 버퍼를 놓고 남은 캠의 해상도를 다시 정함 */
+void photo_rx_cam_info(const uint8_t *mac, uint16_t pid, uint8_t max_fs);
+uint8_t photo_rx_cam_frame_size(const uint8_t *mac);
+void photo_rx_cam_forget(const uint8_t *mac);
+
 /* 2026-09-26(설계 6단계) — 브 재부팅 시 진행 중이던 사진 수신을 버림(임시파일 삭제). 2026-10-18 — 그 브릿지(번호)를 거치는 캠 것만 */
 void photo_rx_reset_sessions(uint8_t bridge);
 

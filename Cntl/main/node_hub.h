@@ -156,6 +156,7 @@ typedef struct {
      * 아직 한 번도 못 받음(막 페어링됨, has_deepsleep_stats와 별개 플래그 — Sens는 배터리와
      * 센서값이 같은 메시지에 실려오지만 개념상 분리해둠) */
     bool            has_sensor_data;
+    bool            light_on;        /* 2026-10-20 — 캠 조명 테스트 상태(켜기 요청 시 켜짐, 캠이 "꺼짐"을 알려 오면 꺼짐) */
     uint8_t         sensor_kind;                      /* sensor_kind_t */
     uint8_t         chan_count;
     uint8_t         chan_type[ESP_NOW_MAX_CHANNELS];
@@ -301,8 +302,10 @@ bool node_hub_apply_response_interval_sec(uint32_t sec);
 
 /* 2026-08-21 — AGC(자동게인)/AEC(자동노출) On/Off, 카메라별 설정이라 촬영주기와 동일하게
  * mac 하나만 대상으로 함(세로줄 노이즈 진단용) */
-void node_hub_apply_cam_agc_enable(const uint8_t *mac, bool enable);
-void node_hub_apply_cam_aec_enable(const uint8_t *mac, bool enable);
+/* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — 위를 "자동 노출/색" 하나로 합침(AGC·AEC 함께, 캠은 끄면 AWB도 끔) + 그때 쓰는 수동값
+ * (device_config.h DEVICE_CONFIG_MAN_COUNT 순서) */
+void node_hub_apply_cam_auto_image(const uint8_t *mac, bool on);
+void node_hub_apply_cam_manual_image(const uint8_t *mac, const uint16_t v[5]);
 
 /* 2026-08-21 — XCLK(MHz) 프리셋, 위와 동일 패턴(카메라별 설정) */
 void node_hub_apply_cam_xclk_mhz(const uint8_t *mac, uint8_t mhz);
@@ -329,3 +332,7 @@ esp_err_t node_hub_boril_set(const uint8_t *mac, bool on);
 /* 2026-10-18(6단계) — 보릴(한 대 전제) 노드 정보를 out에 복사. PAIRED이고 살아 있으면 true */
 bool node_hub_get_boril(node_hub_node_t *out);
 
+/* 2026-10-20(사용자 결정 — 조명 테스트 스위치를 캠 실제 상태에 맞춤) — 캠별 조명 상태. 켜기를 보낼 때 set(true), 캠이 CAM_LIGHT_ACK로
+ * 켜짐/꺼짐을 알려 오면(요청 응답이든, 잠들기 직전·촬영 뒤 스스로 끈 알림이든) 그 값으로 바뀜 */
+void node_hub_set_cam_light(const uint8_t *mac, bool on);
+bool node_hub_get_cam_light(const uint8_t *mac);

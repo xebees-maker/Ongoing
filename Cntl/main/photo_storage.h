@@ -43,6 +43,8 @@ bool photo_storage_save(const uint8_t mac[6], uint8_t kind, const uint8_t *jpeg,
  * abort(임시파일 삭제, w 해제). 한 저장기는 한 태스크에서만 씀 */
 typedef struct photo_storage_writer photo_storage_writer_t;
 photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind);
+/* 2026-10-20 — 호출부가 준 고정 버퍼(buf, cap)에 모으는 저장기. cap을 넘으면 실패(늘리지 않음), 끝나도 buf는 놓지 않음 */
+photo_storage_writer_t *photo_storage_begin_ext(const uint8_t mac[6], uint8_t kind, uint8_t *buf, size_t cap);
 bool photo_storage_append(photo_storage_writer_t *w, const uint8_t *data, size_t len);
 bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq);
 void photo_storage_abort(photo_storage_writer_t *w);
@@ -75,6 +77,9 @@ uint32_t photo_storage_trim_to(uint64_t target_bytes);
  * stats_store_get_count()와 동일 관례 */
 uint32_t photo_storage_get_count(const uint8_t mac[6]);
 
+/* 2026-10-21 — 사진 목록이 바뀔 때마다(저장·지우기·재스캔) 늘어나는 번호(웹 카메라 팝업 자동 갱신용) */
+uint32_t photo_storage_list_gen(void);
+
 /* page_index=0이 가장 최근(seq 큰 것부터) 페이지 — stats_store_read_page()와 동일 관례.
  * out에 최대 out_cap개 채우고 실제 채운 개수 반환 */
 uint32_t photo_storage_read_page(const uint8_t mac[6], uint32_t page_index, uint32_t page_size,
@@ -85,6 +90,14 @@ uint32_t photo_storage_read_page(const uint8_t mac[6], uint32_t page_index, uint
  * 실패(false) — 잘린 채로 디코드 시도하지 않음 */
 bool photo_storage_read_file(const uint8_t mac[6], uint8_t kind, uint32_t seq,
                               uint8_t *out_buf, size_t buf_cap, size_t *out_len);
+
+/* 2026-10-20(사용자 결정 — 사진 보기 메모리) — 사진 크기만 알아냄(읽기 버퍼를 딱 맞게 잡으려고). 없으면 false */
+bool photo_storage_get_size(const uint8_t mac[6], uint8_t kind, uint32_t seq, size_t *out_size);
+
+/* 2026-10-20 — 사진의 offset부터 최대 cap바이트를 읽음(웹이 작은 버퍼로 나눠 보내려고). 부를 때마다 파일을 열고 닫음(쓰기와
+ * 같은 칸 파일을 오래 열어 두지 않게). out_total = 사진 전체 크기. 전체 CRC는 확인하지 않음(머리 확인만) */
+bool photo_storage_read_part(const uint8_t mac[6], uint8_t kind, uint32_t seq, size_t offset,
+                             uint8_t *out_buf, size_t cap, size_t *out_len, size_t *out_total);
 
 /* 사진 1장 삭제 — 성공/실패(이미 없음 포함) 반환 */
 bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq);

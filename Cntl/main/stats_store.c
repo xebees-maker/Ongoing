@@ -486,7 +486,7 @@ static uint32_t agg_write_sd_locked(agg_pend_t *pend, uint32_t n)
         int widx = week_get_or_add_locked(week);
         char path[48];
         agg_path(sc, week, path, sizeof(path));
-        FILE *f = (widx >= 0) ? fopen(path, "ab") : NULL;
+        FILE *f = (widx >= 0 && sd_storage_chain_ok(path)) ? fopen(path, "ab") : NULL;   /* 2026-10-21 — 클러스터 연결이 끊긴 파일에 쓰면 FatFs가 빈 클러스터를 붙임(sd_storage_chain_ok) */
         if (!f) {
             ESP_LOGW(TAG, "Aggregate file open failed (scale=%u, errno=%d)", (unsigned)sc, errno);
             s_write_io_error_pending = true;
@@ -1163,7 +1163,7 @@ static uint32_t sd_raw_write_locked(const stats_record_t *records, uint32_t coun
         if (widx < 0) return i;
         char path[48];
         raw_path(week, path, sizeof(path));
-        FILE *f = fopen(path, "ab");
+        FILE *f = sd_storage_chain_ok(path) ? fopen(path, "ab") : NULL;   /* 2026-10-21 — 클러스터 연결이 끊긴 파일에 쓰면 FatFs가 빈 클러스터를 붙임(sd_storage_chain_ok) */
         if (!f) {
             s_last_io_error = true;
             s_write_io_error_pending = true;
@@ -1521,7 +1521,7 @@ bool stats_store_restore_begin(uint32_t total_bytes)
         rs_fail("not a backup file (size)");
         return false;
     }
-    s_rs_f = fopen(RESTORE_TMP_PATH, "wb");
+    s_rs_f = sd_storage_chain_ok(RESTORE_TMP_PATH) ? fopen(RESTORE_TMP_PATH, "wb") : NULL;   /* 2026-10-21 — 클러스터 연결이 끊긴 파일에 쓰면 FatFs가 빈 클러스터를 붙임(sd_storage_chain_ok) */
     if (!s_rs_f) { rs_fail("temp file open failed"); return false; }
     s_rs_bytes = 0;
     s_rs_crc = 0;
@@ -1634,7 +1634,7 @@ static int64_t restore_merge_week(uint32_t week, rec_reader_t *in, stats_record_
     raw_path(week, path, sizeof(path));
     snprintf(npath, sizeof(npath), "%s.new", path);
     rec_reader_t ex = { .f = fopen(path, "rb"), .buf = heap_caps_malloc(sizeof(stats_record_t) * STATS_CHUNK, MALLOC_CAP_SPIRAM) };
-    FILE *o = fopen(npath, "wb");
+    FILE *o = sd_storage_chain_ok(npath) ? fopen(npath, "wb") : NULL;   /* 2026-10-21 — 클러스터 연결이 끊긴 파일에 쓰면 FatFs가 빈 클러스터를 붙임(sd_storage_chain_ok) */
     if (!ex.buf || !o) { if (ex.f) fclose(ex.f); if (o) fclose(o); heap_caps_free(ex.buf); return -1; }
     int64_t out_n = 0;
     bool wok = true;
@@ -1654,6 +1654,9 @@ static int64_t restore_merge_week(uint32_t week, rec_reader_t *in, stats_record_
             wok &= fwrite(&a, sizeof(a), 1, o) == 1; out_n++; rr_next(&ex);
         }
         while (rr_peek(in, &b) && b.unix_time == t) {
+            /* 2026-10-21(실기 — 카드에서 살린 기록 중 시각 4바이트만 멀쩡하고 뒤가 FF인 2개가 실제 기록과 시각이 같아 이 묶음으로 들어와
+             * 검사 없이 써졌음 → 매시 검사 5009) — 같은 시각 묶음도 위와 같은 검사 */
+            if (!rec_sane(&b)) { s_rs_bad++; rr_next(in); continue; }
             bool dup = false;
             for (uint32_t k = 0; k < ng && !dup; k++) dup = memcmp(&grp[k], &b, sizeof(b)) == 0;
             if (dup) s_rs_dup++;

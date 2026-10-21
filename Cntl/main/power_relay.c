@@ -1,4 +1,5 @@
 #include "power_relay.h"
+#include "sd_health.h"
 #include "memdiag.h"
 #include "ui_main.h"
 #include "fs.h"
@@ -369,6 +370,7 @@ static void relay_set_output(int idx, bool on)
         return;
     }
     esp_err_t err = ch422g_set_do(s_relay_do_bit[idx], !on);  /* Low = 켜짐 */
+    sd_health_mark(SDH_MARK_RELAY, (uint32_t)idx * 10 + (on ? 1 : 0));   /* 2026-10-21 — SD 명령 기록에 릴레이 바뀜 */
     if (err != ESP_OK) ESP_LOGE(TAG, "Relay%d: DO write failed (%s)", idx, esp_err_to_name(err));
 }
 

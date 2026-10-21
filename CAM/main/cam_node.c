@@ -60,7 +60,13 @@ static const char *TAG = "CAM";
     #define CAM_VIDEO_XCLK_FREQ_HZ  24000000
     #define CAM_VIDEO_FB_COUNT      1
 #endif
-#define CAM_JPEG_QUALITY        12
+#define CAM_JPEG_QUALITY        12  /* 전원을 처음 넣었을 때의 기본값(아래 s_jpeg_quality) */
+/* 2026-10-19(사용자 결정 — 사진 버퍼 재설계: 콘이 메모리에 맞춰 q를 정해 줌) — 매 깨어남이 재부팅이라 콘솔/콘이 정한 q를
+ * RTC에 둠. 카메라 초기화가 이 값을 씀(예전엔 늘 CAM_JPEG_QUALITY로 초기화돼 콘솔 q가 다음 깨어남에 사라졌음) */
+static RTC_DATA_ATTR int s_jpeg_quality = CAM_JPEG_QUALITY;
+/* 2026-10-19(사용자 결정 — q 대신 해상도로 사진 크기를 맞춤) — 목표 해상도(framesize_t). -1이면 예전처럼 CAM_FRAME_SIZE.
+ * 어느 쪽이든 센서 최대(s_sensor_max_framesize)보다 크면 센서 최대로 낮춤. 콘솔(res)이 정하고 최종 설계에서는 콘이 정함 */
+static RTC_DATA_ATTR int s_frame_size = -1;
 /* 부팅 시 노출/게인(AEC/AGC) 수렴용 워밍업 프레임 수(2026-08-10) — 예전엔 esp_camera_init()
  * 직후 무조건 vTaskDelay(2000ms)로 "어림잡아 2초 기다림"이었는데, 근거 주석이 전혀 없었고
  * (Espressif FAQ: "esp_camera_init() 안의 지연은 제거를 시도해볼 수 있다") 실제로 필요한 건
@@ -171,6 +177,14 @@ static uint8_t s_xclk_target_mhz = (uint8_t)(CAM_VIDEO_XCLK_FREQ_HZ / 1000000);
 
 void cam_node_set_agc_enable(bool enable) { s_agc_enable = enable; }
 void cam_node_set_aec_enable(bool enable) { s_aec_enable = enable; }
+/* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — 수동(AGC·AEC 끔)일 때 넣는 값. 기본 = 게인 1.0배, AWB 맑음 프리셋(R 1.47·G 1.02·B 1.31), 노출 10-21 Side 실측(885줄) */
+static uint16_t s_man_exposure = 885, s_man_gain = 16, s_man_awb[3] = { 0x5E0, 0x410, 0x540 };   /* AWB = 맑음 프리셋(콘 기본과 같음) */
+void cam_node_set_manual_image(uint16_t exposure, uint16_t gain, const uint16_t awb[3])
+{
+    if (exposure) s_man_exposure = exposure;
+    if (gain) s_man_gain = gain;
+    for (int i = 0; i < 3; i++) if (awb[i]) s_man_awb[i] = awb[i];
+}
 
 /* 2026-08-08 실기에서 확인된 크래시(과거 안전장치, 값만 완화) — capture_interval_sec=10으로
  * 설정하고 CAM이 마침 ESP-NOW 채널동기/페어링 활동 중일 때 자동촬영 타이머가 겹쳐 발동하면
@@ -408,9 +422,42 @@ static bool s_camera_ready = false;
  * maximum" 경고를 찍고 최대로 줄였음. 알게 된 뒤로는 처음부터 min(설정값, 센서 최대)을 요청(결과 해상도는 같음).
  * -1 = 아직 모름(전원을 켠 직후 첫 초기화 1번만 예전처럼 경고) */
 static RTC_DATA_ATTR int16_t s_sensor_max_framesize = -1;
+/* 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 센서 PID(0 = 아직 모름). 페어링 응답(PAIR_ACK)에 최대 해상도와 함께 실어 콘에 알림 */
+static RTC_DATA_ATTR uint16_t s_sensor_pid = 0;
+
+uint16_t cam_node_get_sensor_pid(void) { return s_sensor_pid; }
+uint8_t cam_node_get_sensor_max_framesize(void) { return s_sensor_max_framesize > 0 ? (uint8_t)s_sensor_max_framesize : 0; }
+int cam_node_get_frame_size_setting(void) { return s_frame_size; }
+
+/* 2026-10-19 — 초기화 때 요청할 해상도: 목표(s_frame_size, 없으면 CAM_FRAME_SIZE)와 센서 최대 중 작은 것 */
+static framesize_t target_frame_size(void)
+{
+    int fs = (s_frame_size >= 0) ? s_frame_size : (int)CAM_FRAME_SIZE;
+    if (s_sensor_max_framesize >= 0 && s_sensor_max_framesize < fs) fs = s_sensor_max_framesize;
+    return (framesize_t)fs;
+}
+
+bool cam_node_set_frame_size(int fs)
+{
+    if (fs < -1 || fs >= (int)FRAMESIZE_INVALID) {
+        ESP_LOGW(TAG, "Frame size out of range (-1 = default, 0~%d): %d", (int)FRAMESIZE_INVALID - 1, fs);
+        return false;
+    }
+    s_frame_size = fs;
+    framesize_t t = target_frame_size();
+    /* 카메라가 지금 켜져 있으면 바로 적용, 아니면 다음 초기화 때 적용 */
+    sensor_t *sensor = s_camera_ready ? esp_camera_sensor_get() : NULL;
+    if (sensor && sensor->set_framesize(sensor, t) != 0) {
+        ESP_LOGW(TAG, "Frame size change failed (saved %d for the next camera init)", fs);
+        return false;
+    }
+    ESP_LOGI(TAG, "Frame size set: %d -> res %d (kept across deep sleep, applies from next capture)", fs, (int)t);
+    return true;
+}
 
 /* save_warmup_frames: 예전엔 워밍업 프레임을 SD에 저장하는 임시 진단 스위치였음(2026-08-21).
  * SD 제거(2026-09-18/09-26)로 이 함수 안에서 쓰는 곳이 없음 — 아래 워밍업 루프 주석 참고 */
+static void camdiag_sensor(const char *where, int64_t frame_ms);   /* 2026-10-20(진단, 임시) — 아래 정의 */
 static esp_err_t camera_init(bool save_warmup_frames)
 {
     camera_config_t config = {
@@ -442,9 +489,8 @@ static esp_err_t camera_init(bool save_warmup_frames)
         .ledc_timer   = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,
         .pixel_format = PIXFORMAT_JPEG,
-        .frame_size   = (s_sensor_max_framesize >= 0 && s_sensor_max_framesize < CAM_FRAME_SIZE)
-                        ? (framesize_t)s_sensor_max_framesize : CAM_FRAME_SIZE,
-        .jpeg_quality = CAM_JPEG_QUALITY,
+        .frame_size   = target_frame_size(),
+        .jpeg_quality = s_jpeg_quality,
         .fb_count     = CAM_VIDEO_FB_COUNT,
         .fb_location  = CAMERA_FB_IN_PSRAM,
         .grab_mode    = CAMERA_GRAB_WHEN_EMPTY,
@@ -488,6 +534,7 @@ static esp_err_t camera_init(bool save_warmup_frames)
 
     sensor_t *s = esp_camera_sensor_get();
     camera_sensor_info_t *sensor_info = esp_camera_sensor_get_info(&s->id);
+    s_sensor_pid = s->id.PID;   /* 2026-10-20 — 위 s_sensor_pid 주석 */
     if (sensor_info && s_sensor_max_framesize != (int16_t)sensor_info->max_size) {
         s_sensor_max_framesize = (int16_t)sensor_info->max_size;
         ESP_LOGI(TAG, "Sensor max frame size %d remembered (%s) - requested from next init", s_sensor_max_framesize,
@@ -510,10 +557,11 @@ static esp_err_t camera_init(bool save_warmup_frames)
     }
     ESP_LOGD(TAG, "Exposure warm-up %d frames: %lldms", CAM_WARMUP_FRAME_COUNT,
              (esp_timer_get_time() - warmup_start_us) / 1000);
+    camdiag_sensor("after warm-up", (esp_timer_get_time() - warmup_start_us) / 1000);   /* 2026-10-20(진단, 임시) */
 
     s_camera_ready = true;
     ESP_LOGI(TAG, "Camera init done (XCLK=%dMHz, fb_count=%d, res %d, JPEG q=%d)",
-             (int)s_xclk_target_mhz, CAM_VIDEO_FB_COUNT, (int)config.frame_size, CAM_JPEG_QUALITY);
+             (int)s_xclk_target_mhz, CAM_VIDEO_FB_COUNT, (int)config.frame_size, config.jpeg_quality);
     return ESP_OK;
 }
 
@@ -560,14 +608,40 @@ static SemaphoreHandle_t s_capture_mutex = NULL;
 
 /* 2026-08-21 — 매 촬영 직전에 현재 설정을 반영(카메라 초기화 시 1회가 아니라 촬영마다) —
  * Cntl에서 설정을 바꾼 게 이번 웨이크 사이클 중간(카메라 이미 초기화된 뒤)에 와도 다음
- * 촬영부터 바로 적용되게 함. sensor_t::set_gain_ctrl/set_exposure_ctrl은 켬(1)->끔(0)
- * 전환 시 그 순간의 자동값에 고정하는 것뿐이라 별도 수동값 지정은 안 함(단순 On/Off) */
+ * 촬영부터 바로 적용되게 함.
+ * 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — AGC·AEC가 둘 다 꺼져 있으면(콘의 "자동 노출/색" 끔) AWB도 끄고
+ * 노출·게인·AWB 게인을 콘이 보낸 수동값으로 넣음. 예전엔 끄면 그 순간의 자동값(깨어난 직후 어두운 값, 게인 248)에 고정됐음.
+ * 켜져 있으면 AWB 자동. 레지스터는 OV5640 기준(OV3660은 나중에 확인 — 사용자 10-21) */
+static bool manual_image(void) { return !s_agc_enable && !s_aec_enable; }
+
 static void apply_agc_aec_settings(void)
 {
     sensor_t *s = esp_camera_sensor_get();
     if (!s) return;
     if (s->set_gain_ctrl)     s->set_gain_ctrl(s, s_agc_enable ? 1 : 0);
     if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, s_aec_enable ? 1 : 0);
+    if (s->set_whitebal) s->set_whitebal(s, 1);
+    if (!manual_image()) {
+        if (s->set_wb_mode) s->set_wb_mode(s, 0);   /* AWB 자동(0x3406 = 0) */
+        return;
+    }
+    if (!s->set_reg) return;
+    /* 노출은 프레임 길이(VTS, 0x380E~0x380F)를 넘으면 의미가 없어 자름(드라이버 set_aec_value와 같은 기준) */
+    uint32_t exp_lines = s_man_exposure;
+    if (s->get_reg) {
+        int vts = (s->get_reg(s, 0x380E, 0xff) << 8) | s->get_reg(s, 0x380F, 0xff);
+        if (vts > 0 && exp_lines > (uint32_t)vts) exp_lines = (uint32_t)vts;
+    }
+    s->set_reg(s, 0x3500, 0xff, (exp_lines >> 12) & 0x0f);
+    s->set_reg(s, 0x3501, 0xff, (exp_lines >> 4) & 0xff);
+    s->set_reg(s, 0x3502, 0xff, (exp_lines << 4) & 0xf0);
+    s->set_reg(s, 0x350A, 0xff, (s_man_gain >> 8) & 0x03);
+    s->set_reg(s, 0x350B, 0xff, s_man_gain & 0xff);
+    s->set_reg(s, 0x3406, 0xff, 0x01);   /* AWB 수동 */
+    for (int i = 0; i < 3; i++) {
+        s->set_reg(s, 0x3400 + i * 2, 0xff, (s_man_awb[i] >> 8) & 0x0f);
+        s->set_reg(s, 0x3401 + i * 2, 0xff, s_man_awb[i] & 0xff);
+    }
 }
 
 /* 2026-09-18(SD 제거 재설계 — "찍을 때마다 항상 콘에 가져와서 콘의 SD에 저장") — 반드시
@@ -585,38 +659,100 @@ static void apply_agc_aec_settings(void)
 
 static int64_t s_light_on_us = 0;  /* 이번 촬영에서 LED를 켠 시각(0 = 아직 안 켬) */
 
+/* 2026-10-20(사용자 결정 — 실패 시 LED 안전장치, 밤 시험 3단계) — 프레임을 못 받아 기다림이 길어져도(프레임 대기 한 번 15초) LED가
+ * 이 시간 넘게 켜져 있지 않게 타이머로 강제로 끔(배터리). 정상 촬영은 노출 맞추기 1.1초 + 프레임 2장으로 이보다 짧음 */
+#define CAM_LIGHT_MAX_ON_MS  4000
+/* 2026-10-20(밤 시험, 임시) — 같은 소스로 세 단계를 빌드: 1 = 예전(초기화 전에 켬, 안전장치 없음), 2 = 초기화 뒤에 켬,
+ * 3 = 2 + 실패 시 즉시 끔·켜짐 상한 타이머. 빌드할 때 -DCAM_LED_STAGE=n으로 바꿈. 시험이 끝나면 정한 동작만 남기고 지울 것 */
+#ifndef CAM_LED_STAGE
+#define CAM_LED_STAGE 3
+#endif
+static esp_timer_handle_t s_light_guard_timer = NULL;
+static void light_guard_cb(void *arg)
+{
+    (void)arg;
+    cam_light_set(false);
+    ESP_LOGW(TAG, "Capture light forced off after %dms (frame not received in time)", CAM_LIGHT_MAX_ON_MS);
+}
+
 static void capture_light_on(void)
 {
     if (s_light_on_us != 0) return;
     cam_light_set(true);
     s_light_on_us = esp_timer_get_time();
+    if (!s_light_guard_timer) {
+        const esp_timer_create_args_t a = { .callback = light_guard_cb, .name = "light_guard" };
+        esp_timer_create(&a, &s_light_guard_timer);
+    }
+    if (CAM_LED_STAGE >= 3 && s_light_guard_timer) {
+        esp_timer_stop(s_light_guard_timer);
+        esp_timer_start_once(s_light_guard_timer, (uint64_t)CAM_LIGHT_MAX_ON_MS * 1000);
+    }
 }
 
 static void capture_light_off(void)
 {
+    if (s_light_guard_timer) esp_timer_stop(s_light_guard_timer);
     cam_light_set(false);
     s_light_on_us = 0;
+    esp_now_cam_notify_light_off();   /* 2026-10-20 — 콘이 켠 시험 조명이었으면 콘에 꺼짐을 알림 */
+}
+
+/* 2026-10-20(진단, 임시 — 프레임 타임아웃/NO-EOI가 01:51부터 시간당 수십~백여 번) — 프레임마다 걸린 시간과 센서의 노출·게인·
+ * 프레임 길이(OV5640 레지스터)를 남겨 실패한 촬영과 성공한 촬영을 비교. 원인을 보면 지울 것 */
+static void camdiag_sensor(const char *where, int64_t frame_ms)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s || !s->get_reg) return;
+    int e0 = s->get_reg(s, 0x3500, 0xff), e1 = s->get_reg(s, 0x3501, 0xff), e2 = s->get_reg(s, 0x3502, 0xff);
+    int g0 = s->get_reg(s, 0x350A, 0xff), g1 = s->get_reg(s, 0x350B, 0xff);
+    int v0 = s->get_reg(s, 0x380E, 0xff), v1 = s->get_reg(s, 0x380F, 0xff);
+    int a0 = s->get_reg(s, 0x3A00, 0xff);
+    long exp_lines = ((long)(e0 & 0x0f) << 12 | (long)e1 << 4 | (e2 >> 4));
+    ESP_LOGI(TAG, "CAMDIAG %s: frame %lldms, exposure %ld lines, gain 0x%03x, VTS %d, 0x3A00=0x%02x, uptime %lldms",
+             where, (long long)frame_ms, exp_lines, ((g0 & 0x03) << 8) | g1, (v0 << 8) | v1, a0,
+             (long long)(esp_timer_get_time() / 1000));
 }
 
 static bool camera_capture_one(cam_capture_kind_t kind)
 {
-    capture_light_on();  /* 수동 경로는 cam_node_capture_now_sized()에서 초기화 전에 이미 켰음 */
+    /* 2026-10-20(사용자 결정 — LED 켜짐 시간 줄이기, 밤 시험 2단계) — 예전엔 LED를 카메라 초기화(워밍업 프레임 2장 포함, 약 2.5초)
+     * 전에 켜서 정상 촬영에도 4~5초 켜져 있었음. 이제 초기화가 끝난 뒤 켜고, 아래에서 CAM_LIGHT_LEAD_MS 동안 프레임을 버리며 노출을
+     * 맞춘 뒤 찍음(09-29 측정: 1.1초 먼저 켜면 3초 먼저 켠 것과 노출이 같았음) */
+    if (CAM_LED_STAGE == 1) capture_light_on();   /* 밤 시험 1단계 = 예전 동작(초기화 전에 켬) */
     if (ensure_camera_ready(kind == CAM_CAPTURE_KIND_MANUAL) != ESP_OK) {
         capture_light_off();
         return false;
     }
     apply_agc_aec_settings();
+    bool manual_exp = manual_image();   /* 수동값이면 맞출 것이 없어 노출 맞추기를 건너뜀(10-21 측정: LED 1.5초 -> 0.74초) */
+    capture_light_on();   /* 2단계 이상: 초기화 뒤에 켬(1단계는 이미 켜져 있어 아무 일 없음) */
 
     xSemaphoreTake(s_capture_mutex, portMAX_DELAY);
 
     /* LED를 켠 뒤 선행 시간이 지날 때까지 프레임을 계속 받아 버림 — 그동안 자동노출이 LED 밝기에 맞춰짐.
      * 방금 LED를 켜고 초기화했으면 초기화+워밍업에 이미 그만큼 걸려서 대개 바로 통과, 카메라가 이미 켜져
      * 있었으면(어두운 상태로 맞춰져 있음) 여기서 기다림 */
-    if (s_light_on_us != 0) {
+    int lead_frames = 0;
+    if (s_light_on_us != 0 && !manual_exp) {
         while (esp_timer_get_time() - s_light_on_us < (int64_t)CAM_LIGHT_LEAD_MS * 1000) {
             camera_fb_t *lead_fb = esp_camera_fb_get();
-            if (lead_fb) esp_camera_fb_return(lead_fb);
-            else break;
+            if (!lead_fb && CAM_LED_STAGE < 3) break;   /* 1·2단계 = 예전 동작 */
+            if (!lead_fb) {
+                /* 2026-10-20(밤 시험 3단계) — 프레임을 못 받음: LED를 바로 끄고 이 사진은 포기(다음 주기에 다시 찍음) */
+                ESP_LOGW(TAG, "Frame not received while adjusting exposure - capture skipped, light off");
+                capture_light_off();
+                xSemaphoreGive(s_capture_mutex);
+                return false;
+            }
+            esp_camera_fb_return(lead_fb);
+            lead_frames++;
+            /* 2026-10-21(진단, 임시 — AGC/AEC가 LED를 켠 뒤 몇 프레임에 맞춰지는지) — 버리는 프레임마다 노출·게인 */
+            {
+                char w[24];
+                snprintf(w, sizeof(w), "lead %d", lead_frames);
+                camdiag_sensor(w, (esp_timer_get_time() - s_light_on_us) / 1000);
+            }
         }
     }
 
@@ -626,12 +762,32 @@ static bool camera_capture_one(cam_capture_kind_t kind)
      * 정확히 "요청 2번 전" 프레임이 나오는 게 실기로 확인됨(2026-08-05, 1/2/3/4 숫자
      * 화면으로 재현) — 진짜로 저장할 프레임을 받기 전에 큐를 fb_count개만큼 미리
      * 비워서 신선하게 만듦 */
-    for (int i = 0; i < CAM_VIDEO_FB_COUNT; i++) {
+    /* 2026-10-21(사용자 지시 — LED 켜짐 시간 줄이기) — 위 루프가 프레임을 1장 이상 받아 돌려줬으면 큐는 이미 비었고 다음 프레임은
+     * 그 뒤에 새로 찍힘 → 묵은 프레임 비우기(한 프레임 시간, Side 24MHz 약 380ms)를 건너뜀. 한 장도 안 받았으면(LED가 이미 켜져
+     * 있던 경우) 예전처럼 비움. 확인: CAMDIAG shot이 한 프레임 시간이면 새 프레임, 0ms에 가까우면 묵은 프레임 */
+    int64_t t_stale = esp_timer_get_time();
+    for (int i = 0; i < (lead_frames > 0 ? 0 : CAM_VIDEO_FB_COUNT); i++) {
         camera_fb_t *stale = esp_camera_fb_get();
-        if (stale) esp_camera_fb_return(stale);
+        if (!stale && CAM_LED_STAGE < 3) continue;   /* 1·2단계 = 예전 동작 */
+        if (!stale) {
+            /* 2026-10-20(밤 시험 3단계) — 위와 같음 */
+            ESP_LOGW(TAG, "Frame not received while flushing stale frame - capture skipped, light off");
+            capture_light_off();
+            xSemaphoreGive(s_capture_mutex);
+            return false;
+        }
+        esp_camera_fb_return(stale);
     }
+    int64_t t_shot = esp_timer_get_time();
 
     camera_fb_t *fb = esp_camera_fb_get();
+    /* 2026-10-20(진단, 임시) — 위 camdiag_sensor 주석. stale = 묵은 프레임 비우기, shot = 실제 촬영 프레임 */
+    {
+        int64_t now = esp_timer_get_time();
+        ESP_LOGI(TAG, "CAMDIAG stale %lldms, shot %lldms (%s)", (long long)((t_shot - t_stale) / 1000),
+                 (long long)((now - t_shot) / 1000), fb ? "ok" : "FAIL");
+        camdiag_sensor(fb ? "after shot" : "after FAIL", (now - t_shot) / 1000);
+    }
     capture_light_off();  /* 프레임을 받았으면 바로 끔 — 전송(수 초)은 LED 없이 */
     if (!fb) {
         ESP_LOGW(TAG, "esp_camera_fb_get failed");
@@ -666,12 +822,14 @@ bool cam_node_set_jpeg_quality(int quality)
         ESP_LOGW(TAG, "JPEG quality out of range (0~63): %d", quality);
         return false;
     }
-    sensor_t *sensor = esp_camera_sensor_get();
-    if (!sensor || sensor->set_quality(sensor, quality) != 0) {
-        ESP_LOGW(TAG, "JPEG quality change failed");
+    s_jpeg_quality = quality;   /* 2026-10-19 — 다음 깨어남부터도 이 값(위 s_jpeg_quality 주석) */
+    /* 카메라가 지금 켜져 있으면 바로 적용, 아니면 다음 초기화 때 적용 */
+    sensor_t *sensor = s_camera_ready ? esp_camera_sensor_get() : NULL;
+    if (sensor && sensor->set_quality(sensor, quality) != 0) {
+        ESP_LOGW(TAG, "JPEG quality change failed (saved %d for the next camera init)", quality);
         return false;
     }
-    ESP_LOGI(TAG, "JPEG quality changed: %d (applies from next capture)", quality);
+    ESP_LOGI(TAG, "JPEG quality set: %d (kept across deep sleep, applies from next capture)", quality);
     return true;
 }
 
@@ -727,8 +885,9 @@ bool cam_node_capture_now_sized(const char *size_name)
     /* 2026-08-10 — 필요시 초기화: 해상도 오버라이드(size_name)는 esp_camera_sensor_get()으로
      * 센서 핸들이 필요해서 camera_capture_one() 진입 전에 여기서 먼저 준비돼 있어야 함.
      * 이 함수 자체가 수동(콘솔 shot/CAPTURE_NOW) 전용 경로라 save_warmup_frames=true 고정.
-     * 2026-09-29 — LED는 초기화 전에 켬(camera_capture_one()의 CAM_LIGHT_LEAD_MS 주석 참고) */
-    capture_light_on();
+     * 2026-09-29 — LED는 초기화 전에 켬(camera_capture_one()의 CAM_LIGHT_LEAD_MS 주석 참고).
+     * 2026-10-20 — 밤 시험 2단계: LED는 camera_capture_one()이 초기화 뒤에 켬 */
+    if (CAM_LED_STAGE == 1) capture_light_on();   /* 밤 시험 1단계 = 예전 동작 */
     if (ensure_camera_ready(true) != ESP_OK) {
         ESP_LOGW(TAG, "Manual capture request - camera init failed");
         capture_light_off();
@@ -792,7 +951,7 @@ void app_main(void)
      * RWDT(rwdt_guard.c)가 이번 사이클 전체를 지키는 안전망 — 소프트웨어가 무슨 이유로든
      * esp_deep_sleep_start()에 못 이르면 강제로 리셋시킴. */
 
-    /* 2026-09-29 — 촬영용 LED 게이트(GPIO44)는 SD 선 풀업(10kΩ) 때문에 전원이 들어오면 HIGH(켜짐) — 가장 먼저 LOW로 */
+    /* 2026-09-29 — 촬영용 LED(GPIO44)를 가장 먼저 끔으로. 2026-10-19부터 반전 회로라 풀업 HIGH = 꺼짐(cam_light.c 주석) */
     cam_light_init();
     capture_wake_reason();
     rwdt_guard_arm(CAM_RESPONSE_INTERVAL_SEC_DEFAULT + CONFIG_CAM_DEEPSLEEP_AWAKE_MARGIN_SEC);
@@ -871,6 +1030,16 @@ void app_main(void)
         esp_now_cam_set_status_led(BSP_CAM_PWR_LED_STATUS_ID);
     } else {
         ESP_LOGW(TAG, "Status LED init failed - continuing without LED");
+    }
+    /* 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 전원을 처음 넣었을 때(센서를 아직 모를 때) 한 번만 카메라를 초기화해 센서 PID·
+     * 최대 해상도를 알아내고 바로 끔(RTC에 남아 딥슬립 뒤엔 다시 안 함). 페어링 응답에 실어야 해서 연결 전에 함 */
+    if (s_sensor_pid == 0) {
+        if (camera_init(false) == ESP_OK) {
+            esp_camera_deinit();
+            s_camera_ready = false;
+            bsp_esp32s3_cam_sensor_power(false);
+        }
+        ESP_LOGI(TAG, "Sensor probe at power-on: PID 0x%04x, max res %d", (unsigned)s_sensor_pid, (int)s_sensor_max_framesize);
     }
     esp_now_cam_init();  /* fast path 시도(성공하면 이미 PAIRED) 또는 폴백 스캔 시작 */
     /* esp_now_cam_init() 다음에 저장된(또는 기본) 응답성 설정을 반영(RWDT도 여기서
@@ -1013,8 +1182,9 @@ void app_main(void)
     /* 2026-09-26 — IO 익스팬더 출력은 ESP32가 자는 동안에도 유지됨 — 상태 LED가 켜진 위상에서
      * 잠들면 딥슬립 내내 켜져 있으므로 확실히 끄고 잠 */
     bsp_esp32s3_cam_pwr_led_shutdown();
-    /* 2026-09-29 — 촬영용 LED도 PCF8574 출력이 자는 동안 유지되므로 확실히 끄고 잠(오류 경로 대비) */
+    /* 2026-09-29 — 촬영용 LED를 확실히 끄고 잠(오류 경로 대비). 자는 동안은 핀이 풀려도 풀업 HIGH = 꺼짐(2026-10-19 반전 회로) */
     cam_light_set(false);
+    esp_now_cam_notify_light_off();   /* 2026-10-20 — 콘이 켠 시험 조명이었으면 콘에 꺼짐을 알림(아래 응답 송신 대기에 포함) */
     /* 2026-09-26 — 센서 전원은 딥슬립 중에도 살아 있으므로(스키매틱: LDO 인에이블 없음) 카메라를 정리하고 PWDN으로
      * 대기시킨 뒤 잠. 이번 사이클에 카메라를 안 썼으면 이미 대기 상태 */
     if (s_camera_ready) {

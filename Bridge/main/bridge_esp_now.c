@@ -96,6 +96,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         esp_now_reliable_on_recv(data[1], info->src_addr, data, len);
     }
 
+    bridge_sr_note_alive(info->src_addr);   /* 2026-10-20 — 진행 중인 사진 세션 유지(bridge_sr.c 주석) */
     /* 2026-09-26(설계 §4, 4단계) — SR(사진 전송)은 브가 끝점 — 콘으로 RELAY하지 않고 여기서 처리(bridge_sr.c) */
     if (bridge_sr_on_recv(info->src_addr, data, len)) return;
 

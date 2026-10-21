@@ -28,6 +28,7 @@ static sens_kind_entry_t s_entries[SENS_KIND_SLOTS];
 static void save(void)
 {
     if (!sd_health_writes_allowed()) return;   /* 2026-10-14 — SD 고장 상태면 쓰지 않음 */
+    if (!sd_storage_chain_ok(SENS_KIND_FILE_PATH)) return;   /* 2026-10-21 — 클러스터 연결이 끊긴 파일에 쓰면 FatFs가 빈 클러스터를 붙임(sd_storage_chain_ok) */
     FILE *f = fopen(SENS_KIND_FILE_PATH, "wb");
     if (!f) {
         ESP_LOGW(TAG, "Save failed (fopen): %s", SENS_KIND_FILE_PATH);

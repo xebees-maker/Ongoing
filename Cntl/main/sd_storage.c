@@ -19,6 +19,8 @@
 #include "sdmmc_cmd.h"
 #include <sys/stat.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -55,6 +57,8 @@ static esp_err_t sd_do_transaction_cs(int slot, sdmmc_command_t *cmd)
     }
     esp_err_t r = sdspi_host_do_transaction(slot, cmd);
     int64_t t2 = esp_timer_get_time();
+    /* 2026-10-21 — 처음 손상 원인 추적: 명령 기록·FAT 기대값(sd_health_on_cmd) */
+    sd_health_on_cmd((uint8_t)cmd->opcode, cmd->arg, cmd->data, (uint32_t)(cmd->datalen / 512), (uint32_t)(t2 - t1), (int)r);
     e = ch422g_set_io(CH422G_IO_SD_CS, true);              /* HIGH = 해제 */
     int64_t t3 = esp_timer_get_time();
     if (e != ESP_OK) {
@@ -289,6 +293,25 @@ esp_err_t sd_storage_format(void)
 bool sd_storage_is_mounted(void)
 {
     return s_card != NULL;
+}
+
+/* 2026-10-21(SD 손상 원인 조사 — 카드 원본 섹터로 확인) — FatFs는 쓰기 모드에서 클러스터 연결을 따라가다(이어쓰기 O_APPEND는
+ * 쓰기마다 f_lseek(파일 끝), 덮어쓰기는 fseek·fwrite가 클러스터를 넘을 때) 연결 값이 범위를 벗어나면(손상된 FAT 칸) 에러 없이
+ * "파일 끝"으로 보고 새 빈 클러스터를 붙여 파일 크기를 채움(create_chain). 10-21 통계 원시 파일이 그렇게 클러스터 52개(FF)를 받아
+ * 기록 50,461개가 FF로 읽혔고, 원래 기록은 끊긴 연결 다음 클러스터에 그대로 남아 있었음. 10-14 "FF 구간이 새 클러스터 경계에서
+ * 시작"도 같은 모양. 읽기 모드의 f_lseek는 같은 연결을 따라가며 값이 범위를 벗어나면 FR_INT_ERR를 돌려주므로, 쓰기 전에 읽기
+ * 모드로 파일 끝까지 옮겨 연결을 확인함. 연결 값이 우연히 범위 안의 다른 클러스터 번호로 바뀐 경우는 못 잡음 */
+bool sd_storage_chain_ok(const char *path)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return true;   /* 없음(새로 만듦) — 다른 이유의 실패는 실제 열기에서 드러남 */
+    off_t r = lseek(fd, 0, SEEK_END);
+    int err = errno;
+    close(fd);
+    if (r >= 0) return true;
+    ESP_LOGE(TAG, "SD cluster chain broken (errno=%d) - not written: %s", err, path);
+    sd_health_report(SDH_EV_CHAIN_BROKEN, path, 0);
+    return false;
 }
 
 esp_err_t sd_storage_read_sectors(void *dst, size_t start_sector, size_t count)

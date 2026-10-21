@@ -27,6 +27,8 @@ typedef enum {
     SDH_EV_BOOT_AREA_CHANGED,  /* 콘이 쓰지 않는 영역(0번 섹터 ~ FAT 앞, FSInfo 제외)이 마운트 때와 다름 */
     SDH_EV_BAD_DIR_ENTRY,      /* 사진·통계 폴더에 이름이 깨진 항목 */
     SDH_EV_BAD_STATS_RECORD,   /* 통계 원시 기록에 그 주에 속하지 않는 레코드(0xFF·쓰레기) */
+    SDH_EV_CHAIN_BROKEN,       /* 2026-10-21 — 쓰기 전 확인: 파일의 클러스터 연결이 파일 크기 전에 끊기거나 범위를 벗어남 */
+    SDH_EV_FAT_CHANGED_NO_WRITE, /* 2026-10-21 — 10분 감시: FAT 섹터가 콘이 쓴 내용과 다름(콘이 쓰지 않았는데 바뀜) */
     SDH_EV_COUNT
 } sd_health_event_t;
 
@@ -50,6 +52,10 @@ void sd_health_report(sd_health_event_t ev, const char *path, uint32_t offset);
 /* false면 SD에 쓰지 말 것(고장 상태) */
 bool sd_health_writes_allowed(void);
 
+/* 2026-10-21 — 재연결/포맷 뒤 검증(ui_main sd_verify_healthy): 고장 상태에서도 FAT1/FAT2를 원본 섹터로 비교, 같으면 true
+ * (다르면 사건으로 보고). 사진·통계 쓰기를 잠깐 멈추고 약 2초 */
+bool sd_health_fat_ok(void);
+
 /* 재연결/포맷 뒤 검증을 통과했을 때(ui_main clear_sd_io_fail) — 고장 상태 해제 */
 void sd_health_clear(void);
 
@@ -61,6 +67,17 @@ void sd_health_count(sd_health_counter_t c, uint32_t n);
 /* 2026-10-15 — sd_storage가 마운트·포맷 성공 직후 부름: 부트 영역 기준값을 기록 태스크에서 새로 잡음 */
 void sd_health_on_mount(void);
 
+
+/* 2026-10-21(처음 손상 원인 추적) — sd_storage의 명령 감싸기가 명령마다 부름(어느 태스크든). 쓰기·느린 명령·실패·지우기·리셋을
+ * 명령 기록(RAM 링)에 남기고, FAT 섹터에 쓴 내용의 CRC를 기억(10분 감시가 "콘의 쓰기 없이 바뀜"을 가림) */
+void sd_health_on_cmd(uint8_t op, uint32_t arg, const void *data, uint32_t blocks, uint32_t dur_us, int err);
+
+/* 다른 장치 동작을 명령 기록에 끼워 넣음(손상 때 무엇이 함께 있었는지) */
+enum { SDH_MARK_RELAY = 1, SDH_MARK_SCREEN, SDH_MARK_MOUNT, SDH_MARK_FATGUARD };
+void sd_health_mark(uint8_t code, uint32_t val);
+
+/* 웹 /api/sd/journal — 최근 명령 기록 글(max_lines 0 = 전부), 길이 반환 */
+int sd_health_journal_text(char *buf, size_t cap, uint32_t max_lines);
 
 /* sd_storage가 마운트 직전에 읽은 카드 CID 한 줄 */
 void sd_health_set_card(const char *cid_line);

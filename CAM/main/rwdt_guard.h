@@ -18,3 +18,7 @@
  *         딥슬립 중에도 계속 카운트되다가, 다음 부팅 때 이 함수가 다시 불리며 자연히
  *         재무장된다. */
 void rwdt_guard_arm(uint32_t total_budget_sec);
+
+/** @brief 2026-10-21 — 마지막 무장 뒤 RWDT가 리셋시키기까지 남은 시간(us). 무장 전이면 INT64_MAX.
+ *         RWDT는 설정을 받을 때마다 다시 무장되므로, 오래 깨어 있는 경우엔 부팅 뒤 시간이 아니라 이 값으로 판단해야 함 */
+int64_t rwdt_guard_remaining_us(void);

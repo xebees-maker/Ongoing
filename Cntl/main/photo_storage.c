@@ -152,6 +152,16 @@ static bool parse_fname(const char *d_name, uint8_t *out_kind, uint32_t *out_seq
 
 /* 이 카메라 폴더 안에서 가장 큰 순번+1(비어있으면 0) — 폴더가 아예 없어도 0(첫 저장 때
  * mkdir로 새로 만듦) */
+/* 2026-10-21(사용자 — 웹 사진 목록이 주기·수동 촬영 뒤 자동으로 안 바뀜) — 사진 목록이 바뀔 때마다(저장·지우기·재스캔) 늘어나는 번호.
+ * 주화면 내용(웹 WebSocket)에 실어 웹 카메라 팝업이 목록을 다시 받게 함(기록 표의 rec과 같은 방식) */
+static volatile uint32_t s_list_gen = 0;
+uint32_t photo_storage_list_gen(void) { return s_list_gen; }
+static void photo_list_changed(void)
+{
+    s_list_gen++;
+    storage_mgr_notify_changed();
+}
+
 static uint32_t next_seq_in_dir(const char *dir_path)
 {
     DIR *dir = opendir(dir_path);
@@ -342,6 +352,7 @@ struct photo_storage_writer {
     uint8_t   mac[6];
     uint8_t   kind;
     bool      failed;
+    bool      ext;       /* 2026-10-20 — buf가 호출부 것(캠별 고정 버퍼) — 늘리지도 놓지도 않음 */
 };
 
 /* 2026-09-28 — 재마운트/포맷 동안 사진 쓰기·읽기를 막는 잠금(잠금 순서: s_wmutex -> s_mutex(photo)) */
@@ -383,7 +394,22 @@ static bool index_has(const uint8_t mac[6], uint8_t kind, uint32_t seq)
     return index_find(mac, kind, seq, NULL);
 }
 
+static photo_storage_writer_t *begin_common(const uint8_t mac[6], uint8_t kind, uint8_t *ext_buf, size_t ext_cap);
+
 photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
+{
+    return begin_common(mac, kind, NULL, 0);
+}
+
+/* 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 캠별로 미리 잡아 둔 버퍼에 모음. 받는 중 재할당이 없음(예전 128K→256K→512K
+ * 재할당이 힙 잠금 안에서 수백 KB를 복사하는 동안 인터럽트가 막혀 CAN 수신 FIFO가 넘쳤음) */
+photo_storage_writer_t *photo_storage_begin_ext(const uint8_t mac[6], uint8_t kind, uint8_t *buf, size_t cap)
+{
+    if (!buf || cap == 0) return NULL;
+    return begin_common(mac, kind, buf, cap);
+}
+
+static photo_storage_writer_t *begin_common(const uint8_t mac[6], uint8_t kind, uint8_t *ext_buf, size_t ext_cap)
 {
     if (!sd_storage_is_mounted()) {
         ESP_LOGW(TAG, "Save start failed - SD not mounted");
@@ -399,9 +425,15 @@ photo_storage_writer_t *photo_storage_begin(const uint8_t mac[6], uint8_t kind)
     }
     photo_storage_writer_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM);
     if (!w) return NULL;
-    w->cap = 128 * 1024;
-    w->buf = heap_caps_malloc(w->cap, MALLOC_CAP_SPIRAM);
-    if (!w->buf) { heap_caps_free(w); return NULL; }
+    if (ext_buf) {
+        w->ext = true;
+        w->buf = ext_buf;
+        w->cap = ext_cap;
+    } else {
+        w->cap = 128 * 1024;
+        w->buf = heap_caps_malloc(w->cap, MALLOC_CAP_SPIRAM);
+        if (!w->buf) { heap_caps_free(w); return NULL; }
+    }
     memcpy(w->mac, mac, 6);
     w->kind = kind;
     return w;
@@ -412,6 +444,11 @@ bool photo_storage_append(photo_storage_writer_t *w, const uint8_t *data, size_t
     if (!w || w->failed) return false;
     if (len == 0) return true;
     if (w->len + len > PHOTO_MAX_SANE_BYTES) { w->failed = true; ESP_LOGW(TAG, "Photo too large (%u bytes)", (unsigned)(w->len + len)); return false; }
+    if (w->len + len > w->cap && w->ext) {
+        w->failed = true;
+        ESP_LOGW(TAG, "Photo larger than its fixed buffer (%u > %u)", (unsigned)(w->len + len), (unsigned)w->cap);
+        return false;
+    }
     if (w->len + len > w->cap) {
         size_t ncap = w->cap;
         while (ncap < w->len + len) ncap *= 2;
@@ -428,7 +465,7 @@ bool photo_storage_append(photo_storage_writer_t *w, const uint8_t *data, size_t
 void photo_storage_abort(photo_storage_writer_t *w)
 {
     if (!w) return;
-    heap_caps_free(w->buf);
+    if (!w->ext) heap_caps_free(w->buf);
     heap_caps_free(w);
 }
 
@@ -450,6 +487,7 @@ static bool ring_load_or_create_locked(void)
     r[0] = SLOT_RING_MAGIC;
     r[1] = esp_random() | 1u;
     r[2] = esp_rom_crc32_le(0, (const uint8_t *)r, 8);
+    if (!sd_storage_chain_ok(SLOT_RING_PATH)) return false;   /* 2026-10-21 — 클러스터 연결이 끊긴 파일에 쓰면 FatFs가 빈 클러스터를 붙임(sd_storage_chain_ok) */
     f = fopen(SLOT_RING_PATH, "wb");
     bool ok = f && fwrite(r, sizeof(r), 1, f) == 1;
     if (f && (fflush(f) != 0 || fsync(fileno(f)) != 0)) ok = false;
@@ -471,6 +509,7 @@ static bool slot_file_create(uint32_t file_no)
     struct stat st;
     if (stat(path, &st) == 0 && (uint64_t)st.st_size == SLOT_FILE_BYTES) return true;   /* 이미 있음 — 다시 만들지 않음(지우지 않게) */
     int64_t t0 = esp_timer_get_time();
+    if (!sd_storage_chain_ok(path)) return false;   /* 2026-10-21 — 클러스터 연결이 끊긴 파일에 쓰면 FatFs가 빈 클러스터를 붙임(sd_storage_chain_ok) */
     FILE *f = fopen(path, "wb");
     if (!f) { ESP_LOGW(TAG, "Slot file create failed: %s (errno=%d)", path, errno); return false; }
     uint8_t z = 0;
@@ -524,6 +563,7 @@ static void slot_free_hdr(uint32_t slot)
 {
     char path[48];
     slot_file_path(slot / SLOT_PER_FILE, path, sizeof(path));
+    if (!sd_storage_chain_ok(path)) return;   /* 2026-10-21 — 클러스터 연결이 끊긴 파일에 쓰면 FatFs가 빈 클러스터를 붙임(sd_storage_chain_ok) */
     FILE *f = fopen(path, "r+b");
     if (!f) { ESP_LOGW(TAG, "Slot free: open failed %s (errno=%d)", path, errno); return; }
     slot_hdr_t h = { .magic = SLOT_MAGIC, .ring_id = s_ring_id, .state = SLOT_ST_FREE };
@@ -599,6 +639,7 @@ bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
     if (ok && stale_head != SLOT_NONE) slot_free_hdr(stale_head);
     char path[48];
     slot_file_path(file_no, path, sizeof(path));
+    if (ok && !sd_storage_chain_ok(path)) ok = false;   /* 2026-10-21 — 클러스터 연결이 끊긴 파일에 쓰면 FatFs가 빈 클러스터를 붙임(sd_storage_chain_ok) */
     FILE *f = ok ? fopen(path, "r+b") : NULL;
     if (ok && !f) { ESP_LOGW(TAG, "Slot open failed: %s (errno=%d)", path, errno); ok = false; }
     slot_hdr_t h = { .magic = SLOT_MAGIC, .ring_id = s_ring_id, .state = SLOT_ST_WRITING, .kind = w->kind, .seq = seq,
@@ -635,7 +676,7 @@ bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
     unlock();
     wunlock();
     if (ok) {
-        storage_mgr_notify_changed();
+        photo_list_changed();
         if (out_seq) *out_seq = seq;
         ESP_LOGD(TAG, "Photo saved: slot %u (%s #%u) %c%08u %u bytes, %ums", (unsigned)slot, path, (unsigned)idx, (char)w->kind,
                  (unsigned)seq, (unsigned)w->len, (unsigned)((esp_timer_get_time() - t0) / 1000));
@@ -1058,6 +1099,70 @@ bool photo_storage_read_file(const uint8_t mac[6], uint8_t kind, uint32_t seq,
     return true;
 }
 
+bool photo_storage_get_size(const uint8_t mac[6], uint8_t kind, uint32_t seq, size_t *out_size)
+{
+    photo_idx_entry_t ie;
+    if (index_find(mac, kind, seq, &ie) && ie.slot != SLOT_NONE) { *out_size = ie.size; return true; }
+    char file_path[96];
+    file_path_for(mac, kind, seq, file_path, sizeof(file_path));
+    struct stat st;
+    if (stat(file_path, &st) != 0) return false;
+    *out_size = (size_t)st.st_size;
+    return true;
+}
+
+bool photo_storage_read_part(const uint8_t mac[6], uint8_t kind, uint32_t seq, size_t offset,
+                             uint8_t *out_buf, size_t cap, size_t *out_len, size_t *out_total)
+{
+    *out_len = 0;
+    photo_idx_entry_t ie;
+    if (index_find(mac, kind, seq, &ie) && ie.slot != SLOT_NONE) {
+        *out_total = ie.size;
+        if (offset >= ie.size) return offset == ie.size;
+        size_t n = ie.size - offset;
+        if (n > cap) n = cap;
+        char path[48];
+        slot_file_path(ie.slot / SLOT_PER_FILE, path, sizeof(path));
+        uint32_t idx = ie.slot % SLOT_PER_FILE;
+        bool ok = false;
+        wlock();   /* 칸에 쓰는 중과 겹치지 않게(slot_read와 같음) */
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            slot_hdr_t h;
+            uint8_t *hb = heap_caps_malloc(SLOT_HDR_BYTES, MALLOC_CAP_SPIRAM);
+            if (hb && fseek(f, (long)(idx * SLOT_BYTES), SEEK_SET) == 0 && fread(hb, 1, SLOT_HDR_BYTES, f) == SLOT_HDR_BYTES) {
+                memcpy(&h, hb, sizeof(h));
+                if (h.magic == SLOT_MAGIC && h.hcrc == hdr_crc(&h) && h.state == SLOT_ST_VALID && h.seq == ie.seq &&
+                    h.kind == ie.kind && memcmp(h.mac, mac, 6) == 0 && h.size == ie.size &&
+                    fseek(f, (long)(idx * SLOT_BYTES + SLOT_HDR_BYTES + offset), SEEK_SET) == 0 &&
+                    fread(out_buf, 1, n, f) == n) {
+                    ok = true;
+                }
+            }
+            heap_caps_free(hb);
+            fclose(f);
+        }
+        wunlock();
+        if (!ok) { ESP_LOGW(TAG, "read_part: slot photo %c%08u read failed at %u", (char)kind, (unsigned)seq, (unsigned)offset); return false; }
+        *out_len = n;
+        return true;
+    }
+    char file_path[96];
+    file_path_for(mac, kind, seq, file_path, sizeof(file_path));
+    struct stat st;
+    if (stat(file_path, &st) != 0) return false;
+    *out_total = (size_t)st.st_size;
+    if (offset >= (size_t)st.st_size) return offset == (size_t)st.st_size;
+    FILE *fp = fopen(file_path, "rb");
+    if (!fp) return false;
+    size_t n = (size_t)st.st_size - offset;
+    if (n > cap) n = cap;
+    bool ok = fseek(fp, (long)offset, SEEK_SET) == 0 && fread(out_buf, 1, n, fp) == n;
+    fclose(fp);
+    if (ok) *out_len = n;
+    return ok;
+}
+
 bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq)
 {
     photo_idx_entry_t ie;
@@ -1066,7 +1171,7 @@ bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq)
         slot_free_hdr(ie.slot);
         index_remove(mac, kind, seq);
         wunlock();
-        storage_mgr_notify_changed();
+        photo_list_changed();
         ESP_LOGI(TAG, "delete: slot %u (%c%08u)", (unsigned)ie.slot, (char)kind, (unsigned)seq);
         return true;
     }
@@ -1080,7 +1185,7 @@ bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq)
     }
     used_add(-size);  /* 삭제가 성공했을 때만 뺌 */
     index_remove(mac, kind, seq);
-    storage_mgr_notify_changed();
+    photo_list_changed();
     ESP_LOGI(TAG, "delete: %s", file_path);
     return true;
 }
@@ -1127,7 +1232,7 @@ uint32_t photo_storage_delete_all(const uint8_t mac[6])
     photo_idx_cam_t *c = cam_find_locked(mac, false, NULL);
     if (c) c->count = 0;  /* 순번(next_seq)은 그대로 — 지운 번호를 다시 쓰지 않음 */
     unlock();
-    storage_mgr_notify_changed();
+    photo_list_changed();
     ESP_LOGI(TAG, "delete_all: %u deleted (%s)", (unsigned)deleted, dir_path);
     return deleted;
 }

@@ -20,7 +20,9 @@ static const char *TAG = "PHOTO";
 /* 순서가 어긋난 청크 보관 개수 — 설계는 "최대 윈도우 1개(16)"인데, 캠은 윈도우의 누락분을 재전송한 뒤 그 재전송이
  * 도착했는지 확인하지 않고 곧장 다음 윈도우를 보냄. 재전송이 또 빠지면 다음 윈도우 청크가 16칸 범위를 넘어 전부
  * 버려지고 DONE 라운드에서 다시 보내야 해서, 윈도우 2개(32청크, 약 38KB/캠, PSRAM)로 잡음 */
-#define SR_HOLD             32
+/* 2026-10-20(실기 — Side 캠 사진 약 740KB/620청크, 무선 손실이 있으면 앞 청크 하나 때문에 32청크 뒤가 전부 범위 밖으로 버려져
+ * 사진당 최대 약 1,300청크를 다시 받아야 했고 DONE 3라운드를 넘김) — 256(캠당 약 300KB PSRAM, 세션 4개 약 1.2MB / 8MB) */
+#define SR_HOLD             256
 /* 2026-09-28(사용자 설계) — 흐름 제어 기준을 큐 개수(예전 48/16)에서 남은 PSRAM으로 바꿈. Data 송신 큐는 PSRAM에서
  * 필요한 만큼 늘어나므로, 캠은 자기 사진 한 장(META의 전체 청크 수)을 끝까지 쉬지 않고 보내고 빨리 잠듦 — 캠별 기준
  * "그 사진 전체"는 한 장을 보내는 동안 넘을 수 없어서 실제로 미루는 건 PSRAM이 모자랄 때뿐.
@@ -149,7 +151,11 @@ static uint16_t collect_missing(const sr_cam_t *c, uint16_t start, uint16_t end)
 
 static void answer_window_status(sr_cam_t *c)
 {
-    uint16_t n = collect_missing(c, c->st_start, (uint16_t)(c->st_start + c->st_count));
+    /* 2026-10-20(실기 — 앞 창에서 다시 보낸 청크가 또 빠지면 캠은 모르고 다음 창으로 넘어가고, 브 순서는 그 청크에서 멈춰 32청크
+     * 뒤부터 받는 족족 범위 밖으로 버림 → DONE 라운드마다 수백 개 누락, 3라운드 소진) — 물어본 창만이 아니라 다음 순번부터 그 창
+     * 끝까지 빠진 걸 모두 알려 줌. 캠은 앞쪽 구멍부터 메우고 넘어가서 순서가 크게 뒤처지지 않음 */
+    uint16_t from = (c->next_idx < c->st_start) ? c->next_idx : c->st_start;
+    uint16_t n = collect_missing(c, from, (uint16_t)(c->st_start + c->st_count));
     reply_nack(c->mac, ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK, c->file_id, n);
     c->status_pending = false;
 }
@@ -304,6 +310,18 @@ void bridge_sr_on_tx_progress(void)
     for (int i = 0; i < SR_SESSIONS; i++) {
         if (s_cams[i].active && s_cams[i].status_pending) answer_window_status(&s_cams[i]);
     }
+    xSemaphoreGive(s_lock);
+}
+
+/* 2026-10-20(사용자 결정 — "어떻게든 DONE을 받아야지") — 사진 메시지가 아니어도 그 캠에서 무엇이든(체크인 등) 오면 살아 있는 것.
+ * 예전엔 사진 메시지만 기준이라, 캠이 DONE을 다시 보내는 중이어도(그 DONE이 빠지는 동안) 10초 뒤 중단했음. 이제 캠이 아예 조용할
+ * 때만 중단(캠이 연결 끊김을 확인하고 포기했거나 잠든 경우) */
+void bridge_sr_note_alive(const uint8_t *mac)
+{
+    if (!s_lock) return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    sr_cam_t *c = find_cam(mac);
+    if (c && c->active) c->last_us = esp_timer_get_time();
     xSemaphoreGive(s_lock);
 }
 

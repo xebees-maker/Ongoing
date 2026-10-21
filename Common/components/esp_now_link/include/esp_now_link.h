@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>   /* offsetof — 2026-10-20 */
 
 #define ESP_NOW_LINK_VERSION 2
 #define ESP_NOW_LINK_NAME_LEN 16
@@ -183,6 +184,9 @@ typedef enum {
                                                  보릴은 이 응답(또는 SET·PAIR_REQUEST)이 끊기면 통신 끊김으로 봄 */
     ESP_NOW_MSG_BORIL_SET = 62,              /* Cntl -> 보릴: esp_now_boril_set_t — 켜기·끄기(신뢰 전송) */
     ESP_NOW_MSG_BORIL_SET_ACK = 63,          /* 보릴 -> Cntl: esp_now_boril_status_t — 적용 뒤 상태 */
+    /* 2026-10-20(사용자 결정 — 조명 테스트 스위치 동기화) — CAM -> Cntl: esp_now_cam_light_t, 응답 없음. 콘이 켠 시험 조명을 캠이
+     * 스스로 껐을 때(잠들기 직전·촬영 뒤) 알림. CAM_LIGHT_ACK로 보냈더니 브가 진행 중인 켜기 요청의 응답으로 받아 버려 따로 둠 */
+    ESP_NOW_MSG_CAM_LIGHT_STATE = 64,
 } esp_now_msg_type_t;
 
 /* 2026-10-18 — 보릴 상태(STATUS, SET_ACK). 끊김 동작(사용자 결정): 통신이 끊기면 릴레이를 그대로 두다가 failsafe_min분 뒤 끔.
@@ -266,7 +270,13 @@ typedef struct __attribute__((packed)) {
     uint8_t sensor_kind;                      /* sensor_kind_t — 캠은 0(SENSOR_KIND_UNKNOWN) */
     uint8_t chan_count;
     uint8_t chan_type[ESP_NOW_MAX_CHANNELS];  /* sensor_channel_type_t, [0..chan_count) 유효 */
+    /* 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 캠만: 카메라 센서 PID(예 0x5640, 0x3660)와 최대 해상도(framesize_t 번호).
+     * 0 = 모름. 끝에 붙인 필드라 옛 펌웨어(센스, 옛 캠)는 이보다 짧게 보냄 — 받는 쪽은 ESP_NOW_PAIR_ACK_BASE_LEN 이상이면 받고
+     * 이 필드는 길이가 될 때만 읽음 */
+    uint16_t cam_pid;
+    uint8_t  cam_max_framesize;
 } esp_now_pair_ack_t;
+#define ESP_NOW_PAIR_ACK_BASE_LEN offsetof(esp_now_pair_ack_t, cam_pid)
 
 /* esp_now_channel_ping_t/esp_now_channel_pong_t(2026-08-04/05) — 2026-08-25 CASK 재설계로
  * 완전 제거. project_cam_cntl_ping_pong_redesign_proposal 메모리 참고 */
@@ -566,7 +576,18 @@ typedef struct __attribute__((packed)) {
                                         시간 도메인은 보존해서 사실 매번 다시 맞출 필요는
                                         없지만, "필요한지 아닌지 판단하는 로직"을 추가하는
                                         비용이 그냥 매번 보내는 것보다 더 큼) */
+    uint8_t  frame_size;               /* 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 콘이 정한 촬영 해상도(framesize_t 번호).
+                                        콘이 캠마다 이 해상도에 맞는 수신 버퍼를 잡음. 0xFF = 지정 안 함(캠 기본). 끝에 붙인
+                                        필드라 옛 캠은 무시, 캠은 ESP_NOW_CAM_CONFIG_BASE_LEN 이상이면 받음 */
+    /* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — 자동(agc_enable·aec_enable 둘 다 1)이 아니면 캠은 AGC·AEC·AWB를
+     * 모두 끄고 아래 값을 씀. 끝에 붙인 필드라 옛 캠은 무시, 캠은 sizeof(esp_now_cam_config_t) 이상일 때만 받음(OV5640 레지스터 단위) */
+    uint16_t man_exposure;             /* 노출(줄) — 0x3500~0x3502 */
+    uint16_t man_gain;                 /* 게인 ×16(16 = 1.0배) — 0x350A~0x350B */
+    uint16_t man_awb[3];               /* AWB R·G·B 게인 ×1024(1024 = 1.0배) — 0x3400~0x3405 */
 } esp_now_cam_config_t;
+#define ESP_NOW_CAM_CONFIG_BASE_LEN offsetof(esp_now_cam_config_t, frame_size)
+#define ESP_NOW_CAM_CONFIG_MANUAL_LEN sizeof(esp_now_cam_config_t)
+#define ESP_NOW_CAM_FRAME_SIZE_DEFAULT 0xFF
 
 /* CAM -> Cntl: CAM_CONFIG_SET 적용 결과 확인(2026-08-08) */
 typedef struct __attribute__((packed)) {

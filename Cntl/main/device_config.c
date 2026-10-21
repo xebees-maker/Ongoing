@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stddef.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 
@@ -13,7 +14,9 @@ static const char *TAG = "SYS";
 #define DEVICE_CONFIG_PATH    FS_MOUNT_POINT "/device_config.bin"
 #define SCREEN_CFG_PATH       FS_MOUNT_POINT "/screen.cfg"   /* 2026-09-29 — 화면 자동 꺼짐(분) 1바이트 */
 #define SCREEN_OFF_MIN_DEFAULT 5
-#define DEVICE_CONFIG_VERSION 9  /* 2026-09-18: 촬영주기/AGC/AEC/XCLK를 전역 스칼라 필드에서
+#define DEVICE_CONFIG_VERSION 11 /* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영): 카메라별 슬롯에 수동 노출·게인·AWB 추가
+                                    (v9·v10 파일은 읽어서 옮김 — 10은 같은 날 잠깐 쓴 wb_mode 칸, 버림) */
+#define DEVICE_CONFIG_VERSION_V9 9  /* 2026-09-18: 촬영주기/AGC/AEC/XCLK를 전역 스칼라 필드에서
                                     cam_settings[] 슬롯 배열로 재설계(카메라별 설정)로 8->9
                                     (구버전 파일은 버전 불일치로 기본값으로 자연 폴백 —
                                     UI_ERR_CONFIG_FILE_MISMATCH로 화면에도 보임,
@@ -64,7 +67,21 @@ typedef struct __attribute__((packed)) {
     uint8_t  agc_enable;
     uint8_t  aec_enable;
     uint8_t  xclk_mhz;
+    /* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — "자동 노출/색"(agc_enable·aec_enable 함께)을 끄면 쓰는 값(OV5640 단위) */
+    uint16_t man_exposure;   /* 줄 */
+    uint16_t man_gain;       /* ×16 */
+    uint16_t man_awb[3];     /* R·G·B ×1024 */
 } cam_settings_entry_t;
+
+/* v9·v10 파일의 카메라 슬롯 앞부분(둘 다 이 14바이트가 같음, v10은 뒤에 wb_mode 1바이트) — 읽어서 옮기는 데만 씀 */
+typedef struct __attribute__((packed)) {
+    uint8_t  mac[6];
+    uint8_t  in_use;
+    uint32_t capture_interval_sec;
+    uint8_t  agc_enable;
+    uint8_t  aec_enable;
+    uint8_t  xclk_mhz;
+} cam_settings_entry_v9_t;
 
 #define CAM_CAPTURE_INTERVAL_SEC_DEFAULT 1800  /* CAM Kconfig 기본(30분)과 동일 */
 /* 2026-09-17(모델-뷰-Dirty 원칙 감사 — "파일/디폴트/Dirty/model/view가 원칙대로") — 예전
@@ -77,10 +94,17 @@ typedef struct __attribute__((packed)) {
                                                    조작 후 이만큼 조용하면 CAM에 SLEEP_NOW */
 #define AGC_ENABLE_DEFAULT true   /* 센서 전원인가 기본값과 일치(2026-08-21) */
 #define AEC_ENABLE_DEFAULT true
+/* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — 수동값 기본: 게인 1.0배, 노출은 10-21 Side 실측(LED, XCLK 24MHz 수렴값).
+ * AWB는 중립(1.0배)이면 초록으로 나와서(사용자 10-21 확인) 드라이버 "맑음" 프리셋(R 1.47, G 1.02, B 1.31 — 사용자: 색 정상) */
+#define MAN_EXPOSURE_DEFAULT 885
+#define MAN_GAIN_DEFAULT     16
+static const uint16_t s_man_awb_default[3] = { 0x5E0, 0x410, 0x540 };
 #define XCLK_MHZ_DEFAULT 10  /* 2026-08-21 — 24MHz에서 10MHz로 변경. 카메라 고정+동일 밝기
                                  still-cut 비교 테스트에서 10MHz가 화질 최적점으로 확인됨
                                  (20MHz부터 노이즈 심해짐). UI 드롭다운은 그대로 5/10/20/24MHz
-                                 유지, 빌드 시 기본값만 변경(사용자 지시) */
+                                 유지, 빌드 시 기본값만 변경(사용자 지시).
+                                 2026-10-21 — 24MHz 선택지 뺌(드라이버 JPEG PLL이 20MHz 기준, TOP(OV3660)
+                                 24MHz에서 JPEG 깨짐 — ui_main s_xclk_values 주석). 저장값 24는 화면에서 첫 항목으로 보임 */
 /* 2026-09-18(모델 라이프사이클 원칙 리팩토링) — Sens 측정주기가 미설정일 때 쓸 디폴트.
  * node_hub.c와 ui_main.c가 각자 "0이면 내가 아는 숫자로" 하드코딩했던 게(15와 60, 서로
  * 다른 값!) 오늘 지적받은 문제의 원인 — 이 #define은 딱 한 번, 아래 s_sens_sample_interval_
@@ -99,6 +123,34 @@ typedef struct __attribute__((packed)) {
     alias_entry_t aliases[ALIAS_SLOTS];
     cam_settings_entry_t cam_settings[CAM_SETTINGS_SLOTS];
 } device_config_file_t;
+
+/* v9·v10 파일 — 카메라 슬롯만 다르고 앞부분(카메라 슬롯 전까지)은 같음. 카메라 슬롯 한 칸이 v9 14바이트, v10은 wb_mode 1바이트 더 */
+#define CAM_ENTRY_V9_BYTES  sizeof(cam_settings_entry_v9_t)
+#define CAM_ENTRY_V10_BYTES (sizeof(cam_settings_entry_v9_t) + 1)
+static void set_manual_defaults(cam_settings_entry_t *e)
+{
+    e->man_exposure = MAN_EXPOSURE_DEFAULT;
+    e->man_gain = MAN_GAIN_DEFAULT;
+    for (int k = 0; k < 3; k++) e->man_awb[k] = s_man_awb_default[k];
+}
+
+/* 옛 파일(raw, 길이 n)을 새 구조 s로 옮김. 버전이 9나 10이고 길이가 맞으면 true */
+static bool convert_old_config(const uint8_t *raw, size_t n, device_config_file_t *s)
+{
+    const size_t head = offsetof(device_config_file_t, cam_settings);
+    size_t entry = (raw[0] == 9) ? CAM_ENTRY_V9_BYTES : (raw[0] == 10) ? CAM_ENTRY_V10_BYTES : 0;
+    if (!entry || n != head + entry * CAM_SETTINGS_SLOTS) return false;
+    memset(s, 0, sizeof(*s));
+    memcpy(s, raw, head);
+    for (int i = 0; i < CAM_SETTINGS_SLOTS; i++) {
+        memcpy(&s->cam_settings[i], raw + head + entry * i, sizeof(cam_settings_entry_v9_t));
+        set_manual_defaults(&s->cam_settings[i]);
+    }
+    ESP_LOGW(TAG, "Config file v%u converted to v%u (camera manual exposure/gain/white balance added, defaults)", (unsigned)raw[0],
+             (unsigned)DEVICE_CONFIG_VERSION);
+    s->version = DEVICE_CONFIG_VERSION;
+    return true;
+}
 
 static uint32_t s_response_interval_sec    = RESPONSE_INTERVAL_SEC_DEFAULT;
 static uint32_t s_adaptive_response_sec    = ADAPTIVE_RESPONSE_SEC_DEFAULT;
@@ -191,6 +243,14 @@ void device_config_load(void)
     if (!f) return;
     device_config_file_t s = { 0 };
     bool ok = (fread(&s, sizeof(s), 1, f) == 1) && s.version == DEVICE_CONFIG_VERSION;
+    /* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — v9·v10 파일이면 그대로 옮기고 수동값만 기본값. 다음 저장 때 v11로 씀 */
+    if (!ok) {
+        uint8_t *raw = heap_caps_malloc(sizeof(device_config_file_t), MALLOC_CAP_SPIRAM);
+        size_t n = 0;
+        if (raw && fseek(f, 0, SEEK_SET) == 0) n = fread(raw, 1, sizeof(device_config_file_t), f);
+        if (raw && n > 0) ok = convert_old_config(raw, n, &s);
+        heap_caps_free(raw);
+    }
     fclose(f);
     if (!ok) {
         ESP_LOGW(TAG, "Config file format mismatch - keeping defaults");
@@ -255,6 +315,7 @@ static cam_settings_entry_t *find_or_create_cam_settings_slot(const uint8_t *mac
             s_cam_settings[i].agc_enable = AGC_ENABLE_DEFAULT ? 1 : 0;
             s_cam_settings[i].aec_enable = AEC_ENABLE_DEFAULT ? 1 : 0;
             s_cam_settings[i].xclk_mhz = XCLK_MHZ_DEFAULT;
+            set_manual_defaults(&s_cam_settings[i]);
             return &s_cam_settings[i];
         }
     }
@@ -329,25 +390,59 @@ bool device_config_get_agc_enable(const uint8_t *mac)
     return slot ? (slot->agc_enable != 0) : AGC_ENABLE_DEFAULT;
 }
 
-void device_config_set_agc_enable(const uint8_t *mac, bool enable)
-{
-    cam_settings_entry_t *slot = find_or_create_cam_settings_slot(mac);
-    if (!slot) return;
-    slot->agc_enable = enable ? 1 : 0;
-    device_config_save();
-}
-
 bool device_config_get_aec_enable(const uint8_t *mac)
 {
     cam_settings_entry_t *slot = find_cam_settings_slot(mac);
     return slot ? (slot->aec_enable != 0) : AEC_ENABLE_DEFAULT;
 }
 
-void device_config_set_aec_enable(const uint8_t *mac, bool enable)
+/* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — "자동 노출/색": AGC·AEC를 함께(캠은 둘 다 꺼지면 AWB도 끄고 수동값을 씀) */
+bool device_config_get_cam_auto_image(const uint8_t *mac)
+{
+    return device_config_get_agc_enable(mac) && device_config_get_aec_enable(mac);
+}
+
+void device_config_set_cam_auto_image(const uint8_t *mac, bool on)
 {
     cam_settings_entry_t *slot = find_or_create_cam_settings_slot(mac);
     if (!slot) return;
-    slot->aec_enable = enable ? 1 : 0;
+    slot->agc_enable = on ? 1 : 0;
+    slot->aec_enable = on ? 1 : 0;
+    device_config_save();
+}
+
+/* 2026-10-22(사용자 지시 — 노출 시험 결과를 기본값으로, 현장에서는 조정) — 처음 연결되는 캠은 센서 종류로 수동 노출 기본값을 정함.
+ * XCLK 20MHz·게인 1.00·AWB 맑음·불 끔 시험에서 사용자가 고른 최적: OV5640(Side) 590~787줄 -> 690, OV3660(TOP) 782~1095줄 -> 938.
+ * 이미 설정 칸이 있는 캠은 손대지 않음(사용자가 정한 값) */
+#define MAN_EXPOSURE_OV5640 690
+#define MAN_EXPOSURE_OV3660 938
+void device_config_note_cam_sensor(const uint8_t *mac, uint16_t pid)
+{
+    if (!pid || find_cam_settings_slot(mac)) return;
+    cam_settings_entry_t *slot = find_or_create_cam_settings_slot(mac);
+    if (!slot) return;
+    slot->man_exposure = (pid == 0x5640) ? MAN_EXPOSURE_OV5640 : (pid == 0x3660) ? MAN_EXPOSURE_OV3660 : MAN_EXPOSURE_DEFAULT;
+    ESP_LOGI(TAG, "New camera (sensor PID 0x%04x): manual exposure default %u lines", (unsigned)pid, (unsigned)slot->man_exposure);
+    device_config_save();
+}
+
+void device_config_get_cam_manual(const uint8_t *mac, uint16_t out[DEVICE_CONFIG_MAN_COUNT])
+{
+    cam_settings_entry_t *slot = find_cam_settings_slot(mac);
+    cam_settings_entry_t d;
+    if (!slot) { set_manual_defaults(&d); slot = &d; }
+    out[0] = slot->man_exposure;
+    out[1] = slot->man_gain;
+    for (int k = 0; k < 3; k++) out[2 + k] = slot->man_awb[k];
+}
+
+void device_config_set_cam_manual(const uint8_t *mac, const uint16_t v[DEVICE_CONFIG_MAN_COUNT])
+{
+    cam_settings_entry_t *slot = find_or_create_cam_settings_slot(mac);
+    if (!slot) return;
+    slot->man_exposure = v[0];
+    slot->man_gain = v[1];
+    for (int k = 0; k < 3; k++) slot->man_awb[k] = v[2 + k];
     device_config_save();
 }
 

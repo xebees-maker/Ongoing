@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 #include "fs.h"
 #include "esp_heap_caps.h"
+#include "photo_storage.h"   /* 2026-10-20 — /photo가 저장소에서 나눠 읽음 */
 #include "draw/lv_draw_buf_private.h"
 #include "ui_font.h"
 #include "esp_http_server.h"
@@ -123,24 +124,41 @@ static esp_err_t photo_get_handler(httpd_req_t *req)
         has_seq  = (httpd_query_key_value(query, "seq", seq_str, sizeof(seq_str)) == ESP_OK);
     }
 
-    const uint8_t *data = NULL;
-    size_t len = 0;
-    if (!ui_main_get_selected_photo_raw(&data, &len)) {
+    uint8_t sel_mac[6], sel_kind = 0; uint32_t sel_seq = 0;
+    if (!ui_main_get_selected_photo_ref(sel_mac, &sel_kind, &sel_seq)) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no photo selected");
         return ESP_FAIL;
     }
     if (has_kind && has_seq && kind_str[0] != '\0') {
-        uint8_t sel_kind = 0; uint32_t sel_seq = 0;
         uint32_t seq = (uint32_t)strtoul(seq_str, NULL, 10);
-        if (!ui_main_get_selected_photo_id(&sel_kind, &sel_seq) ||
-            sel_kind != (uint8_t)kind_str[0] || sel_seq != seq) {
+        if (sel_kind != (uint8_t)kind_str[0] || sel_seq != seq) {
             httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "selection changed");
             return ESP_FAIL;
         }
     }
 
+    /* 2026-10-20(사용자 결정 — 사진 보기 메모리) — 화면이 원본을 계속 들고 있지 않으므로 저장소에서 128KB씩 나눠 읽어 보냄
+     * (web_api.c의 /api/cam/photo와 같음) */
+    const size_t cap = 128 * 1024;
+    uint8_t *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    size_t off = 0, n = 0, total = 0;
+    if (!photo_storage_read_part(sel_mac, sel_kind, sel_seq, 0, buf, cap, &n, &total) || n == 0) {
+        heap_caps_free(buf);
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "photo read failed");
+        return ESP_FAIL;
+    }
     httpd_resp_set_type(req, "image/jpeg");
-    return httpd_resp_send(req, (const char *)data, len);
+    esp_err_t ret = ESP_OK;
+    for (;;) {
+        ret = httpd_resp_send_chunk(req, (const char *)buf, n);
+        off += n;
+        if (ret != ESP_OK || off >= total) break;
+        if (!photo_storage_read_part(sel_mac, sel_kind, sel_seq, off, buf, cap, &n, &total) || n == 0) { ret = ESP_FAIL; break; }
+    }
+    if (ret == ESP_OK) ret = httpd_resp_send_chunk(req, NULL, 0);
+    heap_caps_free(buf);
+    return ret;
 }
 
 /* 2026-08-30(사용자 지시: "콘은 순수 JSON API만 제공하고... 정적 프론트엔드가 이 API를

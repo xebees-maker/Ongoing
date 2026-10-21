@@ -211,6 +211,7 @@ static bool               s_has_selected_sensor = false;
  * 이 라벨들을 참조하므로 그 함수보다 앞에 선언돼야 함(사용자 지시: "앞으로 모든 label은 그
  * 구조체에 넣어야해" — ui_str_id_t뿐 아니라 이 선언 순서 규칙도 같이 지킬 것). */
 static lv_obj_t *s_capture_interval_dd    = NULL;
+static lv_obj_t *s_light_test_sw          = NULL;   /* 2026-10-20 — 장치 팝업(캠)의 조명 테스트 스위치, 캠 상태 알림으로 맞춤 */
 static lv_obj_t *s_capture_interval_label = NULL;
 
 /* 2026-09-27(사용자 지시 — 전체화면 팝업 규칙) — 촬영주기/AGC/AEC/XCLK는 콘에 저장했다가 캠이 깨어날 때 CASK CONFIG로
@@ -230,16 +231,24 @@ static lv_obj_t *s_auto_connect_known_label  = NULL;
 static lv_obj_t *s_auto_connect_new_switch   = NULL;
 static lv_obj_t *s_auto_connect_new_label    = NULL;
 
-/* AGC/AEC On/Off(2026-08-21, 세로줄 노이즈 진단용) — 카메라별 설정, 토글 즉시 저장 */
-static lv_obj_t *s_agc_switch = NULL;
-static lv_obj_t *s_agc_label  = NULL;
-static lv_obj_t *s_aec_switch = NULL;
-static lv_obj_t *s_aec_label  = NULL;
+/* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — "자동 노출/색"(AGC·AEC·AWB 함께, 예전 AGC·AEC 스위치 둘을 대신함)과 끈 때의 수동값
+ * (노출 줄, 게인 배, AWB R·G·B 배) — 카메라별, 스위치는 즉시 저장, 수동값은 적용 버튼 */
+static lv_obj_t *s_auto_img_switch = NULL;
+static lv_obj_t *s_auto_img_label  = NULL;
+static lv_obj_t *s_man_box         = NULL;
+/* 수동값 칸 — 릴레이 값처럼 역상 글자를 누르면 롤러 팝업(사용자 10-21: "릴레이에서 썼던 방식"), 확인하면 바로 저장 */
+static lv_obj_t *s_man_lbl[5]      = { NULL };
+static lv_obj_t *s_man_roller[4]   = { NULL };
+static int       s_man_roller_idx  = -1;
+static const ui_str_id_t s_man_label_ids[5] = { STR_LABEL_MAN_EXPOSURE, STR_LABEL_MAN_GAIN, STR_LABEL_MAN_AWB_R, STR_LABEL_MAN_AWB_G, STR_LABEL_MAN_AWB_B };
 
 /* XCLK 프리셋 행(2026-08-21, 화질/노이즈 진단용) — 4단계 프리셋 드롭다운, 카메라별 설정, 선택 즉시 저장 */
-static const uint32_t s_xclk_values[] = { 5, 10, 20, 24 };
+/* 2026-10-21(사용자 결정) — 24MHz 뺌: 두 센서 드라이버의 JPEG PLL이 XCLK 20MHz 기준이라 24MHz면 센서 클럭이 20% 빨라짐.
+ * TOP(OV3660)에서 JPEG가 깨짐(불 끈 노출 시험 6장 연속), 설계 클럭(SYSCLK 50MHz)에서는 20장 모두 정상 */
+static const uint32_t s_xclk_values[] = { 5, 10, 20 };
 static lv_obj_t *s_xclk_dd          = NULL;
 static lv_obj_t *s_xclk_label       = NULL;
+
 
 /* 측정 주기 행(2026-09-05, 사용자 설계) — [라벨][드롭다운][Apply], 촬영주기와 동일 패턴.
  * 센서별 설정이라 값은 device_config의 mac 키 슬롯에 저장(device_config_get/set_sens_
@@ -402,7 +411,7 @@ static void ui_post(lv_async_cb_t cb, void *arg)
     if (xQueueSend(s_ui_post_q, &it, 0) != pdTRUE) ESP_LOGW(TAG, "ui_post queue full - UI event dropped");
 }
 
-static const uint32_t s_capture_interval_values[]  = { 0, 60, 600, 3600, 10800, 43200 };
+static const uint32_t s_capture_interval_values[]  = { 0, 30, 3600, 10800, 28800, 43200 };  /* 2026-10-19(사용자 지시) — 30초는 시험용 */
 /* 2026-08-10, CAM Deep Sleep 전환 — 이 값이 곧 딥슬립 사이클 길이가 되므로 절전 정도가
  * 극단적으로 갈리는 5단계로 재정의(즉시/빠름/균형/절전/최대절전). 각 값의 의미는
  * s_response_help_texts(아래)와 사용자 확인된 표 그대로 — 반드시 같이 바꿀 것.
@@ -447,9 +456,9 @@ static lv_image_dsc_t    s_photo_dsc;
  * 참고, "웹기생" 설계: 웹은 콘이 이미 선택해서 들고 있는 바이트를 그대로 읽어갈 뿐, 독자적으로
  * 다시 읽지 않음). 상한은 photo_rx.c의 PHOTO_RECV_BUF_CAP(수신 가능한 최대 사진 크기)과
  * 반드시 같아야 함 — 그보다 큰 사진은 애초에 콘에 도착할 수 없었음 */
+/* 2026-10-20(사용자 결정 — 사진 보기 메모리) — 예전엔 부팅 때 1MB를 잡아 계속 들고 있었음. 이제 사진을 띄울 때 그 크기만큼만 잡고
+ * 디코드가 끝나면 바로 놓음(웹은 ui_main_get_selected_photo_ref로 저장소에서 직접 읽음). 상한은 수신 상한과 같게 */
 #define PHOTO_RAW_BUF_CAP (1024 * 1024)
-static uint8_t *s_photo_raw_buf = NULL;
-static size_t   s_photo_raw_len = 0;
 
 /* 지금촬영 진행 팝업 — 1.명령전달/2.촬영결과/3.목록갱신 3줄(팝업 뼈대 자체는 아래 공용
  * 진행 팝업 모듈이 담당, 이 라벨 배열만 지금촬영 전용) */
@@ -927,6 +936,7 @@ static lv_timer_t *s_screen_off_timer = NULL;
 static void screen_backlight(bool on)
 {
     esp_err_t err = ch422g_set_io(CH422G_IO_BACKLIGHT, on);
+    sd_health_mark(SDH_MARK_SCREEN, on);   /* 2026-10-21 — SD 명령 기록에 화면 켜기/끄기 */
     if (err != ESP_OK) ESP_LOGW(TAG, "Backlight %s failed: %s", on ? "on" : "off", esp_err_to_name(err));
 }
 
@@ -1810,7 +1820,9 @@ static bool sd_verify_healthy(void)
     /* 2026-09-26 — stats_store_get_count()는 이제 RAM 색인만 봐서(I/O 없음) 검증이 안 됨 —
      * 실제 I/O를 하는 전용 probe로 교체 */
     stats_store_probe_io();
-    return !stats_store_had_io_error();
+    if (stats_store_had_io_error()) return false;
+    /* 2026-10-21(C4 — 읽기 한 번만으론 FAT1/FAT2가 30섹터 다른 카드도 통과했음) — FAT 두 벌이 같아야 정상 */
+    return sd_health_fat_ok();
 }
 
 /* 2026-09-11(에러목록 팝업 행별 재설계 — "지우기" 버튼, s_error_active/s_warn_active를
@@ -2910,26 +2922,38 @@ static void fill_rgb565_dsc(lv_image_dsc_t *dsc, uint8_t *pixel_buf, uint16_t w,
  * 디코드해서 대시보드 썸네일(s_photo_box)에 반영. 파일이 없으면(삭제 직후 등) 조용히 무시 */
 static void display_photo(uint8_t kind, uint32_t seq)
 {
-    if (!s_photo_jpeg_buf || !s_photo_raw_buf) {
+    if (!s_photo_jpeg_buf) {
         ESP_LOGE(TAG, "display_photo: no buffer (initial alloc failed?)");
         return;
     }
     if (!s_has_selected_cam) return;
 
-    size_t jpeg_len = 0;
-    if (!photo_storage_read_file(s_selected_cam_mac, kind, seq, s_photo_raw_buf, PHOTO_RAW_BUF_CAP, &jpeg_len)) {
-        ESP_LOGW(TAG, "display_photo: SD read failed (kind=%c seq=%u)", (char)kind, (unsigned)seq);
-        ESP_LOGD(TAG, "DISPLAY read MISS kind=%c seq=%u", (char)kind, (unsigned)seq);
-        s_photo_raw_len = 0;
+    /* 2026-10-20 — 원본은 사진 크기만큼만, 디코드 동안만(위 PHOTO_RAW_BUF_CAP 주석) */
+    size_t photo_size = 0;
+    if (!photo_storage_get_size(s_selected_cam_mac, kind, seq, &photo_size) || photo_size == 0 || photo_size > PHOTO_RAW_BUF_CAP) {
+        ESP_LOGW(TAG, "display_photo: no photo or bad size %u (kind=%c seq=%u)", (unsigned)photo_size, (char)kind, (unsigned)seq);
         return;
     }
-    s_photo_raw_len = jpeg_len;
+    uint8_t *raw = heap_caps_malloc(photo_size, MALLOC_CAP_SPIRAM);
+    if (!raw) {
+        ESP_LOGE(TAG, "display_photo: raw buffer alloc failed (%u bytes)", (unsigned)photo_size);
+        return;
+    }
+    size_t jpeg_len = 0;
+    if (!photo_storage_read_file(s_selected_cam_mac, kind, seq, raw, photo_size, &jpeg_len)) {
+        ESP_LOGW(TAG, "display_photo: SD read failed (kind=%c seq=%u)", (char)kind, (unsigned)seq);
+        ESP_LOGD(TAG, "DISPLAY read MISS kind=%c seq=%u", (char)kind, (unsigned)seq);
+        heap_caps_free(raw);
+        return;
+    }
     ESP_LOGD(TAG, "DISPLAY kind=%c seq=%u jpeg_len=%u", (char)kind, (unsigned)seq, (unsigned)jpeg_len);
 
     uint16_t w = 0, h = 0;
     size_t pixel_len = 0;
-    if (!decode_jpeg_scaled(s_photo_raw_buf, jpeg_len, PHOTO_PANEL_DECODE_W, PHOTO_PANEL_DECODE_H,
-                             s_photo_jpeg_buf, PHOTO_PANEL_BUF_CAP, &w, &h, &pixel_len)) {
+    bool decoded = decode_jpeg_scaled(raw, jpeg_len, PHOTO_PANEL_DECODE_W, PHOTO_PANEL_DECODE_H,
+                                      s_photo_jpeg_buf, PHOTO_PANEL_BUF_CAP, &w, &h, &pixel_len);
+    heap_caps_free(raw);
+    if (!decoded) {
         ESP_LOGE(TAG, "display_photo: decode_jpeg_scaled failed (kind=%c seq=%u)", (char)kind, (unsigned)seq);
         ui_log_add_err(UI_ERR_DECODE_FAIL, "Photo display failed (decode) kind=%c seq=%u", (char)kind, (unsigned)seq);
         return;
@@ -5552,12 +5576,10 @@ static void refresh_dashboard(lv_timer_t *t)
                 format_battery_tiny(batt, sizeof(batt), cam_nodes[j].battery_pct);
                 n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", batt);
             }
-            /* AGC/AEC는 On일 때만("On" 글자 없이 태그만) — 사용자 지시 */
-            if (device_config_get_agc_enable(s_camera_dash_row_macs[i]) && n > 0 && (size_t)n < sizeof(buf)) {
-                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", ui_str(STR_LABEL_AGC_TINY));
-            }
-            if (device_config_get_aec_enable(s_camera_dash_row_macs[i]) && n > 0 && (size_t)n < sizeof(buf)) {
-                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s", ui_str(STR_LABEL_AEC_TINY));
+            /* 2026-10-21(사용자 지시) — 예전 "AGC"·"AEC" 태그 대신 자동 노출/색(AGC·AEC·AWB 함께)이면 Automatic, 끄면 Manual */
+            if (n > 0 && (size_t)n < sizeof(buf)) {
+                n += snprintf(buf + n, sizeof(buf) - (size_t)n, " / %s",
+                              ui_str(device_config_get_cam_auto_image(s_camera_dash_row_macs[i]) ? STR_LABEL_IMG_AUTO_TINY : STR_LABEL_IMG_MANUAL_TINY));
             }
             /* 2026-09-18(사용자 지적 — is_active를 true로 하드코딩해서 실제 상태와 무관하게
              * 표시되던 버그) — 센스의 near_orphan 계산과 동일 패턴으로 실제 상태 반영 */
@@ -6666,18 +6688,130 @@ static void cb_cam_xclk_changed(lv_event_t *e)
     ui_log_add("XCLK saved - applied on next CAM wake");
 }
 
-static void cb_cam_agc_changed(lv_event_t *e)
+/* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — 수동값 글자: [0] 노출은 줄(정수), 게인·AWB는 배율 소수 둘째 자리(LVGL엔 %f가 없어 정수로 나눠 씀) */
+static void man_value_text(int i, uint16_t v, char *out, size_t cap)
 {
-    (void)e;
-    node_hub_apply_cam_agc_enable(s_device_popup_node.mac, lv_obj_has_state(s_agc_switch, LV_STATE_CHECKED));
-    ui_log_add("AGC saved - applied on next CAM wake");
+    if (i == 0) { snprintf(out, cap, "%u", (unsigned)v); return; }
+    uint32_t den = (i == 1) ? 16 : 1024;
+    uint32_t x100 = ((uint32_t)v * 100 + den / 2) / den;
+    snprintf(out, cap, "%u.%02u", (unsigned)(x100 / 100), (unsigned)(x100 % 100));
 }
 
-static void cb_cam_aec_changed(lv_event_t *e)
+static void cb_cam_auto_img_changed(lv_event_t *e)
 {
     (void)e;
-    node_hub_apply_cam_aec_enable(s_device_popup_node.mac, lv_obj_has_state(s_aec_switch, LV_STATE_CHECKED));
-    ui_log_add("AEC saved - applied on next CAM wake");
+    bool on = lv_obj_has_state(s_auto_img_switch, LV_STATE_CHECKED);
+    node_hub_apply_cam_auto_image(s_device_popup_node.mac, on);
+    if (s_man_box) {
+        if (on) lv_obj_add_flag(s_man_box, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_remove_flag(s_man_box, LV_OBJ_FLAG_HIDDEN);
+    }
+    ui_log_add(on ? "Auto exposure/color on - applied on next CAM wake" : "Auto exposure/color off (manual values) - applied on next CAM wake");
+}
+
+/* 롤러 하나 — 옵션 글(0~9 등), 처음 선택 */
+static lv_obj_t *man_roller_add(lv_obj_t *row, const char *opts, int sel)
+{
+    lv_obj_t *r = lv_roller_create(row);
+    lv_obj_set_flex_grow(r, 1);
+    lv_obj_set_style_text_font(r, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_roller_set_options(r, opts, LV_ROLLER_MODE_NORMAL);
+    lv_roller_set_selected(r, (uint16_t)(sel < 0 ? 0 : sel), LV_ANIM_OFF);
+    return r;
+}
+
+static void man_rollers_clear(void)
+{
+    for (int i = 0; i < 4; i++) s_man_roller[i] = NULL;
+    s_man_roller_idx = -1;
+}
+
+static void cb_man_roller_cancel(lv_event_t *e)
+{
+    man_rollers_clear();
+    cb_modal_close(e);
+}
+
+/* 확인 — 롤러 자리값을 레지스터 값으로(노출 줄, 게인 ×16, AWB ×1024), 범위로 자르고 바로 저장 */
+static void cb_man_roller_confirm(lv_event_t *e)
+{
+    int i = s_man_roller_idx;
+    if (i >= 0 && i < DEVICE_CONFIG_MAN_COUNT && s_man_roller[0]) {
+        uint16_t v[DEVICE_CONFIG_MAN_COUNT];
+        device_config_get_cam_manual(s_device_popup_node.mac, v);
+        if (i == 0) {
+            uint32_t x = 0;
+            for (int k = 0; k < 4; k++) x = x * 10 + lv_roller_get_selected(s_man_roller[k]);
+            v[0] = (uint16_t)(x < 1 ? 1 : x);
+        } else {
+            uint32_t whole = lv_roller_get_selected(s_man_roller[0]) + (i == 1 ? 1 : 0);   /* 게인 롤러는 1부터 */
+            uint32_t x100 = whole * 100 + lv_roller_get_selected(s_man_roller[1]) * 10 + lv_roller_get_selected(s_man_roller[2]);
+            uint32_t den = (i == 1) ? 16 : 1024, lo = (i == 1) ? 16 : 1, hi = (i == 1) ? 1023 : 4095;
+            uint32_t raw = (x100 * den + 50) / 100;
+            v[i] = (uint16_t)(raw < lo ? lo : raw > hi ? hi : raw);
+        }
+        node_hub_apply_cam_manual_image(s_device_popup_node.mac, v);
+        if (s_man_lbl[i]) {
+            char t[12];
+            man_value_text(i, v[i], t, sizeof(t));
+            lv_label_set_text(s_man_lbl[i], t);
+        }
+        ui_log_add("Manual exposure/color value saved - applied on next CAM wake");
+    }
+    man_rollers_clear();
+    cb_modal_close(e);
+}
+
+/* 수동값 칸을 누르면 롤러 팝업(릴레이 open_value_roller_popup과 같은 모양): 노출 = [천][백][십][일],
+ * 게인 = [1~63] . [0~9][0~9], AWB = [0~3] . [0~9][0~9] */
+static void cb_man_value_tap(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (s_man_roller_idx >= 0 || i < 0 || i >= DEVICE_CONFIG_MAN_COUNT) return;
+    uint16_t v[DEVICE_CONFIG_MAN_COUNT];
+    device_config_get_cam_manual(s_device_popup_node.mac, v);
+    s_man_roller_idx = i;
+
+    lv_obj_t *box = create_modal();
+    create_modal_title(box, s_man_label_ids[i], MODAL_KIND_NORMAL);
+    lv_obj_t *row = lv_obj_create(box);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 8, 0);
+    static const char *const opts_09 = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9";
+    if (i == 0) {
+        uint32_t x = v[0] > 9999 ? 9999 : v[0];
+        s_man_roller[0] = man_roller_add(row, opts_09, (int)(x / 1000));
+        s_man_roller[1] = man_roller_add(row, opts_09, (int)(x / 100 % 10));
+        s_man_roller[2] = man_roller_add(row, opts_09, (int)(x / 10 % 10));
+        s_man_roller[3] = man_roller_add(row, opts_09, (int)(x % 10));
+    } else {
+        uint32_t den = (i == 1) ? 16 : 1024;
+        uint32_t x100 = ((uint32_t)v[i] * 100 + den / 2) / den;
+        char opts1[200];
+        opts1[0] = '\0';
+        int first = (i == 1) ? 1 : 0, last = (i == 1) ? 63 : 3;
+        for (int k = first; k <= last; k++) {
+            char t[6];
+            snprintf(t, sizeof(t), (k == first) ? "%d" : "\n%d", k);
+            strncat(opts1, t, sizeof(opts1) - strlen(opts1) - 1);
+        }
+        int whole = (int)(x100 / 100);
+        if (whole < first) whole = first;
+        if (whole > last) whole = last;
+        s_man_roller[0] = man_roller_add(row, opts1, whole - first);
+        lv_obj_t *dot = lv_label_create(row);
+        lv_label_set_text(dot, ".");
+        lv_obj_set_style_text_font(dot, ui_font_get(UI_FONT_SIZE_18), 0);
+        s_man_roller[1] = man_roller_add(row, opts_09, (int)(x100 / 10 % 10));
+        s_man_roller[2] = man_roller_add(row, opts_09, (int)(x100 % 10));
+    }
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_CANCEL, cb_man_roller_cancel, NULL);
+    add_modal_button(btn_row, STR_BTN_CONFIRM, cb_man_roller_confirm, NULL);
 }
 
 /* 측정 주기(2026-09-05) — 센스는 매 웨이크 SENS_CONFIG_SET을 다시 받아가므로 저장만 하면 다음 웨이크에 반영.
@@ -7054,11 +7188,14 @@ bool ui_main_inject_photo_select(uint8_t kind, uint32_t seq)
 /* 2026-09-19 — 웹의 "원본 그대로 보기"(/photo, /api/photo_fetch)가 씀. 로컬 SD 읽기라
  * ui_main_inject_photo_select()가 반환한 시점엔 이미 display_photo()까지 동기로 끝나있어서
  * 그 결과(s_photo_raw_buf)를 그대로 넘겨주면 됨 — 웹이 독자적으로 다시 읽지 않음("기생" 원칙) */
-bool ui_main_get_selected_photo_raw(const uint8_t **out_data, size_t *out_len)
+/* 2026-10-20(사용자 결정 — 사진 보기 메모리) — 예전엔 화면이 1MB 버퍼에 들고 있는 원본을 웹이 그대로 가져갔음. 이제 화면은 디코드
+ * 동안만 사진 크기만큼 잡고 바로 놓으므로, 웹은 "지금 선택된 사진이 무엇인지"만 받아 저장소에서 직접 나눠 읽음 */
+bool ui_main_get_selected_photo_ref(uint8_t out_mac[6], uint8_t *out_kind, uint32_t *out_seq)
 {
-    if (!s_has_selected_photo || !s_photo_raw_buf || s_photo_raw_len == 0) return false;
-    *out_data = s_photo_raw_buf;
-    *out_len = s_photo_raw_len;
+    if (!s_has_selected_photo || !s_has_selected_cam) return false;
+    memcpy(out_mac, s_selected_cam_mac, 6);
+    *out_kind = s_selected_kind;
+    *out_seq = s_selected_seq;
     return true;
 }
 
@@ -7126,10 +7263,6 @@ void ui_init(void)
         ESP_LOGE(TAG, "Photo list buffer alloc failed - list unavailable");
     }
 
-    s_photo_raw_buf = heap_caps_malloc(PHOTO_RAW_BUF_CAP, MALLOC_CAP_SPIRAM);
-    if (!s_photo_raw_buf) {
-        ESP_LOGE(TAG, "Original JPEG buffer alloc failed (%u bytes)", (unsigned)PHOTO_RAW_BUF_CAP);
-    }
 
     s_dash_nodes      = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
     s_dash_nodes_prev = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
@@ -8721,12 +8854,14 @@ static void teardown_device_popup(void)
     /* 2026-09-18 — 촬영주기/AGC/AEC/XCLK 위젯도 이 팝업 자식(카메라일 때만 생성됨) */
     s_capture_interval_dd = NULL;
     s_capture_interval_label = NULL;
-    s_agc_switch = NULL;
-    s_agc_label = NULL;
-    s_aec_switch = NULL;
-    s_aec_label = NULL;
+    s_light_test_sw = NULL;
+    s_auto_img_switch = NULL;
+    s_auto_img_label = NULL;
+    s_man_box = NULL;
+    for (int i = 0; i < DEVICE_CONFIG_MAN_COUNT; i++) s_man_lbl[i] = NULL;
     s_xclk_dd = NULL;
     s_xclk_label = NULL;
+
     s_device_disconnect_btn = NULL;
     /* 다음에 팝업이 다시 열릴 때(같은 mac이라도) select_sensor()가 무조건 새 위젯을
      * 다시 동기화하도록 강제 — 아래 build_device_popup() 참고 */
@@ -8743,8 +8878,30 @@ static void cb_cam_light_test_switch(lv_event_t *e)
     bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
     esp_now_cam_light_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_LIGHT_SET, .on = on ? 1 : 0 };
     static const uint8_t s_light_ack_types[] = { ESP_NOW_MSG_CAM_LIGHT_ACK };
+    node_hub_set_cam_light(s_device_popup_node.mac, on);
     node_hub_queue_action(s_device_popup_node.mac, &msg, sizeof(msg), s_light_ack_types, 1, 500, 3, "Cam light");
     ESP_LOGI(TAG, "Cam light %s -> %s queued", on ? "on" : "off", s_device_popup_node.name);
+}
+
+/* 2026-10-20(사용자 결정) — 캠이 알려 온 조명 상태를 열려 있는 장치 팝업의 스위치에 반영(LVGL 태스크에서) */
+typedef struct { uint8_t mac[6]; bool on; } cam_light_evt_t;
+static void ui_apply_cam_light(void *arg)
+{
+    cam_light_evt_t *ev = (cam_light_evt_t *)arg;
+    if (s_light_test_sw && memcmp(s_device_popup_node.mac, ev->mac, 6) == 0) {
+        if (ev->on) lv_obj_add_state(s_light_test_sw, LV_STATE_CHECKED);
+        else lv_obj_remove_state(s_light_test_sw, LV_STATE_CHECKED);
+    }
+    heap_caps_free(ev);
+}
+
+void ui_main_on_cam_light(const uint8_t *mac, bool on)
+{
+    cam_light_evt_t *ev = heap_caps_malloc(sizeof(*ev), MALLOC_CAP_SPIRAM);
+    if (!ev) return;
+    memcpy(ev->mac, mac, 6);
+    ev->on = on;
+    ui_post(ui_apply_cam_light, ev);
 }
 
 /* 2026-10-13(사용자 지시) — 센서 보정 초기화(SCD41): 확인 창 → CASK 할일 큐(센스가 깨어나면 실행, 결과는 알림 목록) */
@@ -8891,36 +9048,6 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_obj_set_style_text_font(lv_dropdown_get_list(s_capture_interval_dd), ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_add_event_cb(s_capture_interval_dd, cb_cam_capture_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
-        lv_obj_t *agc_row = lv_obj_create(popup);
-        lv_obj_set_size(agc_row, LV_PCT(100), LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(agc_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(agc_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_border_width(agc_row, 0, 0);
-        lv_obj_set_style_pad_all(agc_row, 0, 0);
-
-        s_agc_label = lv_label_create(agc_row);
-        lv_label_set_text(s_agc_label, ui_str(STR_LABEL_AGC));
-        lv_obj_set_style_text_font(s_agc_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-        s_agc_switch = lv_switch_create(agc_row);
-        if (device_config_get_agc_enable(mac)) lv_obj_add_state(s_agc_switch, LV_STATE_CHECKED);
-        lv_obj_add_event_cb(s_agc_switch, cb_cam_agc_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
-        lv_obj_t *aec_row = lv_obj_create(popup);
-        lv_obj_set_size(aec_row, LV_PCT(100), LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(aec_row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(aec_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_border_width(aec_row, 0, 0);
-        lv_obj_set_style_pad_all(aec_row, 0, 0);
-
-        s_aec_label = lv_label_create(aec_row);
-        lv_label_set_text(s_aec_label, ui_str(STR_LABEL_AEC));
-        lv_obj_set_style_text_font(s_aec_label, ui_font_get(UI_FONT_SIZE_18), 0);
-
-        s_aec_switch = lv_switch_create(aec_row);
-        if (device_config_get_aec_enable(mac)) lv_obj_add_state(s_aec_switch, LV_STATE_CHECKED);
-        lv_obj_add_event_cb(s_aec_switch, cb_cam_aec_changed, LV_EVENT_VALUE_CHANGED, NULL);
-
         lv_obj_t *xclk_row = lv_obj_create(popup);
         lv_obj_set_size(xclk_row, LV_PCT(100), LV_SIZE_CONTENT);
         lv_obj_set_flex_flow(xclk_row, LV_FLEX_FLOW_ROW);
@@ -8941,6 +9068,62 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_obj_set_style_text_font(s_xclk_dd, ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_set_style_text_font(lv_dropdown_get_list(s_xclk_dd), ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_add_event_cb(s_xclk_dd, cb_cam_xclk_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+        /* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — "자동 노출/색" 하나로 AGC·AEC·AWB를 함께 켜고 끔(예전 AGC·AEC 스위치와
+         * 같은 날 넣은 화이트밸런스 선택을 대신함). 끄면 아래 수동값을 씀 — 글자 입력이라 적용 버튼(전체화면 팝업 규칙) */
+        lv_obj_t *auto_row = lv_obj_create(popup);
+        lv_obj_set_size(auto_row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(auto_row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(auto_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(auto_row, 0, 0);
+        lv_obj_set_style_pad_all(auto_row, 0, 0);
+
+        s_auto_img_label = lv_label_create(auto_row);
+        lv_label_set_text(s_auto_img_label, ui_str(STR_LABEL_AUTO_IMAGE));
+        lv_obj_set_style_text_font(s_auto_img_label, ui_font_get(UI_FONT_SIZE_18), 0);
+
+        s_auto_img_switch = lv_switch_create(auto_row);
+        bool auto_img = device_config_get_cam_auto_image(mac);
+        if (auto_img) lv_obj_add_state(s_auto_img_switch, LV_STATE_CHECKED);
+        lv_obj_add_event_cb(s_auto_img_switch, cb_cam_auto_img_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+        /* 수동값 — 첫 줄 노출·게인, 둘째 줄 AWB R·G·B(사용자 10-21: "AWB는 한 줄에") */
+        s_man_box = lv_obj_create(popup);
+        lv_obj_set_size(s_man_box, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(s_man_box, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_border_width(s_man_box, 0, 0);
+        lv_obj_set_style_pad_all(s_man_box, 0, 0);
+        lv_obj_set_style_pad_row(s_man_box, 8, 0);
+        uint16_t mv[DEVICE_CONFIG_MAN_COUNT];
+        device_config_get_cam_manual(mac, mv);
+        lv_obj_t *man_rows[2];
+        for (int r = 0; r < 2; r++) {
+            man_rows[r] = lv_obj_create(s_man_box);
+            lv_obj_set_size(man_rows[r], LV_PCT(100), LV_SIZE_CONTENT);
+            lv_obj_set_flex_flow(man_rows[r], LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(man_rows[r], LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+            lv_obj_set_style_border_width(man_rows[r], 0, 0);
+            lv_obj_set_style_pad_all(man_rows[r], 0, 0);
+            lv_obj_set_style_pad_column(man_rows[r], 10, 0);
+        }
+        lv_obj_t *awb_lbl = lv_label_create(man_rows[1]);
+        lv_label_set_text(awb_lbl, ui_str(STR_LABEL_MAN_AWB));
+        lv_obj_set_style_text_font(awb_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+        for (int i = 0; i < DEVICE_CONFIG_MAN_COUNT; i++) {
+            lv_obj_t *row = man_rows[i < 2 ? 0 : 1];
+            lv_obj_t *l = lv_label_create(row);
+            lv_label_set_text(l, ui_str(s_man_label_ids[i]));
+            lv_obj_set_style_text_font(l, ui_font_get(UI_FONT_SIZE_18), 0);
+            char t[12];
+            man_value_text(i, mv[i], t, sizeof(t));
+            s_man_lbl[i] = lv_label_create(row);
+            lv_label_set_text(s_man_lbl[i], t);
+            lv_obj_set_style_text_font(s_man_lbl[i], ui_font_get(UI_FONT_SIZE_18), 0);
+            style_inverted_control(s_man_lbl[i]);
+            lv_obj_add_flag(s_man_lbl[i], LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(s_man_lbl[i], cb_man_value_tap, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        }
+        if (auto_img) lv_obj_add_flag(s_man_box, LV_OBJ_FLAG_HIDDEN);
 
     }
 
@@ -8967,7 +9150,9 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         lv_label_set_text(light_lbl, ui_str(STR_LABEL_LIGHT_TEST));
         lv_obj_set_style_text_font(light_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
         lv_obj_t *light_sw = lv_switch_create(light_cluster);
+        if (node_hub_get_cam_light(mac)) lv_obj_add_state(light_sw, LV_STATE_CHECKED);   /* 2026-10-20 — 캠 실제 상태 */
         lv_obj_add_event_cb(light_sw, cb_cam_light_test_switch, LV_EVENT_VALUE_CHANGED, NULL);
+        s_light_test_sw = light_sw;
 
         disconnect_parent = bottom_row;
     } else if (sens_kind_store_get(mac) == SENSOR_KIND_SCD41) {
@@ -11061,19 +11246,27 @@ static bool web_op_execute(const ui_web_op_t *op)
             node_hub_apply_cam_capture_interval_sec(op->mac, op->value);
             ui_log_add("Capture interval saved (web) - applied on next CAM wake");
             return true;
-        case UI_WEB_OP_CAM_AGC:
-            node_hub_apply_cam_agc_enable(op->mac, op->value != 0);
-            ui_log_add("AGC saved (web) - applied on next CAM wake");
+        case UI_WEB_OP_CAM_AUTO_IMAGE:   /* cb_cam_auto_img_changed와 같음 */
+            node_hub_apply_cam_auto_image(op->mac, op->value != 0);
+            ui_log_add("Auto exposure/color saved (web) - applied on next CAM wake");
             return true;
-        case UI_WEB_OP_CAM_AEC:
-            node_hub_apply_cam_aec_enable(op->mac, op->value != 0);
-            ui_log_add("AEC saved (web) - applied on next CAM wake");
+        case UI_WEB_OP_CAM_MANUAL_IMAGE: {   /* text = 레지스터 값 5개 "노출,게인,R,G,B"(device_config 단위) */
+            uint16_t v[DEVICE_CONFIG_MAN_COUNT];
+            unsigned long t[DEVICE_CONFIG_MAN_COUNT];
+            if (sscanf(op->text, "%lu,%lu,%lu,%lu,%lu", &t[0], &t[1], &t[2], &t[3], &t[4]) != DEVICE_CONFIG_MAN_COUNT) return false;
+            if (t[0] < 1 || t[0] > 65535 || t[1] < 16 || t[1] > 1023) return false;
+            for (int k = 2; k < DEVICE_CONFIG_MAN_COUNT; k++) if (t[k] < 1 || t[k] > 4095) return false;
+            for (int k = 0; k < DEVICE_CONFIG_MAN_COUNT; k++) v[k] = (uint16_t)t[k];
+            node_hub_apply_cam_manual_image(op->mac, v);
+            ui_log_add("Manual exposure/color values saved (web) - applied on next CAM wake");
             return true;
+        }
         case UI_WEB_OP_CAM_XCLK:
             if (!value_in(s_xclk_values, sizeof(s_xclk_values) / sizeof(s_xclk_values[0]), op->value)) return false;
             node_hub_apply_cam_xclk_mhz(op->mac, (uint8_t)op->value);
             ui_log_add("XCLK saved (web) - applied on next CAM wake");
             return true;
+
         case UI_WEB_OP_SENS_CALIB_RESET:   /* cb_sens_calib_reset_confirm과 같은 명령 */
             if (sens_kind_store_get(op->mac) != SENSOR_KIND_SCD41) return false;
             node_hub_sens_calib_reset(op->mac);
@@ -11082,6 +11275,7 @@ static bool web_op_execute(const ui_web_op_t *op)
             /* cb_cam_light_test_switch와 같은 명령 */
             esp_now_cam_light_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_LIGHT_SET, .on = op->value ? 1 : 0 };
             static const uint8_t s_light_ack_types[] = { ESP_NOW_MSG_CAM_LIGHT_ACK };
+            node_hub_set_cam_light(op->mac, op->value != 0);   /* 2026-10-20 */
             node_hub_queue_action(op->mac, &msg, sizeof(msg), s_light_ack_types, 1, 500, 3, "Cam light");
             return true;
         }

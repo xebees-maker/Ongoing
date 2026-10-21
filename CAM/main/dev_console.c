@@ -126,6 +126,25 @@ static int cmd_q(int argc, char **argv)
     return 0;
 }
 
+/* 2026-10-19 — 해상도(사진 크기 측정용, 최종 설계에서는 콘이 정함). 이름 또는 framesize_t 번호 */
+static int cmd_res(int argc, char **argv)
+{
+    static const struct { const char *name; int fs; } names[] = {
+        { "default", -1 }, { "vga", 10 }, { "svga", 11 }, { "xga", 12 }, { "sxga", 14 }, { "uxga", 15 },
+        { "qxga", 19 }, { "qsxga", 23 }, { "5mp", 24 },
+    };
+    if (argc < 2) {
+        printf("Usage: res <default|vga|svga|xga|sxga|uxga|qxga|qsxga|5mp|number>\n");
+        return 1;
+    }
+    int fs = atoi(argv[1]);
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (strcasecmp(argv[1], names[i].name) == 0) { fs = names[i].fs; break; }
+    }
+    printf(cam_node_set_frame_size(fs) ? "RES_OK\n" : "RES_FAIL\n");
+    return 0;
+}
+
 static int cmd_xclk(int argc, char **argv)
 {
     if (argc < 2) {
@@ -187,6 +206,14 @@ void dev_console_start(void)
         .func    = cmd_q,
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&q_cmd));
+
+    const esp_console_cmd_t res_cmd = {
+        .command = "res",
+        .help    = "Set capture resolution (kept across deep sleep, e.g. res uxga) - from the next capture on",
+        .hint    = "<name|number>",
+        .func    = cmd_res,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&res_cmd));
 
     const esp_console_cmd_t xclk_cmd = {
         .command = "xclk",

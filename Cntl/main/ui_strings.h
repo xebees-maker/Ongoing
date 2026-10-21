@@ -93,8 +93,13 @@ typedef enum {
     STR_LIST_EMPTY,
     STR_LABEL_CAPTURE_INTERVAL,
     STR_LABEL_RESPONSE_INTERVAL,
-    STR_LABEL_AGC,  /* 2026-08-21 — 세로줄 노이즈 진단용 */
-    STR_LABEL_AEC,
+    STR_LABEL_AUTO_IMAGE,     /* 2026-10-21 — 자동 노출/색(AGC·AEC·AWB 함께, 예전 AGC·AEC 두 줄을 대신함) */
+    STR_LABEL_MAN_EXPOSURE,
+    STR_LABEL_MAN_GAIN,
+    STR_LABEL_MAN_AWB,
+    STR_LABEL_MAN_AWB_R,
+    STR_LABEL_MAN_AWB_G,
+    STR_LABEL_MAN_AWB_B,
     STR_LABEL_XCLK,
     STR_CAPTURE_QUEUED_TOAST,
     STR_BTN_NOT_CONNECTED,       /* 2026-10-05 — 지금 촬영 자리: 연결 안 된 캠 */
@@ -302,8 +307,8 @@ typedef enum {
     /* 2026-09-18(사용자 지시 — 캠 대시 행에 촬영주기/AGC/AEC 표시, 센스 M/Bat과 동일한 짧은
      * 태그 패턴) */
     STR_LABEL_CAPTURE_TINY,      /* "촬영" / "P" (Take Picture/Period) */
-    STR_LABEL_AGC_TINY,          /* "AGC" / "AGC" */
-    STR_LABEL_AEC_TINY,          /* "AEC" / "AEC" */
+    STR_LABEL_IMG_AUTO_TINY,     /* 2026-10-21 — 카메라 요약: 자동 노출/색 */
+    STR_LABEL_IMG_MANUAL_TINY,   /* 2026-10-21 — 카메라 요약: 수동 */
     STR_BTN_RECORD,              /* 통계 팝업 제목바에서 Record 팝업을 여는 버튼: "기록 보기" / "View Record" */
     STR_TITLE_RECORD,            /* Record 팝업 제목: "기록" / "Record" */
     STR_LABEL_PERIOD,            /* Scale 드랍다운 왼쪽 라벨: "기간:" / "Period:" */

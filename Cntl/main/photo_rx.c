@@ -66,6 +66,156 @@ typedef struct {
 } sr_session_t;
 static sr_session_t s_sessions[SR_SESSIONS];
 
+/* ────────────────────────────────────────────────────────────
+ * 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 캠별 사진 수신 버퍼
+ * ────────────────────────────────────────────────────────────
+ * 예전엔 사진마다 128KB로 시작해 256K→512K로 재할당했는데, ESP-IDF 힙은 재할당을 잠금(크리티컬 섹션) 안에서 하고 블록을
+ * 옮길 때 내용을 그 안에서 복사함 → 수백 KB 복사 동안 인터럽트가 막혀 콘 CAN 수신 FIFO가 넘쳤음(10-19 청크 222 손실).
+ * 이제 캠마다 버퍼를 하나 미리 잡고 받는 동안은 할당이 없음. 크기는 해상도로 정함:
+ *   해상도 단계(UXGA → SXGA → XGA → SVGA) 중 모든 캠이 같은 단계(센서 최대를 넘지 않게)일 때 버퍼 합이 PSRAM에 들어가는
+ *   가장 높은 단계. 남길 PSRAM(CAMBUF_PSRAM_RESERVE)은 사진 보기·통계·웹이 최악에 쓰는 양.
+ *   버퍼 = 가로×세로×2바이트 ÷ 16(q=12 최악 실측 약 1/19에 여유) — UXGA 약 240KB.
+ * 캠은 PAIR_ACK로 센서 PID·최대 해상도를 알려 주고, 콘은 정한 해상도를 CAM_CONFIG_SET.frame_size로 보냄. 정보를 안 보내는 옛
+ * 펌웨어 캠은 해상도를 정해 줄 수 없어 UXGA 크기 버퍼만 잡음(그 캠이 더 크게 찍으면 거절됨). 버퍼보다 큰 사진은 받지 않음 */
+#define CAMBUF_MAX            4
+#define CAMBUF_PSRAM_RESERVE  (512 * 1024)
+typedef struct {
+    bool     used;
+    uint8_t  mac[6];
+    uint8_t  max_fs;        /* 센서 최대(framesize_t), 0 = 모름(옛 펌웨어) */
+    uint8_t  fs;            /* 콘이 정한 해상도, ESP_NOW_CAM_FRAME_SIZE_DEFAULT = 정해 줄 수 없음 */
+    uint8_t *buf;
+    size_t   cap;
+    size_t   want_cap;      /* 받는 중이라 아직 못 바꾼 새 크기(0 = 없음) */
+} cam_buf_t;
+static cam_buf_t s_cambufs[CAMBUF_MAX];
+static const struct { uint8_t fs; uint16_t w, h; } s_res_ladder[] = {
+    { 15, 1600, 1200 },   /* UXGA */
+    { 14, 1280, 1024 },   /* SXGA */
+    { 12, 1024,  768 },   /* XGA */
+    { 11,  800,  600 },   /* SVGA */
+};
+#define RES_LEVELS ((int)(sizeof(s_res_ladder) / sizeof(s_res_ladder[0])))
+
+static size_t res_buf_bytes(int level)
+{
+    size_t b = (size_t)s_res_ladder[level].w * s_res_ladder[level].h * 2 / 16;
+    return (b + 4095) & ~(size_t)4095;
+}
+
+/* 단계 level에서 이 캠이 쓸 단계 — 센서 최대보다 높으면 센서 최대 이하의 첫 단계 */
+static int cam_level(const cam_buf_t *c, int level)
+{
+    for (int l = level; l < RES_LEVELS; l++) {
+        if (c->max_fs == 0 || s_res_ladder[l].fs <= c->max_fs) return l;
+    }
+    return RES_LEVELS - 1;
+}
+
+static bool session_active_for_locked(const uint8_t *mac);
+
+/* 캠 버퍼 크기를 실제로 바꿈(받는 중이면 끝난 뒤로 미룸). 호출부가 s_mutex를 쥔 상태 */
+static void cambuf_apply_locked(cam_buf_t *c, size_t cap)
+{
+    if (c->cap == cap && c->buf) { c->want_cap = 0; return; }
+    if (c->buf && session_active_for_locked(c->mac)) { c->want_cap = cap; return; }   /* 버퍼가 없으면 쓰는 중일 수 없음 */
+    heap_caps_free(c->buf);
+    c->buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    c->cap = c->buf ? cap : 0;
+    c->want_cap = 0;
+    if (!c->buf) {
+        ESP_LOGE(TAG, "Photo buffer alloc failed for " MACSTR " (%u bytes) - photos from this cam rejected", MAC2STR(c->mac), (unsigned)cap);
+        ui_log_add_err(UI_ERR_RECV_BUF_ALLOC, "Recv buffer alloc failed - cannot receive photos");
+    }
+}
+
+/* 모든 캠의 해상도·버퍼를 다시 정함. 호출부가 s_mutex를 쥔 상태 */
+static void cambuf_plan_locked(void)
+{
+    size_t held = 0;
+    for (int i = 0; i < CAMBUF_MAX; i++) if (s_cambufs[i].used) held += s_cambufs[i].cap;
+    size_t free_now = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t budget = (free_now + held > CAMBUF_PSRAM_RESERVE) ? free_now + held - CAMBUF_PSRAM_RESERVE : 0;
+    int level = RES_LEVELS - 1;
+    for (int l = 0; l < RES_LEVELS; l++) {
+        size_t need = 0;
+        for (int i = 0; i < CAMBUF_MAX; i++) if (s_cambufs[i].used) need += res_buf_bytes(cam_level(&s_cambufs[i], l));
+        if (need <= budget) { level = l; break; }
+    }
+    for (int i = 0; i < CAMBUF_MAX; i++) {
+        cam_buf_t *c = &s_cambufs[i];
+        if (!c->used) continue;
+        int cl = cam_level(c, level);
+        c->fs = c->max_fs ? s_res_ladder[cl].fs : ESP_NOW_CAM_FRAME_SIZE_DEFAULT;
+        cambuf_apply_locked(c, res_buf_bytes(cl));
+        ESP_LOGI(TAG, "Photo buffer " MACSTR ": res %d (%ux%u), %u bytes%s (PSRAM free %u, budget %u)", MAC2STR(c->mac),
+                 (int)s_res_ladder[cl].fs, s_res_ladder[cl].w, s_res_ladder[cl].h, (unsigned)res_buf_bytes(cl),
+                 c->max_fs ? "" : " [cam sends no info - res not controlled]",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (unsigned)budget);
+    }
+}
+
+static cam_buf_t *cambuf_find_locked(const uint8_t *mac)
+{
+    for (int i = 0; i < CAMBUF_MAX; i++) if (s_cambufs[i].used && memcmp(s_cambufs[i].mac, mac, 6) == 0) return &s_cambufs[i];
+    return NULL;
+}
+
+/* 없으면 만듦(max_fs 0 = 모름). 자리가 없으면 NULL. 호출부가 s_mutex를 쥔 상태 */
+static cam_buf_t *cambuf_get_locked(const uint8_t *mac, bool *created)
+{
+    *created = false;
+    cam_buf_t *c = cambuf_find_locked(mac);
+    if (c) return c;
+    for (int i = 0; i < CAMBUF_MAX; i++) {
+        if (!s_cambufs[i].used) {
+            c = &s_cambufs[i];
+            memset(c, 0, sizeof(*c));
+            c->used = true;
+            memcpy(c->mac, mac, 6);
+            c->fs = ESP_NOW_CAM_FRAME_SIZE_DEFAULT;
+            *created = true;
+            return c;
+        }
+    }
+    return NULL;
+}
+
+void photo_rx_cam_info(const uint8_t *mac, uint16_t pid, uint8_t max_fs)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool created = false;
+    cam_buf_t *c = cambuf_get_locked(mac, &created);
+    if (c && (created || c->max_fs != max_fs)) {
+        ESP_LOGI(TAG, "Cam " MACSTR " reports sensor PID 0x%04x, max res %u", MAC2STR(mac), (unsigned)pid, (unsigned)max_fs);
+        c->max_fs = max_fs;
+        cambuf_plan_locked();
+    }
+    xSemaphoreGive(s_mutex);
+}
+
+uint8_t photo_rx_cam_frame_size(const uint8_t *mac)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    cam_buf_t *c = cambuf_find_locked(mac);
+    uint8_t fs = c ? c->fs : ESP_NOW_CAM_FRAME_SIZE_DEFAULT;
+    xSemaphoreGive(s_mutex);
+    return fs;
+}
+
+void photo_rx_cam_forget(const uint8_t *mac)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    cam_buf_t *c = cambuf_find_locked(mac);
+    if (c && !session_active_for_locked(mac)) {
+        heap_caps_free(c->buf);
+        memset(c, 0, sizeof(*c));
+        ESP_LOGI(TAG, "Photo buffer for " MACSTR " released - replanning", MAC2STR(mac));
+        cambuf_plan_locked();
+    }
+    xSemaphoreGive(s_mutex);
+}
+
 /* UI 통지용 — 마지막 수신 결과(여러 캠이 받아도 "방금 한 장 끝남/실패"만 알리면 됨, ui_main.c 참고) */
 static volatile photo_rx_state_t s_state = PHOTO_RX_STATE_IDLE;
 
@@ -144,6 +294,14 @@ static void drop_session_locked(sr_session_t *s)
     s->writer = NULL;
     s->wlen = 0;
     s->active = false;
+    /* 2026-10-20 — 받는 동안 미뤄 둔 버퍼 크기 변경을 지금 적용(cambuf_apply_locked 참고) */
+    cam_buf_t *c = cambuf_find_locked(s->mac);
+    if (c && c->want_cap) cambuf_apply_locked(c, c->want_cap);
+}
+
+static bool session_active_for_locked(const uint8_t *mac)
+{
+    return find_session_locked(mac) != NULL;
 }
 
 static void finish_event(photo_rx_state_t st)
@@ -199,10 +357,24 @@ static void handle_sr_meta(const uint8_t *mac, const uint8_t *body, size_t len)
     s->received     = 0;
     s->writer       = NULL;
     s->wlen         = 0;
+    /* 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 이 캠의 고정 버퍼(처음 보는 캠이면 지금 만듦). 사진이 버퍼보다 크면 받지 않음 */
+    bool cb_created = false;
+    cam_buf_t *cb = cambuf_get_locked(mac, &cb_created);
+    if (cb && cb_created) cambuf_plan_locked();
+    uint8_t *cb_buf = cb ? cb->buf : NULL;
+    size_t cb_cap = cb ? cb->cap : 0;
+    if (!cb_buf || meta.total_size > cb_cap) {
+        drop_session_locked(s);
+        xSemaphoreGive(s_mutex);
+        ESP_LOGW(TAG, "SR_META " MACSTR ": photo %u bytes > buffer %u - not received (cam resolution larger than planned?)",
+                 MAC2STR(mac), (unsigned)meta.total_size, (unsigned)cb_cap);
+        ui_log_add_err(UI_ERR_CHUNK_MISSING, "Photo receive failed (larger than buffer %u) file_id=%u", (unsigned)cb_cap, (unsigned)meta.file_id);
+        return;
+    }
     xSemaphoreGive(s_mutex);
 
     /* SD 열기는 잠금 밖에서(수 ms~) */
-    s->writer = photo_storage_begin(mac, meta.kind);
+    s->writer = photo_storage_begin_ext(mac, meta.kind, cb_buf, cb_cap);
     /* 2026-10-14 — SD 고장 상태로 거부한 것이면 이미 5009·푸시로 알렸으니 엉뚱한 5008(마운트 실패)을 또 올리지 않음 */
     if (!s->writer && sd_health_writes_allowed()) ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)meta.file_id);
 }

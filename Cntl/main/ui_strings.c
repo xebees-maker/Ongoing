@@ -88,13 +88,19 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LIST_EMPTY]                 = { "사진 없음",                   "No Picture" },
     [STR_LABEL_CAPTURE_INTERVAL]     = { "촬영 주기",                   "Capture interval" },
     [STR_LABEL_RESPONSE_INTERVAL]    = { "응답성",                     "Responsiveness" },
-    [STR_LABEL_AGC]                  = { "자동게인(AGC)",               "Auto gain (AGC)" },
-    [STR_LABEL_AEC]                  = { "자동노출(AEC)",               "Auto exposure (AEC)" },
+    /* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — 자동 노출/색과 끈 때의 수동값 */
+    [STR_LABEL_AUTO_IMAGE]           = { "자동 노출/색 (AGC/AEC/AWB)", "Auto exposure/color (AGC/AEC/AWB)" },
+    [STR_LABEL_MAN_EXPOSURE]         = { "노출(줄)",                    "Exposure (lines)" },
+    [STR_LABEL_MAN_GAIN]             = { "게인(배)",                    "Gain (x)" },
+    [STR_LABEL_MAN_AWB]              = { "AWB(배)",                     "AWB (x)" },
+    [STR_LABEL_MAN_AWB_R]            = { "R",                           "R" },
+    [STR_LABEL_MAN_AWB_G]            = { "G",                           "G" },
+    [STR_LABEL_MAN_AWB_B]            = { "B",                           "B" },
     [STR_LABEL_XCLK]                 = { "픽셀클럭(XCLK)",              "Pixel clock (XCLK)" },
     [STR_CAPTURE_QUEUED_TOAST]       = { "캠 접속 대기 중 - 다음 접속 때 촬영합니다", "Waiting for CAM - it will shoot on next wake" },
     [STR_BTN_NOT_CONNECTED]          = { "연결안됨", "Offline" },
     [STR_FMT_CAPTURE_ON_WAKE]        = { "캠이 깨어나면 촬영합니다(최대 약 %u초)", "Shoots when the CAM wakes (up to ~%us)" },
-    [STR_OPT_XCLK_LIST]              = { "5MHz\n10MHz\n20MHz\n24MHz",  "5MHz\n10MHz\n20MHz\n24MHz" },
+    [STR_OPT_XCLK_LIST]              = { "5MHz\n10MHz\n20MHz",  "5MHz\n10MHz\n20MHz" },   /* 2026-10-21 — 24MHz 뺌(ui_main s_xclk_values 주석) */
     [STR_LABEL_SENS_MEASURE_INTERVAL]    = { "측정 주기",                 "Measure period" },
     [STR_OPT_SENS_MEASURE_INTERVAL_LIST] = { "10초\n15초\n30초\n1분\n5분\n30분", "10S\n15S\n30S\n1M\n5M\n30M" },
     [STR_BTN_APPLY]                  = { "적용",                       "Apply" },
@@ -109,7 +115,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_MSG_RESTART_CONFIRM]        = { "정말 재시작하시겠습니까?",     "Do you want restart?" },
     /* 영문일 때는 단위를 S/M/H로 축약(2026-08-08, 사용자 지시) — 값(초 단위)은
      * s_capture_interval_values/s_response_interval_values와 순서가 반드시 같아야 함 */
-    [STR_OPT_CAPTURE_INTERVAL_LIST]  = { "끄기\n1분\n10분\n1시간\n3시간\n12시간", "Off\n1M\n10M\n1H\n3H\n12H" },  /* 2026-10-09 — 상용 주기(10초·30초는 개발용이라 뺌) */
+    [STR_OPT_CAPTURE_INTERVAL_LIST]  = { "끄기\n30초\n1시간\n3시간\n8시간\n12시간", "Off\n30S\n1H\n3H\n8H\n12H" },  /* 2026-10-19(사용자 지시) — 30초는 시험용, 나머지는 운영 주기 */
     /* 2026-08-10 CAM Deep Sleep 전환 — 값 구간 재정의(1/3/10/30/1800초), 짧은 라벨만
      * 표시하고 뜻은 별도 도움말 텍스트로(STR_RESPONSE_HELP_0..4, 아래) — 순서는
      * ui_main.c의 s_response_interval_values와 반드시 같이 맞출 것 */
@@ -298,8 +304,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LABEL_MEASURE_TINY] = { "측정", "M" },
     [STR_LABEL_BATTERY_TINY] = { "Bat", "Bat" },
     [STR_LABEL_CAPTURE_TINY] = { "촬영", "P" },
-    [STR_LABEL_AGC_TINY]     = { "AGC", "AGC" },
-    [STR_LABEL_AEC_TINY]     = { "AEC", "AEC" },
+    [STR_LABEL_IMG_AUTO_TINY]   = { "Automatic", "Automatic" },   /* 2026-10-21(사용자 지시) — AGC/AEC/AWB 자동 */
+    [STR_LABEL_IMG_MANUAL_TINY] = { "Manual", "Manual" },
     [STR_BTN_RECORD] = { "기록 보기", "View Record" },
     [STR_TITLE_RECORD] = { "기록", "Record" },
     [STR_LABEL_PERIOD] = { "기간:", "Period:" },

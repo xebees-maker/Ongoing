@@ -1,4 +1,5 @@
 #include "esp_now_cam.h"
+#include "rwdt_guard.h"   /* 2026-10-21 — SR DONE 포기 시점(RWDT까지 남은 시간) */
 #include "cam_node.h"  /* cam_node_set_capture_interval_sec/set_response_interval_sec/get_wake_reason/note_activity */
 #include "cam_speaker.h"  /* 2026-08-25 — PAIR_REQUESTED/PAIR_ACK 소리 알림용 */
 #include "cam_light.h"    /* 2026-09-29 — 콘에서 촬영용 LED 켜기/끄기(임시 시험) */
@@ -15,6 +16,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_rom_crc.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -104,6 +106,23 @@ static SemaphoreHandle_t s_tx_space_sem = NULL;
  * 송신 큐에 넣기만 하고, 실제 송신은 조금 뒤 Wi-Fi 태스크가 함. 응답을 넣자마자 딥슬립하면 응답이 공중에 못 나감.
  * 콘으로 보낸 응답 수를 세어 두고(송신 완료 send_cb마다 하나씩 뺌), 잠들기 직전 0이 될 때까지 잠깐 기다림 */
 static volatile uint32_t s_reply_inflight = 0;
+
+/* 2026-10-20(사용자 결정 — 캠 송신 속도 조절, 할 일 "캠 재전송 폭주") — 예전엔 청크를 NO_MEM이 날 때까지 밀어 넣어 송신 큐가 넘침
+ * (Side 캠 사진당 NO_MEM 수백 번, 체크인 응답까지 막힘). 아직 송신 완료(send_cb)가 안 온 프레임 수를 세어, 청크는 이 수가
+ * SR_TX_INFLIGHT_MAX 미만일 때만 보냄. 컴포넌트 송신까지 다 세려고 esp_now_send를 링커로 감쌈(CMakeLists.txt).
+ * 콜백이 송신 함수가 돌아오기 전에 올 수 있어서 먼저 올리고, 실패하면 되돌림 */
+#define SR_TX_INFLIGHT_MAX   6
+#define SR_TX_PACE_LIMIT_MS  1000   /* 송신 완료가 이만큼 안 오면 기다림을 그만두고 그냥 보냄(NO_MEM 재시도 경로가 그 뒤를 맡음) */
+static volatile int32_t s_tx_inflight = 0;
+
+esp_err_t __real_esp_now_send(const uint8_t *peer_addr, const uint8_t *data, size_t len);
+esp_err_t __wrap_esp_now_send(const uint8_t *peer_addr, const uint8_t *data, size_t len)
+{
+    __atomic_add_fetch(&s_tx_inflight, 1, __ATOMIC_RELAXED);
+    esp_err_t err = __real_esp_now_send(peer_addr, data, len);
+    if (err != ESP_OK) __atomic_sub_fetch(&s_tx_inflight, 1, __ATOMIC_RELAXED);
+    return err;
+}
 
 static void send_reply(const uint8_t *mac, const void *msg, size_t len)
 {
@@ -261,6 +280,8 @@ static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t statu
     /* 2026-09-25 — 송신 1건 완료 = 드라이버 송신 큐에 자리 생김. NO_MEM으로 대기 중인
      * esp_now_reliable_request()를 깨움(이벤트 방식, 대기 중인 게 없으면 아무 일도 안 함) */
     esp_now_reliable_on_send_done();
+    /* 2026-10-20 — 송신 완료 1건(위 s_tx_inflight 주석) */
+    if (__atomic_load_n(&s_tx_inflight, __ATOMIC_RELAXED) > 0) __atomic_sub_fetch(&s_tx_inflight, 1, __ATOMIC_RELAXED);
     /* 2026-09-26(할 일 8) — 송신 큐에 자리 생김: 응답 재전송 태스크와 청크 재전송 루프를 깨움 */
     if (s_reply_task) xTaskNotifyGive(s_reply_task);
     if (s_tx_space_sem) xSemaphoreGive(s_tx_space_sem);
@@ -298,9 +319,19 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
         chunk.chunk_idx = idx;
         chunk.chunk_len = (uint16_t)n;
 
+        /* 2026-10-20 — 송신 속도 조절: 완료 안 된 프레임이 SR_TX_INFLIGHT_MAX개 이상이면 송신 완료를 기다림(위 s_tx_inflight 주석) */
+        if (__atomic_load_n(&s_tx_inflight, __ATOMIC_RELAXED) >= SR_TX_INFLIGHT_MAX) {
+            int64_t pace_start = esp_timer_get_time();
+            while (__atomic_load_n(&s_tx_inflight, __ATOMIC_RELAXED) >= SR_TX_INFLIGHT_MAX &&
+                   esp_timer_get_time() - pace_start < (int64_t)SR_TX_PACE_LIMIT_MS * 1000) {
+                if (s_tx_space_sem) xSemaphoreTake(s_tx_space_sem, pdMS_TO_TICKS(20));
+                else vTaskDelay(pdMS_TO_TICKS(5));
+            }
+        }
         esp_err_t err;
-        int attempt;
-        for (attempt = 0; attempt < 6; attempt++) {
+        int tries = 0;  /* 2026-10-19 — 예전엔 6번 다 실패해도 "(7 tries)"로 찍힘 */
+        for (int attempt = 0; attempt < 6; attempt++) {
+            tries++;
             err = esp_now_send(s_hub_mac, (const uint8_t *)&chunk, sizeof(chunk));
             if (err != ESP_ERR_ESPNOW_NO_MEM) break;
             /* 2026-09-26(할 일 8) — 20ms 무조건 대기(폴링) 대신 송신 완료 이벤트(send_cb)가 오면 바로 재시도, 상한 20ms */
@@ -308,7 +339,7 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
             else vTaskDelay(pdMS_TO_TICKS(20));
         }
         if (err != ESP_OK) {
-            LOG_W_RL(TAG_PHOTO, "Resend failed (buf): chunk[%u] -> %s (%d tries)", idx, esp_err_to_name(err), attempt + 1);
+            LOG_W_RL(TAG_PHOTO, "Resend failed (buf): chunk[%u] -> %s (%d tries)", idx, esp_err_to_name(err), tries);
         }
     }
     ESP_LOGD(TAG_PHOTO, "NACK resend done (buf): file_id=%u %u chunks", (unsigned)file_id, (unsigned)nack->missing_count);
@@ -321,8 +352,9 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
  * 신규 전송이든 재전송이든 "이 인덱스들 보내"라 resend_chunks_from_buffer() 하나로 처리.
  * 신뢰성 안전망(DONE/DONE_ACK/NACK라운드)은 마지막에 유지 — 윈도우 도중 놓친 게 있어도
  * 마지막에 한 번 더 전체 확인. */
-#define SR_WINDOW_SIZE 16          /* CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM 기본값(16)에 맞춤 —
-                                       이 값이면 이론상 로컬 큐 포화(NO_MEM) 자체를 거의 안 만남 */
+#define SR_WINDOW_SIZE 16          /* 처음엔 CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM 기본값(16)에 맞춘 값. 2026-10-19 확인 — 지금
+                                       sdkconfig는 동적 TX 버퍼(DYNAMIC_TX_BUFFER_NUM=32)라 그 근거는 맞지 않음. 무선이
+                                       송신을 못 끝내면(send_cb가 안 옴) 창 크기와 상관없이 NO_MEM이 남(Side 캠 3002) */
 #define SR_STATUS_TIMEOUT_MS 400   /* DONE의 800ms보다 짧게 — 윈도우당 훨씬 자주 도니까 */
 #define SR_STATUS_MAX_ATTEMPTS 3
 /* 2026-09-28(사용자 결정 1-가) — 브는 콘 쪽이 밀리면(흐름 제어) WINDOW_STATUS_ACK를 일부러 늦게 줌 = "잠깐 멈춰".
@@ -330,6 +362,12 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
  * 이제 대답이 올 때까지 같은 질문을 반복함. 다만 브가 세션을 잃은 경우(브 재부팅 등) 끝없이 묻지 않도록, 이만큼
  * 대답이 없으면 예전처럼 다음으로 넘어감(마지막 DONE/NACK가 안전망) — 브의 SR 세션 유휴 정리(10초)와 같은 값 */
 #define SR_STATUS_GIVEUP_US (10LL * 1000 * 1000)
+/* 2026-10-20(사용자 결정 — DONE을 반드시 주고받기) — send_photo_from_buffer_sr의 DONE 루프 주석 */
+#define SR_HUB_SILENT_US        (10LL * 1000 * 1000)   /* 허브에서 이만큼 아무것도 못 받으면 연결 끊김으로 봄 */
+/* 2026-10-21(실기 — 연속 촬영으로 Side가 210초 깨어 있자 5번째부터 촬영 즉시 포기, 사진 버림) — 예전엔 "부팅 뒤 85초"로 끊었는데,
+ * 감시 타이머(RWDT)는 설정을 받을 때마다 100초로 다시 걸림. 이제 RWDT까지 남은 시간이 이보다 적을 때만 포기(잠들 여유) */
+#define SR_DONE_RWDT_MARGIN_US  (15LL * 1000 * 1000)
+static volatile int64_t s_last_hub_rx_us = 0;
 
 /* 2026-09-18(SD 제거 재설계) — 촬영한 사진 1장을 SR로 CNTL에 푸시. 카메라 드라이버의 PSRAM
  * 프레임버퍼(jpeg_buf/jpeg_len)를 그대로 씀 — 호출자(cam_node.c의 camera_capture_one())가
@@ -429,34 +467,74 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
     static const uint8_t s_sr_done_ack_types[] = { ESP_NOW_MSG_PHOTO_DONE_ACK };
     static esp_now_photo_chunk_nack_t done_ack;
 
-    for (int round = 0; round < s_nack_max_rounds; round++) {
+    /* 2026-10-20(사용자 결정 — "어떻게든 DONE을 받아야지", "전송이 실패하면 안 되는 코드") — 무선에서 프레임이 빠지는 건 정상 상황.
+     *  - DONE 응답이 없으면 포기하지 않고 계속 다시 보냄. 예전엔 3번 만에 "미정"으로 넘어가(성공으로 침) 브는 DONE을 못 받고
+     *    10초 뒤 중단했음(10-20 18:17 — 브는 83/83을 다 받았는데 3002). 브는 이 캠의 체크인이 오는 동안 세션을 유지함.
+     *  - 재전송 라운드는 횟수 고정(3) 대신 진척으로 판단: 빠진 수가 줄면 계속, s_nack_max_rounds번 연속 안 줄면 포기.
+     *  - 포기하는 건 허브가 정말 조용할 때(SR_HUB_SILENT_US 동안 허브에서 아무것도 못 받음 — 연결 끊김)와 감시 타이머(RWDT)를
+     *    넘기기 전 시간 상한(SR_DONE_RWDT_MARGIN_US — RWDT까지 남은 시간 기준)뿐 */
+    uint16_t best_missing = 0xFFFF;
+    int no_progress = 0;
+    int done_tries = 0;
+    for (;;) {
         if (s_request_generation != my_generation) return false;
+        if (rwdt_guard_remaining_us() < SR_DONE_RWDT_MARGIN_US) {
+            ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): time limit before watchdog - giving up (file_id=%u)", (unsigned)file_id);
+            return false;
+        }
 
         size_t reply_len = 0;
+        done_tries++;
         esp_err_t err = esp_now_reliable_request(s_hub_mac, &done, sizeof(done),
                                                   s_sr_done_ack_types, 1,
                                                   800, 3,
                                                   &done_ack, sizeof(done_ack), &reply_len);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): DONE_ACK no response (round %d) - undecided", round + 1);
-            return true;
+            int64_t silent = esp_timer_get_time() - s_last_hub_rx_us;
+            if (silent > SR_HUB_SILENT_US) {
+                ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): DONE_ACK no response and hub silent %lldms - link lost, giving up (file_id=%u)",
+                         (long long)(silent / 1000), (unsigned)file_id);
+                return false;
+            }
+            ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): DONE_ACK no response (try %d) - hub alive (%lldms ago), sending DONE again",
+                     done_tries, (long long)(silent / 1000));
+            continue;
         }
         if (done_ack.missing_count == 0) {
-            ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): DONE_ACK confirmed (round %d)", round + 1);
+            ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): DONE_ACK confirmed (DONE %d)", done_tries);
             return true;
         }
-
-        ESP_LOGD(TAG_PHOTO, "SR-push DONE_ACK: %u missing - resending (round %d/%d)", (unsigned)done_ack.missing_count, round + 1, s_nack_max_rounds);
+        if (done_ack.missing_count < best_missing) {
+            best_missing = done_ack.missing_count;
+            no_progress = 0;
+        } else if (++no_progress >= s_nack_max_rounds) {
+            ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): no progress for %d rounds - %u chunks still missing (file_id=%u)",
+                     no_progress, (unsigned)done_ack.missing_count, (unsigned)file_id);
+            return false;
+        }
+        ESP_LOGD(TAG_PHOTO, "SR-push DONE_ACK: %u missing - resending (no-progress %d/%d)", (unsigned)done_ack.missing_count,
+                 no_progress, s_nack_max_rounds);
         resend_chunks_from_buffer(jpeg_buf, jpeg_len, file_id, &done_ack);
         if (s_request_generation != my_generation) return false;
     }
-    ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): resend rounds exhausted");
-    return true;
 }
 
 /* 2026-09-18(SD 제거 재설계) — 세션 로컬 file_id 카운터(재부팅마다 0부터 — CNTL이 실제
  * 영구 파일명/순번을 소유하므로 무관함) */
 static uint32_t s_push_file_id_counter = 0;
+
+/* 2026-10-20(사용자 결정 — 콘의 조명 테스트 스위치를 실제 상태에 맞춤) — 콘이 켠 시험 조명을 캠이 스스로 끄면(잠들기 직전, 촬영 뒤)
+ * 콘에 "꺼짐"을 알림(CAM_LIGHT_STATE on=0 — 응답 메시지와 섞이지 않게 따로 둔 종류) */
+static volatile bool s_light_test_on = false;
+void esp_now_cam_notify_light_off(void)
+{
+    if (!s_light_test_on) return;
+    s_light_test_on = false;
+    if (s_conn_state != CAM_CONN_PAIRED) return;
+    esp_now_cam_light_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_LIGHT_STATE, .on = 0 };
+    send_reply(s_hub_mac, &msg, sizeof(msg));
+    ESP_LOGI(TAG_CASK, "Test light turned off by cam - CNTL notified");
+}
 
 bool esp_now_cam_push_captured_photo(const uint8_t *buf, size_t len, cam_capture_kind_t kind)
 {
@@ -628,6 +706,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 {
     if (len < 2) return;
     uint8_t msg_type = data[1];
+    /* 2026-10-20 — 허브(브)에서 무엇이든 받은 시각(DONE 재전송을 계속할지 판단, send_photo_from_buffer_sr) */
+    if (info && memcmp(info->src_addr, s_hub_mac, 6) == 0) s_last_hub_rx_us = esp_timer_get_time();
 
     /* ADVERTISE_ACK/CHANNEL_PONG 소비 — 그 외 타입은 조용히 무시하고 리턴하므로 아래 기존
      * dispatch와 안전하게 병행됨(2026-08-04, esp_now_channelsync.h 참고) */
@@ -692,10 +772,16 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     if (msg_type == ESP_NOW_MSG_CAM_CONFIG_SET) {
         /* 2026-08-08 — 촬영주기+응답성(연결성/절전) 원격 설정. recv_cb(ESP-NOW 드라이버
          * 태스크)에서 바로 처리 — 값 적용뿐이라 photo_transfer_task 큐로 넘길 만큼 무겁지 않음 */
-        if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_cam_config_t)) return;
+        if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)ESP_NOW_CAM_CONFIG_BASE_LEN) return;   /* 2026-10-20 — 옛 콘은 frame_size 없이 짧음 */
         cam_speaker_notify(SPK_EVT_CAM_CONFIG);
         esp_now_cam_config_t cfg;
-        memcpy(&cfg, data, sizeof(cfg));
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.frame_size = ESP_NOW_CAM_FRAME_SIZE_DEFAULT;
+        memcpy(&cfg, data, len < (int)sizeof(cfg) ? (size_t)len : sizeof(cfg));
+        /* 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 콘이 정한 해상도(콘은 이 해상도에 맞춰 이 캠의 수신 버퍼를 잡음). 바뀔 때만 적용 */
+        if (cfg.frame_size != ESP_NOW_CAM_FRAME_SIZE_DEFAULT && (int)cfg.frame_size != cam_node_get_frame_size_setting()) {
+            cam_node_set_frame_size(cfg.frame_size);
+        }
         cam_node_set_capture_interval_sec(cfg.capture_interval_sec);
         cam_node_set_response_interval_sec(cfg.response_interval_sec);
         /* 2026-08-25(CASK 재설계) — SET_TIME이 별도 메시지였던 걸 여기로 흡수. 매번 무조건
@@ -708,15 +794,14 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         cam_node_set_aec_enable(cfg.aec_enable != 0);
         if (cfg.xclk_mhz != 0) cam_node_set_xclk_target_mhz(cfg.xclk_mhz);
         if (cfg.nack_max_rounds != 0) s_nack_max_rounds = cfg.nack_max_rounds;
-        if (cfg.wb_mode < CAM_WB_MODE_COUNT) {
-            /* 화이트밸런스는 기존 필드라 그대로 적용 — 센서 API가 cam_node.c에 없어서 여기서
-             * 직접 처리(다른 촬영 파라미터 setter들과 달리 이건 esp_camera 센서 핸들을
-             * cam_node.c 밖으로 안 내보내서, sensor_t 직접 접근은 그쪽에만 있음 — 지금은
-             * wb_mode 저장/전달만 하고 실제 센서 적용은 TODO로 남김, 촬영주기/응답성이 이번
-             * 세션의 핵심 스코프) */
-            ESP_LOGI(TAG_CASK, "CAM_CONFIG_SET: wb_mode=%u(TODO) capture=%us response=%us",
-                     cfg.wb_mode, (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec);
+        /* 2026-10-21 — 수동값(AGC·AEC 끔일 때 씀). 옛 콘은 이 필드가 없어 짧음 — 그때는 캠 기본값 유지 */
+        if (len >= (int)ESP_NOW_CAM_CONFIG_MANUAL_LEN) {
+            const uint16_t awb[3] = { cfg.man_awb[0], cfg.man_awb[1], cfg.man_awb[2] };   /* packed 구조체 — 주소를 넘기지 않고 복사 */
+            cam_node_set_manual_image(cfg.man_exposure, cfg.man_gain, awb);
         }
+        ESP_LOGI(TAG_CASK, "CAM_CONFIG_SET: capture=%us response=%us auto=%d manual exp %u gain %u awb %u/%u/%u",
+                 (unsigned)cfg.capture_interval_sec, (unsigned)cfg.response_interval_sec, (cfg.agc_enable && cfg.aec_enable) ? 1 : 0,
+                 (unsigned)cfg.man_exposure, (unsigned)cfg.man_gain, (unsigned)cfg.man_awb[0], (unsigned)cfg.man_awb[1], (unsigned)cfg.man_awb[2]);
         esp_now_cam_config_ack_t ack = {
             .version  = ESP_NOW_LINK_VERSION,
             .msg_type = ESP_NOW_MSG_CAM_CONFIG_ACK,
@@ -765,6 +850,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_cam_light_t)) return;
         const esp_now_cam_light_t *msg = (const esp_now_cam_light_t *)data;
         cam_light_set(msg->on != 0);
+        s_light_test_on = (msg->on != 0);   /* 2026-10-20 — esp_now_cam_notify_light_off 주석 */
         ESP_LOGI(TAG_CASK, "CAM_LIGHT_SET: %s", msg->on ? "on" : "off");
         esp_now_cam_light_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_LIGHT_ACK,
                                     .on = msg->on };
@@ -825,6 +911,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     esp_now_pair_ack_t ack = {
         .version  = ESP_NOW_LINK_VERSION,
         .msg_type = ESP_NOW_MSG_PAIR_ACK,
+        .cam_pid  = cam_node_get_sensor_pid(),                 /* 2026-10-20 — 사진 버퍼 재설계(콘 photo_rx.c) */
+        .cam_max_framesize = cam_node_get_sensor_max_framesize(),
     };
     memcpy(ack.node_mac, s_mac, sizeof(ack.node_mac));
     /* 2026-08-26(순서 버그 수정) — CNTL이 PAIR_ACK 수신 직후 곧바로 CONFIG+SLEEP_NOW를

@@ -128,6 +128,7 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
     jb_printf(&b, ",\"ip\":%s},\"status\":\"%s\"", wifi_sta_get_own_ip_str()[0] ? "true" : "false",
               (err || sd_fail) ? "error" : warn ? "warning" : "normal");
     jb_printf(&b, ",\"rec\":%lu", (unsigned long)stats_store_get_append_seq());  /* 2026-10-09 — 웹 기록 표 자동 갱신 */
+    jb_printf(&b, ",\"ph\":%lu", (unsigned long)photo_storage_list_gen());   /* 2026-10-21 — 웹 사진 목록 자동 갱신 */
     jb_printf(&b, ",\"held\":%lu", (unsigned long)stats_store_get_unsynced());   /* 2026-10-15(SD 개선 4단계) — SD 조치 안내 */
 
     /* Summary — 메모리(바이트), 저장 공간(영역별 사용%·여유MB, 콘 Summary와 같은 계산) */
@@ -241,9 +242,8 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
         if (nd->has_rssi) jb_printf(&b, ",\"rssi\":%d", nd->rssi);
         if (nd->has_deepsleep_stats) jb_printf(&b, ",\"battery\":%u", (unsigned)nd->battery_pct);
         if (cam) {
-            jb_printf(&b, ",\"agc\":%s,\"aec\":%s,\"capture_s\":%lu",
-                      device_config_get_agc_enable(nd->mac) ? "true" : "false",
-                      device_config_get_aec_enable(nd->mac) ? "true" : "false",
+            jb_printf(&b, ",\"auto_img\":%s,\"capture_s\":%lu",   /* 2026-10-21 — 요약 Automatic/Manual */
+                      device_config_get_cam_auto_image(nd->mac) ? "true" : "false",
                       (unsigned long)device_config_get_cam_capture_interval_sec(nd->mac));
         } else {
             jb_printf(&b, ",\"interval_s\":%lu", (unsigned long)device_config_get_sens_sample_interval_sec(nd->mac));
@@ -522,6 +522,13 @@ static esp_err_t api_device_get_handler(httpd_req_t *req)
         jb_values(&b, 1);
         jb_printf(&b, ",\"opt_xclk\":");
         jb_values(&b, 2);
+        {   /* 2026-10-21 — 자동 노출/색, 수동값(레지스터 단위: 노출 줄, 게인 ×16, AWB ×1024) */
+            uint16_t mv[DEVICE_CONFIG_MAN_COUNT];
+            device_config_get_cam_manual(nd->mac, mv);
+            jb_printf(&b, ",\"auto_img\":%s,\"man\":[%u,%u,%u,%u,%u]", device_config_get_cam_auto_image(nd->mac) ? "true" : "false",
+                      (unsigned)mv[0], (unsigned)mv[1], (unsigned)mv[2], (unsigned)mv[3], (unsigned)mv[4]);
+        }
+        jb_printf(&b, ",\"light\":%s", node_hub_get_cam_light(nd->mac) ? "true" : "false");   /* 2026-10-20 — 조명 테스트 실제 상태 */
     } else {
         jb_printf(&b, ",\"interval_s\":%lu,\"opt_interval\":", (unsigned long)device_config_get_sens_sample_interval_sec(nd->mac));
         jb_values(&b, 0);
@@ -533,7 +540,7 @@ static esp_err_t api_device_get_handler(httpd_req_t *req)
     return ret;
 }
 
-/* POST /api/device/set?mac=&key=(alias|interval|capture|agc|aec|xclk|light)&val= — alias는 본문이 새 별명.
+/* POST /api/device/set?mac=&key=(alias|interval|capture|auto_img|manual|xclk|light)&val= — alias는 본문이 새 별명, manual은 본문이 "노출,게인,R,G,B".
  * 콘 화면 콜백과 같은 모델 함수를 LVGL 태스크에서 실행(ui_main_run_web_op) */
 static esp_err_t api_device_set_post_handler(httpd_req_t *req)
 {
@@ -544,13 +551,14 @@ static esp_err_t api_device_set_post_handler(httpd_req_t *req)
     if (!hex_to_mac(s_w->mac_hex, op->mac)) return send_simple(req, "400 Bad Request", "{\"ok\":false,\"error\":\"mac\"}");
     static const struct { const char *key; ui_web_op_type_t type; } keys[] = {
         { "alias", UI_WEB_OP_ALIAS }, { "interval", UI_WEB_OP_SENS_INTERVAL }, { "capture", UI_WEB_OP_CAM_CAPTURE },
-        { "agc", UI_WEB_OP_CAM_AGC }, { "aec", UI_WEB_OP_CAM_AEC }, { "xclk", UI_WEB_OP_CAM_XCLK }, { "light", UI_WEB_OP_CAM_LIGHT },
+        { "auto_img", UI_WEB_OP_CAM_AUTO_IMAGE }, { "manual", UI_WEB_OP_CAM_MANUAL_IMAGE },   /* 2026-10-21 — manual은 본문 "노출,게인,R,G,B" */
+        { "xclk", UI_WEB_OP_CAM_XCLK }, { "light", UI_WEB_OP_CAM_LIGHT },
         { "calib_reset", UI_WEB_OP_SENS_CALIB_RESET },   /* 2026-10-13 — val 무시 */
     };
     op->type = 0;
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) if (strcmp(s_w->key, keys[i].key) == 0) op->type = keys[i].type;
     if (!op->type) return send_simple(req, "400 Bad Request", "{\"ok\":false,\"error\":\"key\"}");
-    if (op->type == UI_WEB_OP_ALIAS) {
+    if (op->type == UI_WEB_OP_ALIAS || op->type == UI_WEB_OP_CAM_MANUAL_IMAGE) {
         if (req->content_len > DEVICE_CONFIG_ALIAS_MAX_LEN - 1) return send_simple(req, "400 Bad Request", "{\"ok\":false,\"error\":\"len\"}");
         int got = 0;
         while (got < (int)req->content_len) {
@@ -583,6 +591,25 @@ static esp_err_t api_sd_health_get_handler(httpd_req_t *req)
                       (unsigned long)c, (unsigned long)f, (unsigned long)sl, (unsigned long)mx);
     }
     httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t r = httpd_resp_send(req, buf, n);
+    heap_caps_free(buf);
+    return r;
+}
+
+/* 2026-10-21(처음 손상 원인 추적) — GET /api/sd/journal?n=<줄 수, 기본 400, 최대 4096> — SD 명령 기록(쓰기·느린 명령·실패·표시) 글 */
+static esp_err_t api_sd_journal_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    char q[24] = "", v[8];
+    uint32_t lines = 400;
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK && httpd_query_key_value(q, "n", v, sizeof(v)) == ESP_OK) lines = (uint32_t)strtoul(v, NULL, 10);
+    if (lines == 0 || lines > 4096) lines = 4096;
+    size_t cap = (size_t)lines * 72 + 64;
+    char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    int n = sd_health_journal_text(buf, cap, lines);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t r = httpd_resp_send(req, buf, n);
     heap_caps_free(buf);
@@ -818,7 +845,7 @@ static esp_err_t api_relay_override_post_handler(httpd_req_t *req)
 
 /* ── 카메라 팝업 ── */
 #define WEB_PHOTO_PAGE_SIZE 20            /* 콘 PHOTO_LIST_PAGE_SIZE와 같음 */
-#define WEB_PHOTO_BUF_CAP   (1024 * 1024) /* 콘 PHOTO_RAW_BUF_CAP과 같음 */
+#define WEB_PHOTO_BUF_CAP   (128 * 1024) /* 2026-10-20 — 나눠 보내는 단위(예전 1MB 통째로) */
 
 /* GET /api/cam/list — 카메라 선택지: 지금 연결된 캠 + 사진 폴더가 있는 캠(콘 카메라 팝업 드롭다운과 같은 기준) */
 static esp_err_t api_cam_list_get_handler(httpd_req_t *req)
@@ -903,16 +930,28 @@ static esp_err_t api_cam_photo_get_handler(httpd_req_t *req)
     if (!hex_to_mac(s_w->mac_hex, mac)) return send_simple(req, "400 Bad Request", "{\"error\":\"mac\"}");
     char kind = (char)query_int(s_w->query, "kind", 'M');
     uint32_t seq = (uint32_t)query_int(s_w->query, "seq", -1);
+    /* 2026-10-20(사용자 결정 — 사진 보기 메모리, 실측 10-20: 117KB 사진에 1MB를 잡아 PSRAM 여유가 0.5MB까지 내려감) —
+     * 128KB 버퍼로 나눠 읽어 나눠 보냄. 보통 사진(UXGA)은 한 번에 끝남 */
     uint8_t *buf = heap_caps_malloc(WEB_PHOTO_BUF_CAP, MALLOC_CAP_SPIRAM);
     if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
-    size_t len = 0;
-    if (!photo_storage_read_file(mac, (uint8_t)kind, seq, buf, WEB_PHOTO_BUF_CAP, &len)) {
+    size_t off = 0, n = 0, total = 0;
+    if (!photo_storage_read_part(mac, (uint8_t)kind, seq, 0, buf, WEB_PHOTO_BUF_CAP, &n, &total) || n == 0) {
         heap_caps_free(buf);
         return send_simple(req, "404 Not Found", "{\"error\":\"photo\"}");
     }
     httpd_resp_set_type(req, "image/jpeg");
     httpd_resp_set_hdr(req, "Cache-Control", "private, max-age=86400");
-    esp_err_t ret = httpd_resp_send(req, (const char *)buf, len);
+    esp_err_t ret = ESP_OK;
+    for (;;) {
+        ret = httpd_resp_send_chunk(req, (const char *)buf, n);
+        off += n;
+        if (ret != ESP_OK || off >= total) break;
+        if (!photo_storage_read_part(mac, (uint8_t)kind, seq, off, buf, WEB_PHOTO_BUF_CAP, &n, &total) || n == 0) {
+            ret = ESP_FAIL;   /* 중간에 못 읽음 — 응답을 끝내지 않고 끊음(브라우저는 깨진 이미지로 봄) */
+            break;
+        }
+    }
+    if (ret == ESP_OK) ret = httpd_resp_send_chunk(req, NULL, 0);
     heap_caps_free(buf);
     return ret;
 }
@@ -1449,6 +1488,8 @@ void web_api_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &stats_records_uri);
     static const httpd_uri_t sd_health_uri = { .uri = "/api/sd/health", .method = HTTP_GET, .handler = api_sd_health_get_handler };
     httpd_register_uri_handler(server, &sd_health_uri);
+    static const httpd_uri_t sd_journal_uri = { .uri = "/api/sd/journal", .method = HTTP_GET, .handler = api_sd_journal_get_handler };
+    httpd_register_uri_handler(server, &sd_journal_uri);
     static const httpd_uri_t stats_sync_uri = { .uri = "/api/stats/sync", .method = HTTP_GET, .handler = api_stats_sync_get_handler };   /* SD 확인 끝나면 지움 */
     httpd_register_uri_handler(server, &stats_sync_uri);
     /* 2026-10-15(SD 개선 5단계) — 통계 백업·복원 */

@@ -75,6 +75,21 @@ typedef enum {
 #define ISO_TP_FC_STATUS_WAIT 0x1
 #define ISO_TP_FC_STATUS_OVERFLOW 0x2
 
+/* ---- 2026-10-20(사용자 결정 — 링크 메시지 확인·재전송) — ISO-TP 확장 ----
+ * ISO-TP에는 "메시지를 다 받았다"는 확인이 없음. FC 뒤 CF가 빠지면 받는 쪽만 메시지를 버리고 보내는 쪽은 모름(실기 10-19:
+ * 콘 TWAI 수신 FIFO가 넘쳐 CF가 빠지고 사진 37장이 버려짐 — 콘 바쁠 때 인터럽트 지연). 그래서:
+ *  - 보내는 쪽은 메시지 앞에 2바이트 순번(링크 내부용, 받는 쪽이 떼어 냄)을 붙이고, 끝까지 보낸 뒤 확인을 기다림.
+ *    확인이 안 오거나 재전송 요청이 오면 같은 순번으로 다시 보냄(최대 CAN_BRIDGE_LINK_MAX_ATTEMPTS번).
+ *  - 받는 쪽은 메시지를 다 받으면 확인, CF 순번이 어긋나면 재전송 요청을 보냄. 같은 순번이 또 오면(확인 유실) 앱에 안
+ *    넘기고 확인만 다시 보냄.
+ * 확인·재전송 요청은 FC 프레임에 표준이 안 쓰는 상태값을 써서 보냄(byte0 = 0x30|상태, byte1~2 = 순번) — FC는 이미 양쪽 수신
+ * 루프가 보내는 쪽(can_bridge_ctx_notify_fc)으로 넘기므로 분배 코드를 바꾸지 않아도 됨 */
+#define ISO_TP_FC_STATUS_LINK_ACK  0x8   /* 확장: 이 순번의 메시지를 다 받음 */
+#define ISO_TP_FC_STATUS_LINK_NACK 0x9   /* 확장: 이 순번의 메시지가 깨짐 — 다시 보내 줘 */
+#define CAN_BRIDGE_LINK_SEQ_LEN        2
+#define CAN_BRIDGE_LINK_MAX_ATTEMPTS   5
+#define CAN_BRIDGE_LINK_ACK_TIMEOUT_MS 200
+
 /* ---- 애플리케이션 레벨 메시지 헤더 — ISO-TP가 재조립한 바이트열의 맨 앞에 옴 ----
  * MAC은 페이로드 안의 평범한 값(CAN/ISO-TP는 이 구조체 내용을 전혀 모름). msg_type의
  * 의미는 카테고리(CONTROL/DATA)에 따라 다른 enum을 씀(아래 참고) */
@@ -211,6 +226,12 @@ typedef struct {
     uint8_t  next_seq;       /* 다음에 기대하는 CF 순번(0~15 순환) */
     uint8_t  in_progress;    /* 1이면 FF 받고 CF 기다리는 중 */
     uint8_t  last_cf_len;    /* 직전 CF로 채운 바이트 수(0이면 아직 CF 없음) — 중복 CF 판별용 */
+    /* 2026-10-20 — 링크 확인(위 ISO_TP_FC_STATUS_LINK_ACK 주석) */
+    uint16_t cur_seq;        /* 지금 조립 중인 메시지의 링크 순번(FF에서 읽음) — 재전송 요청에 실음 */
+    uint16_t last_seq;       /* 마지막으로 앱에 넘긴 메시지의 순번 */
+    uint8_t  has_last;       /* last_seq가 유효 */
+    uint32_t dup_count;      /* 같은 순번이 다시 와서 버린 수(보낸 쪽이 확인을 못 받음) */
+    uint32_t nack_count;     /* 재전송 요청을 보낸 수(CF 빠짐) */
 } can_bridge_reassembly_t;
 
 /* ---- FIFO 큐 — 드롭 금지, 꽉 차면 재할당으로 키움(PSRAM). 완성된 메시지(app_header+payload)
@@ -255,7 +276,9 @@ void can_bridge_queue_get_stats(can_bridge_queue_t *q, uint32_t *out_count, uint
  * 하면 채워서 반환(호출자가 twai_node_transmit으로 즉시 전송) */
 void can_bridge_reassembly_init(can_bridge_reassembly_t *r, uint8_t *psram_buf, size_t buf_cap);
 /* 반환값: 1이면 fc_frame_out(8바이트)에 FC 프레임을 채웠으니 즉시 전송해야 함, 0이면 불필요.
- * 메시지가 완성되면 완성 콜백으로 큐에 넣어줌(complete_queue) */
+ * 메시지가 완성되면 완성 콜백으로 큐에 넣어줌(complete_queue).
+ * 2026-10-20 — FC(CTS) 말고도 링크 확인·재전송 요청 프레임을 채움(같은 방식으로 보내면 됨). 앱에 넘기는 메시지에는 링크
+ * 순번이 떼어져 있음 */
 int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_data, uint8_t frame_len,
                                 uint8_t fc_frame_out[8], can_bridge_queue_t *complete_queue);
 
@@ -310,3 +333,5 @@ void can_bridge_ctx_notify_fc(can_bridge_ctx_t *ctx, const uint8_t *frame_data);
  * FC 대기 포함). 2026-09-25부터 ctx당 세션 1개 원칙을 함수 안의 뮤텍스가 보장 — 여러 태스크가
  * 같은 ctx로 동시에 불러도 한 메시지씩 차례로 나감(호출자가 따로 직렬화할 필요 없음) */
 esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len);
+/* 2026-10-20 — 링크 재전송 통계(상태 로그용): 다시 보낸 수, 끝내 실패한 메시지 수 */
+void can_bridge_ctx_get_link_stats(can_bridge_ctx_t *ctx, uint32_t *out_resends, uint32_t *out_fails);

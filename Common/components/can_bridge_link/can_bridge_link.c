@@ -5,6 +5,7 @@
 #include "hal/twai_ll.h"   /* 송신 중단 명령(드라이버 API에 없음) — abort_if_stuck */
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -156,6 +157,37 @@ void can_bridge_reassembly_init(can_bridge_reassembly_t *r, uint8_t *psram_buf, 
     r->buf_cap = buf_cap;
 }
 
+/* 2026-10-20 — 링크 확인·재전송 요청 프레임(헤더의 ISO_TP_FC_STATUS_LINK_ACK 주석) */
+static void make_link_reply(uint8_t out[8], uint8_t status, uint16_t seq)
+{
+    memset(out, 0, 8);
+    out[0] = (uint8_t)((ISO_TP_PCI_FC << 4) | status);
+    out[1] = (uint8_t)(seq & 0xFF);
+    out[2] = (uint8_t)(seq >> 8);
+}
+
+/* 다 받은 메시지(r->buf, len — 앞 2바이트가 링크 순번): 처음 보는 순번이면 순번을 떼고 앱에 넘김, 같은 순번이면 중복이라 버림.
+ * 어느 쪽이든 확인 프레임을 채움(1 반환) */
+static int deliver_complete(can_bridge_reassembly_t *r, size_t len, uint8_t out[8], can_bridge_queue_t *complete_queue)
+{
+    if (len <= CAN_BRIDGE_LINK_SEQ_LEN) {
+        LOG_W_RL(TAG, "Message too short for link seq (%u) - discarded", (unsigned)len);
+        return 0;
+    }
+    uint16_t seq = (uint16_t)(r->buf[0] | ((uint16_t)r->buf[1] << 8));
+    if (r->has_last && seq == r->last_seq) {
+        r->dup_count++;
+        LOG_W_RL(TAG, "Duplicate message (link seq %u, ack was lost) - acked again, not delivered (dups %u)",
+                 (unsigned)seq, (unsigned)r->dup_count);
+    } else {
+        can_bridge_queue_push(complete_queue, r->buf + CAN_BRIDGE_LINK_SEQ_LEN, len - CAN_BRIDGE_LINK_SEQ_LEN);
+        r->last_seq = seq;
+        r->has_last = 1;
+    }
+    make_link_reply(out, ISO_TP_FC_STATUS_LINK_ACK, seq);
+    return 1;
+}
+
 int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_data, uint8_t frame_len,
                                 uint8_t fc_frame_out[8], can_bridge_queue_t *complete_queue)
 {
@@ -169,9 +201,8 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
             return 0;
         }
         memcpy(r->buf, &frame_data[1], len);
-        can_bridge_queue_push(complete_queue, r->buf, len);
         r->in_progress = 0;
-        return 0; /* SF는 FC 불필요 */
+        return deliver_complete(r, len, fc_frame_out, complete_queue); /* 2026-10-20 — SF도 확인 */
     }
 
     if (pci == ISO_TP_PCI_FF) {
@@ -190,6 +221,7 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
         r->next_seq = 1;
         r->in_progress = 1;
         r->last_cf_len = 0;
+        r->cur_seq = (uint16_t)(r->buf[0] | ((uint16_t)r->buf[1] << 8));  /* FF 데이터 6B 안에 링크 순번 2B가 있음 */
 
         /* BS=0("남은 거 다 보내"), STmin=0 — 사용자 지시 없는 세부는 최소구현(단순 P2P 링크라
          * 별도 페이싱 협상 불필요) */
@@ -214,10 +246,13 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
             return 0;
         }
         if (seq != r->next_seq) {
-            LOG_W_RL(TAG, "CF sequence mismatch (expected=%u got=%u) - message discarded (sender retry expected)",
-                     r->next_seq, seq);
+            /* 2026-10-20 — 보낸 쪽에 바로 재전송 요청(예전엔 버리기만 해서 보낸 쪽은 모르고 넘어갔음) */
+            r->nack_count++;
+            LOG_W_RL(TAG, "CF sequence mismatch (expected=%u got=%u) - message discarded, resend requested (link seq %u, nacks %u)",
+                     r->next_seq, seq, (unsigned)r->cur_seq, (unsigned)r->nack_count);
             r->in_progress = 0;
-            return 0;
+            make_link_reply(fc_frame_out, ISO_TP_FC_STATUS_LINK_NACK, r->cur_seq);
+            return 1;
         }
         size_t remain = r->total_len - r->received_len;
         size_t chunk = (size_t)(frame_len - 1);
@@ -233,8 +268,8 @@ int can_bridge_reassembly_feed(can_bridge_reassembly_t *r, const uint8_t *frame_
         r->next_seq = (uint8_t)((r->next_seq + 1) & 0x0F);
 
         if (r->received_len >= r->total_len) {
-            can_bridge_queue_push(complete_queue, r->buf, r->total_len);
             r->in_progress = 0;
+            return deliver_complete(r, r->total_len, fc_frame_out, complete_queue);
         }
         return 0;
     }
@@ -521,7 +556,18 @@ struct can_bridge_ctx {
      * 같은 ctx로 동시에 can_bridge_send를 불러 두 메시지의 FF/CF가 섞임 -> 콘 "CF 순번 어긋남",
      * 브 "FC 타임아웃") — "ctx당 세션 1개" 규칙을 호출자에게 맡기지 않고 여기서 보장 */
     SemaphoreHandle_t send_mutex;
+    /* 2026-10-20 — 링크 확인·재전송(헤더의 ISO_TP_FC_STATUS_LINK_ACK 주석) */
+    uint8_t *txbuf;                 /* 링크 순번 + 메시지(PSRAM, CAN_BRIDGE_LINK_TXBUF_LEN) */
+    uint16_t tx_seq;                /* 다음 메시지 순번 — 부팅마다 난수에서 시작(상대가 재부팅 전 순번과 헷갈리지 않게) */
+    SemaphoreHandle_t ack_sem;
+    volatile uint8_t ack_pending;
+    volatile uint8_t ack_status;
+    volatile uint16_t ack_seq;
+    uint32_t resend_count, fail_count;
 };
+
+/* 받는 쪽 재조립 버퍼(콘·브 모두 1536B)와 맞춤 */
+#define CAN_BRIDGE_LINK_TXBUF_LEN 1536
 
 can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id)
 {
@@ -530,23 +576,43 @@ can_bridge_ctx_t *can_bridge_ctx_create(twai_node_handle_t node, uint32_t tx_id)
         ESP_LOGE(TAG, "ctx alloc failed");
         abort();
     }
+    memset(ctx, 0, sizeof(*ctx));
     ctx->node = node;
     ctx->tx_id = tx_id;
     ctx->fc_sem = xSemaphoreCreateBinary();
     ctx->send_mutex = xSemaphoreCreateMutex();
-    if (!ctx->fc_sem || !ctx->send_mutex) {
-        ESP_LOGE(TAG, "ctx semaphore/mutex create failed");
+    ctx->ack_sem = xSemaphoreCreateBinary();
+    ctx->txbuf = (uint8_t *)psram_or_internal_alloc(CAN_BRIDGE_LINK_TXBUF_LEN);
+    if (!ctx->fc_sem || !ctx->send_mutex || !ctx->ack_sem || !ctx->txbuf) {
+        ESP_LOGE(TAG, "ctx semaphore/mutex/buffer create failed");
         abort();
     }
     ctx->fc_status = ISO_TP_FC_STATUS_CTS;
     ctx->fc_pending = 0;
+    ctx->tx_seq = (uint16_t)esp_random();
     return ctx;
+}
+
+void can_bridge_ctx_get_link_stats(can_bridge_ctx_t *ctx, uint32_t *out_resends, uint32_t *out_fails)
+{
+    if (out_resends) *out_resends = ctx ? ctx->resend_count : 0;
+    if (out_fails) *out_fails = ctx ? ctx->fail_count : 0;
 }
 
 /* CAN RX 콜백 쪽에서, 이 ctx가 기다리는 FC 프레임을 받았을 때 호출 — can_test.c의
  * on_rx_done에서 PCI==FC이고 기대하던 방향이면 이걸 불러줘야 함 */
 void can_bridge_ctx_notify_fc(can_bridge_ctx_t *ctx, const uint8_t *frame_data)
 {
+    uint8_t status = frame_data[0] & 0x0F;
+    if (status == ISO_TP_FC_STATUS_LINK_ACK || status == ISO_TP_FC_STATUS_LINK_NACK) {
+        /* 2026-10-20 — 링크 확인·재전송 요청. 지금 기다리는 순번과 맞을 때만(늦게 온 옛 확인은 버림) */
+        uint16_t seq = (uint16_t)(frame_data[1] | ((uint16_t)frame_data[2] << 8));
+        if (!ctx->ack_pending || seq != ctx->ack_seq) return;
+        ctx->ack_status = status;
+        ctx->ack_pending = 0;
+        xSemaphoreGive(ctx->ack_sem);
+        return;
+    }
     if (!ctx->fc_pending) return;
     ctx->fc_status = frame_data[0] & 0x0F;
     ctx->fc_pending = 0;
@@ -616,24 +682,67 @@ esp_err_t can_bridge_send(can_bridge_ctx_t *ctx, const uint8_t *msg, size_t len)
     if (!ctx || !msg) return ESP_ERR_INVALID_ARG;
     if (len == 0 || len > ISO_TP_MAX_MSG_LEN) return ESP_ERR_INVALID_ARG;
 
+
     /* ctx당 세션 1개 — 다른 태스크가 같은 ctx로 보내는 중이면 끝날 때까지 대기(메시지 드롭 금지
      * 정책이라 타임아웃 없이 기다림, 한 세션은 FC 타임아웃 500ms + CF 전송으로 유한시간 안에 끝남) */
+    if (len + CAN_BRIDGE_LINK_SEQ_LEN > CAN_BRIDGE_LINK_TXBUF_LEN) {
+        ESP_LOGE(TAG, "Message too long for link buffer (%u) - not sent", (unsigned)len);
+        return ESP_ERR_INVALID_SIZE;
+    }
     xSemaphoreTake(ctx->send_mutex, portMAX_DELAY);
-    uint32_t drops_before = drop_count(ctx->tx_id);
-    esp_err_t err = can_bridge_send_locked(ctx, msg, len);
-    if (err == ESP_OK) {
-        /* 마지막 프레임까지 실제로 끝났는지 기다린 뒤(송신 권한이 돌아오면 끝난 것), 그사이 이 ID의 프레임이 버려졌으면
-         * 실패 — 호출부(브 릴레이)가 메시지 전체를 다시 보냄. 받는 쪽은 새 FF로 다시 조립하고, 중복은 앱이 거름 */
-        if (xSemaphoreTake(s_tx_inflight_sem, pdMS_TO_TICKS(CAN_BRIDGE_DEFAULT_TIMEOUT_MS)) == pdTRUE) {
-            xSemaphoreGive(s_tx_inflight_sem);
+    /* 2026-10-20 — 링크 순번을 앞에 붙임. 재전송은 같은 순번(받는 쪽이 중복을 거름). 끝내 실패해도 순번은 넘김 — 실패한 메시지를
+     * 사실 받았을 수 있으니, 다음 메시지가 같은 순번이라 중복으로 버려지는 일이 없게(호출부가 같은 메시지를 다시 보내면 앱이 중복을 거름) */
+    uint16_t seq = ctx->tx_seq++;
+    ctx->txbuf[0] = (uint8_t)(seq & 0xFF);
+    ctx->txbuf[1] = (uint8_t)(seq >> 8);
+    memcpy(ctx->txbuf + CAN_BRIDGE_LINK_SEQ_LEN, msg, len);
+    size_t wire_len = len + CAN_BRIDGE_LINK_SEQ_LEN;
+
+    esp_err_t err = ESP_FAIL;
+    const char *why = "";
+    bool no_peer = false;   /* FC가 안 와서 바로 그만둠(링크 실패로 안 셈 — 예전과 같은 FC 타임아웃 로그가 이미 남음) */
+    for (int attempt = 0; attempt < CAN_BRIDGE_LINK_MAX_ATTEMPTS; attempt++) {
+        if (attempt > 0) {
+            ctx->resend_count++;
+            LOG_W_RL(TAG, "Link resend (id=0x%x seq %u, attempt %d, %s) - resends %u",
+                     (unsigned)ctx->tx_id, (unsigned)seq, attempt + 1, why, (unsigned)ctx->resend_count);
+        }
+        xSemaphoreTake(ctx->ack_sem, 0);  /* 지난 메시지에서 남았을 수 있는 신호 비움 */
+        ctx->ack_seq = seq;
+        ctx->ack_pending = 1;
+        uint32_t drops_before = drop_count(ctx->tx_id);
+        err = can_bridge_send_locked(ctx, ctx->txbuf, wire_len);
+        if (err == ESP_OK) {
+            /* 마지막 프레임까지 실제로 끝났는지 기다린 뒤(송신 권한이 돌아오면 끝난 것), 그사이 이 ID의 프레임이 버려졌으면 실패 */
+            if (xSemaphoreTake(s_tx_inflight_sem, pdMS_TO_TICKS(CAN_BRIDGE_DEFAULT_TIMEOUT_MS)) == pdTRUE) {
+                xSemaphoreGive(s_tx_inflight_sem);
+            } else {
+                abort_if_stuck();
+                err = ESP_ERR_TIMEOUT;
+            }
+            if (err == ESP_OK && drop_count(ctx->tx_id) != drops_before) { err = ESP_FAIL; why = "frame dropped"; }
         } else {
-            abort_if_stuck();
-            err = ESP_ERR_TIMEOUT;
+            /* FC가 안 옴·송신 막힘 = 상대가 없거나 버스 이상 — 여기서 다시 보내 봐야 같은 결과라 예전처럼 바로 실패로 돌려줌
+             * (호출부의 재시도와 곱해져 송신이 오래 막히지 않게). 링크 재전송은 FC 뒤의 손실(확인 없음·재전송 요청·버려짐)에만 씀 */
+            ctx->ack_pending = 0;
+            no_peer = true;
+            break;
         }
-        if (err == ESP_OK && drop_count(ctx->tx_id) != drops_before) {
-            LOG_W_RL(TAG, "Message frame dropped by bus-off etc (id=0x%x) - returning failure (resend expected)", (unsigned)ctx->tx_id);
-            err = ESP_FAIL;
+        if (err == ESP_OK) {
+            /* 2026-10-20 — 받는 쪽 확인을 기다림 */
+            if (xSemaphoreTake(ctx->ack_sem, pdMS_TO_TICKS(CAN_BRIDGE_LINK_ACK_TIMEOUT_MS)) != pdTRUE) {
+                err = ESP_ERR_TIMEOUT; why = "no ack";
+            } else if (ctx->ack_status != ISO_TP_FC_STATUS_LINK_ACK) {
+                err = ESP_FAIL; why = "nack";
+            }
         }
+        ctx->ack_pending = 0;
+        if (err == ESP_OK) break;
+    }
+    if (err != ESP_OK && !no_peer) {
+        ctx->fail_count++;
+        LOG_W_RL(TAG, "Link send FAILED after %d attempts (id=0x%x seq %u, last: %s) - fails %u",
+                 CAN_BRIDGE_LINK_MAX_ATTEMPTS, (unsigned)ctx->tx_id, (unsigned)seq, why, (unsigned)ctx->fail_count);
     }
     xSemaphoreGive(ctx->send_mutex);
     return err;

@@ -80,6 +80,7 @@ static void write_rec(const alarm_rec_t *r)
 {
     if (!sd_storage_is_mounted()) return;
     if (!sd_health_writes_allowed()) return;   /* 2026-10-14 — SD 고장 상태면 쓰지 않음(푸시·RAM 목록은 그대로) */
+    if (!sd_storage_chain_ok(ALARM_FILE)) return;   /* 2026-10-21 — 클러스터 연결이 끊긴 파일에 쓰면 FatFs가 빈 클러스터를 붙임(sd_storage_chain_ok) */
     FILE *f = fopen(ALARM_FILE, "r+b");
     if (!f) {
         ESP_LOGW(TAG, "%s open failed", ALARM_FILE);
