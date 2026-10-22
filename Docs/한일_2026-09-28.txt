@@ -4,7 +4,7 @@
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
 - 2026-10-23 새벽: 원래 PC에서 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리 변경 없음. sdkconfig: CONFIG_FATFS_TIMEOUT_MS 10000 → 60000(sdkconfig.defaults에 추가 후 다시 만듦, 차이 이 한 줄).
-  git 밖: 콘 SD = 새 16GB 'USDU1'(PSN 52BA0266) 듀얼 포맷(10-22 23:19). 옛 카드 통계 백업 C:\Projects\serial_logs\stats_backups  cntl_stats_2026-10-22_2130.bin. 콘 LittleFS sd_guard.bin이 2판(볼륨별 집계)으로 바뀜. 두 캠 30초 주기 촬영 그대로.
+  git 밖: 콘 SD = 새 16GB 'USDU1'(PSN 52BA0266) 듀얼 포맷(10-22 23:19). 옛 카드 통계 백업 C:\Projects\serial_logs\stats_backups\cntl_stats_2026-10-22_2130.bin. 콘 LittleFS sd_guard.bin이 2판(볼륨별 집계)으로 바뀜. 두 캠 30초 주기 촬영 그대로.
 - 2026-10-22 저녁: 원래 PC에서 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리: feedback_sd_swap_backup_old_stats 추가(같은 PC라 zip 갱신 안 함). sdkconfig 변경 없음.
   git 밖: 콘 LittleFS app.html.gz를 19:2x 빌드로 올림(복원 중 화면). 콘 LittleFS sd_guard.bin(가드 집계) 새로 생김.
