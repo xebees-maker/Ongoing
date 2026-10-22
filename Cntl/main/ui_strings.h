@@ -247,6 +247,7 @@ typedef enum {
     STR_ERR_DESC_DECODE_FAIL,
     STR_ERR_DESC_CAPTURE_FAILED,
     STR_ERR_DESC_CAPTURE_NORESPONSE,
+    STR_ERR_DESC_AUTO_CAPTURE_GAVEUP,   /* 2026-10-22 */
     STR_ERR_DESC_FONT_FILE_MISSING,
     STR_ERR_DESC_FONT_BUF_ALLOC,
     STR_ERR_DESC_FONT_FILE_OPEN,
@@ -279,6 +280,7 @@ typedef enum {
     STR_ERR_DESC_BRIDGE2_NORESPONSE,  /* 2026-10-18 — 5014 */
     STR_WEB_LOCK_MSG,                 /* 2026-10-03(할 일 AD) — 웹 접속 중 콘 잠금 화면 */
     STR_WEB_LOCK_TAKEOVER,
+    STR_RESTORE_LOCK_MSG,             /* 2026-10-22 — 빈 SD에 측정 기록을 다시 옮기는 동안 잠금 화면 */
     STR_MSG_STATS_BLOCKED_SD_FAIL,
     /* 2026-09-11(에러목록 팝업 행별 재설계 — 지우기 버튼) */
     STR_BTN_DISMISS,

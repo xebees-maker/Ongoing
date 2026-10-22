@@ -250,6 +250,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_ERR_DESC_DECODE_FAIL]           = { "JPEG 디코드 실패",               "JPEG decode failed" },
     [STR_ERR_DESC_CAPTURE_FAILED]        = { "촬영 실패",                     "Capture failed" },
     [STR_ERR_DESC_CAPTURE_NORESPONSE]    = { "지금촬영 무응답",               "Capture no response" },
+    [STR_ERR_DESC_AUTO_CAPTURE_GAVEUP]   = { "주기 촬영 3번 실패",            "Auto capture failed 3 times" },
     [STR_ERR_DESC_FONT_FILE_MISSING]     = { "폰트 파일 없음",                 "Font file missing" },
     [STR_ERR_DESC_FONT_BUF_ALLOC]        = { "폰트 버퍼 할당 실패",             "Font buffer alloc failed" },
     [STR_ERR_DESC_FONT_FILE_OPEN]        = { "폰트 파일 열기 실패",             "Font file open failed" },
@@ -284,6 +285,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_ERR_DESC_BRIDGE2_NORESPONSE] = { "브릿지 2 응답 없음",             "Bridge 2 not responding" },
     [STR_WEB_LOCK_MSG]                = { "웹에서 사용 중입니다",           "Web access in use" },
     [STR_WEB_LOCK_TAKEOVER]           = { "웹 연결 끊고 사용",              "Disconnect web and use" },
+    [STR_RESTORE_LOCK_MSG]            = { "측정 기록을 SD로 복원하는 중입니다\n몇 분 걸리며, 끝나면 자동으로 풀립니다",
+                                          "Restoring measurement records to SD\nThis takes a few minutes and unlocks automatically" },
     [STR_MSG_STATS_BLOCKED_SD_FAIL] = { "SD 불량으로 통계를 조회할 수 없습니다. 상태버튼을 눌러 조치하세요.",
                                         "Statistics can't be viewed because the SD card is faulty. Tap the status button to take action." },
     [STR_BTN_DISMISS]            = { "지우기",                         "Dismiss" },
@@ -312,10 +315,12 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LABEL_STORAGE_LEGEND] = { "[사용 %(여유 MB)]", "[Used % (MB free)]" },
     [STR_MSG_SD_RESOLVE_GUIDE] = { "제어기 전원을 끄지 마세요. 측정값은 내부 플래시에 보관 중입니다(SD로 아직 안 옮긴 값 %u개, 최대 7일).\n"
                                    "카드를 바꾸려면: 카드를 빼고 다른 카드를 꽂은 뒤 재마운트 — 새 카드에는 보관 중인 측정값이 자동으로 옮겨집니다.\n"
-                                   "재마운트가 안 될 때만 포맷하세요(카드의 사진·기록이 지워집니다).",
+                                   "재마운트가 안 될 때만 포맷하세요(카드의 사진·기록이 지워집니다).\n"
+                                   "재마운트·포맷은 10초쯤 걸립니다. 그동안 단추가 눌리지 않습니다.",
                                    "Don't power off the CNTL. Measurements are being kept in internal flash (%u not yet on SD, up to 7 days).\n"
                                    "To replace the card: take it out, insert another card, then tap Remount - kept measurements are moved to the new card automatically.\n"
-                                   "Format only if Remount fails (it erases the card's photos and records)." },
+                                   "Format only if Remount fails (it erases the card's photos and records).\n"
+                                   "Remount and Format take about 10 seconds. Buttons don't respond meanwhile." },
     [STR_LABEL_FLASH]          = { "플래시 [MB]", "Flash [MB]" },
     [STR_LABEL_BACKUP]         = { "통계 백업", "Stats backup" },
     [STR_LABEL_BACKUP_NEVER]   = { "아직 없음", "never" },

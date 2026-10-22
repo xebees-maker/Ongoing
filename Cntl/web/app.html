@@ -255,6 +255,11 @@
   <button id="reclaimBtn" class="primary" data-w="RECONNECT"></button>
 </div>
 
+<!-- 2026-10-22(사용자 설계) — 빈 SD에 측정 기록을 다시 옮기는 동안(몇 분) 콘이 503 {"error":"restoring"} — 끝나면 주화면으로 -->
+<div id="restoreView" class="center hidden">
+  <div data-w="RESTORING"></div>
+</div>
+
 <!-- 주화면 — 콘 판넬 순서: Summary → Power Control → Sensor → Camera -->
 <div id="mainView" class="hidden">
   <div id="conn"></div>
@@ -301,6 +306,8 @@
   var W = {
     PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'], LOGIN_LOCKED: ['로그인 시도가 너무 많습니다. 5분 뒤 다시 시도하세요', 'Too many attempts. Try again in 5 minutes'],
     LOCAL_IN_USE: ['제어기 화면에서 사용 중입니다', 'CNTL is being used on its screen'], RECONNECT: ['다시 연결', 'Reconnect'],
+    RESTORING: ['측정 기록을 SD로 복원하는 중입니다. 몇 분 걸리며, 끝나면 자동으로 돌아갑니다',
+                'Restoring measurement records to SD. This takes a few minutes and returns automatically'],
     OFFLINE: ['연결 끊김', 'Offline'], WEB: ['웹', 'Web'],
     LOADING: ['받는 중', 'Loading'], CAPTURING: ['촬영 중', 'Capturing'], NO_PHOTO: ['사진이 오지 않았습니다', 'No photo arrived'],
     SEC: ['초', 's'],
@@ -346,12 +353,29 @@
     view = v;
     $('loginView').classList.toggle('hidden', v !== 'login');
     $('localView').classList.toggle('hidden', v !== 'local');
+    $('restoreView').classList.toggle('hidden', v !== 'restore');
     $('mainView').classList.toggle('hidden', v !== 'main');
     if (v !== 'main') { clearTimeout(timer); wsStop(); }
+    clearTimeout(restoreTimer);
+    if (v === 'restore') {   /* 2026-10-22 — 열린 팝업은 닫고 5초마다 끝났는지 물어봄 */
+      if (!$('sheet').classList.contains('hidden')) realCloseSheet();
+      restoreTimer = setTimeout(restoreCheck, 5000);
+    }
     if (v === 'login') setTimeout(function () { $('pw').focus(); }, 0);
   }
 
-  /* 공통 요청 — 401이면 로그인, 409(local)면 넘겨받음 화면 */
+  /* 2026-10-22 — 복원 중 화면: 끝나면 주화면으로 */
+  var restoreTimer = null;
+  function restoreCheck() {
+    if (view !== 'restore') return;
+    api('api/restore_state').then(function (d) {
+      if (view !== 'restore') return;
+      if (d.restoring) { restoreTimer = setTimeout(restoreCheck, 5000); return; }
+      show('main'); poll();
+    }).catch(function (e) { if (!(e && e.handled) && view === 'restore') restoreTimer = setTimeout(restoreCheck, 5000); });
+  }
+
+  /* 공통 요청 — 401이면 로그인, 409(local)면 넘겨받음 화면, 503(restoring)이면 복원 중 화면 */
   function api(path, opts) {
     opts = opts || {};
     opts.cache = 'no-store';
@@ -359,6 +383,7 @@
     return fetch(path, opts).then(function (r) {
       if (r.status === 401) { show('login'); throw { handled: true }; }
       if (r.status === 409) { show('local'); throw { handled: true }; }
+      if (r.status === 503 && r.headers.get('X-Cntl-Restoring')) { show('restore'); throw { handled: true }; }
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     });
@@ -750,6 +775,7 @@
       var d;
       try { d = JSON.parse(ev.data); } catch (e) { return; }
       if (d.error === 'local') { wsStop(); show('local'); return; }
+      if (d.error === 'restoring') { wsStop(); show('restore'); return; }
       onDash(d);
     };
     ws.onclose = ws.onerror = function () {
@@ -1291,6 +1317,7 @@
     return fetch(url, { credentials: 'same-origin' }).then(function (r) {
       if (r.status === 401) { show('login'); throw { handled: true }; }
       if (r.status === 409) { show('local'); throw { handled: true }; }
+      if (r.status === 503 && r.headers.get('X-Cntl-Restoring')) { show('restore'); throw { handled: true }; }
       if (!r.ok) throw new Error('HTTP ' + r.status);
       var total = +r.headers.get('Content-Length') || 0;
       if (!r.body || !r.body.getReader) return r.blob();
@@ -1614,6 +1641,7 @@
     return fetch(path, { cache: 'no-store', credentials: 'same-origin' }).then(function (r) {
       if (r.status === 401) { show('login'); throw { handled: true }; }
       if (r.status === 409) { show('local'); throw { handled: true }; }
+      if (r.status === 503 && r.headers.get('X-Cntl-Restoring')) { show('restore'); throw { handled: true }; }
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.text();
     });

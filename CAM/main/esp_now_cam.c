@@ -83,6 +83,7 @@ typedef struct {
     cam_task_req_kind_t      kind;
     esp_now_photo_request_t  photo_req;  /* kind==CAM_TASK_REQ_PHOTO일 때만 유효 */
     uint32_t                 generation; /* kind==CAM_TASK_REQ_PHOTO일 때만 유효 — 아래 참고 */
+    uint8_t                  retry;      /* 2026-10-22 — kind==AUTO_CAPTURE일 때 1 = 콘이 보낸 재촬영 */
 } cam_task_request_t;
 
 static QueueHandle_t s_photo_request_queue = NULL;
@@ -601,6 +602,20 @@ static void send_capture_status(uint8_t status)
     ESP_LOGD(TAG_PHOTO, "CAPTURE_STATUS(%u) sent: %s", (unsigned)status, esp_err_to_name(err));
 }
 
+/* 2026-10-22(사용자 설계 — 주기 촬영 실패 시 재촬영, 3번 실패하면 알림) — 주기 촬영(또는 재촬영) 실패를 콘에 알림(ACK 기다리는 신뢰 전송).
+ * 콘이 재촬영을 보내거나(3번 안쪽) 오류·푸시를 함. photo_transfer_task에서 부름 */
+static volatile bool s_retry_inflight = false;   /* 2026-10-22 — 콘이 보낸 재촬영을 큐에 넣고 아직 처리 안 끝남 */
+
+static void send_capture_fail(uint8_t reason, uint8_t retry)
+{
+    esp_now_cam_capture_fail_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_CAPTURE_FAIL,
+                                       .reason = reason, .retry = retry };
+    static const uint8_t s_fail_ack_types[] = { ESP_NOW_MSG_CAM_CAPTURE_FAIL_ACK };
+    esp_err_t err = esp_now_reliable_request(s_hub_mac, &msg, sizeof(msg), s_fail_ack_types, 1, 800, 3, NULL, 0, NULL);
+    ESP_LOGW(TAG_PHOTO, "Auto capture failed (reason %u%s) - CNTL notified: %s", (unsigned)reason, retry ? ", retry" : "",
+             esp_err_to_name(err));
+}
+
 /* 2026-09-26(설계 5단계) — recv_cb에서 reliable로 보낼 수 없는 캡처 상태(RECEIVED)를 대신 보내는 작은 태스크 */
 static void capture_status_task(void *arg)
 {
@@ -626,11 +641,14 @@ static void photo_transfer_task(void *arg)
         if (item.kind == CAM_TASK_REQ_AUTO_CAPTURE) {
             if ((s_conn_state == CAM_CONN_PAIRED)) {
                 if (!cam_node_run_auto_capture()) {
-                    ESP_LOGW(TAG_PHOTO, "AUTO_CAPTURE: capture or push failed - retry next cycle");
+                    ESP_LOGW(TAG_PHOTO, "AUTO_CAPTURE%s: capture or push failed", item.retry ? " (retry)" : "");
+                    uint8_t reason = cam_node_last_capture_fail_reason();
+                    send_capture_fail(reason ? reason : CAM_CAPFAIL_NO_FRAME, item.retry);   /* 2026-10-22 — 콘이 재촬영·알림 */
                 }
             } else {
                 ESP_LOGW(TAG_PHOTO, "AUTO_CAPTURE: not paired - skipping this cycle");
             }
+            if (item.retry) s_retry_inflight = false;
             mark_transfer_idle();
             continue;
         }
@@ -855,6 +873,24 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         esp_now_cam_light_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_LIGHT_ACK,
                                     .on = msg->on };
         send_reply(s_hub_mac, &ack, sizeof(ack));
+        return;
+    }
+
+    /* 2026-10-22(사용자 설계 — 주기 촬영 실패 시 재촬영, 3번 실패하면 알림) — 콘의 재촬영 요청: 받았다고 답하고 주기 촬영과 같은 경로로 찍음 */
+    if (msg_type == ESP_NOW_MSG_CAM_CAPTURE_RETRY) {
+        if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_cam_capture_ack_t)) return;
+        esp_now_cam_capture_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_CAPTURE_RETRY_ACK };
+        send_reply(s_hub_mac, &ack, sizeof(ack));
+        /* 콘이 ACK를 못 받아 같은 요청을 다시 보낸 경우 두 번 찍지 않게 — 재촬영이 처리 중이면 답만(끝난 뒤 온 요청은 새 재촬영) */
+        if (s_retry_inflight) return;
+        cam_task_request_t item = { .kind = CAM_TASK_REQ_AUTO_CAPTURE, .retry = 1 };
+        if (!s_photo_request_queue || xQueueSend(s_photo_request_queue, &item, 0) != pdTRUE) {
+            ESP_LOGW(TAG_PHOTO, "Capture retry: queue full - not queued");
+        } else {
+            s_transfer_busy = true;   /* 찍고 보낼 때까지 잠들지 않게(지금 촬영과 같음) */
+            s_retry_inflight = true;
+            ESP_LOGI(TAG_PHOTO, "Capture retry requested by CNTL - queued");
+        }
         return;
     }
 

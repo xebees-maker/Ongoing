@@ -219,6 +219,11 @@ static struct {
 } s_sy;
 static volatile bool s_sync_requested = false;
 static uint32_t s_last_sync_hour = 0;
+/* 2026-10-22(사용자 설계 — 복원 중엔 웹 접속 때와 같은 잠금 화면, 웹은 "복원 중" 화면) — rescan이 "처음부터 다시 옮김"을 정하면 pending,
+ * 그 옮기기가 도는 동안만 restoring(화면 잠금). 시각이 없거나 SD가 없어 못 옮기면 pending만 남고 잠그지 않음 */
+static volatile bool s_restore_pending = false;
+static volatile bool s_restoring = false;
+static stats_store_restoring_cb_t s_restoring_cb = NULL;
 static SemaphoreHandle_t s_sync_mtx = NULL;   /* 2026-10-15(5단계) — 매시 옮기기 ↔ 복원(stats_store_init에서 만듦) */
 
 static uint32_t mark_crc(const sync_mark_t *m)
@@ -505,6 +510,7 @@ static uint32_t agg_write_sd_locked(agg_pend_t *pend, uint32_t n)
         }
         total += nv;
         if (f && close_synced(f) && nv > 0) {
+            sd_storage_chain_ok(path);   /* 2026-10-22 — 쓰는 도중 빈 클러스터가 붙었는지(위 원시 기록과 같음) */
             size_t nb = nv * sizeof(stats_bucket_t);
             sd_health_count(SDH_C_FSYNC, 1);
             sd_health_count(SDH_C_BYTES, (uint32_t)nb);
@@ -773,6 +779,18 @@ static stats_store_appended_cb_t s_appended_cb = NULL;
 static volatile uint32_t s_append_seq;  /* 아래 정의(2026-10-09) */
 
 void stats_store_set_appended_cb(stats_store_appended_cb_t cb) { s_appended_cb = cb; }
+
+bool stats_store_is_restoring(void) { return s_restoring; }
+void stats_store_set_restoring_cb(stats_store_restoring_cb_t cb) { s_restoring_cb = cb; }
+
+/* 잠금(lock) 밖에서만 부름 — 콜백이 LVGL 잠금을 잡음(LVGL 태스크가 측정 기록 잠금을 기다리는 중이면 서로 막힘) */
+static void set_restoring(bool on)
+{
+    if (s_restoring == on) return;
+    s_restoring = on;
+    ESP_LOGW(TAG, "Restore to SD %s", on ? "started - screen/web locked" : "finished - screen/web unlocked");
+    if (s_restoring_cb) s_restoring_cb(on);
+}
 
 /* 2026-09-11(SD 신뢰성 재설계 항목4) — WAKE_HELLO_SENS 처리(LVGL 태스크가 아님)에서 쓰기실패가
  * 나면 여기만 세팅. ui_main.c의 1초 주기 LVGL 타이머가 매 틱 stats_store_take_write_io_error()로
@@ -1173,6 +1191,7 @@ static uint32_t sd_raw_write_locked(const stats_record_t *records, uint32_t coun
         long start = (fseek(f, 0, SEEK_END) == 0) ? ftell(f) : -1;
         size_t written = fwrite(&records[i], sizeof(stats_record_t), j - i, f);
         bool synced = close_synced(f);
+        sd_storage_chain_ok(path);   /* 2026-10-22 — 쓰는 도중 연결이 끊겨 빈 클러스터가 붙었는지(끊겼으면 SD 이상으로 보고) */
         long fsize = (start >= 0) ? start + (long)(written * sizeof(stats_record_t)) : -1;
         if (written > 0 && synced) {
             /* 2026-10-14(SD 개선 1단계) — 방금 쓴 끝부분을 다른 핸들로 다시 읽어 비교 */
@@ -1342,8 +1361,12 @@ static void minute_job(const uint8_t *arg)
     if (!s_sync_mtx || xSemaphoreTake(s_sync_mtx, 0) != pdTRUE) return;   /* 복원 중 — 끝나면 다음 분에 */
     s_sync_requested = false;
     s_last_sync_hour = hour;
+    bool restore = s_restore_pending;   /* 2026-10-22 — 처음부터 다시 옮기는 동안만 화면·웹 잠금 */
+    s_restore_pending = false;
+    if (restore) set_restoring(true);
     sync_run();   /* 실패하면 다음 시(時)에 다시(나쁜 카드를 매분 두드리지 않게) — 재연결하면 재검사가 다시 요청함 */
     xSemaphoreGive(s_sync_mtx);
+    if (restore) set_restoring(false);   /* 도중에 또 새 카드면 rescan이 pending을 다시 세움 — 다음 옮기기에서 다시 잠금 */
 }
 
 static esp_timer_handle_t s_minute_timer = NULL;
@@ -2019,10 +2042,14 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
         mark_save_locked();
         s_restore_gen++;
         s_sy.restores++;
+        s_restore_pending = true;   /* 2026-10-22 */
         ESP_LOGW(TAG, "Empty SD stats - restoring %u values from flash", (unsigned)lfs_unsynced_locked());
     }
     s_sync_requested = true;   /* 마운트·재연결·포맷 뒤 — 다음 분에 옮김 */
+    bool restore_now = s_restore_pending;
     unlock();
+    /* 2026-10-22 — 복원은 다음 분을 기다리지 않고 바로(잠금 화면이 떠 있는 시간을 옮기는 시간만으로) */
+    if (restore_now) stats_store_request_sync();
     if (out_bad_entries) *out_bad_entries = bad;
 }
 

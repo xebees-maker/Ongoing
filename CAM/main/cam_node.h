@@ -111,3 +111,5 @@ bool cam_node_read_battery_mv(uint16_t *out_raw, uint16_t *out_mv);
  *         끝내고 반환. 촬영 자체 실패 또는 푸시 실패 시 false(이번 사진은 버려짐, 다음
  *         주기가 새로 촬영) */
 bool cam_node_run_auto_capture(void);
+/* 2026-10-22 — 마지막 촬영이 실패했을 때 이유(esp_now_link.h cam_capfail_reason_t), 성공이면 0 */
+uint8_t cam_node_last_capture_fail_reason(void);

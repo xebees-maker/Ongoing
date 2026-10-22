@@ -68,6 +68,13 @@ bool stats_store_post_job(stats_store_job_fn_t fn, const void *arg, size_t arg_l
 typedef void (*stats_store_appended_cb_t)(void);
 void stats_store_set_appended_cb(stats_store_appended_cb_t cb);
 
+/* 2026-10-22(사용자 설계 — 복원 중엔 웹 접속 때와 같은 잠금 화면, 웹은 "복원 중" 화면) — 빈 SD(새 카드·포맷)에 내부 플래시 기록을
+ * 처음부터 다시 옮기는 동안(10-22 실측 약 5분) true. 그동안 화면·웹이 측정 기록을 읽으면 옮기기 잠금을 기다리며 멈춤.
+ * 콜백은 기록 태스크에서 불림(잠금 밖) — UI는 lv_async_call로 넘길 것 */
+bool stats_store_is_restoring(void);
+typedef void (*stats_store_restoring_cb_t)(bool restoring);
+void stats_store_set_restoring_cb(stats_store_restoring_cb_t cb);
+
 /* 2026-10-15(MPIO 카드 손상 대응) — 최근 두 주 SD 통계 파일(원시·집계)을 훑어 그 주에 속하지 않는 레코드(0xFF·쓰레기)가
  * 있으면 SD 이상으로 보고(sd_health 1시간 점검이 기록 태스크에서 부름) */
 void stats_store_sd_check(void);

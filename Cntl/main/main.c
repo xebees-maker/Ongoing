@@ -32,6 +32,7 @@
 #include "notify.h"
 #include "alarm.h"
 #include "sd_health.h"
+#include "sd_guard.h"
 #include "flash_usage.h"
 #include "lv_mem_route.h"
 #include "web_access_log.h"
@@ -1134,6 +1135,7 @@ void app_main(void)
     notify_init();  /* 2026-10-03(할 일 AD) — 휴대폰 알림 보내기 태스크(설정 notify.cfg는 LittleFS) */
     alarm_init();   /* 2026-10-05(할 일 AD 5단계) — 알림 기록 큐(사건은 여기서부터 쌓이고 처리는 alarm_start 뒤) */
     sd_health_init();   /* 2026-10-14(SD 개선 1단계) — LittleFS 뒤, SD 마운트 전(마운트 때 카드 CID를 받음) */
+    sd_guard_init();    /* 2026-10-22 — SD 쓰기 보호 집계(마운트 때 붙음) */
     stats_store_init(); /* 2026-10-15(SD 개선 2단계) — 내부 플래시 날 파일·옮긴 위치(SD 마운트 전) */
     flash_usage_init(); /* 2026-10-15 — 내부 플래시 영역별 사용량(콘 Summary·웹 표시, 60초마다 갱신) */
     web_auth_init();  /* 2026-10-03(할 일 AD) — 웹 로그인(web_auth.bin) */
@@ -1285,6 +1287,7 @@ void app_main(void)
      * 초기화만 건너뛰는 건 이 코드베이스 구조상 안전하지 않음 — 그래서 초기화는 항상 정상
      * 진행하고, 대신 아래에서 recv_cb만 브릿지용으로 바꿔치기하는 방식으로 변경 */
     photo_rx_init();
+    photo_rx_capture_watch_start();   /* 2026-10-22 — 주기 촬영 실패 감시(재촬영·3번 실패 알림) */
     /* 2026-09-26(실기 크래시 — 부팅 루프) — node_hub_init()이 CAN 수신을 시작하면 브가 중계한 캠 광고가 곧바로
      * 도착해 자동연결로 node_request_enqueue()가 불림. node_request_init()이 아래(Wi-Fi 초기화 뒤)에 있어서 큐가
      * NULL인 채 assert(uxQueueMessagesWaiting)로 재부팅, 캠이 광고 중이면 매 부팅 반복됐음 → CAN 수신보다 먼저 */

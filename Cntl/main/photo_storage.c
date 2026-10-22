@@ -652,6 +652,8 @@ bool photo_storage_finish(photo_storage_writer_t *w, uint32_t *out_seq)
         h.hcrc = hdr_crc(&h);
         ok = slot_write_hdr(f, idx, &h) && fflush(f) == 0 && fsync(fileno(f)) == 0;
     }
+    /* 2026-10-22(10-22 02:35 실측 — 쓰는 도중 FAT이 상해 FatFs가 이 파일에 빈 클러스터 1,376개를 붙였음) — 쓴 뒤 연결 다시 확인 */
+    if (ok && !sd_storage_chain_ok(path)) ok = false;
     int v = -1;
     if (ok) {
         sd_health_count(SDH_C_FSYNC, 1);

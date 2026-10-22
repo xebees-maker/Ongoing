@@ -4,6 +4,7 @@
 #include "node_hub.h"
 #include "sens_kind_store.h"
 #include "sd_health.h"
+#include "sd_guard.h"
 #include "flash_usage.h"
 #include "device_config.h"
 #include "power_relay.h"
@@ -16,6 +17,7 @@
 #include "wifi_sta.h"
 #include "ui_main.h"
 #include "photo_storage.h"
+#include "photo_rx.h"
 #include "stats_store.h"
 #include "notify.h"
 #include "alarm.h"
@@ -351,6 +353,12 @@ static void ws_push_work(void *arg)
         ws_close_current();
         return;
     }
+    if (stats_store_is_restoring()) {  /* 2026-10-22 — 복원 중: 웹앱이 "복원 중" 화면으로 */
+        static const char restoring_msg[] = "{\"error\":\"restoring\"}";
+        ws_send_text(fd, restoring_msg, sizeof(restoring_msg) - 1);
+        ws_close_current();
+        return;
+    }
     if (!web_session_web_active()) {  /* hb가 끊겨 세션이 끝남 */
         ws_close_current();
         return;
@@ -388,6 +396,7 @@ static void ws_timer_cb(void *arg)
 static esp_err_t ws_pre_handshake(httpd_req_t *req)
 {
     if (!web_auth_check(req)) return ESP_FAIL;
+    if (!web_restore_gate(req)) return ESP_FAIL;   /* 2026-10-22 — 복원 중(웹앱은 HTTP 조회로 돌아가 503 → "복원 중" 화면) */
     if (!web_session_gate(req)) return ESP_FAIL;
     return ESP_OK;
 }
@@ -579,7 +588,7 @@ static esp_err_t api_device_set_post_handler(httpd_req_t *req)
 static esp_err_t api_sd_health_get_handler(httpd_req_t *req)
 {
     WEB_AUTH_REQUIRE(req);
-    const size_t cap = 6144;
+    const size_t cap = 12288;   /* 2026-10-22 — 쓰기 보호 사건 목록까지(예전 6144) */
     char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
     if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
     int n = sd_health_json(buf, cap);
@@ -587,8 +596,10 @@ static esp_err_t api_sd_health_get_handler(httpd_req_t *req)
         uint32_t c, f, sl, mx;
         sd_storage_cs_stats(&c, &f, &sl, &mx);
         n--;
-        n += snprintf(buf + n, cap - n, ",\"cs\":{\"cmds\":%lu,\"fail\":%lu,\"slow\":%lu,\"max_us\":%lu}}",
+        n += snprintf(buf + n, cap - n, ",\"cs\":{\"cmds\":%lu,\"fail\":%lu,\"slow\":%lu,\"max_us\":%lu},",
                       (unsigned long)c, (unsigned long)f, (unsigned long)sl, (unsigned long)mx);
+        n += sd_guard_json(buf + n, cap - n - 2);   /* 2026-10-22 — 쓰기 보호 효과(날짜별·누적·최근 사건) */
+        n += snprintf(buf + n, cap - n, "}");
     }
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

@@ -43,6 +43,7 @@ void ui_log_get_snapshot(char *out, size_t out_cap);
 
 #define UI_ERR_CAPTURE_FAILED       4003  /* CAM이 촬영 실패로 응답 */
 #define UI_ERR_CAPTURE_NORESPONSE   4004  /* 지금촬영 요청 후 CAM 무응답 */
+#define UI_ERR_AUTO_CAPTURE_GAVEUP  4005  /* 2026-10-22 — 주기 촬영이 재촬영 2번까지 모두 실패(photo_rx 감시) — 사용자가 지움 */
 
 #define UI_ERR_FONT_FILE_MISSING    5001  /* 폰트 파일 없음(stat 실패) */
 #define UI_ERR_FONT_BUF_ALLOC       5002  /* 폰트 파일 로드용 PSRAM 할당 실패 */

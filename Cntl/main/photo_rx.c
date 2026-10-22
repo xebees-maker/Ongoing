@@ -7,6 +7,7 @@
 #include "device_config.h"
 #include "photo_storage.h"
 #include "sd_health.h"
+#include "sd_storage.h"
 #include "can_bridge_link.h"
 #include "esp_mac.h"
 
@@ -181,8 +182,12 @@ static cam_buf_t *cambuf_get_locked(const uint8_t *mac, bool *created)
     return NULL;
 }
 
+static void capw_on_pair(const uint8_t *mac);          /* 아래(주기 촬영 실패 감시) */
+static void capw_note_auto_photo(const uint8_t *mac);
+
 void photo_rx_cam_info(const uint8_t *mac, uint16_t pid, uint8_t max_fs)
 {
+    capw_on_pair(mac);   /* 2026-10-22 — 연결된 캠부터 주기 촬영 감시(기준 = 지금) */
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     bool created = false;
     cam_buf_t *c = cambuf_get_locked(mac, &created);
@@ -449,12 +454,14 @@ static void handle_sr_done(const uint8_t *mac, const uint8_t *body, size_t len)
     }
     uint32_t file_id = s->file_id, size = s->total_size;
     uint16_t got = s->next_idx, total = s->total_chunks;
+    uint8_t s_kind = s->kind;   /* 2026-10-22 — 아래 drop 뒤에도 쓰려고 */
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     drop_session_locked(s);   /* 실패 경로에 남은 writer는 abort */
     xSemaphoreGive(s_mutex);
 
     if (saved) {
+        if (s_kind == 'T') capw_note_auto_photo(mac);   /* 2026-10-22 — 주기 촬영(재촬영 포함) 성공 — 실패 횟수 0으로 */
         ESP_LOGI(TAG, "Photo received: " MACSTR " file_id=%u, %u bytes -> seq=%u", MAC2STR(mac),
                  (unsigned)file_id, (unsigned)size, (unsigned)seq);
         finish_event(PHOTO_RX_STATE_READY);
@@ -603,10 +610,163 @@ bool photo_rx_is_transacting_with(const uint8_t *mac)
 }
 
 /* ════════════════════════════════════════════════════════════
+ * 2026-10-22(사용자 설계 — 주기 촬영 실패 시 재촬영, 원래 1번 + 재촬영 2번, 3번 다 실패하면 오류·푸시, 수동 촬영은 해당 없음)
+ * 실패를 아는 길 두 가지: ① 캠이 CAM_CAPTURE_FAIL로 알림 ② 콘이 "촬영 주기 + 여유" 안에 주기 촬영 사진(T)을 못 받음(캠이 멈추거나
+ * 전송이 끊겨 알리지도 못한 경우 — 3002 포함). 실패마다 횟수를 올리고, 3번 안쪽이면 다음 체크인 때 재촬영(CAM_CAPTURE_RETRY)을
+ * 보내고, 3번째면 오류(4005)·푸시 후 0부터. 주기 촬영 사진을 받으면 0으로. 오류는 사용자가 지움
+ * ════════════════════════════════════════════════════════════ */
+#define CAPW_ATTEMPTS        3          /* 원래 1번 + 재촬영 2번 */
+#define CAPW_GRACE_SHORT_US  (60LL * 1000000)    /* 주기 30초 이하일 때 여유 */
+#define CAPW_GRACE_LONG_US   (120LL * 1000000)   /* 그보다 긴 주기 */
+typedef struct {
+    bool    used;
+    uint8_t mac[6];
+    uint8_t fails;            /* 이번 주기 촬영의 연속 실패 수 */
+    int64_t last_ok_us;       /* 마지막 주기 촬영 사진을 받은 때(없으면 기준을 잡은 때) */
+} capw_t;
+static capw_t s_capw[CAMBUF_MAX];
+static portMUX_TYPE s_capw_mux = portMUX_INITIALIZER_UNLOCKED;
+static esp_timer_handle_t s_capw_timer = NULL;
+
+static capw_t *capw_get(const uint8_t *mac, bool create)
+{
+    for (int i = 0; i < CAMBUF_MAX; i++) if (s_capw[i].used && memcmp(s_capw[i].mac, mac, 6) == 0) return &s_capw[i];
+    if (!create) return NULL;
+    for (int i = 0; i < CAMBUF_MAX; i++) {
+        if (!s_capw[i].used) {
+            memset(&s_capw[i], 0, sizeof(s_capw[i]));
+            s_capw[i].used = true;
+            memcpy(s_capw[i].mac, mac, 6);
+            s_capw[i].last_ok_us = esp_timer_get_time();
+            return &s_capw[i];
+        }
+    }
+    return NULL;
+}
+
+static const char *capfail_text(uint8_t reason)
+{
+    switch (reason) {
+    case CAM_CAPFAIL_INIT:     return "camera init failed";
+    case CAM_CAPFAIL_NO_FRAME: return "no frame";
+    case CAM_CAPFAIL_PUSH:     return "send failed";
+    case 0xFF:                 return "no photo in time";
+    default:                   return "unknown";
+    }
+}
+
+/* 실패 한 번 — 재촬영을 걸거나(3번 안쪽) 오류·푸시 */
+static void capw_fail(const uint8_t *mac, uint8_t reason)
+{
+    /* 2026-10-22(사용자 지시 — 10-22 15:52~ SD 차단 중 4005가 66번 잘못 나감) — SD가 없거나 쓰기가 막혀 있으면 콘이 사진을
+     * 저장 못 하는 것이지 캠 실패가 아님: 전송 실패·시간 안에 사진 없음은 세지 않음(캠 자체 실패 — 초기화·프레임 — 는 셈) */
+    if ((reason == CAM_CAPFAIL_PUSH || reason == 0xFF) && (!sd_storage_is_mounted() || !sd_health_writes_allowed())) {
+        ESP_LOGW(TAG, "Auto capture miss (%s) " MACSTR " not counted - SD not writable", capfail_text(reason), MAC2STR(mac));
+        taskENTER_CRITICAL(&s_capw_mux);
+        capw_t *c = capw_get(mac, true);
+        if (c) c->last_ok_us = esp_timer_get_time();
+        taskEXIT_CRITICAL(&s_capw_mux);
+        return;
+    }
+    uint8_t fails;
+    taskENTER_CRITICAL(&s_capw_mux);
+    capw_t *c = capw_get(mac, true);
+    if (!c) { taskEXIT_CRITICAL(&s_capw_mux); return; }
+    c->fails++;
+    fails = c->fails;
+    c->last_ok_us = esp_timer_get_time();   /* 감시는 여기부터 다시 셈(재촬영 결과를 기다림) */
+    if (fails >= CAPW_ATTEMPTS) c->fails = 0;
+    taskEXIT_CRITICAL(&s_capw_mux);
+
+    const char *alias = device_config_get_alias(mac);
+    char name[40];
+    if (alias && alias[0]) snprintf(name, sizeof(name), "%s", alias);
+    else snprintf(name, sizeof(name), "C%02X%02X%02X", mac[3], mac[4], mac[5]);
+    if (fails < CAPW_ATTEMPTS) {
+        esp_now_cam_capture_ack_t req = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_CAPTURE_RETRY };
+        static const uint8_t s_retry_ack_types[] = { ESP_NOW_MSG_CAM_CAPTURE_RETRY_ACK };
+        node_hub_queue_action(mac, &req, sizeof(req), s_retry_ack_types, 1, 500, 3, "Capture retry");
+        ESP_LOGW(TAG, "Auto capture failed (%s) " MACSTR " - retry %u/%u queued", capfail_text(reason), MAC2STR(mac),
+                 (unsigned)fails, (unsigned)(CAPW_ATTEMPTS - 1));
+        return;
+    }
+    ESP_LOGE(TAG, "Auto capture failed %u times (%s) " MACSTR, (unsigned)CAPW_ATTEMPTS, capfail_text(reason), MAC2STR(mac));
+    /* 오류 목록에 올리면 알림 기록·푸시도 함께 나감(ui_log_add_err — 따로 alarm_post 하면 두 번 감, 10-22 시험) */
+    ui_log_add_err(UI_ERR_AUTO_CAPTURE_GAVEUP, "%s auto capture failed %u times (%s)", name, (unsigned)CAPW_ATTEMPTS, capfail_text(reason));
+}
+
+static void capw_on_pair(const uint8_t *mac)
+{
+    taskENTER_CRITICAL(&s_capw_mux);
+    capw_get(mac, true);
+    taskEXIT_CRITICAL(&s_capw_mux);
+}
+
+static void capw_note_auto_photo(const uint8_t *mac)
+{
+    taskENTER_CRITICAL(&s_capw_mux);
+    capw_t *c = capw_get(mac, true);
+    if (c) { c->fails = 0; c->last_ok_us = esp_timer_get_time(); }
+    taskEXIT_CRITICAL(&s_capw_mux);
+}
+
+/* 캠이 보낸 실패 알림 — ACK 하고 셈 */
+static void handle_capture_fail(const uint8_t *src_mac, const uint8_t *data, int len)
+{
+    if (!src_mac || len < (int)sizeof(esp_now_cam_capture_fail_t)) return;
+    const esp_now_cam_capture_fail_t *m = (const esp_now_cam_capture_fail_t *)data;
+    esp_now_cam_capture_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_CAPTURE_FAIL_ACK };
+    can_bridge_relay_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
+    /* 캠의 신뢰 전송이 ACK를 못 받아 같은 알림을 다시 보낸 경우 두 번 세지 않게(5초 안 같은 캠) */
+    static uint8_t s_last_mac[6];
+    static int64_t s_last_us = 0;
+    int64_t now = esp_timer_get_time();
+    if (s_last_us && now - s_last_us < 5000000LL && memcmp(s_last_mac, src_mac, 6) == 0) return;
+    memcpy(s_last_mac, src_mac, 6);
+    s_last_us = now;
+    capw_fail(src_mac, m->reason);
+}
+
+/* 감시 타이머(10초) — 촬영 주기 + 여유 안에 주기 촬영 사진이 없으면 실패로 셈. 연결된 캠·주기 촬영 켠 캠만 */
+static void capw_timer_cb(void *arg)
+{
+    (void)arg;
+    int64_t now = esp_timer_get_time();
+    for (int i = 0; i < CAMBUF_MAX; i++) {
+        uint8_t mac[6];
+        int64_t last;
+        taskENTER_CRITICAL(&s_capw_mux);
+        bool used = s_capw[i].used;
+        memcpy(mac, s_capw[i].mac, 6);
+        last = s_capw[i].last_ok_us;
+        taskEXIT_CRITICAL(&s_capw_mux);
+        if (!used) continue;
+        uint32_t interval = device_config_get_cam_capture_interval_sec(mac);
+        hub_conn_state_t cs = node_hub_get_conn_state(mac);
+        if (interval == 0 || cs == HUB_CONN_STATE_WAITING) {   /* 주기 촬영 끔·끊김 — 기준만 지금으로 */
+            taskENTER_CRITICAL(&s_capw_mux);
+            s_capw[i].last_ok_us = now;
+            taskEXIT_CRITICAL(&s_capw_mux);
+            continue;
+        }
+        int64_t grace = (interval <= 30) ? CAPW_GRACE_SHORT_US : CAPW_GRACE_LONG_US;
+        if (now - last > (int64_t)interval * 1000000 + grace) capw_fail(mac, 0xFF);
+    }
+}
+
+void photo_rx_capture_watch_start(void)
+{
+    if (s_capw_timer) return;
+    const esp_timer_create_args_t ta = { .callback = capw_timer_cb, .name = "capw" };
+    if (esp_timer_create(&ta, &s_capw_timer) == ESP_OK) esp_timer_start_periodic(s_capw_timer, 10LL * 1000000);
+}
+
+/* ════════════════════════════════════════════════════════════
  * 디스패치
  * ════════════════════════════════════════════════════════════ */
 void photo_rx_on_recv(uint8_t msg_type, const uint8_t *src_mac, const uint8_t *data, int len)
 {
     /* 2026-09-26(4단계) — SR 7종은 브가 끝점이라 콘으로 안 옴(사진은 photo_rx_on_sr_stream으로) */
     if (msg_type == ESP_NOW_MSG_CAPTURE_STATUS) handle_capture_status(src_mac, data, len);
+    else if (msg_type == ESP_NOW_MSG_CAM_CAPTURE_FAIL) handle_capture_fail(src_mac, data, len);   /* 2026-10-22 */
 }

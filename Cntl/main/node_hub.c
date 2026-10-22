@@ -1096,7 +1096,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
     } else if (msg_type == ESP_NOW_MSG_PHOTO_META || msg_type == ESP_NOW_MSG_PHOTO_CHUNK ||
                msg_type == ESP_NOW_MSG_PHOTO_DONE || msg_type == ESP_NOW_MSG_CAPTURE_STATUS ||
-               msg_type == ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST) {
+               msg_type == ESP_NOW_MSG_PHOTO_WINDOW_STATUS_REQUEST ||
+               msg_type == ESP_NOW_MSG_CAM_CAPTURE_FAIL) {   /* 2026-10-22 — 주기 촬영 실패 알림(photo_rx 재촬영) */
         /* 수신 콜백이 하나라서, 사진 관련 프로토콜(사진 수신/지금촬영 진행상태) 처리는 전부
          * photo_rx.c로 넘김(2026-09-26 — 캠 SD 제거로 목록/삭제 메시지는 삭제) */
         photo_rx_on_recv(msg_type, info ? info->src_addr : NULL, data, len);

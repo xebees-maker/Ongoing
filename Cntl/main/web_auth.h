@@ -27,8 +27,15 @@ bool web_auth_check(httpd_req_t *req);
 /* 401 + {"error":"auth"} 응답(호출부는 이 반환값을 그대로 돌려주면 됨) */
 esp_err_t web_auth_reject(httpd_req_t *req);
 
-/* 핸들러 맨 앞에 — 인증 안 됐으면 401로 끝냄 */
-#define WEB_AUTH_REQUIRE(req) do { if (!web_auth_check(req)) return web_auth_reject(req); } while (0)
+/* 2026-10-22(사용자 설계 — 복원 중엔 웹에 "복원 중" 화면) — 빈 SD에 측정 기록을 다시 옮기는 중(stats_store_is_restoring)이면
+ * 503 {"error":"restoring"}을 보내고 false. 그동안 측정 기록을 읽는 요청은 옮기기 잠금을 기다리며 웹서버(태스크 하나)를 멈춤 */
+bool web_restore_gate(httpd_req_t *req);
 
-/* 핸들러 등록 — POST /api/login, POST /api/password, POST /api/logout_all */
+/* 핸들러 맨 앞에 — 인증 안 됐으면 401로 끝냄, 복원 중이면 503 */
+#define WEB_AUTH_REQUIRE(req) do { \
+        if (!web_auth_check(req)) return web_auth_reject(req); \
+        if (!web_restore_gate(req)) return ESP_OK; \
+    } while (0)
+
+/* 핸들러 등록 — POST /api/login, POST /api/password, POST /api/logout_all, GET /api/restore_state(2026-10-22) */
 void web_auth_register_handlers(httpd_handle_t server);

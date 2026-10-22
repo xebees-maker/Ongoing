@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "sd_health.h"
+#include "sd_guard.h"
 #include "esp_vfs_fat.h"
 #include <stdbool.h>
 #include "driver/sdspi_host.h"
@@ -197,6 +198,7 @@ esp_err_t sd_storage_init(void)
     }
 
     ESP_LOGI(TAG, "SD mounted: %s", SD_STORAGE_MOUNT_POINT);
+    sd_guard_attach(s_card);   /* 2026-10-22 — FatFs 쓰기를 보호 쓰기로(sd_guard.h) */
     sd_health_on_mount();   /* 2026-10-15 — 부트 영역 기준값을 새로 잡음(손상 감시) */
     /* 2026-09-26 — 재연결로 다시 마운트된 경우 사용량 합계를 새로 만들게 함(부팅 때는 파일처리
      * 태스크가 아직 없어서 무시되고, 태스크가 시작하면서 어차피 재스캔함) */
@@ -270,7 +272,10 @@ esp_err_t sd_storage_format(void)
     /* 재연결과 포맷 사이에 새로 열린 저장 파일도 닫고 막음(위 reconnect와 같은 이유) */
     photo_storage_io_suspend();
     stats_store_io_suspend();
+    sd_guard_set_enabled(false);   /* 2026-10-22 — f_mkfs 대량 쓰기는 확인하지 않음 */
     esp_err_t err = esp_vfs_fat_sdcard_format(SD_STORAGE_MOUNT_POINT, s_card);
+    sd_guard_attach(s_card);
+    sd_guard_set_enabled(true);
     stats_store_io_resume();
     photo_storage_io_resume();
     if (err != ESP_OK) {

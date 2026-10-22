@@ -44,6 +44,9 @@ void photo_rx_on_sr_stream(uint8_t app_type, const uint8_t *mac, const uint8_t *
  * photo_rx_cam_frame_size: 콘이 정한 그 캠의 해상도(CAM_CONFIG_SET.frame_size로 보냄), 정해 줄 수 없으면 0xFF.
  * photo_rx_cam_forget: 연결 해제된 캠의 버퍼를 놓고 남은 캠의 해상도를 다시 정함 */
 void photo_rx_cam_info(const uint8_t *mac, uint16_t pid, uint8_t max_fs);
+
+/* 2026-10-22 — 주기 촬영 실패 감시 타이머 시작(부팅 때 한 번). 재촬영·3번 실패 알림은 photo_rx.c 주석 */
+void photo_rx_capture_watch_start(void);
 uint8_t photo_rx_cam_frame_size(const uint8_t *mac);
 void photo_rx_cam_forget(const uint8_t *mac);
 

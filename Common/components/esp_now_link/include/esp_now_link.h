@@ -187,7 +187,32 @@ typedef enum {
     /* 2026-10-20(사용자 결정 — 조명 테스트 스위치 동기화) — CAM -> Cntl: esp_now_cam_light_t, 응답 없음. 콘이 켠 시험 조명을 캠이
      * 스스로 껐을 때(잠들기 직전·촬영 뒤) 알림. CAM_LIGHT_ACK로 보냈더니 브가 진행 중인 켜기 요청의 응답으로 받아 버려 따로 둠 */
     ESP_NOW_MSG_CAM_LIGHT_STATE = 64,
+    /* 2026-10-22(사용자 설계 — 주기 촬영 실패 시 재촬영, 3번 실패하면 알림) — 콘이 실패를 받으면 재촬영을 보내고(원래 1번 + 재촬영 2번),
+     * 3번 다 실패하면 오류·푸시. 수동(지금 촬영)은 해당 없음 */
+    ESP_NOW_MSG_CAM_CAPTURE_FAIL = 65,       /* CAM -> Cntl: esp_now_cam_capture_fail_t — 주기 촬영(또는 재촬영) 실패, 신뢰 전송 */
+    ESP_NOW_MSG_CAM_CAPTURE_FAIL_ACK = 66,   /* Cntl -> CAM: esp_now_cam_capture_ack_t */
+    ESP_NOW_MSG_CAM_CAPTURE_RETRY = 67,      /* Cntl -> CAM: esp_now_cam_capture_ack_t — 주기 촬영 다시(사진은 주기 촬영 사진 T로) */
+    ESP_NOW_MSG_CAM_CAPTURE_RETRY_ACK = 68,  /* CAM -> Cntl: esp_now_cam_capture_ack_t — 받음(결과는 사진 또는 CAPTURE_FAIL) */
 } esp_now_msg_type_t;
+
+/* 2026-10-22 — 주기 촬영 실패 이유 */
+typedef enum {
+    CAM_CAPFAIL_INIT     = 1,   /* 카메라 초기화 실패 */
+    CAM_CAPFAIL_NO_FRAME = 2,   /* 프레임을 못 받음(시간 초과, JPEG 끝 표시 없음) */
+    CAM_CAPFAIL_PUSH     = 3,   /* 콘으로 전송 실패 */
+} cam_capfail_reason_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+    uint8_t reason;   /* cam_capfail_reason_t */
+    uint8_t retry;    /* 1 = 콘이 보낸 재촬영이 실패 */
+} esp_now_cam_capture_fail_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_cam_capture_ack_t;
 
 /* 2026-10-18 — 보릴 상태(STATUS, SET_ACK). 끊김 동작(사용자 결정): 통신이 끊기면 릴레이를 그대로 두다가 failsafe_min분 뒤 끔.
  * 보릴이 재부팅하면 릴레이는 꺼진 채로 시작(콘이 다시 켜야 함) */

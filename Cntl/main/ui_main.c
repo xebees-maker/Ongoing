@@ -1050,26 +1050,32 @@ static void cb_web_lock_takeover(lv_event_t *e)
 static lv_obj_t *s_error_warn_popup;                /* 정의는 에러·경고 목록 부분 */
 static void cb_close_error_warn_popup(lv_event_t *e);
 
+/* 잠금 화면을 띄울 때 — 열려 있던 설정 팝업을 닫음. 웹 잠금: 팝업은 열 때 모델을 복사해 두므로, 웹이 바꾼 뒤 넘겨받으면
+ * 옛 값으로 덮어쓸 수 있음. 복원 잠금(2026-10-22): 통계 팝업의 그래프 갱신이 옮기기 잠금을 기다리며 화면을 멈춤 */
+static void close_setting_popups(void)
+{
+    if (s_device_popup) teardown_device_popup();
+    if (s_relay_popup) teardown_relay_popup();
+    if (s_camera_popup) teardown_camera_tab();
+    if (s_stats_popup) teardown_stats_tab();
+    if (s_error_warn_popup) cb_close_error_warn_popup(NULL);
+    if (s_option_popup) {  /* 설정·로그 팝업(cb_close_option_popup과 같은 정리 — 로그를 보고 있었으면 로그부터) */
+        if (s_log_tab_built) teardown_log_tab();
+        else teardown_option_tab();
+        lv_obj_delete(s_option_popup);
+        s_option_popup = NULL;
+        s_option_content = NULL;
+        s_option_popup_title = NULL;
+        s_option_tab_built = false;
+    }
+}
+
+static lv_obj_t *s_restore_lock_overlay = NULL;   /* 아래 restore_lock_apply — 웹 잠금보다 위 */
+
 static void web_lock_apply(void *arg)
 {
     bool locked = (bool)(intptr_t)arg;
-    if (locked) {
-        /* 콘에 열려 있던 설정 팝업은 닫음 — 팝업은 열 때 모델을 복사해 두므로, 웹이 바꾼 뒤 넘겨받으면 옛 값으로 덮어쓸 수 있음 */
-        if (s_device_popup) teardown_device_popup();
-        if (s_relay_popup) teardown_relay_popup();
-        if (s_camera_popup) teardown_camera_tab();
-        if (s_stats_popup) teardown_stats_tab();
-        if (s_error_warn_popup) cb_close_error_warn_popup(NULL);
-        if (s_option_popup) {  /* 설정·로그 팝업(cb_close_option_popup과 같은 정리 — 로그를 보고 있었으면 로그부터) */
-            if (s_log_tab_built) teardown_log_tab();
-            else teardown_option_tab();
-            lv_obj_delete(s_option_popup);
-            s_option_popup = NULL;
-            s_option_content = NULL;
-            s_option_popup_title = NULL;
-            s_option_tab_built = false;
-        }
-    }
+    if (locked) close_setting_popups();
     if (!locked) {
         if (s_web_lock_overlay) lv_obj_add_flag(s_web_lock_overlay, LV_OBJ_FLAG_HIDDEN);
         return;
@@ -1100,9 +1106,58 @@ static void web_lock_apply(void *arg)
     lv_label_set_text(s_web_lock_btn_lbl, ui_str(STR_WEB_LOCK_TAKEOVER));
     lv_obj_remove_flag(s_web_lock_overlay, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_web_lock_overlay);
+    /* 2026-10-22 — 복원 중이면 복원 잠금이 위(넘겨받기 단추가 눌리지 않게) */
+    if (s_restore_lock_overlay && !lv_obj_has_flag(s_restore_lock_overlay, LV_OBJ_FLAG_HIDDEN)) lv_obj_move_foreground(s_restore_lock_overlay);
     /* 화면이 꺼진 뒤에 웹이 접속한 경우 — 깨우기 막(첫 터치는 화면 켜기만)이 잠금 화면보다 위에 있어야 함. 아니면 꺼진 화면을
      * 눌러도 안 켜지고, 버튼 자리를 누르면 보이지 않는 채로 넘겨받기가 눌림 */
     if (s_screen_wake_overlay) lv_obj_move_foreground(s_screen_wake_overlay);
+}
+
+/* ════════════════════════════════════════════════════════════
+ * 2026-10-22(사용자 설계 — 복원 중엔 웹 접속 때와 같은 잠금 화면) — 빈 SD(새 카드·포맷)에 내부 플래시
+ * 측정 기록을 다시 옮기는 동안(10-22 실측 약 5분) 화면·웹이 측정 기록을 읽으면 옮기기 잠금을 기다리며 멈춤(그래프 갱신 88초).
+ * 그동안 웹 잠금 화면과 같은 모양으로 덮고 터치를 막음(넘겨받기 단추 없음). 끝나면 걷음
+ * ════════════════════════════════════════════════════════════ */
+static lv_obj_t *s_restore_lock_msg = NULL;
+
+static void restore_lock_apply(void *arg)
+{
+    (void)arg;
+    bool on = stats_store_is_restoring();   /* 알림 순서가 바뀌어도 지금 상태대로 */
+    if (!on) {
+        if (s_restore_lock_overlay) lv_obj_add_flag(s_restore_lock_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    close_setting_popups();
+    if (!s_restore_lock_overlay) {
+        s_restore_lock_overlay = lv_obj_create(lv_layer_top());
+        lv_obj_set_size(s_restore_lock_overlay, LV_PCT(100), LV_PCT(100));
+        lv_obj_set_style_radius(s_restore_lock_overlay, 0, 0);
+        lv_obj_set_style_border_width(s_restore_lock_overlay, 0, 0);
+        lv_obj_set_style_bg_color(s_restore_lock_overlay, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(s_restore_lock_overlay, LV_OPA_80, 0);
+        lv_obj_add_flag(s_restore_lock_overlay, LV_OBJ_FLAG_CLICKABLE);  /* 아래 화면 터치 막음 */
+        lv_obj_clear_flag(s_restore_lock_overlay, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(s_restore_lock_overlay, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(s_restore_lock_overlay, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+        s_restore_lock_msg = lv_label_create(s_restore_lock_overlay);
+        lv_obj_set_width(s_restore_lock_msg, LV_PCT(90));
+        lv_label_set_long_mode(s_restore_lock_msg, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(s_restore_lock_msg, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(s_restore_lock_msg, ui_font_get(UI_FONT_SIZE_30), 0);
+        lv_obj_set_style_text_color(s_restore_lock_msg, lv_color_white(), 0);
+    }
+    lv_label_set_text(s_restore_lock_msg, ui_str(STR_RESTORE_LOCK_MSG));   /* 언어가 바뀌었을 수 있어 띄울 때마다 */
+    lv_obj_remove_flag(s_restore_lock_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_restore_lock_overlay);
+    if (s_screen_wake_overlay) lv_obj_move_foreground(s_screen_wake_overlay);   /* 꺼진 화면의 첫 터치는 켜기만(웹 잠금과 같음) */
+}
+
+/* 기록 태스크(stats_wr)에서 불림(stats_store 잠금 밖) — on_stats_appended와 같이 ui_post로 */
+static void on_stats_restoring(bool on)
+{
+    ui_post(restore_lock_apply, (void *)(intptr_t)on);
 }
 
 void ui_main_get_status_flags(bool *error, bool *warn, bool *sd_io_fail)
@@ -1526,6 +1581,7 @@ static ui_str_id_t err_code_to_desc_str(int code)
         case UI_ERR_DECODE_FAIL:           return STR_ERR_DESC_DECODE_FAIL;
         case UI_ERR_CAPTURE_FAILED:        return STR_ERR_DESC_CAPTURE_FAILED;
         case UI_ERR_CAPTURE_NORESPONSE:    return STR_ERR_DESC_CAPTURE_NORESPONSE;
+        case UI_ERR_AUTO_CAPTURE_GAVEUP:   return STR_ERR_DESC_AUTO_CAPTURE_GAVEUP;   /* 2026-10-22 */
         case UI_ERR_FONT_FILE_MISSING:     return STR_ERR_DESC_FONT_FILE_MISSING;
         case UI_ERR_FONT_BUF_ALLOC:        return STR_ERR_DESC_FONT_BUF_ALLOC;
         case UI_ERR_FONT_FILE_OPEN:        return STR_ERR_DESC_FONT_FILE_OPEN;
@@ -1985,9 +2041,26 @@ static void show_alert_popup(const char *message, modal_kind_t kind)
  * 돌아가야되는데") — 실패하면 해결(Resolve) 선택팝업을 안 닫고 그 위에 결과팝업만 띄워서,
  * 결과팝업을 확인하면 다시 해결 팝업(다른 조치를 또 고를 수 있음)으로 돌아가게 함. 성공했을
  * 때만 해결 팝업까지 같이 닫음(문제가 실제로 풀렸으니 더 고를 게 없음) */
+/* 2026-10-22(사용자 지시 — "재마운트는 팝업에 미리 시간이 걸린다고 써주고, 입력할 수 있는 단추만 disable") — 재마운트·포맷은
+ * LVGL 태스크에서 동기로 약 7초(10-22 실측: FAT 검사 6.5초). 그동안 해결 팝업의 단추(X 포함)를 막고, 막힌 모습을 먼저 그림 */
+static void sd_resolve_set_busy(lv_obj_t *obj, bool busy)
+{
+    if (!obj) return;
+    if (lv_obj_check_type(obj, &lv_button_class)) {
+        if (busy) lv_obj_add_state(obj, LV_STATE_DISABLED);
+        else lv_obj_remove_state(obj, LV_STATE_DISABLED);
+    }
+    uint32_t n = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < n; i++) sd_resolve_set_busy(lv_obj_get_child(obj, i), busy);
+}
+
 static void cb_sd_reconnect_tap(lv_event_t *e)
 {
+    lv_obj_t *resolve_overlay = lv_obj_get_parent(lv_obj_get_parent(lv_obj_get_parent(lv_event_get_target(e))));
+    sd_resolve_set_busy(resolve_overlay, true);
+    lv_refr_now(NULL);   /* 막힌 단추를 먼저 그림 — 아래 동안은 화면이 다시 그려지지 않음 */
     esp_err_t err = sd_storage_reconnect();
+    sd_resolve_set_busy(resolve_overlay, false);
     if (err == ESP_OK && sd_verify_healthy()) {
         clear_sd_io_fail();
         cb_modal_close(e);  /* 성공 — 해결 팝업도 같이 닫음 */
@@ -2005,7 +2078,10 @@ static void cb_sd_reconnect_tap(lv_event_t *e)
 static void cb_sd_format_confirmed(void *ctx)
 {
     lv_obj_t *resolve_overlay = (lv_obj_t *)ctx;
+    sd_resolve_set_busy(resolve_overlay, true);   /* 2026-10-22 — 위 sd_resolve_set_busy 주석 */
+    lv_refr_now(NULL);
     esp_err_t err = sd_storage_format();
+    sd_resolve_set_busy(resolve_overlay, false);
     if (err == ESP_OK && sd_verify_healthy()) {
         clear_sd_io_fail();
         if (resolve_overlay) {
@@ -7911,6 +7987,7 @@ void ui_init(void)
     node_hub_set_connect_event_cb(on_connect_result_event);
     node_hub_set_pair_rejected_cb(on_pair_rejected_event);
     stats_store_set_appended_cb(on_stats_appended);
+    stats_store_set_restoring_cb(on_stats_restoring);   /* 2026-10-22 — 복원 중 잠금 화면 */
 }
 
 /* 2026-09-08(재설계) — 통계 팝업 닫기: 타이머 삭제 + 팝업 전체 삭제(lv_obj_delete — 이제

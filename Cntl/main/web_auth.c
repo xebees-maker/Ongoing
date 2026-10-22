@@ -1,5 +1,6 @@
 #include "web_auth.h"
 #include "fs.h"
+#include "stats_store.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -309,8 +310,26 @@ static esp_err_t api_logout_all_post_handler(httpd_req_t *req)
     return send_json(req, NULL, ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
+bool web_restore_gate(httpd_req_t *req)
+{
+    if (!stats_store_is_restoring()) return true;
+    httpd_resp_set_hdr(req, "X-Cntl-Restoring", "1");   /* 다른 503(SD 이상)과 구별 — 웹앱은 이 머리말로 "복원 중" 화면 */
+    send_json(req, "503 Service Unavailable", "{\"error\":\"restoring\"}");
+    return false;
+}
+
+/* 2026-10-22 — GET /api/restore_state: 웹앱 "복원 중" 화면이 끝났는지 물어봄(인증만, 복원 중에도 응답) */
+static esp_err_t api_restore_state_get_handler(httpd_req_t *req)
+{
+    if (!web_auth_check(req)) return web_auth_reject(req);
+    return send_json(req, NULL, stats_store_is_restoring() ? "{\"restoring\":true}" : "{\"restoring\":false}");
+}
+
 void web_auth_register_handlers(httpd_handle_t server)
 {
+    static const httpd_uri_t restore_state_uri = { .uri = "/api/restore_state", .method = HTTP_GET,
+                                                   .handler = api_restore_state_get_handler };
+    httpd_register_uri_handler(server, &restore_state_uri);
     static const httpd_uri_t login_uri = { .uri = "/api/login", .method = HTTP_POST, .handler = api_login_post_handler };
     static const httpd_uri_t password_uri = { .uri = "/api/password", .method = HTTP_POST, .handler = api_password_post_handler };
     static const httpd_uri_t logout_all_uri = { .uri = "/api/logout_all", .method = HTTP_POST, .handler = api_logout_all_post_handler };

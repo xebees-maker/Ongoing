@@ -7,6 +7,7 @@
 #include "stats_store.h"
 #include "photo_storage.h"
 #include "fs.h"
+#include "sd_guard.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -60,7 +61,7 @@ static esp_timer_handle_t s_timer = NULL;
 static const char *const s_ev_name[SDH_EV_COUNT] = {
     "?", "stats verify", "aggregate verify", "photo verify", "photo missing", "bad aggregate record", "FAT1/FAT2 mismatch", "test",
     "boot sector unreadable", "boot area changed", "bad directory entry", "bad stats record", "cluster chain broken",
-    "FAT changed without write",
+    "FAT changed without write", "guard repair failed",
 };
 
 static void journal_save(const char *why);   /* 아래(2026-10-21 명령 기록) */
@@ -458,6 +459,7 @@ static void fat_guard(void)
         sd_health_mark(SDH_MARK_FATGUARD, 0);
         return;
     }
+    sd_guard_note_outside(changed);   /* 2026-10-22 — 쓰기 보호 범위 밖 손상으로 셈(효과 보고) */
     ESP_LOGI(TAG, "FAT guard: %u sectors x2, %u changed without Cntl write, %u rechecked, %u Cntl FAT sector writes since boot, %ums",
              (unsigned)fatsz, (unsigned)changed, (unsigned)rechecked, (unsigned)s_fx_wseq, (unsigned)((esp_timer_get_time() - t0) / 1000));
     sd_health_mark(SDH_MARK_FATGUARD, changed);
@@ -697,6 +699,7 @@ static void hourly_job(const uint8_t *arg)
     guard_check();
     dir_check();
     stats_store_sd_check();   /* 2026-10-15 — 최근 두 주 통계 원시·집계 파일의 레코드가 그 주에 속하는지 */
+    sd_guard_hourly();        /* 2026-10-22 — 쓰기 보호 집계 한 줄·저장 */
     if (!s_st) return;
     uint32_t now = (uint32_t)time(NULL);
     taskENTER_CRITICAL(&s_mux);

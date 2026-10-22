@@ -29,6 +29,7 @@ typedef enum {
     SDH_EV_BAD_STATS_RECORD,   /* 통계 원시 기록에 그 주에 속하지 않는 레코드(0xFF·쓰레기) */
     SDH_EV_CHAIN_BROKEN,       /* 2026-10-21 — 쓰기 전 확인: 파일의 클러스터 연결이 파일 크기 전에 끊기거나 범위를 벗어남 */
     SDH_EV_FAT_CHANGED_NO_WRITE, /* 2026-10-21 — 10분 감시: FAT 섹터가 콘이 쓴 내용과 다름(콘이 쓰지 않았는데 바뀜) */
+    SDH_EV_GUARD_REPAIR_FAILED,  /* 2026-10-22 — 쓰기 보호(sd_guard): 쓴 뒤 바뀐 섹터를 다시 써도 끝내 못 고침 */
     SDH_EV_COUNT
 } sd_health_event_t;
 

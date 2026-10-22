@@ -714,14 +714,20 @@ static void camdiag_sensor(const char *where, int64_t frame_ms)
              (long long)(esp_timer_get_time() / 1000));
 }
 
+/* 2026-10-22(사용자 설계 — 주기 촬영 실패 시 재촬영, 3번 실패하면 알림) — 마지막 촬영 실패 이유(cam_capfail_reason_t) — 주기 촬영 실패를 콘에 알릴 때 */
+static uint8_t s_capture_fail_reason = 0;
+uint8_t cam_node_last_capture_fail_reason(void) { return s_capture_fail_reason; }
+
 static bool camera_capture_one(cam_capture_kind_t kind)
 {
+    s_capture_fail_reason = 0;
     /* 2026-10-20(사용자 결정 — LED 켜짐 시간 줄이기, 밤 시험 2단계) — 예전엔 LED를 카메라 초기화(워밍업 프레임 2장 포함, 약 2.5초)
      * 전에 켜서 정상 촬영에도 4~5초 켜져 있었음. 이제 초기화가 끝난 뒤 켜고, 아래에서 CAM_LIGHT_LEAD_MS 동안 프레임을 버리며 노출을
      * 맞춘 뒤 찍음(09-29 측정: 1.1초 먼저 켜면 3초 먼저 켠 것과 노출이 같았음) */
     if (CAM_LED_STAGE == 1) capture_light_on();   /* 밤 시험 1단계 = 예전 동작(초기화 전에 켬) */
     if (ensure_camera_ready(kind == CAM_CAPTURE_KIND_MANUAL) != ESP_OK) {
         capture_light_off();
+        s_capture_fail_reason = CAM_CAPFAIL_INIT;
         return false;
     }
     apply_agc_aec_settings();
@@ -742,6 +748,7 @@ static bool camera_capture_one(cam_capture_kind_t kind)
                 /* 2026-10-20(밤 시험 3단계) — 프레임을 못 받음: LED를 바로 끄고 이 사진은 포기(다음 주기에 다시 찍음) */
                 ESP_LOGW(TAG, "Frame not received while adjusting exposure - capture skipped, light off");
                 capture_light_off();
+                s_capture_fail_reason = CAM_CAPFAIL_NO_FRAME;
                 xSemaphoreGive(s_capture_mutex);
                 return false;
             }
@@ -773,6 +780,7 @@ static bool camera_capture_one(cam_capture_kind_t kind)
             /* 2026-10-20(밤 시험 3단계) — 위와 같음 */
             ESP_LOGW(TAG, "Frame not received while flushing stale frame - capture skipped, light off");
             capture_light_off();
+            s_capture_fail_reason = CAM_CAPFAIL_NO_FRAME;
             xSemaphoreGive(s_capture_mutex);
             return false;
         }
@@ -790,6 +798,7 @@ static bool camera_capture_one(cam_capture_kind_t kind)
     }
     capture_light_off();  /* 프레임을 받았으면 바로 끔 — 전송(수 초)은 LED 없이 */
     if (!fb) {
+        s_capture_fail_reason = CAM_CAPFAIL_NO_FRAME;
         ESP_LOGW(TAG, "esp_camera_fb_get failed");
         xSemaphoreGive(s_capture_mutex);
         return false;
@@ -798,6 +807,7 @@ static bool camera_capture_one(cam_capture_kind_t kind)
     if (ok) {
         ESP_LOGI(TAG, "Pushed to CNTL: kind=%c, %u bytes", (char)kind, (unsigned)fb->len);
     } else {
+        s_capture_fail_reason = CAM_CAPFAIL_PUSH;
         ESP_LOGW(TAG, "CNTL push failed (kind=%c) - photo dropped", (char)kind);
     }
     esp_camera_fb_return(fb);

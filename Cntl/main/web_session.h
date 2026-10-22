@@ -44,5 +44,6 @@ void web_session_register_handlers(httpd_handle_t server);
 /* 화면 API 핸들러 맨 앞 — 인증 + 세션 */
 #define WEB_SCREEN_API_BEGIN(req) do { \
         if (!web_auth_check(req)) return web_auth_reject(req); \
+        if (!web_restore_gate(req)) return ESP_OK; \
         if (!web_session_gate(req)) return ESP_OK; \
     } while (0)
