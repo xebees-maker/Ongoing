@@ -80,6 +80,11 @@ void sd_health_mark(uint8_t code, uint32_t val);
 /* 웹 /api/sd/journal — 최근 명령 기록 글(max_lines 0 = 전부), 길이 반환 */
 int sd_health_journal_text(char *buf, size_t cap, uint32_t max_lines);
 
+/* 2026-10-22(듀얼 파티션) — sd_guard 읽기가 FAT 섹터마다 부름(FatFs 볼륨 잠금 아래). sp = vol(0 A, 1 B)에서 읽은 한 섹터.
+ * 콘이 쓴 내용(CRC)과 같으면 그대로, 다르면 다른 벌(다른 쪽 같은 자리 → 같은 쪽 FAT 짝 → 다른 쪽 FAT 짝)에서 맞는 내용을 sp에 넣고
+ * 틀린 벌을 메꿈. 맞는 벌이 없으면 SD 이상으로 보고하고 false */
+bool sd_health_fat_read_check(uint32_t lba, uint8_t *sp, int vol);
+
 /* sd_storage가 마운트 직전에 읽은 카드 CID 한 줄 */
 void sd_health_set_card(const char *cid_line);
 

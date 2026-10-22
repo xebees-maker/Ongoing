@@ -120,6 +120,10 @@ void ui_log_clear_one_error(int code);
 #define UI_WARN_BACKUP_DUE          6003  /* 2026-10-15(SD 개선 5단계) — 마지막 통계 백업에서 정한 기간이 지남(시험 중 하루,
                                              출시 때 3개월 — stats_store.c BACKUP_REMIND_SEC). 하루에 한 번 */
 
+#define UI_WARN_SD_NOT_DUAL         6004  /* 2026-10-22(듀얼 파티션) — 카드가 한 벌(듀얼 아님) — 포맷하면 듀얼 */
+#define UI_WARN_SD_VOL_REPAIRED     6005  /* 2026-10-22 — 한 쪽 볼륨이 망가져 다른 쪽으로 메꿈(카드 상태를 지켜볼 것) */
+#define UI_WARN_SD_VOL_FAILED       6006  /* 2026-10-22 — 한 쪽 볼륨을 메꾸지 못해 다른 쪽만 씀(카드 교체 준비) */
+
 void ui_log_add_warn(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 bool ui_log_get_pending_warn(char *out, size_t out_cap);
 #define UI_WARN_HISTORY_CAP 16

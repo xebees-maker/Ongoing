@@ -259,6 +259,9 @@ typedef enum {
     STR_ERR_DESC_UNKNOWN,  /* 테이블에 없는 코드용 폴백(원래 있었으면 안 되는 상황) */
     STR_WARN_DESC_SD_BAD_ENTRY,
     STR_WARN_DESC_BACKUP_DUE,    /* 2026-10-15(SD 개선 5단계) */
+    STR_WARN_DESC_SD_NOT_DUAL,       /* 2026-10-22(듀얼 파티션) */
+    STR_WARN_DESC_SD_VOL_REPAIRED,
+    STR_WARN_DESC_SD_VOL_FAILED,
     STR_WARN_DESC_UNKNOWN,
     /* 2026-09-10(SD 신뢰성 재설계, [[project_cntl_sd_reliability_redesign_2026_09_10]]) —
      * 주화면 SD 상태 라벨(짧은 문구) + 탭해서 여는 상태팝업(긴 설명) + 재연결/포맷 버튼과

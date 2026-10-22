@@ -87,3 +87,7 @@ CONFIG_LWIP_SO_LINGER=y
 CONFIG_HTTPD_WS_SUPPORT=y
 # IDF v6는 연결을 맺을 때 URI 핸들러를 부르지 않음 — 로그인·웹 세션 확인은 연결 전 콜백에서
 CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT=y
+
+# 2026-10-22(듀얼 파티션) — 이중 쓰기 + 쓰기 보호로 한 FatFs 호출이 10초를 넘을 수 있음(32MB 칸 파일 만들기 15.9초) —
+# 다른 태스크의 FatFs 호출이 잠금 대기 시간 초과(ETIMEDOUT)로 실패하지 않게 60초
+CONFIG_FATFS_TIMEOUT_MS=60000

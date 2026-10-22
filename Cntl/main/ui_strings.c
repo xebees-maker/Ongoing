@@ -262,6 +262,9 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_ERR_DESC_UNKNOWN]               = { "알 수 없는 에러",               "Unknown error" },
     [STR_WARN_DESC_SD_BAD_ENTRY]         = { "SD 손상 의심 항목 제외됨",       "SD damaged entries skipped" },
     [STR_WARN_DESC_BACKUP_DUE]           = { "통계 백업할 때가 됨(웹 통계 → 백업)", "Statistics backup due (web app: Statistics > Backup)" },
+    [STR_WARN_DESC_SD_NOT_DUAL]          = { "SD 한 벌 저장 중(포맷하면 이중 저장)", "SD stores a single copy (format to make it dual)" },
+    [STR_WARN_DESC_SD_VOL_REPAIRED]      = { "SD 한쪽 손상을 다른 쪽으로 복구함(카드 상태 주의)", "SD volume damage repaired from the other copy (watch the card)" },
+    [STR_WARN_DESC_SD_VOL_FAILED]        = { "SD 한쪽 사용 중지 - 카드 교체 준비", "SD volume out of use - prepare a card replacement" },
     [STR_WARN_DESC_UNKNOWN]              = { "알 수 없는 워닝",               "Unknown warning" },
 
     [STR_STATUS_SD_IO_ERROR_MSG] = { "오류 - 상태버튼을 눌러 조치하세요",        "error - tap the status button to act" },

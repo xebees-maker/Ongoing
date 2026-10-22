@@ -1606,6 +1606,9 @@ static ui_str_id_t warn_code_to_desc_str(int code)
     switch (code) {
         case UI_WARN_SD_BAD_ENTRY: return STR_WARN_DESC_SD_BAD_ENTRY;
         case UI_WARN_BACKUP_DUE:   return STR_WARN_DESC_BACKUP_DUE;   /* 2026-10-15 */
+        case UI_WARN_SD_NOT_DUAL:      return STR_WARN_DESC_SD_NOT_DUAL;       /* 2026-10-22 */
+        case UI_WARN_SD_VOL_REPAIRED:  return STR_WARN_DESC_SD_VOL_REPAIRED;
+        case UI_WARN_SD_VOL_FAILED:    return STR_WARN_DESC_SD_VOL_FAILED;
         default:                   return STR_WARN_DESC_UNKNOWN;
     }
 }

@@ -19,6 +19,7 @@
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "SD";
 
@@ -65,6 +66,12 @@ static const char *const s_ev_name[SDH_EV_COUNT] = {
 };
 
 static void journal_save(const char *why);   /* 아래(2026-10-21 명령 기록) */
+
+/* 2026-10-22 — 감시·검사가 기록 태스크(10분·매시)와 재연결 검증(화면·웹 태스크)에서 겹치지 않게 */
+static SemaphoreHandle_t s_gmtx = NULL;
+static void gm_take(void) { if (s_gmtx) xSemaphoreTakeRecursive(s_gmtx, portMAX_DELAY); }
+static void gm_give(void) { if (s_gmtx) xSemaphoreGiveRecursive(s_gmtx); }
+
 
 static void save_now(void)
 {
@@ -382,170 +389,308 @@ static void journal_save(const char *why)
     heap_caps_free(copy);
 }
 
-/* 10분마다(기록 태스크) — FAT 두 벌을 읽어 기대값과 비교. 기준이 없으면(마운트 직후) 지금 내용을 기준으로 */
-static void fat_guard(void)
+/* ════════════════════════════════════════════════════════════
+ * 2026-10-22(듀얼 파티션 — 사용자 결정 "정상인 곳에서 비정상인 곳을 메꾸고, 알리고") — FAT 감시·검사를 벌(copy) 단위로:
+ * 한 벌 카드는 A의 FAT1·FAT2 두 벌, 듀얼은 A·B 각각의 FAT1·FAT2 네 벌. 섹터마다 콘이 쓴 내용(CRC, sd_health_on_cmd)과 비교해
+ * 틀린 벌은 맞는 벌로 메꿈(sd_guard_copy_sector — 다시 읽어 확인) → 경고 6005. 맞는 벌이 없으면 예전처럼 SD 이상(5009).
+ * 기준을 새로 잡을 때(마운트·포맷·재연결 검증)는 벌들 가운데 과반인 내용을 기준으로(과반이 없으면 SD 이상) — 사진·통계 쓰기를 멈추고
+ * ════════════════════════════════════════════════════════════ */
+#define FATG_MAXCAND  1024   /* 한 번에 다시 볼 틀린 벌 수 상한 */
+
+typedef struct { uint32_t idx; uint8_t copy; } fatg_cand_t;   /* idx = FAT1 기준 섹터 순번, copy = vol*2 + (0 FAT1 / 1 FAT2) */
+
+/* A 기준 절대 섹터에서 FAT 섹터 기대값과 짝(FAT1 ↔ FAT2) */
+static bool fat_exp(uint32_t lba, uint32_t *crc, uint32_t *peer)
 {
-    if (!sd_storage_is_mounted() || !s_fx_crc) return;
-    uint8_t *buf = heap_caps_malloc(SDH_FAT_CHUNK * 512, MALLOC_CAP_SPIRAM);
-    uint8_t *one = heap_caps_malloc(512, MALLOC_CAP_SPIRAM);
-    if (!buf || !one) { heap_caps_free(buf); heap_caps_free(one); return; }
+    uint32_t lba0 = s_fx_lba0, n = s_fx_n;
+    if (!s_fx_crc || !n || lba < lba0 || lba >= lba0 + 2 * n) return false;
+    uint32_t idx = lba - lba0;
+    taskENTER_CRITICAL(&s_j_mux);
+    bool ok = !s_fx_unk[idx];
+    *crc = s_fx_crc[idx];
+    taskEXIT_CRITICAL(&s_j_mux);
+    *peer = idx < n ? lba + n : lba - n;
+    return ok;
+}
+
+static uint8_t *s_rc_buf = NULL;   /* FAT 읽기 확인용 한 섹터(PSRAM) — FatFs 볼륨 잠금 아래에서만 */
+
+bool sd_health_fat_read_check(uint32_t lba, uint8_t *sp, int vol)
+{
+    uint32_t exp, peer;
+    if (!fat_exp(lba, &exp, &peer)) return true;
+    if (esp_rom_crc32_le(0, sp, 512) == exp) return true;
+    if (!s_rc_buf) s_rc_buf = heap_caps_malloc(512, MALLOC_CAP_SPIRAM);
+    if (!s_rc_buf) return true;
+    bool dual = sd_guard_dual_info(NULL);
+    const struct { int v; uint32_t lba; } src[3] = { { !vol, lba }, { vol, peer }, { !vol, peer } };
+    for (int k = 0; k < 3; k++) {
+        if (src[k].v != vol && !(dual && sd_guard_vol_usable(src[k].v))) continue;
+        if (sd_guard_read_vol(src[k].v, s_rc_buf, src[k].lba, 1) != ESP_OK) continue;
+        if (esp_rom_crc32_le(0, s_rc_buf, 512) != exp) continue;
+        memcpy(sp, s_rc_buf, 512);
+        bool ok = sd_guard_copy_sector(src[k].v, src[k].lba, vol, lba, &exp);
+        sd_guard_note_fix(vol, 1, ok, lba, "FAT (read)");
+        return true;
+    }
+    ESP_LOGE(TAG, "FAT read check: sector %u differs from what Cntl wrote on every copy", (unsigned)lba);
+    sd_health_report(SDH_EV_FAT_CHANGED_NO_WRITE, "FAT read: all copies", lba);
+    return false;
+}
+
+/* read_layout을 A에서, 안 되면(듀얼) B에서 */
+static bool read_layout_any(uint8_t *buf, uint32_t *part, uint32_t *rsv, uint32_t *fatsz, uint32_t *fsinfo, char *why, size_t why_cap)
+{
+    uint32_t delta, a0 = sd_guard_dual_a0();
+    if (!sd_guard_dual_info(&delta)) return read_layout(buf, part, rsv, fatsz, fsinfo, why, why_cap);
+    /* 듀얼 — 배치는 마운트 때 확인한 값(MBR이 망가져도 감시가 멈추지 않고 되살릴 수 있게) */
+    *part = a0;
+    for (int v = 0; v < 2; v++) {
+        if (!sd_guard_vol_usable(v)) continue;
+        if (sd_guard_read_vol(v, buf, a0, 1) != ESP_OK || buf[510] != 0x55 || buf[511] != 0xAA) continue;
+        uint16_t bps = le16(buf + 11);
+        *rsv = le16(buf + 14);
+        *fatsz = le16(buf + 22) ? le16(buf + 22) : le32(buf + 36);
+        *fsinfo = le16(buf + 22) ? UINT32_MAX : a0 + le16(buf + 48);
+        if (bps == 512 && buf[16] >= 2 && *fatsz && *rsv) return true;
+    }
+    snprintf(why, why_cap, "VBR %u bad on A and B", (unsigned)a0);
+    return false;
+}
+
+/* 벌 목록(v·f). 반환 = 벌 수 */
+static int fat_copies(uint8_t copies[4])
+{
+    int n = 0;
+    bool dual = sd_guard_dual_info(NULL);
+    for (int v = 0; v < 2; v++) {
+        if (dual ? !sd_guard_vol_usable(v) : v != 0) continue;
+        copies[n++] = (uint8_t)(v * 2);
+        copies[n++] = (uint8_t)(v * 2 + 1);
+    }
+    return n;
+}
+
+/* 틀린 벌 하나를 맞는 벌(기대값과 같은)로 메꿈 — 다른 쪽 같은 자리 → 같은 쪽 짝 → 다른 쪽 짝 */
+static bool fat_fix_copy(uint32_t lba0, uint32_t fatsz, uint32_t idx, uint8_t dst, uint32_t exp, const uint8_t *copies, int ncopies)
+{
+    int dv = dst >> 1, df = dst & 1;
+    const uint8_t order[3] = { (uint8_t)((!dv) * 2 + df), (uint8_t)(dv * 2 + !df), (uint8_t)((!dv) * 2 + !df) };
+    uint32_t dlba = lba0 + idx + (df ? fatsz : 0);
+    for (int k = 0; k < 3; k++) {
+        bool have = false;
+        for (int j = 0; j < ncopies; j++) if (copies[j] == order[k]) have = true;
+        if (!have) continue;
+        uint32_t slba = lba0 + idx + ((order[k] & 1) ? fatsz : 0);
+        if (sd_guard_copy_sector(order[k] >> 1, slba, dv, dlba, &exp)) return true;
+    }
+    return false;
+}
+
+/* 과반(벌 2개면 둘이 같을 때만) */
+static bool fat_majority(const uint32_t *cc, int nc, uint32_t *out)
+{
+    int best = 0, bestn = 0;
+    for (int j = 0; j < nc; j++) {
+        int m = 0;
+        for (int q = 0; q < nc; q++) m += (cc[q] == cc[j]);
+        if (m > bestn) { bestn = m; best = j; }
+    }
+    *out = cc[best];
+    return (bestn * 2 > nc) || (nc == 2 && bestn == 2);
+}
+
+/* 기준을 잡는 중 — 아직 콘이 안 쓴 FAT 섹터(FAT1·FAT2 짝)의 기대값을 정함 */
+static void fat_set_exp(uint32_t idx, uint32_t fatsz, uint32_t exp)
+{
+    taskENTER_CRITICAL(&s_j_mux);
+    if (s_fx_unk[idx]) { s_fx_crc[idx] = exp; s_fx_unk[idx] = 0; }
+    if (s_fx_unk[idx + fatsz]) { s_fx_crc[idx + fatsz] = exp; s_fx_unk[idx + fatsz] = 0; }
+    taskEXIT_CRITICAL(&s_j_mux);
+}
+
+/* FAT 감시 본체. rebase = 기준을 과반으로 새로 잡음(마운트·포맷·재연결 검증). 메꾸지 못한 틀린 벌이 없으면 true */
+static bool fat_guard_run(bool rebase)
+{
+    if (!sd_storage_is_mounted() || !s_fx_crc) return false;
+    uint8_t copies[4];
+    int nc = fat_copies(copies);
+    uint8_t *buf = heap_caps_malloc(4 * SDH_FAT_CHUNK * 512, MALLOC_CAP_SPIRAM);
+    fatg_cand_t *cand = heap_caps_malloc(FATG_MAXCAND * sizeof(fatg_cand_t), MALLOC_CAP_SPIRAM);
+    if (!buf || !cand || nc == 0) { heap_caps_free(buf); heap_caps_free(cand); return false; }
     int64_t t0 = esp_timer_get_time();
-    uint32_t part, rsv, fatsz, fsinfo;
+    uint32_t part = 0, rsv, fatsz, fsinfo;
     char why[40] = "";
-    if (!read_layout(buf, &part, &rsv, &fatsz, &fsinfo, why, sizeof(why)) || fatsz > SDH_FX_MAX) {
-        heap_caps_free(buf); heap_caps_free(one);
-        return;
+    if (!read_layout_any(buf, &part, &rsv, &fatsz, &fsinfo, why, sizeof(why)) || fatsz > SDH_FX_MAX) {
+        ESP_LOGE(TAG, "FAT guard: boot sector problem (%s)", why);
+        heap_caps_free(buf); heap_caps_free(cand);
+        if (why[0] && sd_storage_is_mounted()) sd_health_report(SDH_EV_LAYOUT, why, 0);
+        return false;
     }
-    uint32_t lba0 = part + rsv, total = 2 * fatsz;
-    bool rebase = s_fx_rebase || s_fx_lba0 != lba0 || s_fx_n != fatsz;
+    uint32_t lba0 = part + rsv;
+    rebase = rebase || s_fx_rebase || s_fx_lba0 != lba0 || s_fx_n != fatsz;
     if (rebase) {
-        s_fx_n = 0;   /* 기준을 다 잡을 때까지 쓰기 갱신 끔 */
+        /* 기대값을 모두 "모름"으로 두고 쓰기 추적은 켠 채 읽음 — 읽는 사이 콘이 쓴 섹터는 그 쓴 내용이 기대값(10-22 실기: 기준을 잡는
+         * 사이 알림 기록 쓰기가 끼어 네 벌이 2:2로 갈림 → 오탐 5009) */
+        taskENTER_CRITICAL(&s_j_mux);
         s_fx_lba0 = lba0;
+        s_fx_n = fatsz;
+        memset(s_fx_unk, 1, 2 * fatsz);
+        memset(s_fx_wt, 0, 2 * fatsz * sizeof(uint32_t));
+        taskEXIT_CRITICAL(&s_j_mux);
     }
-    uint32_t changed = 0, rechecked = 0;
-    for (uint32_t s = 0; s < total; s += SDH_FAT_CHUNK) {
-        uint32_t k = (total - s < SDH_FAT_CHUNK) ? total - s : SDH_FAT_CHUNK;
+    uint32_t ncand = 0, unresolved = 0, fixed = 0, first_bad = 0;
+    bool overflow = false, read_fail = false;
+    for (uint32_t s = 0; s < fatsz && !read_fail; s += SDH_FAT_CHUNK) {
+        uint32_t k = (fatsz - s < SDH_FAT_CHUNK) ? fatsz - s : SDH_FAT_CHUNK;
         uint32_t seq0 = s_fx_wseq;
-        if (sd_storage_read_sectors(buf, lba0 + s, k) != ESP_OK) {
-            ESP_LOGW(TAG, "FAT guard: read failed at sector %u", (unsigned)(lba0 + s));
-            heap_caps_free(buf); heap_caps_free(one);
-            return;   /* 기준을 잡던 중이면 다음에 다시(s_fx_rebase 그대로) */
+        for (int j = 0; j < nc && !read_fail; j++) {
+            uint8_t c = copies[j];
+            if (sd_guard_read_vol(c >> 1, buf + (size_t)j * SDH_FAT_CHUNK * 512, lba0 + s + ((c & 1) ? fatsz : 0), k) != ESP_OK) {
+                ESP_LOGW(TAG, "FAT guard: read failed at sector %u (copy %u)", (unsigned)(lba0 + s), (unsigned)c);
+                read_fail = true;
+            }
         }
+        if (read_fail) break;
         for (uint32_t i = 0; i < k; i++) {
             uint32_t idx = s + i;
-            const uint8_t *p = buf + i * 512;
-            uint32_t c = esp_rom_crc32_le(0, p, 512);
-            if (rebase) { s_fx_crc[idx] = c; s_fx_wt[idx] = 0; s_fx_unk[idx] = 0; continue; }
-            taskENTER_CRITICAL(&s_j_mux);
-            uint32_t exp = s_fx_crc[idx];
-            bool unk = s_fx_unk[idx];
-            if (unk) { s_fx_crc[idx] = c; s_fx_unk[idx] = 0; }
-            taskEXIT_CRITICAL(&s_j_mux);
-            if (unk || c == exp) continue;
-            if (s_fx_wseq != seq0) {   /* 읽는 사이 콘의 FAT 쓰기가 끼었음 — 그 섹터만 다시 읽어 그때의 기대값과 비교 */
-                rechecked++;
-                if (sd_storage_read_sectors(one, lba0 + idx, 1) != ESP_OK) continue;
-                c = esp_rom_crc32_le(0, one, 512);
+            uint32_t cc[4];
+            for (int j = 0; j < nc; j++) cc[j] = esp_rom_crc32_le(0, buf + ((size_t)j * SDH_FAT_CHUNK + i) * 512, 512);
+            if (rebase) {
                 taskENTER_CRITICAL(&s_j_mux);
-                exp = s_fx_crc[idx];
+                bool unk = s_fx_unk[idx] && s_fx_unk[idx + fatsz];   /* 기준을 잡기 시작한 뒤 콘이 안 씀 */
                 taskEXIT_CRITICAL(&s_j_mux);
-                if (c == exp) continue;
-                p = one;
+                if (unk) {
+                    uint32_t exp;
+                    if (!fat_majority(cc, nc, &exp)) {   /* 과반 없음 — 잠깐 뒤 다시 봄 */
+                        if (ncand < FATG_MAXCAND) cand[ncand++] = (fatg_cand_t){ idx, 0xFF }; else overflow = true;
+                        continue;
+                    }
+                    fat_set_exp(idx, fatsz, exp);
+                }
             }
-            uint32_t wt = s_fx_wt[idx];
-            uint32_t now_s = (uint32_t)(esp_timer_get_time() / 1000000);
-            ESP_LOGE(TAG, "FAT guard: FAT%u sector %u (abs %u) changed WITHOUT a Cntl write (crc %08X -> %08X), last Cntl write: %s %us ago, "
-                     "first bytes %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
-                     (unsigned)(idx < fatsz ? 1 : 2), (unsigned)(idx % fatsz), (unsigned)(lba0 + idx), (unsigned)exp, (unsigned)c,
-                     wt ? "write" : "none since baseline,", (unsigned)(wt ? now_s - wt : now_s),
-                     p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
-            taskENTER_CRITICAL(&s_j_mux);
-            s_fx_crc[idx] = c;   /* 같은 변화를 매번 다시 보고하지 않게 */
-            taskEXIT_CRITICAL(&s_j_mux);
-            if (changed++ == 0) {
-                char d[40];
-                snprintf(d, sizeof(d), "FAT%u sector %u", (unsigned)(idx < fatsz ? 1 : 2), (unsigned)(idx % fatsz));
-                sd_health_report(SDH_EV_FAT_CHANGED_NO_WRITE, d, lba0 + idx);
+            /* 기대값과 비교(기준을 잡을 때는 방금 정한 과반 또는 그 사이 콘이 쓴 내용) */
+            for (int j = 0; j < nc; j++) {
+                uint32_t ei = idx + ((copies[j] & 1) ? fatsz : 0);
+                taskENTER_CRITICAL(&s_j_mux);
+                uint32_t exp = s_fx_crc[ei];
+                bool unk = s_fx_unk[ei];
+                if (unk && !rebase && (copies[j] >> 1) == 0) { s_fx_crc[ei] = cc[j]; s_fx_unk[ei] = 0; }   /* 모르던 기대값은 A의 지금 내용으로 */
+                taskEXIT_CRITICAL(&s_j_mux);
+                if (unk || cc[j] == exp) continue;
+                if (ncand < FATG_MAXCAND) cand[ncand++] = (fatg_cand_t){ idx, copies[j] }; else overflow = true;
             }
         }
+        (void)seq0;
     }
+    if (rebase && read_fail) {
+        heap_caps_free(buf); heap_caps_free(cand);
+        return false;   /* 기준을 잡던 중 — 다음에 다시(s_fx_rebase 그대로) */
+    }
+    if (ncand) vTaskDelay(pdMS_TO_TICKS(1000));   /* 읽는 사이 콘의 쓰기(A 다음 B)가 끼었을 수 있음 — 잠깐 뒤 다시 봄 */
+    uint32_t now_s = (uint32_t)(esp_timer_get_time() / 1000000);
+    for (uint32_t c = 0; c < ncand; c++) {
+        uint32_t idx = cand[c].idx;
+        uint8_t cp = cand[c].copy;
+        if (cp == 0xFF) {   /* 기준 때 과반이 없던 섹터 — 다시 읽어 과반(그 사이 콘이 썼으면 그 내용) */
+            uint32_t cc[4], exp;
+            bool rd = true;
+            for (int j = 0; j < nc && rd; j++) {
+                rd = sd_guard_read_vol(copies[j] >> 1, buf, lba0 + idx + ((copies[j] & 1) ? fatsz : 0), 1) == ESP_OK;
+                cc[j] = esp_rom_crc32_le(0, buf, 512);
+            }
+            taskENTER_CRITICAL(&s_j_mux);
+            bool unk = s_fx_unk[idx] && s_fx_unk[idx + fatsz];
+            exp = s_fx_crc[idx];
+            taskEXIT_CRITICAL(&s_j_mux);
+            if (unk) {
+                if (!rd || !fat_majority(cc, nc, &exp)) {
+                    ESP_LOGE(TAG, "FAT guard: sector %u has no majority among %d copies", (unsigned)idx, nc);
+                    if (unresolved++ == 0) first_bad = lba0 + idx;
+                    fat_set_exp(idx, fatsz, cc[0]);   /* 같은 것을 매번 다시 보고하지 않게 */
+                    continue;
+                }
+                fat_set_exp(idx, fatsz, exp);
+            }
+            for (int j = 0; j < nc; j++) {
+                if (cc[j] == exp) continue;
+                uint32_t lba = lba0 + idx + ((copies[j] & 1) ? fatsz : 0);
+                bool ok = fat_fix_copy(lba0, fatsz, idx, copies[j], exp, copies, nc);
+                sd_guard_note_fix(copies[j] >> 1, 1, ok, lba, "FAT (mount check)");
+                if (ok) fixed++; else if (unresolved++ == 0) first_bad = lba;
+            }
+            continue;
+        }
+        uint32_t ei = idx + ((cp & 1) ? fatsz : 0);
+        uint32_t lba = lba0 + ei;
+        taskENTER_CRITICAL(&s_j_mux);
+        uint32_t exp = s_fx_crc[ei];
+        uint32_t wt = s_fx_wt[ei];
+        taskEXIT_CRITICAL(&s_j_mux);
+        if (sd_guard_read_vol(cp >> 1, buf, lba, 1) != ESP_OK) continue;
+        uint32_t cur = esp_rom_crc32_le(0, buf, 512);
+        if (cur == exp) continue;   /* 그 사이 맞아짐(콘의 쓰기) */
+        ESP_LOGE(TAG, "FAT guard: %c FAT%u sector %u (abs %u) differs from what Cntl wrote (crc %08X -> %08X), last Cntl write: %s %us ago, "
+                 "first bytes %02X%02X%02X%02X%02X%02X%02X%02X",
+                 (cp >> 1) ? 'B' : 'A', (unsigned)((cp & 1) + 1), (unsigned)idx, (unsigned)lba, (unsigned)exp,
+                 (unsigned)cur, wt ? "write" : "none since baseline,", (unsigned)(wt ? now_s - wt : now_s),
+                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+        if (fat_fix_copy(lba0, fatsz, idx, cp, exp, copies, nc)) {
+            fixed++;
+            sd_guard_note_fix(cp >> 1, 1, true, lba, rebase ? "FAT (mount check)" : "FAT (10-min check)");
+            continue;
+        }
+        sd_guard_note_fix(cp >> 1, 1, false, lba, "FAT");
+        if (unresolved++ == 0) first_bad = lba;
+        taskENTER_CRITICAL(&s_j_mux);
+        if (!rebase) s_fx_crc[ei] = cur;   /* 같은 변화를 매번 다시 보고하지 않게 */
+        taskEXIT_CRITICAL(&s_j_mux);
+    }
+    if (rebase) s_fx_rebase = false;
     heap_caps_free(buf);
-    heap_caps_free(one);
-    if (rebase) {
-        s_fx_n = fatsz;
-        s_fx_rebase = false;
-        ESP_LOGI(TAG, "FAT guard: baseline %u sectors x2 (FAT1 at %u), %ums", (unsigned)fatsz, (unsigned)lba0,
-                 (unsigned)((esp_timer_get_time() - t0) / 1000));
-        sd_health_mark(SDH_MARK_FATGUARD, 0);
-        return;
+    heap_caps_free(cand);
+    if (overflow) {
+        ESP_LOGE(TAG, "FAT guard: more than %u differing copies - not all checked", (unsigned)FATG_MAXCAND);
+        if (unresolved++ == 0) first_bad = lba0;
     }
-    sd_guard_note_outside(changed);   /* 2026-10-22 — 쓰기 보호 범위 밖 손상으로 셈(효과 보고) */
-    ESP_LOGI(TAG, "FAT guard: %u sectors x2, %u changed without Cntl write, %u rechecked, %u Cntl FAT sector writes since boot, %ums",
-             (unsigned)fatsz, (unsigned)changed, (unsigned)rechecked, (unsigned)s_fx_wseq, (unsigned)((esp_timer_get_time() - t0) / 1000));
-    sd_health_mark(SDH_MARK_FATGUARD, changed);
+    sd_guard_note_outside(fixed + unresolved);   /* 쓰기 보호 범위 밖 손상(효과 보고) */
+    ESP_LOGI(TAG, "FAT guard%s: %u sectors x%d copies, %u differing, %u repaired, %u not repaired, %u Cntl FAT sector writes since boot, %ums",
+             rebase ? " (baseline)" : "", (unsigned)fatsz, nc, (unsigned)ncand, (unsigned)fixed, (unsigned)unresolved, (unsigned)s_fx_wseq,
+             (unsigned)((esp_timer_get_time() - t0) / 1000));
+    sd_health_mark(SDH_MARK_FATGUARD, fixed + unresolved);
+    if (unresolved) {
+        char d[40];
+        snprintf(d, sizeof(d), "FAT sector %u", (unsigned)(first_bad - lba0));
+        sd_health_report(SDH_EV_FAT_CHANGED_NO_WRITE, d, first_bad);
+        return false;
+    }
+    return true;
 }
 
-/* 매시 FAT1/FAT2 비교에서 다른 섹터 — 각 벌이 콘이 쓴 내용인지(기대값과 같은지) 남김 */
-static void fat_mismatch_detail(uint32_t fat_idx, const uint8_t *s1, const uint8_t *s2, uint32_t fatsz)
+/* 10분마다(기록 태스크) */
+static void fat_guard(void)
 {
-    if (s_fx_n != fatsz || fat_idx >= fatsz) return;
-    uint32_t c1 = esp_rom_crc32_le(0, s1, 512), c2 = esp_rom_crc32_le(0, s2, 512);
-    uint32_t i2 = fat_idx + fatsz;
-    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000000);
-    ESP_LOGE(TAG, "FAT mismatch sector %u: FAT1 %s (last Cntl write %us ago), FAT2 %s (last Cntl write %us ago)", (unsigned)fat_idx,
-             c1 == s_fx_crc[fat_idx] ? "= what Cntl wrote" : "!= what Cntl wrote", (unsigned)(s_fx_wt[fat_idx] ? now - s_fx_wt[fat_idx] : 0),
-             c2 == s_fx_crc[i2] ? "= what Cntl wrote" : "!= what Cntl wrote", (unsigned)(s_fx_wt[i2] ? now - s_fx_wt[i2] : 0));
+    fat_guard_run(false);
 }
 
-/* FAT1/FAT2를 원본 섹터로 비교. 사진 저장·통계 기록을 잠깐 멈추고(재연결과 같은 잠금 순서: 사진 → 통계) 읽음.
- * 다른 섹터가 있으면 3초 뒤 그 섹터만 다시 읽어 여전히 다를 때만 보고. 끝까지 읽었고 다른 섹터가 없으면 true.
- * force = 고장 상태에서도 돎(재연결·포맷 검증 — sd_health_fat_ok) */
+/* 매시(force = false) — FAT 감시와 같음(FAT1·FAT2 모두 기대값과 비교하므로 두 벌이 갈라진 것도 여기서 잡음).
+ * 재연결·포맷 검증(force) — 고장 상태에서도, 기준을 과반으로 새로 잡으며 */
 static bool fat_check(bool force)
 {
     if (!sd_storage_is_mounted() || (!force && !sd_health_writes_allowed())) return false;
-    uint8_t *a = heap_caps_malloc(SDH_FAT_CHUNK * 512, MALLOC_CAP_SPIRAM);
-    uint8_t *b = heap_caps_malloc(SDH_FAT_CHUNK * 512, MALLOC_CAP_SPIRAM);
-    uint32_t *bad = heap_caps_malloc(SDH_FAT_MAXBAD * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
-    if (!a || !b || !bad) { heap_caps_free(a); heap_caps_free(b); heap_caps_free(bad); return false; }
-
-    int64_t t0 = esp_timer_get_time();
-    photo_storage_pause();
-    stats_store_io_suspend();
-    uint32_t nbad = 0, fat1 = 0, fatsz = 0, part = 0, rsv = 0, fsinfo = 0;
-    char why[40] = "";
-    bool ok = sd_storage_is_mounted();
-    bool layout_ok = ok && read_layout(a, &part, &rsv, &fatsz, &fsinfo, why, sizeof(why));
-    if (ok && !layout_ok) {
-        ok = false;
-        ESP_LOGE(TAG, "FAT check: boot sector problem (%s)", why);   /* 2026-10-15 — 예전엔 말없이 건너뜀 */
-    }
-    fat1 = part + rsv;
-    for (uint32_t s = 0; ok && s < fatsz; s += SDH_FAT_CHUNK) {
-        uint32_t n = (fatsz - s < SDH_FAT_CHUNK) ? fatsz - s : SDH_FAT_CHUNK;
-        if (sd_storage_read_sectors(a, fat1 + s, n) != ESP_OK || sd_storage_read_sectors(b, fat1 + fatsz + s, n) != ESP_OK) {
-            ESP_LOGW(TAG, "FAT check read failed at sector %u", (unsigned)(fat1 + s));
-            ok = false;
-            break;
-        }
-        for (uint32_t k = 0; k < n; k++) {
-            if (memcmp(a + k * 512, b + k * 512, 512) != 0 && nbad < SDH_FAT_MAXBAD) bad[nbad++] = s + k;
-        }
-    }
-    stats_store_io_resume();
-    photo_storage_unpause();
-
-    uint32_t still = 0, first_bad = 0;
-    if (ok && nbad > 0) {
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        photo_storage_pause();
-        stats_store_io_suspend();
-        for (uint32_t i = 0; i < nbad && sd_storage_is_mounted(); i++) {
-            if (sd_storage_read_sectors(a, fat1 + bad[i], 1) == ESP_OK &&
-                sd_storage_read_sectors(b, fat1 + fatsz + bad[i], 1) == ESP_OK && memcmp(a, b, 512) != 0) {
-                if (still < 8) fat_mismatch_detail(bad[i], a, b, fatsz);   /* 2026-10-21 — 각 벌이 콘이 쓴 내용인지 */
-                if (still++ == 0) first_bad = bad[i];
-            }
-        }
-        stats_store_io_resume();
-        photo_storage_unpause();
-    }
-    heap_caps_free(a);
-    heap_caps_free(b);
-    heap_caps_free(bad);
-    if (why[0] && !layout_ok && sd_storage_is_mounted()) sd_health_report(SDH_EV_LAYOUT, why, 0);
-    if (!ok) return false;
-    sd_health_count(SDH_C_FAT_CHECK, 1);
-    ESP_LOGI(TAG, "FAT check: %u sectors x2, first pass %u differ, confirmed %u, %ums", (unsigned)fatsz, (unsigned)nbad,
-             (unsigned)still, (unsigned)((esp_timer_get_time() - t0) / 1000));
-    if (still) sd_health_report(SDH_EV_FAT_MISMATCH, "FAT sector", first_bad);
-    return still == 0;
+    bool ok = fat_guard_run(force);
+    if (ok) sd_health_count(SDH_C_FAT_CHECK, 1);
+    return ok;
 }
 
 /* 2026-10-21(C4 재연결 검증 — 10-21 실기: FAT1/FAT2가 30섹터 다른 카드가 읽기 한 번 통과로 재연결 1초 만에 정상으로 돌아가
  * 쓰기가 다시 열렸음) — 재연결·포맷 뒤 검증에서 고장 상태와 상관없이 FAT1/FAT2를 비교 */
 bool sd_health_fat_ok(void)
 {
-    return fat_check(true);
+    gm_take();
+    bool ok = fat_check(true);
+    gm_give();
+    return ok;
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -557,9 +702,98 @@ static uint32_t *s_guard_crc = NULL;       /* PSRAM, SDH_GUARD_MAX */
 static uint32_t  s_guard_n = 0;            /* 기준값을 잡은 섹터 수(0 = 아직) */
 static volatile bool s_guard_rebase = true;
 
+/* 2026-10-22(듀얼 파티션) — 부트 영역 감시: 0번 섹터(MBR, 한 벌)는 기준 때 내용을 RAM에 두고 바뀌면 그 내용으로 되살림.
+ * A·B의 예약 영역(부트 섹터~FAT 앞, FSInfo 제외)은 기준과 다르면 다른 쪽(기준과 같은)으로 메꿈. 양쪽 다 다르면 SD 이상.
+ * 그 사이 빈 곳(1 ~ A 시작 전)은 쓰지 않는 곳이라 보지 않음 */
+static uint8_t *s_mbr = NULL;   /* 기준 때 0번 섹터(PSRAM 512) */
+
+static void guard_check_dual(void)
+{
+    uint8_t *buf = heap_caps_malloc(SDH_FAT_CHUNK * 512, MALLOC_CAP_SPIRAM);
+    if (!s_guard_crc) s_guard_crc = heap_caps_malloc(SDH_GUARD_MAX * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+    if (!s_mbr) s_mbr = heap_caps_malloc(512, MALLOC_CAP_SPIRAM);
+    if (!buf || !s_guard_crc || !s_mbr) { heap_caps_free(buf); return; }
+    int64_t t0 = esp_timer_get_time();
+    uint32_t part = 0, rsv, fatsz, fsinfo;
+    char why[40] = "";
+    if (!read_layout_any(buf, &part, &rsv, &fatsz, &fsinfo, why, sizeof(why)) || rsv > SDH_GUARD_MAX || rsv > SDH_FAT_CHUNK * 4) {
+        heap_caps_free(buf);
+        if (sd_storage_is_mounted()) {
+            ESP_LOGE(TAG, "Boot-area guard: boot sector problem (%s)", why);
+            sd_health_report(SDH_EV_LAYOUT, why, 0);
+        }
+        return;
+    }
+    bool rebase = s_guard_rebase || s_guard_n != rsv;
+    uint32_t fs_rel = (fsinfo == UINT32_MAX) ? UINT32_MAX : fsinfo - part;
+    uint32_t fixed = 0, unresolved = 0;
+    char detail[40] = "";
+
+    /* 0번 섹터 */
+    if (sd_storage_read_sectors(buf, 0, 1) == ESP_OK) {
+        if (rebase) memcpy(s_mbr, buf, 512);
+        else if (memcmp(buf, s_mbr, 512) != 0) {
+            ESP_LOGE(TAG, "Boot-area guard: MBR (sector 0) changed, first bytes %02X%02X%02X%02X%02X%02X%02X%02X - restoring",
+                     buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+            bool ok = sd_guard_write_raw(s_mbr, 0, 1) == ESP_OK && sd_storage_read_sectors(buf, 0, 1) == ESP_OK && memcmp(buf, s_mbr, 512) == 0;
+            sd_guard_note_fix(0, 1, ok, 0, "MBR");
+            if (ok) fixed++;
+            else if (unresolved++ == 0) hexstr(detail, sizeof(detail), "S", 0, buf, 16);
+        }
+    }
+
+    /* 예약 영역 — 기준은 A(A를 못 쓰면 B) */
+    int base_v = sd_guard_vol_usable(0) ? 0 : 1;
+    bool other_ok = sd_guard_vol_usable(!base_v);
+    for (uint32_t i = 0; i < rsv; i++) {
+        if (i == fs_rel) continue;   /* FSInfo는 FatFs가 씀 */
+        uint32_t lba = part + i;
+        uint32_t c[2] = { 0, 0 };
+        bool have[2] = { false, false };
+        for (int v = 0; v < 2; v++) {
+            if (!sd_guard_vol_usable(v)) continue;
+            have[v] = sd_guard_read_vol(v, buf, lba, 1) == ESP_OK;
+            if (have[v]) c[v] = esp_rom_crc32_le(0, buf, 512);
+        }
+        if (!have[base_v]) continue;
+        if (rebase) {
+            s_guard_crc[i] = c[base_v];
+            if (other_ok && have[!base_v] && c[!base_v] != c[base_v]) {   /* 다른 쪽이 기준과 다름 — 기준 쪽으로 */
+                bool ok = sd_guard_copy_sector(base_v, lba, !base_v, lba, &s_guard_crc[i]);
+                sd_guard_note_fix(!base_v, 1, ok, lba, "boot area (mount check)");
+                if (ok) fixed++; else unresolved++;
+            }
+            continue;
+        }
+        for (int v = 0; v < 2; v++) {
+            if (!have[v] || c[v] == s_guard_crc[i]) continue;
+            ESP_LOGE(TAG, "Boot-area guard: %c sector %u changed (crc %08X -> %08X)", v ? 'B' : 'A', (unsigned)lba, (unsigned)s_guard_crc[i],
+                     (unsigned)c[v]);
+            bool ok = have[!v] && c[!v] == s_guard_crc[i] && sd_guard_copy_sector(!v, lba, v, lba, &s_guard_crc[i]);
+            sd_guard_note_fix(v, 1, ok, lba, "boot area");
+            if (ok) { fixed++; continue; }
+            if (unresolved++ == 0) snprintf(detail, sizeof(detail), "%c S%u", v ? 'B' : 'A', (unsigned)lba);
+        }
+    }
+    heap_caps_free(buf);
+    if (rebase) {
+        s_guard_n = rsv;
+        s_guard_rebase = false;
+        ESP_LOGI(TAG, "Boot-area guard: baseline MBR + %u reserved sectors x%d (partition at %u, FSInfo %d), %u repaired, %ums", (unsigned)rsv,
+                 other_ok ? 2 : 1, (unsigned)part, (fsinfo == UINT32_MAX) ? -1 : (int)fsinfo, (unsigned)fixed,
+                 (unsigned)((esp_timer_get_time() - t0) / 1000));
+        if (unresolved) sd_health_report(SDH_EV_BOOT_AREA_CHANGED, "mount: B differs, not repaired", unresolved);
+        return;
+    }
+    ESP_LOGI(TAG, "Boot-area guard: MBR + %u sectors x%d, %u repaired, %u not repaired, %ums", (unsigned)rsv, other_ok ? 2 : 1,
+             (unsigned)fixed, (unsigned)unresolved, (unsigned)((esp_timer_get_time() - t0) / 1000));
+    if (unresolved) sd_health_report(SDH_EV_BOOT_AREA_CHANGED, detail, unresolved);
+}
+
 static void guard_check(void)
 {
     if (!sd_storage_is_mounted()) return;   /* 읽기만 하므로 고장 상태에서도 돎(재연결 직후 기준값도 이때 잡힘) */
+    if (sd_guard_dual_info(NULL)) { guard_check_dual(); return; }   /* 2026-10-22 */
     uint8_t *buf = heap_caps_malloc(SDH_FAT_CHUNK * 512, MALLOC_CAP_SPIRAM);
     if (!s_guard_crc) s_guard_crc = heap_caps_malloc(SDH_GUARD_MAX * sizeof(uint32_t), MALLOC_CAP_SPIRAM);
     if (!buf || !s_guard_crc) { heap_caps_free(buf); return; }
@@ -679,8 +913,10 @@ static void hourly_job(const uint8_t *arg);   /* 아래 */
 static void guard_job(const uint8_t *arg)
 {
     (void)arg;
+    gm_take();
     guard_check();
-    fat_guard();   /* 2026-10-21 — FAT 섹터가 콘의 쓰기 없이 바뀌었는지 */
+    fat_guard();   /* 2026-10-21 — FAT 섹터가 콘의 쓰기 없이 바뀌었는지(2026-10-22 — 틀린 벌은 맞는 벌로 메꿈) */
+    gm_give();
 }
 
 /* 마운트·포맷 직후(그 태스크에서) — 기준값은 기록 태스크에서 새로 잡음 */
@@ -695,8 +931,10 @@ void sd_health_on_mount(void)
 static void hourly_job(const uint8_t *arg)
 {
     (void)arg;
+    gm_take();
     fat_check(false);
     guard_check();
+    gm_give();
     dir_check();
     stats_store_sd_check();   /* 2026-10-15 — 최근 두 주 통계 원시·집계 파일의 레코드가 그 주에 속하는지 */
     sd_guard_hourly();        /* 2026-10-22 — 쓰기 보호 집계 한 줄·저장 */
@@ -730,6 +968,7 @@ static void guard_timer_cb(void *arg)
 void sd_health_init(void)
 {
     if (s_st) return;
+    s_gmtx = xSemaphoreCreateRecursiveMutex();
     s_st = heap_caps_calloc(1, sizeof(*s_st), MALLOC_CAP_SPIRAM);
     if (!s_st) { ESP_LOGE(TAG, "SD health alloc failed"); return; }
     FILE *f = fopen(SDH_FILE, "rb");

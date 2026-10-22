@@ -13,6 +13,7 @@
 #include "esp_heap_caps.h"
 #include "sd_health.h"
 #include "sd_guard.h"
+#include "ui_log.h"
 #include "esp_vfs_fat.h"
 #include <stdbool.h>
 #include "driver/sdspi_host.h"
@@ -117,6 +118,7 @@ static void log_card_cid(const sdmmc_host_t *host, const sdspi_device_config_t *
 static sdmmc_card_t *s_card = NULL;
 /* 2026-10-15 — 포맷 요청 중에만 true: 마운트가 실패하면(FAT 없음·손상) 그 자리에서 FAT을 만들고 마운트(sd_storage_format) */
 static bool s_format_if_mount_failed = false;
+static esp_err_t raw_card_open(sdmmc_card_t **out_card, sdspi_dev_handle_t *out_h);   /* 아래(2026-10-22 듀얼 포맷) */
 
 esp_err_t sd_storage_init(void)
 {
@@ -183,6 +185,22 @@ esp_err_t sd_storage_init(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "SD mount failed: %s", esp_err_to_name(err));
         spi_bus_free(SD_SPI_HOST);
+        /* 2026-10-22(듀얼) — 0번 섹터(파티션 표)만 망가진 듀얼 카드면 다시 쓰고 한 번 더 마운트 */
+        static bool s_mbr_retry = false;
+        sdmmc_card_t *rc = NULL;
+        sdspi_dev_handle_t rh;
+        if (!s_mbr_retry && raw_card_open(&rc, &rh) == ESP_OK) {
+            bool fixed = sd_guard_repair_mbr(rc);
+            sdspi_host_remove_device(rh);
+            heap_caps_free(rc);
+            spi_bus_free(SD_SPI_HOST);
+            if (fixed) {
+                s_mbr_retry = true;
+                err = sd_storage_init();
+                s_mbr_retry = false;
+                if (err == ESP_OK) ui_log_add_warn(UI_WARN_SD_VOL_REPAIRED, "SD partition table was damaged - rebuilt from the A/B copies");
+            }
+        }
         return err;
     }
 
@@ -240,57 +258,73 @@ esp_err_t sd_storage_reconnect(void)
     return err;
 }
 
-/* 2026-09-10(사용자 설계 — "포맷" 버튼) — esp_vfs_fat_sdcard_format()이 포맷+재마운트까지
- * 알아서 함(마운트된 상태에서만 호출 가능 — 요구사항). 포맷하면 빈 카드가 되므로 stats/
- * photos 폴더를 sd_storage_init()과 동일하게 다시 만들어줌 */
+/* 2026-10-22(사용자 결정 — 듀얼 파티션) — 포맷 = 카드를 마운트 없이 초기화만 하고 0번 섹터에 파티션 표(같은 크기 A·B)를 쓴 뒤
+ * A를 FAT32로 만듦(sd_guard_format_dual — 같은 내용이 B에도 써짐), 그 다음 평소처럼 마운트. 예전(09-10~10-21)엔 마운트된 카드를
+ * esp_vfs_fat_sdcard_format으로 한 파티션 FAT로 만들었고, FAT이 없는 카드는 "마운트 실패면 FAT 만들기"로 먼저 마운트했음 */
+static esp_err_t raw_card_open(sdmmc_card_t **out_card, sdspi_dev_handle_t *out_h)
+{
+    esp_err_t err = ch422g_set_io(CH422G_IO_SD_CS, true);
+    if (err != ESP_OK) return err;
+    spi_bus_config_t bus_cfg = {
+        .mosi_io_num = SD_PIN_MOSI, .miso_io_num = SD_PIN_MISO, .sclk_io_num = SD_PIN_SCK,
+        .quadwp_io_num = -1, .quadhd_io_num = -1, .max_transfer_sz = 4000,
+    };
+    err = spi_bus_initialize(SD_SPI_HOST, &bus_cfg, SDSPI_DEFAULT_DMA);
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (!s_cs_mutex) s_cs_mutex = xSemaphoreCreateMutexStatic(&s_cs_mutex_buf);
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = SD_SPI_HOST;
+    host.do_transaction = sd_do_transaction_cs;
+    sdspi_device_config_t slot_cfg = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_cfg.host_id = SD_SPI_HOST;
+    slot_cfg.gpio_cs = SDSPI_SLOT_NO_CS;
+    sdmmc_card_t *card = heap_caps_calloc(1, sizeof(*card), MALLOC_CAP_SPIRAM);
+    if (!card) { spi_bus_free(SD_SPI_HOST); return ESP_ERR_NO_MEM; }
+    sdspi_dev_handle_t h;
+    err = sdspi_host_init_device(&slot_cfg, &h);
+    if (err == ESP_OK) {
+        host.slot = h;
+        err = sdmmc_card_init(&host, card);
+        if (err != ESP_OK) sdspi_host_remove_device(h);
+    }
+    if (err != ESP_OK) { heap_caps_free(card); spi_bus_free(SD_SPI_HOST); return err; }
+    *out_card = card;
+    *out_h = h;
+    return ESP_OK;
+}
+
 esp_err_t sd_storage_format(void)
 {
-    /* 2026-10-15(실기 — FAT이 없는 카드는 마운트가 안 돼서 "SD not mounted, reconnect first"로 포맷 자체가 막혔음) —
-     * 예전엔 마운트된 카드만 포맷했음. 이제 아래 재연결을 "마운트가 실패하면 FAT을 만들고 마운트"로 함. 마운트가 된
-     * 카드(FAT 있음)는 그대로 마운트되므로 아래 포맷이 원래대로 진행됨(FAT이 없던 카드는 FAT을 만든 뒤 한 번 더 포맷) */
-
-    /* 2026-09-11(실기에서 "포맷 실패" 재현 후 근본원인 확인 — f_mkfs failed (3), FatFs
-     * ff.c의 f_mkfs()는 시작하자마자 disk_initialize(pdrv)를 부르고 STA_NOINIT이면 곧장
-     * FR_NOT_READY(3)로 리턴함(포맷 자체를 시도조차 안 함). 이 프로젝트의 diskio_sdmmc.c
-     * (ff_sdmmc_initialize -> ff_sdmmc_card_available)는 이 상태확인을 sdmmc_get_status()
-     * (CMD13)로 하는데, 몇 시간에 걸쳐 반복된 읽기실패(0x107) 뒤라 이 단순 상태확인 명령
-     * 조차 실패하는 상태로 카드/SPI버스가 남아있었던 것으로 보임(카드가 SPI 프로토콜
-     * 상태머신에서 헤어나오지 못한 것 — CS를 매 트랜잭션마다 안 띄우는 이 보드의 배선
-     * 특성상 명령 타임아웃 뒤 자연 복구가 안 될 수 있음). 재연결(sd_storage_reconnect())은
-     * SPI버스를 완전히 새로 초기화하고 카드에 CMD0(GO_IDLE_STATE)부터 다시 보내는 완전한
-     * 재프로브라 이 상태를 확실히 리셋함 — 포맷 직전에 항상 한 번 거쳐서 깨끗한 상태에서
-     * 시도하게 함 */
-    s_format_if_mount_failed = true;
-    esp_err_t reconnect_err = sd_storage_reconnect();
-    s_format_if_mount_failed = false;
-    if (reconnect_err != ESP_OK) {
-        ESP_LOGE(TAG, "Format failed - reconnect before format failed: %s", esp_err_to_name(reconnect_err));
-        return reconnect_err;
-    }
-
-    ESP_LOGW(TAG, "SD format start");
-    /* 재연결과 포맷 사이에 새로 열린 저장 파일도 닫고 막음(위 reconnect와 같은 이유) */
+    ESP_LOGW(TAG, "SD format start (dual partitions)");
     photo_storage_io_suspend();
     stats_store_io_suspend();
-    sd_guard_set_enabled(false);   /* 2026-10-22 — f_mkfs 대량 쓰기는 확인하지 않음 */
-    esp_err_t err = esp_vfs_fat_sdcard_format(SD_STORAGE_MOUNT_POINT, s_card);
-    sd_guard_attach(s_card);
-    sd_guard_set_enabled(true);
+    if (s_card) {
+        esp_vfs_fat_sdcard_unmount(SD_STORAGE_MOUNT_POINT, s_card);
+        s_card = NULL;
+        spi_bus_free(SD_SPI_HOST);
+    }
+    sdmmc_card_t *card = NULL;
+    sdspi_dev_handle_t h;
+    esp_err_t err = raw_card_open(&card, &h);
+    if (err == ESP_OK) {
+        sd_guard_set_enabled(false);   /* f_mkfs 대량 쓰기는 확인하지 않음(B에는 같은 내용을 씀) */
+        err = sd_guard_format_dual(card);
+        sd_guard_set_enabled(true);
+        sdspi_host_remove_device(h);
+        heap_caps_free(card);
+        spi_bus_free(SD_SPI_HOST);
+    } else {
+        ESP_LOGE(TAG, "SD format: card init failed: %s", esp_err_to_name(err));
+    }
+    esp_err_t merr = sd_storage_init();   /* 포맷이 실패해도 원래 카드로 다시 마운트를 시도 */
     stats_store_io_resume();
     photo_storage_io_resume();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SD format failed: %s", esp_err_to_name(err));
-        return err;
-    }
-    if (mkdir(SD_STORAGE_MOUNT_POINT "/stats", 0777) != 0 && errno != EEXIST) {
-        ESP_LOGW(TAG, "stats folder create failed (errno=%d)", errno);
-    }
-    if (mkdir(SD_STORAGE_MOUNT_POINT "/photos", 0777) != 0 && errno != EEXIST) {
-        ESP_LOGW(TAG, "photos folder create failed (errno=%d)", errno);
+    if (err != ESP_OK || merr != ESP_OK) {
+        ESP_LOGE(TAG, "SD format failed: %s / mount %s", esp_err_to_name(err), esp_err_to_name(merr));
+        return err != ESP_OK ? err : merr;
     }
     ESP_LOGI(TAG, "SD format done");
-    sd_health_on_mount();   /* 2026-10-15 — 포맷으로 부트 영역이 바뀜 — 기준값 새로 */
-    storage_mgr_request_rescan();  /* 포맷으로 전부 비었음 — 합계 새로 */
     return ESP_OK;
 }
 
@@ -314,6 +348,12 @@ bool sd_storage_chain_ok(const char *path)
     int err = errno;
     close(fd);
     if (r >= 0) return true;
+    if (err == ETIMEDOUT) {
+        /* 2026-10-22 — FatFs 볼륨 잠금을 제때 못 받음(다른 FatFs 호출이 오래 쥠) — 연결이 끊긴 것이 아님(10-22 23:32 오탐 5009).
+         * 확인 못 한 채 true — 이어지는 실제 쓰기가 같은 이유로 실패하면 그쪽 오류로 드러남 */
+        ESP_LOGW(TAG, "SD cluster chain not checked - FatFs busy (timeout): %s", path);
+        return true;
+    }
     ESP_LOGE(TAG, "SD cluster chain broken (errno=%d) - not written: %s", err, path);
     sd_health_report(SDH_EV_CHAIN_BROKEN, path, 0);
     return false;
