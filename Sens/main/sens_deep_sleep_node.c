@@ -567,6 +567,8 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
             ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u co2=%d temp=%d.%d humi=%d.%d",
                      (unsigned)s_measurement_id, (int)s_cached_vals[0],
                      temp_x10 / 10, temp_x10 % 10, humi_x10 / 10, humi_x10 % 10);
+            /* 2026-10-23(보정 의심) — 측정 40번마다(15초 주기면 10분) 보정 설정도 다시 읽음: 딥슬립 중에 바뀌는지 */
+            if (s_measurement_id % 40 == 0) scd41_log_calibration("periodic");
 #elif CONFIG_SENS_SENSOR_MQ137
             int ppm_x10 = (int)(s_cached_vals[0] * 10.0f + 0.5f);
             ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u NH3=%d.%dppm (provisional factor)",
@@ -656,6 +658,7 @@ void app_main(void)
         scd41_reinit();
         scd41_read_identity();   /* 2026-10-18(시험) — 예전 순서 그대로(scd41.c 주석) */
         scd41_ensure_asc_off();  /* 2026-10-05(SCD41 개선 3단계) */
+        scd41_log_calibration("power-on");   /* 2026-10-23(보정 의심) — 전원 부팅마다 */
     }
 #elif CONFIG_SENS_SENSOR_SHT45 || CONFIG_SENS_SENSOR_SHT45_DS2
     /* SHT4x는 SCD41과 달리 전원안정화 지연 요구사항이 문서화돼있지 않음(예전 sensor_node.c도

@@ -3,11 +3,22 @@ dependencies:
     version: ">=5.5.0"
 
   lvgl/lvgl:
-    version: "^9"
+    # 2026-10-23 — 9.5.0 고정(어댑터를 고친 사본으로 바꾸자 의존성을 다시 풀며 9.6.0으로 올라감 — 어댑터 0.5.3은 9.6 미지원).
+    # 새 버전(어댑터 0.7.3 + LVGL 9.6)은 따로 올림(사용자 결정 — 3일 뒤). 그때 아래 button·libpng 고정도 뺌
+    version: "==9.5.0"
     public: true
+
+  # 2026-10-23 — 간접 의존(어댑터·디코더)인데 같은 이유로 판이 올라가 원래 판으로 고정(한 번에 하나만 바꾸기)
+  espressif/button:
+    version: "==4.2.1"
+  espressif/libpng:
+    version: "==1.6.58~1"
 
   espressif/esp_lvgl_adapter:
     version: "^0.5.2"
+    # 2026-10-23(콘 크래시 15:25) — 고친 사본(components/esp_lvgl_adapter, 0.5.3 + 패치)을 씀. copy_unrendered_area_from_front_to_back의
+    # 사각형 목록이 칸 수 확인 없이 넘쳐 스택을 덮음(최신 0.7.3에도 그대로). 자세한 건 그 파일의 "Cntl 패치" 주석
+    override_path: "../components/esp_lvgl_adapter"
 
   espressif/esp_lcd_touch_gt911:
     version: "^1"

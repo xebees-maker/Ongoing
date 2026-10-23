@@ -2,6 +2,10 @@
    + W6002 원인 확인 + 4시간 무인 로그 (원래 PC, 사용자 부재 중 진행) ==
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
+- 2026-10-23 저녁: 원래 PC에서 마무리(PC 이동 아님, 사용자 3일 부재 — 19시 이후 관찰). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
+  메모리 변경 없음. sdkconfig: 의존성이 LVGL 9.6으로 풀렸다 9.5.0으로 돌아오며 다시 만들어짐 — sdkconfig.defaults의 LVGL 19개 값 일치 확인.
+  git 밖: 콘 19:16 플래시(어댑터 패치). 이산화탄소 센스 보정 로그 펌웨어. 상시 로거에 sens_co2 추가(다시 띄움).
+  콘 크래시 해석용 ELF 보관: C:\Projects\serial_logs\elf\cntl_<ELF 해시>.elf. Dev 로그 덤프 cntl_dumps/20261023_191601.
 - 2026-10-23 오후: 원래 PC에서 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리: feedback_sensor_wait_tick_rounding 추가(같은 PC라 zip 갱신 안 함). sdkconfig 변경 없음(Sens Kconfig에서 DS18B20 단독 선택지 지움 —
   C:\Projects\build_sens\sens_DS18B20 폴더가 있으면 쓸모없음).
@@ -1333,5 +1337,21 @@ C14. 39af070 Wi-Fi 결함 수정 2개 동작 확인 — ① 연결 요청 거절
         정의 지움(레거시 상시 동작 빌드 sensor_node.c — DHT22/SHT40 — 만 자기 파일에 둠, DHT22 빌드 확인), 딥슬립 빌드의 status_led 제거.
         Tools/fast_flash.py에 MAC=… 지정(잠든 센스의 포트를 USB 일련번호로 찾음).
      다음: SCD41 이산화탄소 값이 비정상으로 높은 원인 조사(사용자).
+     ⑪ (저녁) 콘 크래시 15:25 LoadProhibited — LVGL 어댑터(esp_lvgl_adapter 0.5.3) copy_unrendered_area_from_front_to_back의
+        사각형 목록(스택 132칸)이 칸 수 확인 없이 넘쳐 저장된 impl을 덮음(impl=0x35). 최신 0.7.3에도 그대로. 고친 사본
+        Cntl/components/esp_lvgl_adapter(override_path) — 넘칠 상황이면 한 줄씩 복사, 로그 "Unsynced-area list full … scanline copy".
+        의존성이 다시 풀리며 LVGL 9.6.0·button 4.2.2·libpng 1.6.59로 올라갔던 것을 9.5.0·4.2.1·1.6.58~1로 고정(main/idf_component.yml).
+        19:16 플래시. 이산화탄소 센스: 보정 설정 로그(scd41_log_calibration — ASC 꺼짐·공장 기본값 확인), 상시 로거에 sens_co2 추가,
+        14:41 사용자 공장 초기화(ASC 다시 끔 확인). 실외 386(화면)·205(로그).
+     할 일(10-23 추가):
+       - 3일 뒤(사용자 결정): 어댑터 0.7.3 + LVGL 9.6으로 모두 올리고 같은 패치 다시 넣기, idf_component.yml의 버전 고정 3줄 빼기.
+       - 코어 덤프(사용자 지시 "할일로 저장"): 크래시 순간 태스크 상태를 플래시 coredump 파티션에. 먼저 확인 — 파티션 표에 빈 공간이
+         있는지(LittleFS 안 움직이게), IDF 6.0에서 PSRAM 태스크 스택(LVGL 태스크)도 덤프에 들어가는지. 꺼내기는 시리얼 coredump-info.
+       - 이산화탄소: 10-23 19시 이후(창문 닫고 비움) 기록으로 기준점 이동·연속값 흔들림·보정 설정 변화 판단. 그다음 단발/연속 모드 비교.
+       - 사진 3002(TOP 캠 META 무응답): 캠이 깨자마자 찍고 META → 브는 0.1초 안에 받아 META_ACK를 바로 보냄(실패 기록 없음) → 캠은
+         3번(2.4초) 모두 응답 못 받고 사진 버림 → 콘은 늦게 받은 META로 기다리다 브가 10초 뒤 중단(3002). 콘·다른 캠 전송과 무관
+         (처음에 "Side 저장에 밀림"이라 한 것은 잘못). 7번 중 6번이 10-23 00:18~00:50, 1번 19:19, 10-22 2번, 그 전 0. 다음: 진단 로그 —
+         브: META_ACK 전송 완료 콜백 결과·재전송 META 받은 사실, 캠: META 기다리는 동안 받은 ESP-NOW 프레임.
+       - 콘 내부 RAM 평소 여유 143.9K(10-22) → 143.0K(10-23 13:08 이후), 하루 안에선 평평(새는 것 아님, 오늘 넣은 정적 메모리로 추정).
      남은 것(4단계): 릴레이 조건 시나리오(설계 3.5), 주화면 센싱 판·보드 이름("… 측정 보드"), 연결 대수 제한을 센싱 단위로, 교체 때 묻는 화면,
      센싱 이름 설정, sens_kind_store·MAC 별칭 정리, 다른 센스(이산화탄소·암모니아) 새 펌웨어, 배터리 만충 학습.

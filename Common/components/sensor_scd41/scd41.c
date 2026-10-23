@@ -355,6 +355,25 @@ void scd41_read_identity(void)
     ESP_LOGD(TAG, "SCD4x identity read: sn %d var %d asc %d", sn_ok, var_ok, asc_ok);
 }
 
+/* 2026-10-23(사용자 지시 — 이산화탄소 기준점이 며칠 사이 50~260ppm까지 내려갔다 850까지 올라감, 보정 쪽 의심) — 보정에 관계된
+ * 설정을 모두 읽어 한 줄로 남김. 모두 유휴 상태에서만 받는 get 명령(실행 1ms, 데이터시트 3.7·3.8):
+ * ASC 켜짐(0x2313), ASC 목표(0x233F, ppm), ASC 초기·표준 기간(0x2340·0x234B, 시간), 온도 오프셋(0x2318, ×175/65535 °C),
+ * 고도(0x2322, m), 기압(0xE000, ×100 Pa). 센서 안의 현재 기준점(보정량) 자체는 읽는 명령이 없음 — FRC를 할 때만 돌려줌.
+ * 읽기 실패한 값은 -1 */
+void scd41_log_calibration(const char *when)
+{
+    if (!s_dev) return;
+    static const uint16_t cmds[] = { 0x2313, 0x233F, 0x2340, 0x234B, 0x2318, 0x2322, 0xE000 };
+    long v[7];
+    for (int i = 0; i < 7; i++) {
+        uint16_t w = 0;
+        v[i] = read_words(cmds[i], &w, 1) ? (long)w : -1;
+    }
+    long toff_x100 = v[4] < 0 ? -1 : (v[4] * 17500L + 32767L) / 65535L;
+    ESP_LOGW(TAG, "SCD4x CALIB(%s): asc=%ld target=%ldppm init_period=%ldh std_period=%ldh temp_offset=%ld.%02ldC altitude=%ldm pressure=%ldhPa",
+             when, v[0], v[1], v[2], v[3], toff_x100 < 0 ? -1L : toff_x100 / 100, toff_x100 < 0 ? 0L : toff_x100 % 100, v[5], v[6]);
+}
+
 /* 2026-10-05(사용자 결정 — SCD41 개선 3단계) — ASC 끄기 + persist_settings, 센서당 한 번만.
  * 근거: Sensirion 저전력 앱노트 5.2 — ASC가 켜져 있으면 단발 48번마다 보정 이력을 EEPROM에 씀(15초 간격이면 하루 약 120번,
  * persist 수명 2000회 이상). EEPROM 쓰기는 "켜져 있을 때만" — 끈 뒤로는 읽기만 하므로 전원을 여러 번 켜도 센서당 한 번.
