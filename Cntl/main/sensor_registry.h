@@ -53,6 +53,10 @@ bool sreg_sensing_board(uint16_t sensing_id, uint8_t out_mac[6]);
 
 /* 센싱 자동 이름(영문/한글 문자열 표는 ui_strings — 여기는 구분값만) */
 
+/* 2026-10-23 — 센서별 측정 상태(센스가 상태 메시지마다 보냄, RAM만). 로그로 남길 때(상태가 바뀜, 또는 실패가 이어지는 동안
+ * 40번마다)면 true와 센서 ID. 통신 태스크에서 불림 */
+bool sreg_note_status(const uint8_t mac[6], uint8_t port, uint8_t fault, uint16_t streak, uint16_t *out_sensor_id);
+
 /* 부팅 때 한 번(LittleFS 뒤) */
 void sreg_init(void);
 

@@ -25,7 +25,7 @@ bool esp_now_node_is_paired(void);
  */
 void esp_now_node_set_status_led(gpio_num_t pin);
 
-#if CONFIG_SENS_SENSOR_SCD41 || CONFIG_SENS_SENSOR_MQ137 || CONFIG_SENS_SENSOR_SC05 || CONFIG_SENS_SENSOR_SHT45 || CONFIG_SENS_SENSOR_PT100 || CONFIG_SENS_SENSOR_DS18B20 || CONFIG_SENS_SENSOR_SHT45_DS2
+#if CONFIG_SENS_SENSOR_SCD41 || CONFIG_SENS_SENSOR_MQ137 || CONFIG_SENS_SENSOR_SC05 || CONFIG_SENS_SENSOR_SHT45 || CONFIG_SENS_SENSOR_PT100 || CONFIG_SENS_SENSOR_SHT45_DS2
 /* 2026-09-12(사용자 지시 — "장치 종류가 달라도 프로토콜은 동일") — 캐스크 구조를 쓰는
  * 센서 종류가 늘어날 때마다 여기도 같이 OR로 추가해야 함(CMakeLists.txt의 조건과 항상
  * 짝을 맞출 것 — 실제로 이걸 안 맞춰서 MQ137이 예전 설계 선언부를 받는 버그가 있었음) */
@@ -44,6 +44,8 @@ void esp_now_node_init(sensor_kind_t sensor_kind, uint8_t chan_count, const uint
 void esp_now_node_set_sensors(const esp_now_sensor_desc_t *list, uint8_t count);
 /* 콘이 새로 붙여 준 센서 ID가 있으면 NVS에 저장(잠들기 전에 — 받은 콜백에서 하지 않음) */
 void esp_now_node_persist_sensor_ids(void);
+/* 2026-10-23 — 센서별 측정 상태(센서 목록 순서). 다음 상태 메시지부터 실려 감 */
+void esp_now_node_set_sensor_status(const uint8_t *fault, const uint16_t *streak, uint8_t count);
 
 /**
  * @brief 이번 부팅의 딥슬립 웨이크 원인 + 실제로 잤던 시간을 판정/기록(2026-09-05, CAM의
@@ -142,4 +144,4 @@ void esp_now_node_set_readings(sensor_kind_t sensor_kind, uint8_t chan_count,
  */
 void esp_now_node_set_data_period_ms(uint32_t ms);
 
-#endif /* CONFIG_SENS_SENSOR_SCD41 || CONFIG_SENS_SENSOR_MQ137 || CONFIG_SENS_SENSOR_SC05 || CONFIG_SENS_SENSOR_SHT45 || CONFIG_SENS_SENSOR_PT100 || CONFIG_SENS_SENSOR_DS18B20 || CONFIG_SENS_SENSOR_SHT45_DS2 */
+#endif /* CONFIG_SENS_SENSOR_SCD41 || CONFIG_SENS_SENSOR_MQ137 || CONFIG_SENS_SENSOR_SC05 || CONFIG_SENS_SENSOR_SHT45 || CONFIG_SENS_SENSOR_PT100 || CONFIG_SENS_SENSOR_SHT45_DS2 */

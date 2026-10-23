@@ -979,10 +979,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         /* 2026-09-05 — WAKE_HELLO 분기의 구조적 사본(사용자 지시: "나머지(ACK 재시도,
          * 할일 처리, SLEEP_NOW)는 캠 것과 같은 함수를 그대로 불러 씀"). 이 분기 안에서
          * 새로 쓰는 부분은 딱 하나 — 센서값을 노드 구조체에 저장하는 부분뿐 */
-        if (len < (int)sizeof(esp_now_wake_hello_sens_t)) return;
-        const esp_now_wake_hello_sens_t *hello = (const esp_now_wake_hello_sens_t *)data;
+        /* 2026-10-23 — 센서별 상태가 붙은 새 길이와 옛 길이 둘 다 받음. 옛 길이는 0으로 채운 사본(센서별 0개).
+         * 사본은 정적(스택에 큰 구조체 안 둠) — 수신 처리는 한 태스크에서만, 채우기·읽기는 노드 뮤텍스 안 */
+        if (len < (int)ESP_NOW_WAKE_HELLO_SENS_BASE_LEN) return;
+        static esp_now_wake_hello_sens_t s_hello_sens;
+        const esp_now_wake_hello_sens_t *hello = &s_hello_sens;
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+        memset(&s_hello_sens, 0, sizeof(s_hello_sens));
+        memcpy(&s_hello_sens, data, len < (int)sizeof(s_hello_sens) ? (size_t)len : sizeof(s_hello_sens));
         node_hub_node_t *n = find_node(info->src_addr);
         if (!n || !n->ever_paired || n->user_unpaired) {
             xSemaphoreGive(s_nodes_mutex);
@@ -1015,11 +1020,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
         /* 2026-09-29(사용자 지시 — SCD41이 밤새 측정을 못 했는데 원인을 알 수 없었음) — 센스의 측정 실패 원인.
          * 상태가 바뀔 때와, 실패가 이어지는 동안 40번마다(15초 주기면 약 10분) Dev Log에 남김 */
+        static const char *const s_fault_name[] = { "none", "command NACK", "data not ready", "CRC mismatch",
+                                                    "receive failed", "other", "RTD open/short/out of range" };
         if (hello->sensor_fault != n->sensor_fault ||
             (hello->sensor_fault != SENSOR_FAULT_NONE && hello->sensor_fail_streak % 40 == 0 &&
              hello->sensor_fail_streak != n->sensor_fail_streak)) {
-            static const char *const s_fault_name[] = { "none", "command NACK", "data not ready", "CRC mismatch",
-                                                        "receive failed", "other", "RTD open/short/out of range" };
             uint8_t f = hello->sensor_fault;
             if (f != SENSOR_FAULT_NONE) {
                 ESP_LOGW(TAG, "%s sensor fault: %s (%u failed in a row)", n->name,
@@ -1027,6 +1032,20 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                          (unsigned)hello->sensor_fail_streak);
             } else {
                 ESP_LOGI(TAG, "%s sensor measuring again", n->name);
+            }
+        }
+        /* 2026-10-23(사용자 결정) — 센서별 측정 상태(위는 보드 전체 = 모든 센서가 실패했을 때만). 같은 규칙으로 로그 */
+        for (int si = 0; si < hello->sensor_n && si < ESP_NOW_MAX_SENSORS; si++) {
+            const esp_now_sensor_status_t *st = &hello->sensor_st[si];
+            uint16_t sid = 0;
+            if (!sreg_note_status(n->mac, st->port, st->fault, st->streak, &sid)) continue;
+            if (st->fault != SENSOR_FAULT_NONE) {
+                ESP_LOGW(TAG, "%s sensor %u (port %u) fault: %s (%u failed in a row)", n->name, (unsigned)sid,
+                         (unsigned)st->port,
+                         (st->fault < sizeof(s_fault_name) / sizeof(s_fault_name[0])) ? s_fault_name[st->fault] : "?",
+                         (unsigned)st->streak);
+            } else {
+                ESP_LOGI(TAG, "%s sensor %u (port %u) measuring again", n->name, (unsigned)sid, (unsigned)st->port);
             }
         }
         n->sensor_fault       = hello->sensor_fault;

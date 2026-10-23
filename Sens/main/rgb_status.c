@@ -34,8 +34,8 @@ static void led_set(int color, bool on)
 {
     if (!s_strip) return;
     if (!on) { led_strip_clear(s_strip); led_strip_refresh(s_strip); return; }
-    uint8_t r = color == RGB_STATUS_RED ? RGB_BRIGHTNESS : 0;
-    uint8_t g = color == RGB_STATUS_GREEN ? RGB_BRIGHTNESS : 0;
+    uint8_t r = (color == RGB_STATUS_RED || color == RGB_STATUS_YELLOW) ? RGB_BRIGHTNESS : 0;
+    uint8_t g = (color == RGB_STATUS_GREEN || color == RGB_STATUS_YELLOW) ? RGB_BRIGHTNESS : 0;
     uint8_t b = color == RGB_STATUS_BLUE ? RGB_BRIGHTNESS : 0;
     led_strip_set_pixel(s_strip, 0, r, g, b);
     led_strip_refresh(s_strip);

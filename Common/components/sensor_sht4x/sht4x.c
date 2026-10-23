@@ -8,12 +8,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "sensor_wait.h"
 
 static const char *TAG = "SENS";
 
 #define CMD_MEASURE_HIGH_PRECISION  0xFD
 #define I2C_TIMEOUT_MS              1000
-#define MEASURE_DELAY_MS            10   /* 고정밀 모드 최대 측정 시간(8.3ms) + 여유 */
+#define MEASURE_DELAY_MS            10   /* 고정밀 모드 최대 측정 시간(8.3ms) + 여유. 대기는 sensor_wait_ms(sensor_wait.h — 10-23
+                                          * 이 대기가 실제로 0~10ms라 측정 중에 읽어 NACK 나던 문제) */
 
 static i2c_master_dev_handle_t s_dev = NULL;
 static i2c_master_bus_handle_t s_bus = NULL;
@@ -71,7 +73,7 @@ bool sht4x_read(float *temperature, float *humidity)
         return false;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(MEASURE_DELAY_MS));
+    sensor_wait_ms(MEASURE_DELAY_MS);
 
     uint8_t resp[6] = { 0 };
     err = i2c_master_receive(s_dev, resp, sizeof(resp), I2C_TIMEOUT_MS);

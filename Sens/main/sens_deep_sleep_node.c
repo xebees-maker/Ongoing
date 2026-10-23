@@ -46,6 +46,7 @@
 #include "esp_now_channelsync.h"
 #include "rwdt_guard.h"
 #include "rgb_status.h"
+#include "sensor_wait.h"   /* 2026-10-23 — 센서 타이밍 대기는 모두 sensor_wait_ms */
 
 /* 2026-09-12(사용자 지시 — "장치 종류가 달라도 프로토콜/루틴은 동일해야 한다") — 이 파일은
  * 이제 SCD41 전용이 아니라 캐스크(딥슬립) 구조를 쓰는 모든 센서 종류의 공용 루틴이다.
@@ -86,13 +87,6 @@
     static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
         SENSOR_CHAN_TEMP_C,    /* 2026-09-30 — Agar 접촉 온도(3선 PT100 + MAX31865) */
     };
-#elif CONFIG_SENS_SENSOR_DS18B20
-    #include "ds18b20_sensor.h"
-    #define SENSOR_KIND_CURRENT  SENSOR_KIND_DS18B20
-    #define SENSOR_CHAN_COUNT    1
-    static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
-        SENSOR_CHAN_TEMP_C,    /* 2026-09-30 — Agar 접촉 온도(DS18B20, PT100과 비교용) */
-    };
 #elif CONFIG_SENS_SENSOR_SHT45_DS2
     /* 2026-10-23(사용자 설계 — 고온 보드, 센서 중심 구조) — 센서 3개: SHT45(공기 온습도) + DS18B20 두 개(배지 온도, 핀 하나씩).
      * 보드의 sensor_kind는 옛 콘 호환용 대표값일 뿐 — 실제 구성은 s_sensors(페어링 응답의 센서 목록) */
@@ -109,7 +103,7 @@
         { .kind = SENSOR_KIND_DS18B20, .port = 2, .chan_first = 3, .chan_n = 1 },   /* GPIO5 */
     };
 #else
-    #error "sens_deep_sleep_node.c supports only SCD41/MQ137/SC05/SHT45/PT100/DS18B20/SHT45_DS2 - add a branch here to move another sensor to CASK"
+    #error "sens_deep_sleep_node.c supports only SCD41/MQ137/SC05/SHT45/PT100/SHT45_DS2 - add a branch here to move another sensor to CASK"
 #endif
 
 #if !CONFIG_SENS_SENSOR_SHT45_DS2
@@ -182,6 +176,12 @@ static RTC_DATA_ATTR uint16_t s_sensor_fail_streak                = 0;
 #define SENS_REINIT_EVERY_FAILS 2  /* 2026-10-06(사용자 결정) — 2회 연속 실패마다 reinit(예전 3회) */
 /* measure_sensor()가 실패했을 때 그 원인 — attempt_one_measurement()가 채움 */
 static uint8_t s_attempt_fault = 0;
+/* 2026-10-23(사용자 결정 — 센서 중 하나라도 성공하면 측정 성공, 실패한 센서는 따로 보고) — 센서별(s_sensors 순서) 측정 상태.
+ * 위 s_sensor_fault/streak는 보드 전체(모든 센서가 실패했을 때만 실패) */
+#define SENS_SENSOR_N  (sizeof(s_sensors) / sizeof(s_sensors[0]))
+static RTC_DATA_ATTR uint8_t  s_sen_fault[ESP_NOW_MAX_SENSORS];
+static RTC_DATA_ATTR uint16_t s_sen_streak[ESP_NOW_MAX_SENSORS];
+static uint8_t s_attempt_sen_fault[ESP_NOW_MAX_SENSORS];   /* 이번 시도의 센서별 실패 원인 */
 
 /* 2026-09-05 — CAM의 cam_node.c 이벤트기반 대기 루프 이식(s_wake_recheck_sem/s_sweep_completed/
  * s_sleep_now_requested). esp_now_node_cask.c(연결 상태 전담, esp_now_cam.c와 대칭)가
@@ -279,7 +279,7 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
     if (!trig_ok && s_first_cmd_this_boot) {
         ESP_LOGW(TAG, "SCD41 first command NACK - previous measurement may still be running, retry in %ums",
                  (unsigned)SCD41_MEASURE_MIN_WAIT_MS);
-        vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_MIN_WAIT_MS));
+        sensor_wait_ms(SCD41_MEASURE_MIN_WAIT_MS);
         scd41_clear_fault();
         trig_ok = scd41_trigger_single_shot();
     }
@@ -292,14 +292,14 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
     /* 2026-10-06(사용자 결정 — Sensirion 단발 예제 그대로 시험) — exampleScd41SingleShot.ino loop():
      * wakeUp() → measureSingleShot()(5초, 결과 버림) → measureAndReadSingleShot()(트리거 → 5초 → 100ms마다 data-ready, 준비되면 읽기).
      * wake_up은 이 함수 맨 앞, 위의 트리거가 "버리는 측정". 공식은 무한정 기다림 — RWDT 예산 때문에 두 번째 트리거 뒤 15초 상한(시험, 임시) */
-    vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_MIN_WAIT_MS));  /* 첫 측정(버림) — 공식 measureSingleShot() 안의 delay(5000) */
+    sensor_wait_ms(SCD41_MEASURE_MIN_WAIT_MS);  /* 첫 측정(버림) — 공식 measureSingleShot() 안의 delay(5000) */
     scd41_clear_fault();
     bool ok = false;
     uint32_t waited_ms = 0;
     if (!scd41_trigger_single_shot()) {
         s_attempt_fault = SENSOR_FAULT_CMD_NACK;
     } else {
-        vTaskDelay(pdMS_TO_TICKS(SCD41_MEASURE_MIN_WAIT_MS));
+        sensor_wait_ms(SCD41_MEASURE_MIN_WAIT_MS);
         waited_ms = SCD41_MEASURE_MIN_WAIT_MS;
         bool done = false;
         while (!done && waited_ms <= 15000) {
@@ -312,7 +312,7 @@ static bool measure_scd41(float out[SENSOR_CHAN_COUNT])
                 if (ok) { out[0] = (float)co2; out[1] = t; out[2] = h; }
                 else s_attempt_fault = scd41_last_fault() ? (uint8_t)scd41_last_fault() : SENSOR_FAULT_READ;
             } else {
-                vTaskDelay(pdMS_TO_TICKS(100));
+                sensor_wait_ms(100);
                 waited_ms += 100;
             }
         }
@@ -385,7 +385,7 @@ static bool measure_sensor(float out[SENSOR_CHAN_COUNT], uint8_t ok[SENSOR_CHAN_
 #if CONFIG_SENS_SENSOR_SHT45_DS2
     bool a = sht4x_read(&out[0], &out[1]);
     ok[0] = ok[1] = a;
-    if (!a) s_attempt_fault = SENSOR_FAULT_READ;
+    if (!a) s_attempt_fault = s_attempt_sen_fault[0] = SENSOR_FAULT_READ;
     const gpio_num_t pins[2] = { BSP_C3_DS18B20_PIN_A, BSP_C3_DS18B20_PIN_B };
     bool all = a;
     for (int i = 0; i < 2; i++) {
@@ -395,13 +395,14 @@ static bool measure_sensor(float out[SENSOR_CHAN_COUNT], uint8_t ok[SENSOR_CHAN_
             all = false;
             s_attempt_fault = (r == DS18B20_SENSOR_ERR_NO_DEVICE) ? SENSOR_FAULT_CMD_NACK
                             : (r == DS18B20_SENSOR_ERR_CRC) ? SENSOR_FAULT_CRC : SENSOR_FAULT_READ;
-            ESP_LOGW(TAG, "DS18B20 on GPIO%d read failed (%d)", (int)pins[i], (int)r);
+            s_attempt_sen_fault[1 + i] = s_attempt_fault;
         }
     }
     return all;
 #else
     bool r = measure_sensor_one(out);
     for (int i = 0; i < SENSOR_CHAN_COUNT; i++) ok[i] = r;
+    if (!r) s_attempt_sen_fault[0] = s_attempt_fault;
     return r;
 #endif
 }
@@ -433,13 +434,6 @@ static bool measure_sensor_one(float out[SENSOR_CHAN_COUNT])
                     : (r == MAX31865_ERR_NO_CHIP) ? SENSOR_FAULT_CMD_NACK : SENSOR_FAULT_READ;
     if (r == MAX31865_ERR_FAULT) ESP_LOGW(TAG, "MAX31865 RTD fault status 0x%02X", fault_status);
     return false;
-#elif CONFIG_SENS_SENSOR_DS18B20
-    /* 변환 대기 약 800ms(12비트, 컴포넌트가 블로킹). 무응답 = 명령 NACK, CRC 불일치 = CRC */
-    ds18b20_sensor_result_t r = ds18b20_sensor_read(&out[0]);
-    if (r == DS18B20_SENSOR_OK) return true;
-    s_attempt_fault = (r == DS18B20_SENSOR_ERR_NO_DEVICE) ? SENSOR_FAULT_CMD_NACK
-                    : (r == DS18B20_SENSOR_ERR_CRC) ? SENSOR_FAULT_CRC : SENSOR_FAULT_READ;
-    return false;
 #endif
 }
 #endif
@@ -449,8 +443,34 @@ static bool measure_sensor_one(float out[SENSOR_CHAN_COUNT])
  * 표시하고(사용자 지시: 구분 없이 LED 표시), 실측정도 이 함수로 함 — 한 사이클 안에서
  * 최대 두 번(워밍업+실측정) 불릴 수 있어서 elapsed는 호출부가 계속 누적하도록
  * 포인터로 받음 */
+/* 2026-10-23 — 센서별 결과 반영(센서의 채널이 모두 성공 = 그 센서 성공). 콘에는 다음 상태 메시지에 실려 감 */
+static void note_sensor_results(const uint8_t ok_ch[SENSOR_CHAN_COUNT])
+{
+    for (int i = 0; i < (int)SENS_SENSOR_N && i < ESP_NOW_MAX_SENSORS; i++) {
+        bool ok = true;
+        for (int c = s_sensors[i].chan_first; c < s_sensors[i].chan_first + s_sensors[i].chan_n && c < SENSOR_CHAN_COUNT; c++) {
+            if (!ok_ch[c]) ok = false;
+        }
+        if (ok) {
+            if (s_sen_streak[i] > 0) {
+                ESP_LOGI(TAG, "Sensor port%u recovered after %u failed measurements", (unsigned)s_sensors[i].port,
+                         (unsigned)s_sen_streak[i]);
+            }
+            s_sen_fault[i] = SENSOR_FAULT_NONE;
+            s_sen_streak[i] = 0;
+        } else {
+            s_sen_fault[i] = s_attempt_sen_fault[i] ? s_attempt_sen_fault[i] : SENSOR_FAULT_OTHER;
+            if (s_sen_streak[i] < UINT16_MAX) s_sen_streak[i]++;
+            ESP_LOGW(TAG, "Sensor port%u read failed (fault=%u, streak=%u)", (unsigned)s_sensors[i].port,
+                     (unsigned)s_sen_fault[i], (unsigned)s_sen_streak[i]);
+        }
+    }
+    esp_now_node_set_sensor_status(s_sen_fault, s_sen_streak, (uint8_t)SENS_SENSOR_N);
+}
+
 static bool attempt_one_measurement(float out[SENSOR_CHAN_COUNT], uint8_t ok_ch[SENSOR_CHAN_COUNT], uint32_t *accum_elapsed_ms)
 {
+    memset(s_attempt_sen_fault, 0, sizeof(s_attempt_sen_fault));
     rgb_status_blink(RGB_STATUS_GREEN, 1);   /* 2026-10-23 — 측정 시작 G 1번 */
     uint32_t start_ms = (uint32_t)(esp_timer_get_time() / 1000);
     pm_lock_no_light_sleep_acquire();
@@ -458,7 +478,13 @@ static bool attempt_one_measurement(float out[SENSOR_CHAN_COUNT], uint8_t ok_ch[
     bool ok = measure_sensor(out, ok_ch);
     pm_lock_no_light_sleep_release();
     *accum_elapsed_ms += (uint32_t)(esp_timer_get_time() / 1000) - start_ms;
-    rgb_status_blink(ok ? RGB_STATUS_GREEN : RGB_STATUS_RED, ok ? 2 : 1);   /* 성공 G 2번 / 실패 R 1번 */
+    note_sensor_results(ok_ch);
+    bool any_ok = false;
+    for (int i = 0; i < SENSOR_CHAN_COUNT; i++) any_ok |= ok_ch[i];
+    /* 성공 G 2번 / 일부 성공 노랑 2번(사용자 결정 10-23) / 실패 R 1번 */
+    if (ok) rgb_status_blink(RGB_STATUS_GREEN, 2);
+    else if (any_ok) rgb_status_blink(RGB_STATUS_YELLOW, 2);
+    else rgb_status_blink(RGB_STATUS_RED, 1);
     return ok;
 }
 
@@ -524,8 +550,9 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
         bool any_ok = false;
         for (int i = 0; i < SENSOR_CHAN_COUNT; i++) any_ok |= fresh_chok[i];
         if (any_ok) {
-            /* 2026-10-23 — 센서가 여럿이면 성공한 채널만 새 값, 실패한 채널은 "값 없음"(콘이 그 센싱만 비움) */
-            if (fresh_ok) note_measure_recovered(); else note_measure_failed();
+            /* 2026-10-23 — 센서가 여럿이면 성공한 채널만 새 값, 실패한 채널은 "값 없음"(콘이 그 센싱만 비움).
+             * 하나라도 성공하면 보드는 측정 성공(사용자 결정) — 실패한 센서는 센서별 상태로(note_sensor_results) */
+            note_measure_recovered();
             memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
             for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = fresh_chok[i];
             s_measurement_id++;
@@ -561,7 +588,7 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
                      fresh_ok ? "ok" : "partial", (unsigned)s_measurement_id, t0 / 10, t0 % 10, h0 / 10, h0 % 10,
                      s_cached_chan_ok[2] ? "" : "(none) ", abs(a1) / 100, abs(a1) % 100,
                      s_cached_chan_ok[3] ? "" : "(none) ", abs(a2) / 100, abs(a2) % 100);
-#elif CONFIG_SENS_SENSOR_PT100 || CONFIG_SENS_SENSOR_DS18B20
+#elif CONFIG_SENS_SENSOR_PT100
             int pt_temp_x100 = (int)(s_cached_vals[0] * 100.0f + (s_cached_vals[0] < 0 ? -0.5f : 0.5f));
             ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u agar_temp=%s%d.%02d",
                      (unsigned)s_measurement_id, pt_temp_x100 < 0 ? "-" : "",
@@ -618,7 +645,7 @@ void app_main(void)
     if (!scd41_init_single_shot(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) {
         ESP_LOGW(TAG, "SCD41 init failed - check wiring (retry next cycle)");
     }
-    vTaskDelay(pdMS_TO_TICKS(1000));  /* 싱글샷용 전원안정화 지연(위 주석 참고) */
+    sensor_wait_ms(1000);  /* 싱글샷용 전원안정화 지연(위 주석 참고) */
     /* 2026-10-05(사용자 결정 — SCD41 개선 2단계) — Sensirion 단발 예제처럼 시작할 때 센서를 깨끗한 상태로:
      * stop_periodic(500ms) → reinit(30ms). 09-06에 "단발엔 필요 없다"며 뺐던 것을 되돌림.
      * 딥슬립에서 깰 때마다 할지 전원 켤 때만 할지는 Live에서 효과 확인 뒤 결정(사용자) — 지금은 부팅마다 */
@@ -640,10 +667,6 @@ void app_main(void)
     if (!max31865_init(BSP_C3_PT100_SPI_HOST, BSP_C3_PT100_SPI_CLK, BSP_C3_PT100_SPI_SDI,
                        BSP_C3_PT100_SPI_SDO, BSP_C3_PT100_SPI_CS, true)) {
         ESP_LOGW(TAG, "MAX31865 init failed - check wiring (retry next cycle)");
-    }
-#elif CONFIG_SENS_SENSOR_DS18B20
-    if (!ds18b20_sensor_init(BSP_C3_DS18B20_PIN)) {
-        ESP_LOGW(TAG, "DS18B20 init failed - check wiring (retry on each measurement)");
     }
 #endif
     /* 2026-09-12(MQ137 추가) — AO 채널 설정에 공유 ADC 유닛 핸들이 필요한데, 그 핸들은
@@ -710,6 +733,7 @@ void app_main(void)
     s_wake_recheck_sem = xSemaphoreCreateBinary();
 
     esp_now_node_set_sensors(s_sensors, sizeof(s_sensors) / sizeof(s_sensors[0]));   /* 2026-10-23 — 센서 목록 */
+    esp_now_node_set_sensor_status(s_sen_fault, s_sen_streak, (uint8_t)SENS_SENSOR_N);   /* 지난 측정의 센서별 상태(RTC) */
     esp_now_node_init(SENSOR_KIND_CURRENT, SENSOR_CHAN_COUNT, s_chan_types);
 
     ESP_LOGI(TAG, "Headless Sens node ready (kind=%d, channels=%d, measID=%u)",
@@ -816,7 +840,8 @@ void app_main(void)
             bool any_ok = false;
             for (int i = 0; i < SENSOR_CHAN_COUNT; i++) any_ok |= fresh_chok[i];
             if (any_ok) {   /* 2026-10-23 — 센서가 여럿이면 성공한 채널만(보통 경로와 같음) */
-                if (all_ok) note_measure_recovered(); else note_measure_failed();
+                (void)all_ok;
+                note_measure_recovered();   /* 하나라도 성공하면 보드는 성공(센서별은 note_sensor_results) */
                 memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
                 for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = fresh_chok[i];
                 s_measurement_id++;

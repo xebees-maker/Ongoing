@@ -697,6 +697,13 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
 } esp_now_wake_hello_ack_t;
 
+/* 2026-10-23 — 센서별 측정 상태(아래 WAKE_HELLO_SENS 끝). fault = sensor_fault_t(0 = 마지막 측정 성공) */
+typedef struct __attribute__((packed)) {
+    uint8_t  port;
+    uint8_t  fault;
+    uint16_t streak;   /* 연속 실패 횟수 */
+} esp_now_sensor_status_t;
+
 /* ESP_NOW_MSG_WAKE_HELLO_SENS(2026-09-05) — esp_now_wake_hello_t와 동일한 CASK 상태 필드 +
  * esp_now_sensor_data_t의 센서 채널 필드를 한 메시지로 합침(사용자 지시 — 별도 왕복 없이
  * 웨익헬로 자체에 센서값까지 실어보냄). mac 필드는 안 둠 — ESP-NOW recv_info의 src_addr로
@@ -728,7 +735,14 @@ typedef struct __attribute__((packed)) {
      * 이 필드가 없는 옛 센스의 WAKE_HELLO_SENS는 콘의 길이 검사에서 걸러짐 — 센스를 모두 새 펌웨어로 올려야 함 */
     uint8_t  sensor_fault;
     uint16_t sensor_fail_streak;
+    /* 2026-10-23(사용자 결정 — 센서 중 하나라도 성공하면 측정 성공, 실패한 센서는 따로 보고) — 위 sensor_fault/streak는
+     * 보드 전체(모든 센서가 실패했을 때만 실패), 여기는 센서별(페어링 응답의 센서 목록 순서·포트). 끝에 붙인 필드라 옛 센스는
+     * 이 부분 없이 옴 — 콘은 ESP_NOW_WAKE_HELLO_SENS_BASE_LEN 이상이면 받음(없으면 센서별 0개) */
+    uint8_t  sensor_n;
+    esp_now_sensor_status_t sensor_st[ESP_NOW_MAX_SENSORS];
 } esp_now_wake_hello_sens_t;
+
+#define ESP_NOW_WAKE_HELLO_SENS_BASE_LEN  offsetof(esp_now_wake_hello_sens_t, sensor_n)
 
 /* esp_now_wake_hello_sens_t.sensor_fault — 측정 실패 원인(센서 종류 공통, SCD41이 가장 자세함) */
 typedef enum {

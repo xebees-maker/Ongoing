@@ -26,6 +26,14 @@
 #include "esp_now_node.h"
 #include "status_led.h"
 
+/* 2026-10-23 — 외부 LED·VIN 분압 보드는 모든 센스에서 뗐음(BSP에서 지움). 이 레거시 상시 동작 빌드(DHT22/SHT40)만 예전 배선
+ * 기준 정의를 여기 둠 — 지금 쓰는 보드는 딥슬립 빌드(sens_deep_sleep_node.c, 내장 RGB·내장 분압) */
+#define BSP_C3_VIN_ADC_CHANNEL   ADC_CHANNEL_1   /* GPIO1 — J3 "V" 핀을 외부 100k+100k 분압 */
+#define BSP_C3_VIN_ADC_ATTEN     ADC_ATTEN_DB_12
+#define BSP_C3_VIN_PRESENT_MV    2200
+#define BSP_C3_LED_GREEN         GPIO_NUM_5      /* ESP-NOW 링크 */
+#define BSP_C3_LED_BLUE          GPIO_NUM_2      /* 배터리 */
+
 #if CONFIG_SENS_SENSOR_DHT22
     #include "dht22.h"
     #define SENSOR_KIND_CURRENT  SENSOR_KIND_DHT22

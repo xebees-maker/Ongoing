@@ -10,7 +10,6 @@
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "esp_sleep.h"
-#include "status_led.h"
 #include "rgb_status.h"
 #include "nvs.h"
 #include <stdio.h>
@@ -71,13 +70,14 @@ static RTC_DATA_ATTR bool    s_wake_hub_known   = false;
 
 static char s_name[ESP_NOW_LINK_NAME_LEN] = "";
 static uint8_t s_mac[6] = { 0 };
-static gpio_num_t s_led_pin = GPIO_NUM_NC;
 
 /* 2026-10-23(사용자 설계 — 센서 중심 구조) — 이 보드에 달린 센서 목록(포트·종류·채널 위치)과 콘이 붙여 준 센서 ID.
  * ID는 포트별로 NVS("sensid"/"p<포트>")에 저장 — 콘이 ESP_NOW_MSG_SENSOR_ID_ASSIGN으로 알려 줌. 저장은 받은 콜백(Wi-Fi 태스크)
  * 이 아니라 앱이 잠들기 전에(esp_now_node_persist_sensor_ids) */
 static esp_now_sensor_desc_t s_sensors[ESP_NOW_MAX_SENSORS];
 static uint8_t s_sensor_count = 0;
+static uint8_t  s_sensor_fault_st[ESP_NOW_MAX_SENSORS];    /* 2026-10-23 — 센서별 측정 상태(앱이 RTC에 들고 있다가 알려 줌) */
+static uint16_t s_sensor_streak_st[ESP_NOW_MAX_SENSORS];
 static volatile bool s_sensor_ids_dirty = false;
 
 static bool     s_channelsync_initialized = false;
@@ -151,10 +151,10 @@ void esp_now_node_note_sleep_entry(void)
     time(&s_sleep_entry_unix_time);
 }
 
-/* 2026-10-23(사용자 설계) — 외부 초록 LED 대신 내장 RGB: 찾는 중·끊김(BLINK_FAST) = B 계속 깜빡임, 연결됨(HEARTBEAT) = B 1번 */
-static void set_led(led_pattern_t pattern)
+/* 2026-10-23(사용자 설계) — 외부 초록 LED 대신 내장 RGB: 찾는 중·끊김 = B 계속 깜빡임, 연결됨 = B 1번 */
+static void set_led(bool connected)
 {
-    if (pattern == LED_PATTERN_HEARTBEAT) {
+    if (connected) {
         rgb_status_search(false);
         rgb_status_blink(RGB_STATUS_BLUE, 1);
     } else {
@@ -185,7 +185,7 @@ static void on_channel_synced(uint8_t channel, const uint8_t *hub_mac)
         s_conn_state = SENS_CONN_FOUND;
         ESP_LOGI(TAG, "[STATE] -> %s", conn_state_name(s_conn_state));
     }
-    set_led(LED_PATTERN_BLINK_FAST);
+    set_led(false);
 }
 
 static const uint8_t s_broadcast_mac[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
@@ -325,7 +325,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         s_conn_state = SENS_CONN_ORPHAN;
         s_wake_hub_known = false;
         ESP_LOGI(TAG, "[STATE] -> %s (unpair)", conn_state_name(s_conn_state));
-        set_led(LED_PATTERN_BLINK_FAST);
+        set_led(false);
         esp_now_unpair_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_UNPAIR_ACK };
         send_reply(info->src_addr, &ack, sizeof(ack));
         start_or_resume_scan();
@@ -414,7 +414,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     esp_now_channelsync_diag_send_report(s_hub_mac);  /* 2026-10-08 — 끊긴 적 있으면 요약을 콘으로 */
     ESP_LOGI(TAG, "[STATE] -> %s (pair_request)", conn_state_name(s_conn_state));
     esp_now_channelsync_notify_paired();
-    set_led(LED_PATTERN_HEARTBEAT);
+    set_led(true);
 
     esp_now_peer_info_t peer = { 0 };
     memcpy(peer.peer_addr, s_hub_mac, sizeof(peer.peer_addr));
@@ -501,6 +501,12 @@ bool esp_now_node_report_reading(uint8_t chan_count, const uint8_t *chan_ok,
         .sensor_fault          = sensor_fault,
         .sensor_fail_streak    = sensor_fail_streak,
     };
+    hello.sensor_n = s_sensor_count;   /* 2026-10-23 — 센서별 */
+    for (int i = 0; i < s_sensor_count; i++) {
+        hello.sensor_st[i].port   = s_sensors[i].port;
+        hello.sensor_st[i].fault  = s_sensor_fault_st[i];
+        hello.sensor_st[i].streak = s_sensor_streak_st[i];
+    }
     memcpy(hello.chan_ok,  chan_ok,  chan_count * sizeof(chan_ok[0]));
     memcpy(hello.chan_val, chan_val, chan_count * sizeof(chan_val[0]));
     s_last_report_ms = now_ms;
@@ -521,7 +527,7 @@ bool esp_now_node_report_reading(uint8_t chan_count, const uint8_t *chan_ok,
         ESP_LOGW(TAG, "WAKE_HELLO_SENS no response (3 tries) - falling back to scan");
         s_conn_state = SENS_CONN_ORPHAN;
         ESP_LOGI(TAG, "[STATE] -> %s (wake_hello_fail)", conn_state_name(s_conn_state));
-        set_led(LED_PATTERN_BLINK_FAST);
+        set_led(false);
         start_or_resume_scan();
         return false;
     }
@@ -532,7 +538,7 @@ bool esp_now_node_report_reading(uint8_t chan_count, const uint8_t *chan_ok,
     s_conn_state = SENS_CONN_PAIRED;
     esp_now_channelsync_diag_send_report(s_hub_mac);  /* 2026-10-08 — 끊긴 적 있으면 요약을 콘으로 */
     ESP_LOGI(TAG, "[STATE] -> %s (wake_hello)", conn_state_name(s_conn_state));
-    set_led(LED_PATTERN_HEARTBEAT);
+    set_led(true);
     return true;
 }
 
@@ -544,6 +550,13 @@ uint32_t esp_now_node_get_last_sleep_sec(void)
 uint32_t esp_now_node_get_sample_interval_sec(void)
 {
     return s_sample_interval_sec;
+}
+
+void esp_now_node_set_sensor_status(const uint8_t *fault, const uint16_t *streak, uint8_t count)
+{
+    if (count > ESP_NOW_MAX_SENSORS) count = ESP_NOW_MAX_SENSORS;
+    memcpy(s_sensor_fault_st, fault, count * sizeof(fault[0]));
+    memcpy(s_sensor_streak_st, streak, count * sizeof(streak[0]));
 }
 
 void esp_now_node_set_sensors(const esp_now_sensor_desc_t *list, uint8_t count)
@@ -582,12 +595,6 @@ void esp_now_node_persist_sensor_ids(void)
     ESP_LOGI(TAG, "Sensor IDs saved");
 }
 
-void esp_now_node_set_status_led(gpio_num_t pin)
-{
-    s_led_pin = pin;
-    status_led_init(pin);
-}
-
 void esp_now_node_init(sensor_kind_t sensor_kind, uint8_t chan_count, const uint8_t *chan_type)
 {
     s_sensor_kind = sensor_kind;
@@ -614,7 +621,7 @@ void esp_now_node_init(sensor_kind_t sensor_kind, uint8_t chan_count, const uint
     if (!s_wake_hub_known) {
         start_or_resume_scan();
     }
-    set_led(LED_PATTERN_BLINK_FAST);
+    set_led(false);
 }
 
 const char *esp_now_node_get_name(void)
@@ -633,7 +640,7 @@ void esp_now_node_wait_replies_sent(uint32_t max_ms)
     int64_t t0 = esp_timer_get_time();
     while (__atomic_load_n(&s_reply_inflight, __ATOMIC_RELAXED) > 0 &&
            esp_timer_get_time() - t0 < (int64_t)max_ms * 1000) {
-        vTaskDelay(pdMS_TO_TICKS(2));
+        vTaskDelay(1);   /* 2026-10-23 — 예전 pdMS_TO_TICKS(2)는 0틱(100Hz)이라 기다리지 않고 계속 돌았음 — 1틱(10ms)씩 */
     }
     uint32_t left = __atomic_load_n(&s_reply_inflight, __ATOMIC_RELAXED);
     ESP_LOGD(TAG, "Replies flushed before sleep: %u left after %ums", (unsigned)left,

@@ -2,6 +2,10 @@
    + W6002 원인 확인 + 4시간 무인 로그 (원래 PC, 사용자 부재 중 진행) ==
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
+- 2026-10-23 오후: 원래 PC에서 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
+  메모리: feedback_sensor_wait_tick_rounding 추가(같은 PC라 zip 갱신 안 함). sdkconfig 변경 없음(Sens Kconfig에서 DS18B20 단독 선택지 지움 —
+  C:\Projects\build_sens\sens_DS18B20 폴더가 있으면 쓸모없음).
+  git 밖: 세 센스(이산화탄소 COM3, 암모니아 SC05, 고온 COM21) 새 펌웨어. Tools/fast_flash.py 커밋 안 함.
 - 2026-10-23 낮: 원래 PC에서 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리 변경 없음. sdkconfig 변경 없음(Sens Kconfig에 SHT45_DS2 선택지 추가 — 고온 보드 빌드는 Tools/sens_variant.ps1 SHT45_DS2, PowerShell에서).
   git 밖: 통계 2판으로 콘 내부 플래시·SD 통계를 비움(fmt.bin). 콘 LittleFS sensors.bin(센서 등록) 새로 생김. 고온 센스(COM21) NVS "sensid"에
@@ -1314,5 +1318,20 @@ C14. 39af070 Wi-Fi 결함 수정 2개 동작 확인 — ① 연결 요청 거절
         명령을 보냄(PC 쓰레기값). sd_guard_detach() + sd_guard 모든 진입점을 재귀 뮤텍스로 감싸고 그 안에서 카드 확인, 꺼내기는 LVGL
         태스크(웹 op)에서만 — 부팅 재스캔 중 꺼내기 다시 시험: 정상. 처음엔 아이콘을 흰색으로 해 밝은 상단 바에서 안 보였음(잘못) — 화면
         잠금 아이콘 색을 따름.
+     ⑧ (오후) SHT45가 거의 측정을 못 함 — 내 잘못: 측정 시작 LED를 타이머 방식(rgb_status)으로 바꾸면서, 예전 LED의 vTaskDelay(100ms)가
+        만들던 틱 정렬이 사라짐. SHT45 측정 대기 10ms는 100Hz 틱에서 1틱 = 실제 0~10ms라 측정 중(최대 8.3ms)에 읽어 NACK
+        (ESP_ERR_INVALID_RESPONSE). SCD41 드라이버의 1~2ms 대기(4곳)는 0틱이라 원래부터 전혀 기다리지 않았음.
+        수정(사용자 지시 "같은 문제 반복하지 않게"): Common/components/sensor_wait(sensor_wait_ms — 1틱보다 짧으면 바쁜 대기,
+        아니면 틱 올림 + 1틱). SCD41 13곳·SHT45·MAX31865·센스 SCD41 측정/전원 안정화 대기를 모두 이 함수로. 헤더에 규칙 기록.
+        잠들기 전 응답 대기 루프의 0틱 대기도 1틱으로.
+     ⑨ 측정 판정(사용자 결정): 센서 중 하나라도 성공하면 보드는 측정 성공, 일부 실패면 합성색 노랑 2번(모두 성공 G2, 모두 실패 R1).
+        센서별 보고: WAKE_HELLO_SENS 끝에 센서별 {포트, 실패 원인, 연속 실패}(esp_now_sensor_status_t) — 콘은 옛 길이도 받음
+        (ESP_NOW_WAKE_HELLO_SENS_BASE_LEN). 콘 sreg_note_status(RAM), /api/sensors에 fault/streak, Dev Log에 센서별 실패·회복.
+     ⑩ 이산화탄소(COM3)·암모니아 SC05 보드도 외부 LED·VIN 분압 제거(사용자) — 이제 모든 센스가 내장 RGB + 내장 분압(IO3).
+        세 보드 새 펌웨어, 센서 ID 1·2·3·4·5 그대로 이어짐, 측정 실패 0. 사용자 확인: LED 모두 정상, Agar 2개 정상.
+        코드 정리(사용자 "다 지워도 되"): Agar 단독(DS18B20 하나) 빌드 선택지·핀(GPIO0)·버스 하나짜리 API 지움, BSP의 외장 LED·VIN
+        정의 지움(레거시 상시 동작 빌드 sensor_node.c — DHT22/SHT40 — 만 자기 파일에 둠, DHT22 빌드 확인), 딥슬립 빌드의 status_led 제거.
+        Tools/fast_flash.py에 MAC=… 지정(잠든 센스의 포트를 USB 일련번호로 찾음).
+     다음: SCD41 이산화탄소 값이 비정상으로 높은 원인 조사(사용자).
      남은 것(4단계): 릴레이 조건 시나리오(설계 3.5), 주화면 센싱 판·보드 이름("… 측정 보드"), 연결 대수 제한을 센싱 단위로, 교체 때 묻는 화면,
      센싱 이름 설정, sens_kind_store·MAC 별칭 정리, 다른 센스(이산화탄소·암모니아) 새 펌웨어, 배터리 만충 학습.

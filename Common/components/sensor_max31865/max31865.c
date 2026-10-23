@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "sensor_wait.h"   /* 2026-10-23 — 바이어스·변환 대기 */
 #include "rom/ets_sys.h"
 
 static const char *TAG = "SENS";
@@ -168,9 +169,9 @@ max31865_result_t max31865_read(float *temp_c, uint8_t *fault_status)
         return MAX31865_ERR_NO_CHIP;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(BIAS_SETTLE_MS));
+    sensor_wait_ms(BIAS_SETTLE_MS);
     if (!write_reg(MAX_REG_CONFIG, s_base_cfg | CFG_BIAS | CFG_1SHOT)) return MAX31865_ERR_SPI;
-    vTaskDelay(pdMS_TO_TICKS(CONVERSION_MS));
+    sensor_wait_ms(CONVERSION_MS);
 
     uint8_t rtd[2] = { 0 };
     bool ok = read_regs(MAX_REG_RTD_MSB, rtd, 2);

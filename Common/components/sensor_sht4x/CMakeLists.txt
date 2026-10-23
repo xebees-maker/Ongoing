@@ -8,4 +8,5 @@ idf_component_register(
         esp_driver_i2c
         freertos
         log
+        sensor_wait
 )

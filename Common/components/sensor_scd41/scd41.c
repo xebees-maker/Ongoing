@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "sensor_wait.h"   /* 2026-10-23 — 대기는 모두 sensor_wait_ms(1~2ms 대기가 0틱이라 전혀 안 기다렸음) */
 #include "esp_attr.h"
 
 static const char *TAG = "SENS";
@@ -148,19 +149,19 @@ static bool start_measurement_sequence(void)
 {
     /* SCD41은 슬립 모드 지원 — wake_up은 NACK이 정상(깨우는 용도), 결과 무시 */
     send_cmd(CMD_WAKE_UP);
-    vTaskDelay(pdMS_TO_TICKS(30));
+    sensor_wait_ms(30);
 
     /* 이전 상태와 무관하게 정지 후 재시작 (정지 명령 실패는 무시) */
     bool stop_ok = send_cmd(CMD_STOP_PERIODIC_MEASUREMENT);
     ESP_LOGD(TAG, "stop_periodic_measurement: %s", stop_ok ? "ACK" : "NACK(ignored)");
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    sensor_wait_ms(1000);
 
     bool start_ok = false;
     for (int retry = 0; retry < 5 && !start_ok; retry++) {
         start_ok = send_cmd(CMD_START_PERIODIC_MEASUREMENT);
         if (!start_ok) {
             ESP_LOGW(TAG, "start_periodic_measurement failed (try %d/5)", retry + 1);
-            vTaskDelay(pdMS_TO_TICKS(200));
+            sensor_wait_ms(200);
         }
     }
     return start_ok;
@@ -232,7 +233,7 @@ static bool data_ready(void)
         ESP_LOGW(TAG, "data_ready: command send failed");
         return false;
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
+    sensor_wait_ms(1);
 
     uint8_t resp[3] = { 0 };
     if (i2c_master_receive(s_dev, resp, sizeof(resp), I2C_TIMEOUT_MS) != ESP_OK) {
@@ -266,7 +267,7 @@ static bool data_ready(void)
 static bool read_measurement_frame(int *co2_ppm, float *temperature, float *humidity)
 {
     if (!send_cmd(CMD_READ_MEASUREMENT)) return false;
-    vTaskDelay(pdMS_TO_TICKS(1));
+    sensor_wait_ms(1);
 
     uint8_t resp[9] = { 0 };
     if (i2c_master_receive(s_dev, resp, sizeof(resp), I2C_TIMEOUT_MS) != ESP_OK) {
@@ -319,9 +320,9 @@ bool scd41_reinit(void)
     /* 데이터시트: reinit 전에 stop 필수, stop 뒤 500ms는 다른 명령을 받지 않음. 싱글샷 모드라 주기 측정은 원래
      * 꺼져 있지만 절차대로 보냄(센서가 어떤 상태로 갇혀 있는지 모르므로) */
     bool stop_ok = send_cmd(CMD_STOP_PERIODIC_MEASUREMENT);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    sensor_wait_ms(500);
     bool reinit_ok = send_cmd(CMD_REINIT);
-    vTaskDelay(pdMS_TO_TICKS(30));  /* 2026-10-05 — 데이터시트 reinit 실행 시간 30ms(예전 20ms) — 그동안 다른 명령 금지 */
+    sensor_wait_ms(30);  /* 2026-10-05 — 데이터시트 reinit 실행 시간 30ms(예전 20ms) — 그동안 다른 명령 금지 */
     s_single_shot_pending = false;
     ESP_LOGW(TAG, "SCD41 reinit: stop=%s reinit=%s", stop_ok ? "ACK" : "NACK", reinit_ok ? "ACK" : "NACK");
     return reinit_ok;
@@ -332,7 +333,7 @@ bool scd41_reinit(void)
 static bool read_words(uint16_t cmd, uint16_t *w, int n)
 {
     if (!send_cmd(cmd)) return false;
-    vTaskDelay(pdMS_TO_TICKS(2));
+    sensor_wait_ms(2);
     uint8_t resp[9] = { 0 };
     if (i2c_master_receive(s_dev, resp, (size_t)n * 3, I2C_TIMEOUT_MS) != ESP_OK) return false;
     for (int i = 0; i < n; i++) {
@@ -371,9 +372,9 @@ void scd41_ensure_asc_off(void)
     uint8_t buf[5] = { 0x24, 0x16, 0x00, 0x00, 0 };  /* set_automatic_self_calibration_enabled(0) */
     buf[4] = crc8(&buf[2], 2);
     esp_err_t err = i2c_master_transmit(s_dev, buf, sizeof(buf), I2C_TIMEOUT_MS);
-    vTaskDelay(pdMS_TO_TICKS(2));
+    sensor_wait_ms(2);
     bool persist_ok = (err == ESP_OK) && send_cmd(0x3615);  /* persist_settings — 실행 800ms */
-    vTaskDelay(pdMS_TO_TICKS(800));
+    sensor_wait_ms(800);
     uint16_t after = 0xFFFF;
     bool rb_ok = read_words(0x2313, &after, 1);
     ESP_LOGW(TAG, "SCD4x ASC: was on -> set=%s persist=%s readback=%s%u",
@@ -389,9 +390,9 @@ bool scd41_factory_reset(uint8_t *asc_after)
     if (!s_dev) return false;
     scd41_wake_up();
     bool stop_ok = send_cmd(CMD_STOP_PERIODIC_MEASUREMENT);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    sensor_wait_ms(500);
     bool reset_ok = send_cmd(CMD_PERFORM_FACTORY_RESET);
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    sensor_wait_ms(1200);
     s_asc_write_tried = false;
     scd41_ensure_asc_off();
     uint16_t asc = 0xFFFF;
@@ -407,7 +408,7 @@ void scd41_wake_up(void)
     if (!s_dev) return;
     uint8_t buf[2] = { (uint8_t)(CMD_WAKE_UP >> 8), (uint8_t)(CMD_WAKE_UP & 0xFF) };
     (void)i2c_master_transmit(s_dev, buf, sizeof(buf), I2C_TIMEOUT_MS);
-    vTaskDelay(pdMS_TO_TICKS(30));
+    sensor_wait_ms(30);
 }
 
 bool scd41_trigger_single_shot(void)

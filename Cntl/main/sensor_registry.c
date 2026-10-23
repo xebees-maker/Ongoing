@@ -41,6 +41,8 @@ typedef struct {
 } sreg_file_t;
 
 static sreg_file_t *s_r = NULL;
+/* 2026-10-23 — 센서별 측정 상태(s_r->sensors와 같은 칸, 파일에 안 씀) */
+static struct { uint8_t fault; uint16_t streak; } s_st[SREG_MAX_SENSORS];
 static SemaphoreHandle_t s_mtx = NULL;
 
 static void lock(void)   { xSemaphoreTakeRecursive(s_mtx, portMAX_DELAY); }
@@ -314,6 +316,24 @@ bool sreg_sensing_board(uint16_t sensing_id, uint8_t out_mac[6])
     return ok;
 }
 
+bool sreg_note_status(const uint8_t mac[6], uint8_t port, uint8_t fault, uint16_t streak, uint16_t *out_sensor_id)
+{
+    if (!s_r) return false;
+    bool log = false;
+    lock();
+    sreg_sensor_t *s = sensor_at(mac, port);
+    if (s) {
+        int i = (int)(s - s_r->sensors);
+        log = (fault != s_st[i].fault) ||
+              (fault != SENSOR_FAULT_NONE && streak % 40 == 0 && streak != s_st[i].streak);
+        s_st[i].fault = fault;
+        s_st[i].streak = streak;
+        *out_sensor_id = s->id;
+    }
+    unlock();
+    return log;
+}
+
 int sreg_json(char *buf, size_t cap)
 {
     if (!s_r || cap < 32) return 0;
@@ -324,10 +344,11 @@ int sreg_json(char *buf, size_t cap)
     for (int i = 0; i < SREG_MAX_SENSORS && n < (int)cap - 160; i++) {
         const sreg_sensor_t *s = &s_r->sensors[i];
         if (!s->id) continue;
-        n += snprintf(buf + n, cap - n, "%s{\"id\":%u,\"kind\":%u,\"board\":\"%02x%02x%02x%02x%02x%02x\",\"port\":%u,\"ch\":[%u,%u],\"attached\":%s,\"seen\":%u}",
+        n += snprintf(buf + n, cap - n, "%s{\"id\":%u,\"kind\":%u,\"board\":\"%02x%02x%02x%02x%02x%02x\",\"port\":%u,\"ch\":[%u,%u],\"attached\":%s,\"seen\":%u,\"fault\":%u,\"streak\":%u}",
                       first ? "" : ",", (unsigned)s->id, (unsigned)s->kind, s->board_mac[0], s->board_mac[1], s->board_mac[2],
                       s->board_mac[3], s->board_mac[4], s->board_mac[5], (unsigned)s->port, (unsigned)s->chan_first,
-                      (unsigned)s->chan_n, s->attached ? "true" : "false", (unsigned)s->last_seen);
+                      (unsigned)s->chan_n, s->attached ? "true" : "false", (unsigned)s->last_seen,
+                      (unsigned)s_st[i].fault, (unsigned)s_st[i].streak);
         first = false;
     }
     n += snprintf(buf + n, cap - n, "],\"sensings\":[");
