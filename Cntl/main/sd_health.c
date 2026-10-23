@@ -71,6 +71,8 @@ static void journal_save(const char *why);   /* 아래(2026-10-21 명령 기록)
 static SemaphoreHandle_t s_gmtx = NULL;
 static void gm_take(void) { if (s_gmtx) xSemaphoreTakeRecursive(s_gmtx, portMAX_DELAY); }
 static void gm_give(void) { if (s_gmtx) xSemaphoreGiveRecursive(s_gmtx); }
+void sd_health_io_suspend(void) { gm_take(); }
+void sd_health_io_resume(void)  { gm_give(); }
 
 
 static void save_now(void)

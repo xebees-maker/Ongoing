@@ -85,6 +85,10 @@ int sd_health_journal_text(char *buf, size_t cap, uint32_t max_lines);
  * 틀린 벌을 메꿈. 맞는 벌이 없으면 SD 이상으로 보고하고 false */
 bool sd_health_fat_read_check(uint32_t lba, uint8_t *sp, int vol);
 
+/* 2026-10-23(SD 꺼내기) — 진행 중인 감시·검사가 끝나길 기다려 막음/풂 */
+void sd_health_io_suspend(void);
+void sd_health_io_resume(void);
+
 /* sd_storage가 마운트 직전에 읽은 카드 CID 한 줄 */
 void sd_health_set_card(const char *cid_line);
 

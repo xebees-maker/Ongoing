@@ -27,21 +27,20 @@
 extern "C" {
 #endif
 
+/* 2026-10-23(사용자 설계 — 센서 중심 구조 2단계, Docs/설계_센서중심_2026-10-23.md) — 기록 단위 = 센싱(sensor_registry.h).
+ * 예전(09-19~10-22, 17바이트)엔 보드 MAC + kind + chan_index였음 — 한 보드의 같은 값 종류(온도 셋)가 섞였음.
+ * 형식 2판: 옛 기록은 버림(사용자 "날려도 돼") — 판이 다르면 내부 플래시·SD 통계를 비우고 시작.
+ * attr = 어디·정밀도(STATS_ATTR_*) — 레코드가 스스로 무엇을·어디를·얼마나 정확히를 알고 있게(09-19 자기서술 원칙 유지) */
+#define STATS_FORMAT_VERSION  2
+#define STATS_ATTR_PRECISE    0x01
+#define STATS_ATTR_SUBSTRATE  0x02
 typedef struct __attribute__((packed)) {
     uint32_t unix_time;
-    uint8_t  mac[6];
-    uint8_t  kind;        /* 2026-09-19(계열 자기서술 재설계, 사용자 설계) — sensor_kind_t.
-                            * 기록 시점에 이미 콘이 알고 있는 값(라이브 노드의 sensor_kind)을
-                            * 바로 박아넣음 — 읽을 때 mac->kind 역조회(라이브 노드 목록/
-                            * 영구저장소 조회) 없이 레코드 자신이 어떤 계열인지 항상 스스로
-                            * 알고 있게 함. 사용자 원칙: "레코드의 값이 어떤 계열인지만 알면
-                            * 항상 대처 가능한 그림을 그릴 수 있다" */
-    uint8_t  chan_type;   /* sensor_channel_type_t */
-    uint8_t  chan_index;  /* 그 노드 chan_type[]/chan_val[] 배열에서의 인덱스(0..4) —
-                            * 레거시 콤보처럼 같은 chan_type이 한 노드에 2개 이상일 때 구분용 */
+    uint16_t sensing;     /* 센싱 ID */
+    uint8_t  chan_type;   /* 무엇을 — sensor_channel_type_t */
+    uint8_t  attr;        /* STATS_ATTR_* */
     float    value;
-} stats_record_t;  /* 17바이트 고정(2026-09-19, kind 추가로 16->17) —
-                       페이지번호*STATS_STORE_PAGE_SIZE*sizeof(stats_record_t) = 파일 오프셋 */
+} stats_record_t;  /* 12바이트 고정 — 페이지번호*STATS_STORE_PAGE_SIZE*sizeof(stats_record_t) = 파일 오프셋 */
 
 /* 2026-09-15(사용자 지시 — "전화면이 되면서... 지금 10개 row로 되어 있는데, 4개는 더
  * 들어갈 듯") — 2열 x 14행 = 28 */
@@ -210,19 +209,12 @@ extern const uint32_t STATS_SCALE_SECONDS[STATS_SCALE_COUNT];  /* 3600/43200/864
 
 typedef struct __attribute__((packed)) {
     uint32_t bucket_start_unix;  /* 벽시계 정렬(unix_time/버킷폭*버킷폭) — 그 버킷의 시작 */
-    uint8_t  mac[6];             /* 2026-09-15(사용자 지시 — "kind 추가해야지... Agar는 각
-                                     기기마다 하나의 계열") — 장치까지 키에 포함. SCD41/SHT45가
-                                     둘 다 온도를 보내도 서로 다른 계열로 분리 저장됨 */
-    uint8_t  kind;                /* 2026-09-19(계열 자기서술 재설계) — stats_record_t.kind와
-                                      동일 이유. 이 필드 덕분에 그래프가 "이 mac이 어떤
-                                      계열이었나"를 라이브 노드 목록/영구저장소에 물어볼 필요
-                                      없이, 저장된 버킷 자신이 스스로 답을 들고 있음 */
+    uint16_t sensing;            /* 2026-10-23 — 센싱 ID(계열 = 센싱) */
     uint8_t  chan_type;
-    uint8_t  sample_count;       /* 진단용 — 이 버킷 구간에 실제로 들어온 실측값 개수(평균에
-                                     쓰이지 않음, 대표값 선정과 무관) */
-    float    avg_value;          /* "평균"이 아니라 버킷 중앙시각에 가장 가까운 실측값 그대로
-                                     (필드명은 하위호환을 위해 유지, 의미만 바뀜) */
-} stats_bucket_t;  /* 17바이트 고정(2026-09-19, kind 추가로 16->17) */
+    uint8_t  attr;               /* STATS_ATTR_* */
+    uint8_t  sample_count;       /* 진단용 — 이 버킷 구간에 실제로 들어온 실측값 개수 */
+    float    avg_value;          /* "평균"이 아니라 버킷 중앙시각에 가장 가까운 실측값 그대로(필드명만 옛 이름) */
+} stats_bucket_t;  /* 13바이트 고정(2026-10-23 형식 2판) */
 
 /* scale_idx(0..4)의 사전집계 저장에서 [window_start_unix, window_end_unix) 범위 안의 버킷을 기기/채널 구분 없이 전부
  * out에 채움(주 파일 순서 = 시간순). 실제 채운 개수 반환.

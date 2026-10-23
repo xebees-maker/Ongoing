@@ -193,6 +193,10 @@ typedef enum {
     ESP_NOW_MSG_CAM_CAPTURE_FAIL_ACK = 66,   /* Cntl -> CAM: esp_now_cam_capture_ack_t */
     ESP_NOW_MSG_CAM_CAPTURE_RETRY = 67,      /* Cntl -> CAM: esp_now_cam_capture_ack_t — 주기 촬영 다시(사진은 주기 촬영 사진 T로) */
     ESP_NOW_MSG_CAM_CAPTURE_RETRY_ACK = 68,  /* CAM -> Cntl: esp_now_cam_capture_ack_t — 받음(결과는 사진 또는 CAPTURE_FAIL) */
+    /* 2026-10-23(사용자 설계 — 센서 중심 구조, Docs/설계_센서중심_2026-10-23.md) — 콘이 센서 ID를 붙여 센스에 알려 줌.
+     * 센스는 포트별로 저장하고 다음 페어링부터 그 ID를 실어 보냄(esp_now_pair_ack_t.sensors) */
+    ESP_NOW_MSG_SENSOR_ID_ASSIGN = 69,       /* Cntl -> Sens: esp_now_sensor_id_assign_t, 신뢰 전송 */
+    ESP_NOW_MSG_SENSOR_ID_ASSIGN_ACK = 70,   /* Sens -> Cntl: esp_now_sensor_id_assign_ack_t */
 } esp_now_msg_type_t;
 
 /* 2026-10-22 — 주기 촬영 실패 이유 */
@@ -282,6 +286,17 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
 } esp_now_pair_request_t;
 
+/* 2026-10-23(센서 중심 구조) — 보드에 달린 센서 하나의 설명(페어링 응답에 실림). 센스는 어느 포트에 어떤 센서가 있고 어떻게
+ * 읽는지만 맡고, 콘·센스는 센서 ID로 센서를 다룸(사용자 설계) */
+#define ESP_NOW_MAX_SENSORS 4
+typedef struct __attribute__((packed)) {
+    uint8_t  kind;        /* sensor_kind_t — 센서 모델 */
+    uint8_t  port;        /* 보드 안 자리(센스가 정함, 0부터) */
+    uint8_t  chan_first;  /* 이 센서 값이 채널 배열(chan_type/chan_val)에서 시작하는 곳 */
+    uint8_t  chan_n;      /* 채널 수 */
+    uint16_t sensor_id;   /* 콘이 붙여 준 ID(0 = 아직 없음) */
+} esp_now_sensor_desc_t;
+
 /* 2026-09-05(사용자 지시) — 노드가 뭘 재는지(센서 종류/채널구성)는 자주 안 바뀌는 값이라
  * 매 캐스크 사이클(WAKE_HELLO_SENS)이 아니라 페어링 완료 이 순간에 1회만 실어보냄 — 이후
  * 패스트패스 재연결 사이클들은 콘이 여기서 받아둔 값을 계속 재사용(콘이 리부팅해서 다시
@@ -300,8 +315,27 @@ typedef struct __attribute__((packed)) {
      * 이 필드는 길이가 될 때만 읽음 */
     uint16_t cam_pid;
     uint8_t  cam_max_framesize;
+    /* 2026-10-23(센서 중심 구조) — 센스만: 보드에 달린 센서 목록(보드 = 운반, 센서 = 관리 단위). 0이면 옛 형식(센서 하나 =
+     * sensor_kind, 채널 전부). 끝에 붙인 필드 — 받는 쪽은 길이가 ESP_NOW_PAIR_ACK_SENSORS_LEN + 개수만큼 될 때만 읽음 */
+    uint8_t  sensor_count;
+    esp_now_sensor_desc_t sensors[ESP_NOW_MAX_SENSORS];
 } esp_now_pair_ack_t;
 #define ESP_NOW_PAIR_ACK_BASE_LEN offsetof(esp_now_pair_ack_t, cam_pid)
+#define ESP_NOW_PAIR_ACK_CAM_LEN  offsetof(esp_now_pair_ack_t, sensor_count)   /* 캠 정보까지 */
+#define ESP_NOW_PAIR_ACK_SENSORS_LEN offsetof(esp_now_pair_ack_t, sensors)     /* 센서 개수까지 */
+
+/* ESP_NOW_MSG_SENSOR_ID_ASSIGN(2026-10-23) — 포트별 센서 ID */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+    uint8_t count;
+    struct __attribute__((packed)) { uint8_t port; uint16_t sensor_id; } ids[ESP_NOW_MAX_SENSORS];
+} esp_now_sensor_id_assign_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_sensor_id_assign_ack_t;
 
 /* esp_now_channel_ping_t/esp_now_channel_pong_t(2026-08-04/05) — 2026-08-25 CASK 재설계로
  * 완전 제거. project_cam_cntl_ping_pong_redesign_proposal 메모리 참고 */

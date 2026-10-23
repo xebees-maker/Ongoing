@@ -44,9 +44,8 @@
 #include "battery.h"
 #include "esp_now_node.h"
 #include "esp_now_channelsync.h"
-#include "status_led.h"
 #include "rwdt_guard.h"
-#include "led_strip.h"
+#include "rgb_status.h"
 
 /* 2026-09-12(사용자 지시 — "장치 종류가 달라도 프로토콜/루틴은 동일해야 한다") — 이 파일은
  * 이제 SCD41 전용이 아니라 캐스크(딥슬립) 구조를 쓰는 모든 센서 종류의 공용 루틴이다.
@@ -94,16 +93,35 @@
     static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
         SENSOR_CHAN_TEMP_C,    /* 2026-09-30 — Agar 접촉 온도(DS18B20, PT100과 비교용) */
     };
+#elif CONFIG_SENS_SENSOR_SHT45_DS2
+    /* 2026-10-23(사용자 설계 — 고온 보드, 센서 중심 구조) — 센서 3개: SHT45(공기 온습도) + DS18B20 두 개(배지 온도, 핀 하나씩).
+     * 보드의 sensor_kind는 옛 콘 호환용 대표값일 뿐 — 실제 구성은 s_sensors(페어링 응답의 센서 목록) */
+    #include "sht4x.h"
+    #include "ds18b20_sensor.h"
+    #define SENSOR_KIND_CURRENT  SENSOR_KIND_SHT45
+    #define SENSOR_CHAN_COUNT    4
+    static const uint8_t s_chan_types[SENSOR_CHAN_COUNT] = {
+        SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT, SENSOR_CHAN_TEMP_C, SENSOR_CHAN_TEMP_C,
+    };
+    static const esp_now_sensor_desc_t s_sensors[] = {
+        { .kind = SENSOR_KIND_SHT45,   .port = 0, .chan_first = 0, .chan_n = 2 },
+        { .kind = SENSOR_KIND_DS18B20, .port = 1, .chan_first = 2, .chan_n = 1 },   /* GPIO4 */
+        { .kind = SENSOR_KIND_DS18B20, .port = 2, .chan_first = 3, .chan_n = 1 },   /* GPIO5 */
+    };
 #else
-    #error "sens_deep_sleep_node.c supports only SCD41/MQ137/SC05/SHT45/PT100/DS18B20 - add a branch here to move another sensor to CASK"
+    #error "sens_deep_sleep_node.c supports only SCD41/MQ137/SC05/SHT45/PT100/DS18B20/SHT45_DS2 - add a branch here to move another sensor to CASK"
+#endif
+
+#if !CONFIG_SENS_SENSOR_SHT45_DS2
+/* 2026-10-23(센서 중심 구조) — 센서 하나짜리 보드: 포트 0에 그 센서, 채널 전부 */
+static const esp_now_sensor_desc_t s_sensors[] = {
+    { .kind = SENSOR_KIND_CURRENT, .port = 0, .chan_first = 0, .chan_n = SENSOR_CHAN_COUNT },
+};
 #endif
 
 static const char *TAG = "sens_deep_sleep_node";
 
-#define BATT_PLATEAU_MIN_MV     3900.0f
-#define BATT_FULL_MV_DEFAULT    4020.0f
-#define NVS_NS_BATTCAL           "battcal"
-#define NVS_KEY_FULL_MV          "full_mv"
+#define BATT_FULL_MV_FIXED      4200.0f   /* 2026-10-23 — 고정(학습은 나중에) */
 
 #if CONFIG_SENS_SENSOR_SCD41
 /* SCD41 single-shot 측정 소요시간(~5초) 대비 여유 — 트리거 후 이 안에 완료 안 되면 실패로
@@ -138,9 +156,7 @@ static const char *TAG = "sens_deep_sleep_node";
 /* Live 모드(SLEEP_NOW.sleep_sec==0) 재체크인 페이싱 — 캠의 CASK_LIVE_PACE_MS와 동일 값 */
 #define SENS_CASK_LIVE_PACE_MS    1000
 
-static float s_full_mv           = BATT_FULL_MV_DEFAULT;
-static int   s_full_mv_persisted = 0;
-static adc_oneshot_unit_handle_t s_vin_adc = NULL;
+static adc_oneshot_unit_handle_t s_adc_unit = NULL;   /* 배터리 ADC 유닛 — MQ137 AO가 같이 씀 */
 
 /* 2026-09-05 — 측정값 캐시(딥슬립 경계 넘어 유지) + 측정ID(캠의 s_wake_hub_* RTC_DATA_ATTR
  * 패턴과 동일 이유). 0=한 번도 측정 성공한 적 없음 — 이때만 웨헬이 "빈" 값(chan_ok=false)을
@@ -214,136 +230,9 @@ static uint32_t next_unpaired_retry_sleep_sec(void)
     return UNPAIRED_BACKOFF_LONG_SEC;
 }
 
-static bool vin_indicates_usb(void)
-{
-    if (!s_vin_adc) return false;
-    int raw = 0;
-    if (adc_oneshot_read(s_vin_adc, BSP_C3_VIN_ADC_CHANNEL, &raw) != ESP_OK) return false;
-    int mv = (int)((float)raw * 3100.0f / 4095.0f);
-    return mv >= BSP_C3_VIN_PRESENT_MV;
-}
-
-/* sensor_node.c의 maybe_learn_full_mv()와 같은 목적이지만 단순화(2026-09-05) — 예전 버전은
- * "계속실행" 전제로 20샘플 추세밴드를 봤는데, 딥슬립에선 매 부팅이 곧 새 판독 하나뿐이라
- * 그 창 자체가 없음. 이번 판독이 USB 전원 중이고 완충값 부근이면 그대로 학습 */
-static void maybe_learn_full_mv(bool powered, int mv)
-{
-    if (!powered) return;
-    if ((float)mv < BATT_PLATEAU_MIN_MV) return;
-    if (mv == (int)s_full_mv) return;
-
-    s_full_mv = (float)mv;
-    battery_set_full_mv(s_full_mv);
-    ESP_LOGI(TAG, "Battery full voltage learned: %d mV", mv);
-
-    if (mv != s_full_mv_persisted) {
-        nvs_handle_t h;
-        if (nvs_open(NVS_NS_BATTCAL, NVS_READWRITE, &h) == ESP_OK) {
-            nvs_set_i32(h, NVS_KEY_FULL_MV, mv);
-            nvs_commit(h);
-            nvs_close(h);
-            s_full_mv_persisted = mv;
-        }
-    }
-}
-
-static led_pattern_t batt_pct_to_led_pattern(int pct)
-{
-    if (pct >= 60) return LED_PATTERN_HEARTBEAT;
-    if (pct >= 20) return LED_PATTERN_HEARTBEAT_FAST;
-    return LED_PATTERN_HEARTBEAT_URGENT;
-}
-
-/* 2026-09-06(사용자 지시: "잘 되면 대치하려고 해") — 온보드 WS2812(GPIO7, bsp_c3_pico.h
- * 주석 확인) 하드웨어 검증용 임시 테스트. 원색 3개(빨/초/파) + 혼합색 3개(보라=빨+파,
- * 노랑=빨+초, 청록=초+파) 1초 간격 6가지 — "혼합도 되는지 확인" 목적. 이 실험이 잘 되면
- * 기존 단색 상태 LED(HEARTBEAT/BLINK_FAST 등)를 이걸로 대치할 예정 — 지금은 순수 시각
- * 확인용 임시 코드, 실제 상태 매핑 아님 */
-#define WS2812_TEST_GPIO       7
-#define WS2812_TEST_BRIGHTNESS 32  /* 0~255, 눈부심 방지로 낮게 */
-
-/* 2026-09-06(사용자 지시: "코드에도 정의해") — 빨/초/파/보/노/청/백 색 이름과 RGB 조합을
- * 코드로 고정. 나중에 실제 상태(HEARTBEAT/BLINK_FAST 등 대치)를 이 색 중 하나로 매핑할
- * 때 이 enum/테이블을 그대로 재사용하면 됨 — 순서는 실기로 확인한 시각 테스트 순서와 동일 */
-typedef enum {
-    WS2812_COLOR_RED,     /* 빨 */
-    WS2812_COLOR_GREEN,   /* 초 */
-    WS2812_COLOR_BLUE,    /* 파 */
-    WS2812_COLOR_PURPLE,  /* 보 = 빨+파 */
-    WS2812_COLOR_YELLOW,  /* 노 = 빨+초 */
-    WS2812_COLOR_CYAN,    /* 청 = 초+파 */
-    WS2812_COLOR_WHITE,   /* 백 = 빨+초+파 */
-    WS2812_COLOR_COUNT,
-} ws2812_color_t;
-
-static const struct { uint8_t r, g, b; const char *name; } s_ws2812_colors[WS2812_COLOR_COUNT] = {
-    [WS2812_COLOR_RED]    = { WS2812_TEST_BRIGHTNESS, 0, 0, "red" },
-    [WS2812_COLOR_GREEN]  = { 0, WS2812_TEST_BRIGHTNESS, 0, "green" },
-    [WS2812_COLOR_BLUE]   = { 0, 0, WS2812_TEST_BRIGHTNESS, "blue" },
-    [WS2812_COLOR_PURPLE] = { WS2812_TEST_BRIGHTNESS, 0, WS2812_TEST_BRIGHTNESS, "purple" },
-    [WS2812_COLOR_YELLOW] = { WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, 0, "yellow" },
-    [WS2812_COLOR_CYAN]   = { 0, WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, "cyan" },
-    [WS2812_COLOR_WHITE]  = { WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, WS2812_TEST_BRIGHTNESS, "white" },
-};
-
-/* 상태 매핑 코드가 재사용할 헬퍼 — 색 이름(enum)만 넘기면 실제 픽셀 설정+refresh까지 함 */
-static void ws2812_set_color(led_strip_handle_t strip, ws2812_color_t color)
-{
-    led_strip_set_pixel(strip, 0, s_ws2812_colors[color].r, s_ws2812_colors[color].g, s_ws2812_colors[color].b);
-    led_strip_refresh(strip);
-}
-
-/* 2026-09-06(사용자 지시) — 측정 시작/완료/실패를 이 WS2812로 눈에 보이게 표시(SCD41 판독
- * 실패 진단용). 핸들은 최초 호출 때 한 번만 만들고 계속 재사용 */
-static led_strip_handle_t s_ws2812_strip = NULL;
-
-static void ws2812_init_once(void)
-{
-    if (s_ws2812_strip) return;
-    led_strip_config_t strip_config = {
-        .strip_gpio_num        = WS2812_TEST_GPIO,
-        .max_leds              = 1,
-        .led_model             = LED_MODEL_WS2812,
-        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_RGB,  /* 이 보드는 GRB 아니라
-                                                                          RGB 순서(실기 확인) */
-    };
-    led_strip_rmt_config_t rmt_config = { .resolution_hz = 10 * 1000 * 1000 };
-    if (led_strip_new_rmt_device(&strip_config, &rmt_config, &s_ws2812_strip) != ESP_OK) {
-        ESP_LOGW(TAG, "WS2812 init failed - continuing without the measurement LED");
-        s_ws2812_strip = NULL;
-    }
-}
-
-static void ws2812_off(void)
-{
-    if (!s_ws2812_strip) return;
-    led_strip_clear(s_ws2812_strip);
-    led_strip_refresh(s_ws2812_strip);
-}
-
-/* 한 번 켰다가 on_ms 뒤에 끔 */
-static void ws2812_flash(ws2812_color_t color, uint32_t on_ms)
-{
-    ws2812_init_once();
-    if (!s_ws2812_strip) return;
-    ws2812_set_color(s_ws2812_strip, color);
-    vTaskDelay(pdMS_TO_TICKS(on_ms));
-    ws2812_off();
-}
-
-/* on_ms 켬 -> on_ms 끔을 times번 반복(측정 실패 표시: 보라 2회 깜빡임) */
-static void ws2812_blink(ws2812_color_t color, uint32_t on_ms, int times)
-{
-    ws2812_init_once();
-    if (!s_ws2812_strip) return;
-    for (int i = 0; i < times; i++) {
-        ws2812_set_color(s_ws2812_strip, color);
-        vTaskDelay(pdMS_TO_TICKS(on_ms));
-        ws2812_off();
-        if (i + 1 < times) vTaskDelay(pdMS_TO_TICKS(on_ms));
-    }
-}
-
+/* 2026-10-23(사용자 결정) — 외부 보드(LED 두 개, VIN 분압)를 모든 센스에서 뗌: USB 전원 감지(vin_indicates_usb)와
+ * 그걸 전제로 한 만충 전압 학습(maybe_learn_full_mv), 파랑 LED 배터리 패턴, WS2812 시험 코드를 지움. 표시는 rgb_status
+ * (내장 RGB, 단색). 만충 전압은 일단 고정(BATT_FULL_MV_FIXED) — 학습은 나중에(사용자 "시간되면") */
 /* 2026-09-06(사용자 지시) — CONFIG_PM_ENABLE=y + FREERTOS_USE_TICKLESS_IDLE=y(자동
  * 라이트슬립)가 켜져 있어서, SCD41 측정 폴링 중(vTaskDelay 사이사이) 라이트슬립에 들어갔다
  * 나왔다 하면서 I2C 상태가 깨질 가능성 — 측정 시작~완료까지는 라이트슬립 자체를 못 하게
@@ -486,9 +375,40 @@ static void calib_wait_idle(void)
 /* 2026-09-12(사용자 지시 — "같은 루틴, 변수만 다르게") — 센서 종류별 실제 판독 하나로
  * 모음. SCD41은 트리거+블로킹폴링(위), MQ137은 이미 히터가 외부전원으로 항상 예열돼
  * 있어서(배터리가 아니라 상시전원 전제) 트리거/대기 없이 즉시 읽으면 됨 */
-static bool measure_sensor(float out[SENSOR_CHAN_COUNT])
+/* 2026-10-23 — 채널마다 성공 여부(ok[])를 채움. 반환 = 모든 채널 성공. 센서 하나짜리는 전부 같은 결과 */
+#if !CONFIG_SENS_SENSOR_SHT45_DS2
+static bool measure_sensor_one(float out[SENSOR_CHAN_COUNT]);
+#endif
+static bool measure_sensor(float out[SENSOR_CHAN_COUNT], uint8_t ok[SENSOR_CHAN_COUNT])
 {
     calib_wait_idle();   /* 2026-10-13 */
+#if CONFIG_SENS_SENSOR_SHT45_DS2
+    bool a = sht4x_read(&out[0], &out[1]);
+    ok[0] = ok[1] = a;
+    if (!a) s_attempt_fault = SENSOR_FAULT_READ;
+    const gpio_num_t pins[2] = { BSP_C3_DS18B20_PIN_A, BSP_C3_DS18B20_PIN_B };
+    bool all = a;
+    for (int i = 0; i < 2; i++) {
+        ds18b20_sensor_result_t r = ds18b20_sensor_read_pin(pins[i], &out[2 + i]);
+        ok[2 + i] = (r == DS18B20_SENSOR_OK);
+        if (r != DS18B20_SENSOR_OK) {
+            all = false;
+            s_attempt_fault = (r == DS18B20_SENSOR_ERR_NO_DEVICE) ? SENSOR_FAULT_CMD_NACK
+                            : (r == DS18B20_SENSOR_ERR_CRC) ? SENSOR_FAULT_CRC : SENSOR_FAULT_READ;
+            ESP_LOGW(TAG, "DS18B20 on GPIO%d read failed (%d)", (int)pins[i], (int)r);
+        }
+    }
+    return all;
+#else
+    bool r = measure_sensor_one(out);
+    for (int i = 0; i < SENSOR_CHAN_COUNT; i++) ok[i] = r;
+    return r;
+#endif
+}
+
+#if !CONFIG_SENS_SENSOR_SHT45_DS2
+static bool measure_sensor_one(float out[SENSOR_CHAN_COUNT])
+{
 #if CONFIG_SENS_SENSOR_SCD41
     return measure_scd41(out);
 #elif CONFIG_SENS_SENSOR_MQ137
@@ -522,26 +442,23 @@ static bool measure_sensor(float out[SENSOR_CHAN_COUNT])
     return false;
 #endif
 }
+#endif
 
 /* 2026-09-06(사용자 지시) — 측정 시도 한 번(노랑 시작 표시 -> 실제 판독 -> 청록/보라
  * 결과 표시)을 통째로 감싼 헬퍼. 파워사이클 후 첫 워밍업 측정도 이 함수로 똑같이
  * 표시하고(사용자 지시: 구분 없이 LED 표시), 실측정도 이 함수로 함 — 한 사이클 안에서
  * 최대 두 번(워밍업+실측정) 불릴 수 있어서 elapsed는 호출부가 계속 누적하도록
  * 포인터로 받음 */
-static bool attempt_one_measurement(float out[SENSOR_CHAN_COUNT], uint32_t *accum_elapsed_ms)
+static bool attempt_one_measurement(float out[SENSOR_CHAN_COUNT], uint8_t ok_ch[SENSOR_CHAN_COUNT], uint32_t *accum_elapsed_ms)
 {
-    ws2812_flash(WS2812_COLOR_YELLOW, 100);
+    rgb_status_blink(RGB_STATUS_GREEN, 1);   /* 2026-10-23 — 측정 시작 G 1번 */
     uint32_t start_ms = (uint32_t)(esp_timer_get_time() / 1000);
     pm_lock_no_light_sleep_acquire();
     s_attempt_fault = SENSOR_FAULT_OTHER;  /* 원인을 구분하는 센서(SCD41)는 measure_* 안에서 덮어씀 */
-    bool ok = measure_sensor(out);
+    bool ok = measure_sensor(out, ok_ch);
     pm_lock_no_light_sleep_release();
     *accum_elapsed_ms += (uint32_t)(esp_timer_get_time() / 1000) - start_ms;
-    if (ok) {
-        ws2812_flash(WS2812_COLOR_CYAN, 200);
-    } else {
-        ws2812_blink(WS2812_COLOR_PURPLE, 100, 2);
-    }
+    rgb_status_blink(ok ? RGB_STATUS_GREEN : RGB_STATUS_RED, ok ? 2 : 1);   /* 성공 G 2번 / 실패 R 1번 */
     return ok;
 }
 
@@ -586,7 +503,8 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
     if (due_for_measurement) {
         bool is_first_ever = (s_measurement_id == 0);
         float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
-        bool fresh_ok = attempt_one_measurement(fresh_vals, measurement_elapsed_ms);
+        uint8_t fresh_chok[SENSOR_CHAN_COUNT] = { 0 };
+        bool fresh_ok = attempt_one_measurement(fresh_vals, fresh_chok, measurement_elapsed_ms);
 
 #if CONFIG_SENS_SENSOR_SCD41
         if (fresh_ok && is_first_ever) {
@@ -597,16 +515,19 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
              * 진짜 측정과 동일하게 LED로 표시(구분 없음). MQ137은 히터가 외부전원으로 항상
              * 예열돼 있어서(배터리 아님) 이 워밍업-버림이 필요 없음 */
             ESP_LOGI(TAG, "SCD41 warm-up measurement done (discarded, first value after power cycle) - measuring again");
-            fresh_ok = attempt_one_measurement(fresh_vals, measurement_elapsed_ms);
+            fresh_ok = attempt_one_measurement(fresh_vals, fresh_chok, measurement_elapsed_ms);
         }
 #else
         (void)is_first_ever;
 #endif
 
-        if (fresh_ok) {
-            note_measure_recovered();
+        bool any_ok = false;
+        for (int i = 0; i < SENSOR_CHAN_COUNT; i++) any_ok |= fresh_chok[i];
+        if (any_ok) {
+            /* 2026-10-23 — 센서가 여럿이면 성공한 채널만 새 값, 실패한 채널은 "값 없음"(콘이 그 센싱만 비움) */
+            if (fresh_ok) note_measure_recovered(); else note_measure_failed();
             memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
-            for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = 1;
+            for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = fresh_chok[i];
             s_measurement_id++;
             s_seconds_since_last_measurement = 0;
             /* %f 안 씀(newlib-nano 미지원 — feedback_lvgl_no_percent_f 관례) — 정수부/소수부
@@ -633,6 +554,13 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
             ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u temp=%d.%d humi=%d.%d",
                      (unsigned)s_measurement_id, sht_temp_x10 / 10, sht_temp_x10 % 10,
                      sht_humi_x10 / 10, sht_humi_x10 % 10);
+#elif CONFIG_SENS_SENSOR_SHT45_DS2
+            int t0 = (int)(s_cached_vals[0] * 10.0f + 0.5f), h0 = (int)(s_cached_vals[1] * 10.0f + 0.5f);
+            int a1 = (int)(s_cached_vals[2] * 100.0f + 0.5f), a2 = (int)(s_cached_vals[3] * 100.0f + 0.5f);
+            ESP_LOGI(TAG, "MEASMARK measurement %s - measID=%u temp=%d.%d humi=%d.%d sub1=%s%d.%02d sub2=%s%d.%02d",
+                     fresh_ok ? "ok" : "partial", (unsigned)s_measurement_id, t0 / 10, t0 % 10, h0 / 10, h0 % 10,
+                     s_cached_chan_ok[2] ? "" : "(none) ", abs(a1) / 100, abs(a1) % 100,
+                     s_cached_chan_ok[3] ? "" : "(none) ", abs(a2) / 100, abs(a2) % 100);
 #elif CONFIG_SENS_SENSOR_PT100 || CONFIG_SENS_SENSOR_DS18B20
             int pt_temp_x100 = (int)(s_cached_vals[0] * 100.0f + (s_cached_vals[0] < 0 ? -0.5f : 0.5f));
             ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u agar_temp=%s%d.%02d",
@@ -671,16 +599,6 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    nvs_handle_t batt_nvs;
-    if (nvs_open(NVS_NS_BATTCAL, NVS_READONLY, &batt_nvs) == ESP_OK) {
-        int32_t learned_mv = 0;
-        if (nvs_get_i32(batt_nvs, NVS_KEY_FULL_MV, &learned_mv) == ESP_OK) {
-            s_full_mv           = (float)learned_mv;
-            s_full_mv_persisted = learned_mv;
-        }
-        nvs_close(batt_nvs);
-    }
-
     ESP_ERROR_CHECK(bsp_c3_pico_init());
 
     /* 2026-09-06(사용자 지시로 재확인) — single-shot만 쓰는 경로는 continuous(periodic)
@@ -712,7 +630,7 @@ void app_main(void)
         scd41_read_identity();   /* 2026-10-18(시험) — 예전 순서 그대로(scd41.c 주석) */
         scd41_ensure_asc_off();  /* 2026-10-05(SCD41 개선 3단계) */
     }
-#elif CONFIG_SENS_SENSOR_SHT45
+#elif CONFIG_SENS_SENSOR_SHT45 || CONFIG_SENS_SENSOR_SHT45_DS2
     /* SHT4x는 SCD41과 달리 전원안정화 지연 요구사항이 문서화돼있지 않음(예전 sensor_node.c도
      * 지연 없이 바로 init) — I2C 버스 공유(BSP_C3_I2C_*)는 SCD41과 동일 자리 */
     if (!sht4x_init(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) {
@@ -745,23 +663,16 @@ void app_main(void)
         .adc_channel = BSP_C3_BATTERY_ADC_CHANNEL,
         .atten       = BSP_C3_BATTERY_ADC_ATTEN,
         .divider     = BSP_C3_BATTERY_DIV,
-        .full_mv     = s_full_mv,
+        .full_mv     = BATT_FULL_MV_FIXED,
         .empty_mv    = 3300.0f,
         .ctrl_gpio   = GPIO_NUM_NC,
     };
     battery_init(&batt_cfg);
 
-    s_vin_adc = battery_get_adc_handle();
-    if (s_vin_adc) {
-        adc_oneshot_chan_cfg_t vin_ch_cfg = {
-            .atten    = BSP_C3_VIN_ADC_ATTEN,
-            .bitwidth = ADC_BITWIDTH_DEFAULT,
-        };
-        adc_oneshot_config_channel(s_vin_adc, BSP_C3_VIN_ADC_CHANNEL, &vin_ch_cfg);
-    }
+    s_adc_unit = battery_get_adc_handle();
 
 #if CONFIG_SENS_SENSOR_MQ137
-    if (!mq137_init(s_vin_adc, BSP_C3_MQ137_AO_ADC_CHANNEL, BSP_C3_MQ137_AO_ADC_ATTEN,
+    if (!mq137_init(s_adc_unit, BSP_C3_MQ137_AO_ADC_CHANNEL, BSP_C3_MQ137_AO_ADC_ATTEN,
                     BSP_C3_MQ137_DO_PIN)) {
         ESP_LOGW(TAG, "MQ137 init failed - check wiring (retry next cycle)");
     }
@@ -776,23 +687,8 @@ void app_main(void)
 
     int batt_mv = battery_read_mv();
     bool batt_ok = (batt_mv > 0);
-    bool powered = vin_indicates_usb();
-    if (batt_ok) maybe_learn_full_mv(powered, batt_mv);
     int batt_pct = batt_ok ? battery_mv_to_pct(batt_mv) : 0;
-
-    /* 충전 중(USB 전원)이 최우선 — sensor_node.c와 동일 우선순위. "판독 실패" LED는
-     * 이번 부팅 판독이 아니라 "한 번도 측정 성공한 적 없음"(measurement_id==0) 기준 —
-     * 캐시된 값이 있으면 이번에 재측정 실패해도 굳이 경보 패턴까지는 안 씀 */
-    if (powered) {
-        status_led_init(BSP_C3_LED_BLUE);
-        status_led_set_pattern(BSP_C3_LED_BLUE, LED_PATTERN_ON);
-    } else if (s_measurement_id == 0) {
-        status_led_init(BSP_C3_LED_BLUE);
-        status_led_set_pattern(BSP_C3_LED_BLUE, LED_PATTERN_BURST_TRIPLE);
-    } else if (batt_ok) {
-        status_led_init(BSP_C3_LED_BLUE);
-        status_led_set_pattern(BSP_C3_LED_BLUE, batt_pct_to_led_pattern(batt_pct));
-    }
+    if (batt_ok && batt_pct < 20) rgb_status_blink(RGB_STATUS_RED, 3);   /* 2026-10-23 — 배터리 20% 미만 R 3번 */
 
     uint16_t batt_mv_u16 = (batt_ok && batt_mv < 65536) ? (uint16_t)batt_mv : 0;
 
@@ -813,7 +709,7 @@ void app_main(void)
     esp_now_channelsync_set_event_hooks(NULL, NULL, NULL, on_scan_sweep_done);
     s_wake_recheck_sem = xSemaphoreCreateBinary();
 
-    esp_now_node_set_status_led(BSP_C3_LED_GREEN);
+    esp_now_node_set_sensors(s_sensors, sizeof(s_sensors) / sizeof(s_sensors[0]));   /* 2026-10-23 — 센서 목록 */
     esp_now_node_init(SENSOR_KIND_CURRENT, SENSOR_CHAN_COUNT, s_chan_types);
 
     ESP_LOGI(TAG, "Headless Sens node ready (kind=%d, channels=%d, measID=%u)",
@@ -915,10 +811,14 @@ void app_main(void)
         if (s_seconds_since_last_measurement + live_awake_elapsed_sec >= live_measure_period_sec &&
             (int32_t)(live_now_ms - live_retry_after_ms) >= 0) {
             float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
-            if (attempt_one_measurement(fresh_vals, &measurement_elapsed_ms)) {
-                note_measure_recovered();
+            uint8_t fresh_chok[SENSOR_CHAN_COUNT] = { 0 };
+            bool all_ok = attempt_one_measurement(fresh_vals, fresh_chok, &measurement_elapsed_ms);
+            bool any_ok = false;
+            for (int i = 0; i < SENSOR_CHAN_COUNT; i++) any_ok |= fresh_chok[i];
+            if (any_ok) {   /* 2026-10-23 — 센서가 여럿이면 성공한 채널만(보통 경로와 같음) */
+                if (all_ok) note_measure_recovered(); else note_measure_failed();
                 memcpy(s_cached_vals, fresh_vals, sizeof(fresh_vals));
-                for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = 1;
+                for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = fresh_chok[i];
                 s_measurement_id++;
                 s_seconds_since_last_measurement = 0;
                 live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
@@ -954,6 +854,8 @@ void app_main(void)
                                      ? sleep_sec - measurement_elapsed_sec : 0;
 
     calib_wait_idle();   /* 2026-10-13 — 보정 초기화 중엔 잠들지 않음 */
+    esp_now_node_persist_sensor_ids();   /* 2026-10-23 — 콘이 붙여 준 센서 ID 저장 */
+    rgb_status_flush(1500);   /* 2026-10-23 — 남은 깜빡임을 보여 주고 끔 */
     esp_now_node_note_sleep_entry();
     ESP_LOGI(TAG, "Deep sleep: wake in %us (requested %us, %us spent measuring)",
              (unsigned)actual_sleep_sec, (unsigned)sleep_sec, (unsigned)measurement_elapsed_sec);

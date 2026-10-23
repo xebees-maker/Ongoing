@@ -44,6 +44,13 @@ esp_err_t sd_storage_reconnect(void);
  * 포맷 후 stats/photos 폴더까지 재생성. 되돌릴 수 없으니 호출부가 확인팝업을 거쳐야 함 */
 esp_err_t sd_storage_format(void);
 
+/* 2026-10-23(사용자 설계 — SD 꺼내기: 전원을 끄거나 카드를 빼기 전에 SD 읽기·쓰기를 멈춤. 10-23 11:43 플래시 리셋이 사진 저장 도중이라 카드가 응답하지 않게 됨 — 카드를 뺐다 꽂아야 풀림).
+ * 진행 중인 저장(사진·측정값·SD 감시)이 끝나길 기다려 막고, 언마운트(FatFs 정리)한 뒤 CS를 올림. 그 뒤 측정값은 내부 플래시에 쌓이고
+ * 사진은 저장하지 않음(오류로 알리지 않음). 다시 쓰려면 sd_storage_reconnect */
+esp_err_t sd_storage_eject(void);
+/* 꺼낸 상태(재연결 전까지) */
+bool sd_storage_is_ejected(void);
+
 /* 지금 SD를 아예 못 쓰는 상태(미마운트)인지 — 주화면 상태표시용 */
 bool sd_storage_is_mounted(void);
 

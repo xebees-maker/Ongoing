@@ -211,17 +211,31 @@ bool sd_guard_dual_info(uint32_t *delta)
 
 bool sd_guard_vol_usable(int v) { return s_dual && !s_vol_bad[v ? 1 : 0]; }
 
+/* 2026-10-23(10-23 11:57 크래시 — 꺼내기가 카드를 해제한 뒤 다른 태스크의 FatFs 읽기가 해제된 카드로 명령을 보냄) — 카드를 쓰는
+ * 모든 진입점은 s_wmtx 아래에서 s_card를 확인. 언마운트 전에 sd_guard_detach가 진행 중인 명령이 끝나길 기다려 카드를 놓음 */
+void sd_guard_detach(void)
+{
+    if (!s_wmtx) { s_card = NULL; s_dual = false; return; }
+    xSemaphoreTakeRecursive(s_wmtx, portMAX_DELAY);
+    s_card = NULL;
+    s_dual = false;
+    xSemaphoreGiveRecursive(s_wmtx);
+}
+
 esp_err_t sd_guard_read_vol(int v, void *dst, uint32_t lba_a, uint32_t n)
 {
-    if (!s_card) return ESP_ERR_INVALID_STATE;
-    return sdmmc_read_sectors(s_card, dst, lba_a + vol_off(v), n);
+    xSemaphoreTakeRecursive(s_wmtx, portMAX_DELAY);
+    esp_err_t e = s_card ? sdmmc_read_sectors(s_card, dst, lba_a + vol_off(v), n) : ESP_ERR_INVALID_STATE;
+    xSemaphoreGiveRecursive(s_wmtx);
+    return e;
 }
 
 /* src_v의 src_lba_a 한 섹터를 dst_v의 dst_lba_a에 복사하고 다시 읽어 확인(lba는 A 기준). want_crc가 있으면 원본이 그 CRC일 때만 */
 bool sd_guard_copy_sector(int src_v, uint32_t src_lba_a, int dst_v, uint32_t dst_lba_a, const uint32_t *want_crc)
 {
-    if (!s_card || !s_one || ((src_v || dst_v) && !s_dual)) return false;
+    if (!s_one) return false;
     xSemaphoreTakeRecursive(s_wmtx, portMAX_DELAY);
+    if (!s_card || ((src_v || dst_v) && !s_dual)) { xSemaphoreGiveRecursive(s_wmtx); return false; }
     bool ok = sdmmc_read_sectors(s_card, s_one, src_lba_a + vol_off(src_v), 1) == ESP_OK;
     uint32_t c = ok ? esp_rom_crc32_le(0, s_one, 512) : 0;
     if (ok && want_crc && c != *want_crc) ok = false;   /* 원본도 틀림 */
@@ -258,20 +272,28 @@ bool sd_guard_fix_from_other(int bad_v, uint32_t lba_a, uint32_t n, const uint32
 /* 쓰기 보호 없이 한 쪽에 바로 씀(MBR 다시 쓰기 등, lba는 절대 섹터) */
 esp_err_t sd_guard_write_raw(const void *src, uint32_t lba, uint32_t n)
 {
-    if (!s_card) return ESP_ERR_INVALID_STATE;
-    return sdmmc_write_sectors(s_card, src, lba, n);
+    xSemaphoreTakeRecursive(s_wmtx, portMAX_DELAY);
+    esp_err_t e = s_card ? sdmmc_write_sectors(s_card, src, lba, n) : ESP_ERR_INVALID_STATE;
+    xSemaphoreGiveRecursive(s_wmtx);
+    return e;
 }
 
 /* ── FatFs 디스크 계층(원래 diskio_sdmmc와 같고 쓰기만 보호) ── */
-static DSTATUS g_init(BYTE pdrv)   { (void)pdrv; return (s_card && sdmmc_get_status(s_card) == ESP_OK) ? 0 : STA_NOINIT; }
+static DSTATUS g_init(BYTE pdrv)
+{
+    (void)pdrv;
+    xSemaphoreTakeRecursive(s_wmtx, portMAX_DELAY);
+    DSTATUS st = (s_card && sdmmc_get_status(s_card) == ESP_OK) ? 0 : STA_NOINIT;
+    xSemaphoreGiveRecursive(s_wmtx);
+    return st;
+}
 static DSTATUS g_status(BYTE pdrv) { (void)pdrv; return 0; }
 
 /* 2026-10-22 — 듀얼: A 영역 읽기는 쓰는 쪽(A, A를 못 쓰면 B)에서. 읽기가 실패하면 다른 쪽에서. FAT 섹터는 콘이 쓴 내용(CRC)과
  * 다르면 다른 쪽을 보고, 그쪽이 맞으면 그 내용을 돌려주고 틀린 쪽을 메꿈 — FatFs가 망가진 FAT를 읽어 파일을 늘려 버리는 일
  * (10-21·10-22 s0009)을 막음 */
-static DRESULT g_read(BYTE pdrv, BYTE *buf, uint32_t sector, unsigned count)
+static DRESULT g_read_locked(BYTE *buf, uint32_t sector, unsigned count)
 {
-    (void)pdrv;
     if (!s_card) return RES_NOTRDY;
     if (!in_a(sector, count)) {
         if (sdmmc_read_sectors(s_card, buf, sector, count) != ESP_OK) return RES_ERROR;
@@ -292,6 +314,15 @@ static DRESULT g_read(BYTE pdrv, BYTE *buf, uint32_t sector, unsigned count)
         if (!sd_health_fat_read_check(sector + i, buf + (size_t)i * 512, p)) return RES_ERROR;   /* 모든 벌이 틀림 — FatFs가 쓰지 않게 */
     }
     return RES_OK;
+}
+
+static DRESULT g_read(BYTE pdrv, BYTE *buf, uint32_t sector, unsigned count)
+{
+    (void)pdrv;
+    xSemaphoreTakeRecursive(s_wmtx, portMAX_DELAY);
+    DRESULT r = g_read_locked(buf, sector, count);
+    xSemaphoreGiveRecursive(s_wmtx);
+    return r;
 }
 
 static DRESULT g_ioctl(BYTE pdrv, BYTE cmd, void *buf)
@@ -424,8 +455,8 @@ static bool guarded_write(const BYTE *buf, uint32_t sector, unsigned count, uint
 static DRESULT g_write(BYTE pdrv, const BYTE *buf, uint32_t sector, unsigned count)
 {
     (void)pdrv;
-    if (!s_card) return RES_NOTRDY;
     xSemaphoreTakeRecursive(s_wmtx, portMAX_DELAY);
+    if (!s_card) { xSemaphoreGiveRecursive(s_wmtx); return RES_NOTRDY; }
     DRESULT r;
     if (!in_a(sector, count)) {
         /* 한 벌 영역(MBR 쪽) 또는 듀얼이 아닌 카드 — 예전과 같음 */

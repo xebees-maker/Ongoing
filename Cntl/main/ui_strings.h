@@ -267,6 +267,12 @@ typedef enum {
      * 주화면 SD 상태 라벨(짧은 문구) + 탭해서 여는 상태팝업(긴 설명) + 재연결/포맷 버튼과
      * 그 결과 안내 */
     STR_STATUS_SD_UNMOUNTED,
+    STR_STATUS_SD_EJECTED,          /* 2026-10-23 — SD 꺼냄 */
+    STR_MSG_SD_EJECT_CONFIRM,
+    STR_MSG_SD_EJECT_DONE,
+    STR_MSG_SD_EJECT_FAIL,
+    STR_MSG_SD_EJECTING,            /* 2026-10-23 — 진행 중 팝업 */
+    STR_MSG_SD_REMOUNTING,
     STR_BTN_SD_RECONNECT,
     STR_BTN_SD_FORMAT,
     STR_MSG_SD_FORMAT_CONFIRM,
@@ -304,6 +310,7 @@ typedef enum {
     STR_VIEW_GROUP_AIR,          /* 그래프 그룹 세그먼트 버튼: "온습도" / "Air" */
     STR_VIEW_GROUP_AGAR,         /* "Agar" / "Agar" */
     STR_VIEW_GROUP_GAS,          /* "가스" / "Gas" */
+    STR_VIEW_GROUP_TEMP,         /* 2026-10-23 — 그래프 온도 묶음(공기 온습도 + 배지): "온도" / "Temp" */
     /* 2026-09-15(사용자 지시 — 센서 판넬 행 압축: "Measure 10S => M 10S, Battery xxxx ->
      * Bat xx%") — 기존 STR_LABEL_MEASURE_SHORT/STR_LABEL_BATTERY는 다른 화면(저장공간
      * 정리 팝업 등)에서도 쓰여서 그대로 두고, 이 행 전용으로 더 짧은 버전을 새로 둠 */

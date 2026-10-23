@@ -62,3 +62,31 @@ ds18b20_sensor_result_t ds18b20_sensor_read(float *temp_c)
     if (*temp_c == 85.0f) return DS18B20_SENSOR_ERR_READ;
     return DS18B20_SENSOR_OK;
 }
+
+/* 2026-10-23(센서 중심 구조 1단계 — 고온 보드: DS18B20 두 개를 핀 하나씩) — 핀을 받아 그때만 1-Wire 버스를 만들고, 읽고, 지움.
+ * ESP32-C3 RMT 송신 채널은 2개뿐이고 내장 RGB LED(rgb_status)가 하나를 쓰므로 버스 두 개를 붙잡아 둘 수 없음 */
+ds18b20_sensor_result_t ds18b20_sensor_read_pin(gpio_num_t data_gpio, float *temp_c)
+{
+    onewire_bus_handle_t bus = NULL;
+    ds18b20_device_handle_t dev = NULL;
+    onewire_bus_config_t bus_cfg = { .bus_gpio_num = data_gpio, .flags.en_pull_up = true };   /* 내부 풀업도(외부 풀업이 있어도 무해) */
+    onewire_bus_rmt_config_t rmt_cfg = { .max_rx_bytes = 10 };
+    if (onewire_new_bus_rmt(&bus_cfg, &rmt_cfg, &bus) != ESP_OK) {
+        ESP_LOGE(TAG, "DS18B20 1-Wire bus create failed (GPIO%d)", data_gpio);
+        return DS18B20_SENSOR_ERR_READ;
+    }
+    ds18b20_sensor_result_t res = DS18B20_SENSOR_OK;
+    ds18b20_config_t cfg = {};
+    if (ds18b20_new_device_from_bus(bus, &cfg, &dev) != ESP_OK) {
+        res = DS18B20_SENSOR_ERR_NO_DEVICE;
+    } else {
+        esp_err_t err = ds18b20_trigger_temperature_conversion(dev);
+        if (err == ESP_OK) err = ds18b20_get_temperature(dev, temp_c);
+        if (err == ESP_ERR_NOT_FOUND) res = DS18B20_SENSOR_ERR_NO_DEVICE;
+        else if (err == ESP_ERR_INVALID_CRC) res = DS18B20_SENSOR_ERR_CRC;
+        else if (err != ESP_OK || *temp_c == 85.0f) res = DS18B20_SENSOR_ERR_READ;   /* 85.0 = 변환 안 된 전원 투입 값 */
+        ds18b20_del_device(dev);
+    }
+    onewire_bus_del(bus);
+    return res;
+}

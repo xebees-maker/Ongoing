@@ -11,6 +11,10 @@
 #include "esp_system.h"
 #include "esp_sleep.h"
 #include "status_led.h"
+#include "rgb_status.h"
+#include "nvs.h"
+#include <stdio.h>
+#include <stddef.h>
 #include "esp_now_channelsync.h"
 #include "esp_now_reliable.h"
 #include "rwdt_guard.h"
@@ -68,6 +72,13 @@ static RTC_DATA_ATTR bool    s_wake_hub_known   = false;
 static char s_name[ESP_NOW_LINK_NAME_LEN] = "";
 static uint8_t s_mac[6] = { 0 };
 static gpio_num_t s_led_pin = GPIO_NUM_NC;
+
+/* 2026-10-23(사용자 설계 — 센서 중심 구조) — 이 보드에 달린 센서 목록(포트·종류·채널 위치)과 콘이 붙여 준 센서 ID.
+ * ID는 포트별로 NVS("sensid"/"p<포트>")에 저장 — 콘이 ESP_NOW_MSG_SENSOR_ID_ASSIGN으로 알려 줌. 저장은 받은 콜백(Wi-Fi 태스크)
+ * 이 아니라 앱이 잠들기 전에(esp_now_node_persist_sensor_ids) */
+static esp_now_sensor_desc_t s_sensors[ESP_NOW_MAX_SENSORS];
+static uint8_t s_sensor_count = 0;
+static volatile bool s_sensor_ids_dirty = false;
 
 static bool     s_channelsync_initialized = false;
 static RTC_DATA_ATTR uint32_t s_sample_interval_sec = 15;  /* Cntl의 SENS_CONFIG_SET이 갱신 —
@@ -140,10 +151,15 @@ void esp_now_node_note_sleep_entry(void)
     time(&s_sleep_entry_unix_time);
 }
 
+/* 2026-10-23(사용자 설계) — 외부 초록 LED 대신 내장 RGB: 찾는 중·끊김(BLINK_FAST) = B 계속 깜빡임, 연결됨(HEARTBEAT) = B 1번 */
 static void set_led(led_pattern_t pattern)
 {
-    if (s_led_pin == GPIO_NUM_NC) return;
-    status_led_set_pattern(s_led_pin, pattern);
+    if (pattern == LED_PATTERN_HEARTBEAT) {
+        rgb_status_search(false);
+        rgb_status_blink(RGB_STATUS_BLUE, 1);
+    } else {
+        rgb_status_search(true);
+    }
 }
 
 /* esp_now_cam.c의 should_advertise()와 동일 이유 — PAIRED가 아닐 때만 광고 */
@@ -325,6 +341,26 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     }
 
     /* 2026-10-13 — 센서 보정 초기화. 실행·응답은 sens_deep_sleep_node.c(같은 seq 재시도면 저장해 둔 결과로 다시 응답) */
+    if (msg_type == ESP_NOW_MSG_SENSOR_ID_ASSIGN) {   /* 2026-10-23 — 콘이 붙여 준 센서 ID */
+        if (len < (int)offsetof(esp_now_sensor_id_assign_t, ids)) return;
+        const esp_now_sensor_id_assign_t *m = (const esp_now_sensor_id_assign_t *)data;
+        int n = m->count <= ESP_NOW_MAX_SENSORS ? m->count : ESP_NOW_MAX_SENSORS;
+        if (len < (int)(offsetof(esp_now_sensor_id_assign_t, ids) + n * sizeof(m->ids[0]))) return;
+        for (int i = 0; i < n; i++) {
+            for (int k = 0; k < s_sensor_count; k++) {
+                if (s_sensors[k].port != m->ids[i].port) continue;
+                if (s_sensors[k].sensor_id != m->ids[i].sensor_id) {
+                    s_sensors[k].sensor_id = m->ids[i].sensor_id;
+                    s_sensor_ids_dirty = true;
+                }
+                ESP_LOGI(TAG, "Sensor ID assigned: port %u -> %u", (unsigned)m->ids[i].port, (unsigned)m->ids[i].sensor_id);
+            }
+        }
+        esp_now_sensor_id_assign_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SENSOR_ID_ASSIGN_ACK };
+        send_reply(info->src_addr, &ack, sizeof(ack));
+        return;
+    }
+
     if (msg_type == ESP_NOW_MSG_SENS_CALIB_RESET) {
         if (s_conn_state != SENS_CONN_PAIRED || len < (int)sizeof(esp_now_sens_calib_reset_t)) return;
         const esp_now_sens_calib_reset_t *msg = (const esp_now_sens_calib_reset_t *)data;
@@ -400,6 +436,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     };
     memcpy(ack.node_mac, s_mac, sizeof(ack.node_mac));
     memcpy(ack.chan_type, s_chan_type, s_chan_count);
+    ack.sensor_count = s_sensor_count;   /* 2026-10-23 — 센서 목록(포트·종류·채널 위치·저장된 ID) */
+    memcpy(ack.sensors, s_sensors, sizeof(ack.sensors));
     esp_err_t err = send_reply(s_hub_mac, &ack, sizeof(ack));
     ESP_LOGI(TAG, "Paired: hub " MACSTR ", PAIR_ACK %s", MAC2STR(s_hub_mac), esp_err_to_name(err));
 
@@ -506,6 +544,42 @@ uint32_t esp_now_node_get_last_sleep_sec(void)
 uint32_t esp_now_node_get_sample_interval_sec(void)
 {
     return s_sample_interval_sec;
+}
+
+void esp_now_node_set_sensors(const esp_now_sensor_desc_t *list, uint8_t count)
+{
+    s_sensor_count = count <= ESP_NOW_MAX_SENSORS ? count : ESP_NOW_MAX_SENSORS;
+    memcpy(s_sensors, list, s_sensor_count * sizeof(s_sensors[0]));
+    nvs_handle_t h;
+    if (nvs_open("sensid", NVS_READONLY, &h) == ESP_OK) {
+        for (int i = 0; i < s_sensor_count; i++) {
+            char key[6];
+            snprintf(key, sizeof(key), "p%u", (unsigned)s_sensors[i].port);
+            uint16_t id = 0;
+            if (nvs_get_u16(h, key, &id) == ESP_OK) s_sensors[i].sensor_id = id;
+        }
+        nvs_close(h);
+    }
+    for (int i = 0; i < s_sensor_count; i++) {
+        ESP_LOGI(TAG, "Sensor port %u: kind %u, channels %u+%u, ID %u", (unsigned)s_sensors[i].port, (unsigned)s_sensors[i].kind,
+                 (unsigned)s_sensors[i].chan_first, (unsigned)s_sensors[i].chan_n, (unsigned)s_sensors[i].sensor_id);
+    }
+}
+
+void esp_now_node_persist_sensor_ids(void)
+{
+    if (!s_sensor_ids_dirty) return;
+    s_sensor_ids_dirty = false;
+    nvs_handle_t h;
+    if (nvs_open("sensid", NVS_READWRITE, &h) != ESP_OK) return;
+    for (int i = 0; i < s_sensor_count; i++) {
+        char key[6];
+        snprintf(key, sizeof(key), "p%u", (unsigned)s_sensors[i].port);
+        nvs_set_u16(h, key, s_sensors[i].sensor_id);
+    }
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "Sensor IDs saved");
 }
 
 void esp_now_node_set_status_led(gpio_num_t pin)

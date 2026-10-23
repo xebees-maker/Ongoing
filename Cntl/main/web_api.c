@@ -19,6 +19,7 @@
 #include "photo_storage.h"
 #include "photo_rx.h"
 #include "stats_store.h"
+#include "sensor_registry.h"
 #include "notify.h"
 #include "alarm.h"
 #include "romanize.h"
@@ -608,6 +609,23 @@ static esp_err_t api_sd_health_get_handler(httpd_req_t *req)
     return r;
 }
 
+/* 2026-10-23(사용자 설계 — SD 꺼내기: 전원을 끄거나 카드를 빼기 전에 SD 읽기·쓰기를 멈춤. 10-23 11:43 플래시 리셋이 사진 저장 도중이라 카드가 응답하지 않게 됨 — 카드를 뺐다 꽂아야 풀림) — POST /api/sd/eject(웹 화면엔 단추 없음 — 플래시 전에 Claude가 부름) */
+
+/* 2026-10-23(센서 중심 구조) — GET /api/sensors — 센서·센싱 목록 */
+static esp_err_t api_sensors_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    const size_t cap = 4096;
+    char *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    int n = sreg_json(buf, cap);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t r = httpd_resp_send(req, buf, n);
+    heap_caps_free(buf);
+    return r;
+}
+
 /* 2026-10-21(처음 손상 원인 추적) — GET /api/sd/journal?n=<줄 수, 기본 400, 최대 4096> — SD 명령 기록(쓰기·느린 명령·실패·표시) 글 */
 static esp_err_t api_sd_journal_get_handler(httpd_req_t *req)
 {
@@ -1018,7 +1036,7 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
     int scale = query_int(s_w->query, "scale", 0);
     int offset = query_int(s_w->query, "offset", 0);
     int group = query_int(s_w->query, "group", 0);
-    if (scale < 0 || scale >= STATS_SCALE_COUNT || offset < 0 || offset > 100000 || group < 0 || group > 2) {
+    if (scale < 0 || scale >= STATS_SCALE_COUNT || offset < 0 || offset > 100000 || group < 0 || group > 1) {   /* 2026-10-23 — 0 온도, 1 가스 */
         return send_simple(req, "400 Bad Request", "{\"error\":\"arg\"}");
     }
     bool tp = query_int(s_w->query, "tp", 1) != 0;
@@ -1035,8 +1053,10 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
         return send_simple(req, "503 Service Unavailable", "{\"error\":\"sd\"}");
     }
 
+    /* 2026-10-23 — tp/hp = 정밀이 있는지(자동, 웹은 이것으로 공기 줄을 고름) */
     jb_printf(&b, "{\"scale\":%d,\"offset\":%d,\"group\":%d,\"tp\":%d,\"hp\":%d,\"end\":%lu,\"ov\":{\"air_t\":[",
-              scale, offset, group, tp, hp, (unsigned long)g->window_end);
+              scale, offset, group, ov->air_t_prec ? 1 : 0, ov->air_h_prec ? 1 : 0, (unsigned long)g->window_end);
+    (void)tp; (void)hp;
     jb_mma(&b, &ov->air_t[0]); jb_printf(&b, ","); jb_mma(&b, &ov->air_t[1]);
     jb_printf(&b, "],\"air_h\":[");
     jb_mma(&b, &ov->air_h[0]); jb_printf(&b, ","); jb_mma(&b, &ov->air_h[1]);
@@ -1044,10 +1064,7 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
     jb_mma(&b, &ov->agar_all);
     jb_printf(&b, ",\"agar\":[");
     for (int i = 0; i < 3; i++) {
-        jb_printf(&b, "%s{\"name\":", i ? "," : "");
-        jb_str(&b, ov->agar_name[i]);
-        jb_en(&b, "name", ov->agar_name[i]);
-        jb_printf(&b, ",\"v\":");
+        jb_printf(&b, "%s{\"ord\":%u,\"on\":%d,\"v\":", i ? "," : "", (unsigned)ov->agar_ord[i], i < ov->agar_count ? 1 : 0);
         jb_mma(&b, &ov->agar[i]);
         jb_printf(&b, "}");
     }
@@ -1059,9 +1076,8 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
     for (int sidx = 0; sidx < g->slot_count; sidx++) {
         const ui_stats_slot_t *sl = &g->slot[sidx];
         const ui_stats_series_t *d = &sl->d;
-        jb_printf(&b, "%s{\"chan\":%u,\"name\":", sidx ? "," : "", (unsigned)sl->chan_type);
-        jb_str(&b, sl->name);
-        jb_en(&b, "name", sl->name);
+        jb_printf(&b, "%s{\"chan\":%u,\"sub\":%d,\"prec\":%d,\"ord\":%u", sidx ? "," : "", (unsigned)sl->chan_type,
+                  (sl->attr & STATS_ATTR_SUBSTRATE) ? 1 : 0, (sl->attr & STATS_ATTR_PRECISE) ? 1 : 0, (unsigned)sl->ord);
         if (d->have_range) {
             jb_printf(&b, ",\"min\":");
             jb_float(&b, d->mn);
@@ -1212,11 +1228,11 @@ static esp_err_t api_stats_records_get_handler(httpd_req_t *req)
     jb_printf(&b, "{\"count\":%lu,\"page\":%d,\"page_size\":%d,\"items\":[", (unsigned long)total, page, STATS_STORE_PAGE_SIZE);
     for (uint32_t i = 0; i < got; i++) {
         const stats_record_t *r = &recs[got - 1 - i];   /* 파일 순서(오래된 것부터) → 최신이 앞(콘 표와 같음) */
-        ui_main_stats_device_name(r->mac, name, 48);
-        jb_printf(&b, "%s{\"name\":", i ? "," : "");
-        jb_str(&b, name);
-        jb_en(&b, "name", name);
-        jb_printf(&b, ",\"chan\":%u,\"v\":", (unsigned)r->chan_type);
+        /* 2026-10-23(센서 중심 구조) — 센싱 구분값만(웹이 언어에 맞춰 "배지 온도 N", "공기 온도(정밀)" 등을 만듦) */
+        uint8_t ord = 0;
+        ui_main_stats_sensing_info(r->sensing, &ord);
+        jb_printf(&b, "%s{\"chan\":%u,\"sub\":%d,\"prec\":%d,\"ord\":%u,\"v\":", i ? "," : "", (unsigned)r->chan_type,
+                  (r->attr & STATS_ATTR_SUBSTRATE) ? 1 : 0, (r->attr & STATS_ATTR_PRECISE) ? 1 : 0, (unsigned)ord);
         jb_float(&b, r->value);
         jb_printf(&b, ",\"t\":%lu}", (unsigned long)r->unix_time);
     }
@@ -1441,6 +1457,7 @@ static esp_err_t err_op(httpd_req_t *req, ui_web_op_type_t type, uint32_t timeou
 static esp_err_t api_errors_clear_post_handler(httpd_req_t *req) { return err_op(req, UI_WEB_OP_ERR_CLEAR, 3000); }
 static esp_err_t api_sd_reconnect_post_handler(httpd_req_t *req) { return err_op(req, UI_WEB_OP_SD_RECONNECT, 30000); }
 static esp_err_t api_sd_format_post_handler(httpd_req_t *req)    { return err_op(req, UI_WEB_OP_SD_FORMAT, 120000); }
+static esp_err_t api_sd_eject_post_handler(httpd_req_t *req)     { return err_op(req, UI_WEB_OP_SD_EJECT, 30000); }   /* 2026-10-23 — LVGL 태스크에서(웹서버 태스크에서 직접 했을 때 크래시) */
 
 /* 시험용 — 출시 전 제거(조건부 C9). POST /api/alarm_sim?type=0..6 — 실제 사건과 같은 alarm_post로 넣음.
  * 웹 세션은 건드리지 않음(로그인만 확인) — 세션 유무에 따른 받는 곳 나눔을 시험하려고 */
@@ -1501,6 +1518,10 @@ void web_api_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &sd_health_uri);
     static const httpd_uri_t sd_journal_uri = { .uri = "/api/sd/journal", .method = HTTP_GET, .handler = api_sd_journal_get_handler };
     httpd_register_uri_handler(server, &sd_journal_uri);
+    static const httpd_uri_t sensors_uri = { .uri = "/api/sensors", .method = HTTP_GET, .handler = api_sensors_get_handler };   /* 10-23 */
+    static const httpd_uri_t sd_eject_uri = { .uri = "/api/sd/eject", .method = HTTP_POST, .handler = api_sd_eject_post_handler };   /* 10-23 */
+    httpd_register_uri_handler(server, &sd_eject_uri);
+    httpd_register_uri_handler(server, &sensors_uri);
     static const httpd_uri_t stats_sync_uri = { .uri = "/api/stats/sync", .method = HTTP_GET, .handler = api_stats_sync_get_handler };   /* SD 확인 끝나면 지움 */
     httpd_register_uri_handler(server, &stats_sync_uri);
     /* 2026-10-15(SD 개선 5단계) — 통계 백업·복원 */

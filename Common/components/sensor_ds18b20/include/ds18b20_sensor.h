@@ -26,3 +26,6 @@ bool ds18b20_sensor_init(gpio_num_t data_gpio);
 
 /** @brief 변환 시작 → 약 800ms 대기 → 판독(블로킹) */
 ds18b20_sensor_result_t ds18b20_sensor_read(float *temp_c);
+
+/** @brief 2026-10-23 — 핀을 받아 그때만 버스를 만들고 읽고 지움(센서 여러 개를 핀 하나씩, RMT 채널을 붙잡지 않음). 블로킹 약 800ms */
+ds18b20_sensor_result_t ds18b20_sensor_read_pin(gpio_num_t data_gpio, float *temp_c);

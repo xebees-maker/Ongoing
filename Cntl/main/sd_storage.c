@@ -116,6 +116,7 @@ static void log_card_cid(const sdmmc_host_t *host, const sdspi_device_config_t *
 #define SD_PIN_SCK      12
 
 static sdmmc_card_t *s_card = NULL;
+static volatile bool s_ejected = false;   /* 2026-10-23 — SD 꺼냄(sd_storage_eject) */
 /* 2026-10-15 — 포맷 요청 중에만 true: 마운트가 실패하면(FAT 없음·손상) 그 자리에서 FAT을 만들고 마운트(sd_storage_format) */
 static bool s_format_if_mount_failed = false;
 static esp_err_t raw_card_open(sdmmc_card_t **out_card, sdspi_dev_handle_t *out_h);   /* 아래(2026-10-22 듀얼 포맷) */
@@ -216,6 +217,7 @@ esp_err_t sd_storage_init(void)
     }
 
     ESP_LOGI(TAG, "SD mounted: %s", SD_STORAGE_MOUNT_POINT);
+    s_ejected = false;
     sd_guard_attach(s_card);   /* 2026-10-22 — FatFs 쓰기를 보호 쓰기로(sd_guard.h) */
     sd_health_on_mount();   /* 2026-10-15 — 부트 영역 기준값을 새로 잡음(손상 감시) */
     /* 2026-09-26 — 재연결로 다시 마운트된 경우 사용량 합계를 새로 만들게 함(부팅 때는 파일처리
@@ -248,6 +250,7 @@ esp_err_t sd_storage_reconnect(void)
     photo_storage_io_suspend();
     stats_store_io_suspend();
     if (s_card) {
+        sd_guard_detach();   /* 2026-10-23 — 해제된 카드를 다른 태스크가 쓰지 않게(10-23 11:57 크래시) */
         esp_vfs_fat_sdcard_unmount(SD_STORAGE_MOUNT_POINT, s_card);
         s_card = NULL;
         spi_bus_free(SD_SPI_HOST);
@@ -300,6 +303,7 @@ esp_err_t sd_storage_format(void)
     photo_storage_io_suspend();
     stats_store_io_suspend();
     if (s_card) {
+        sd_guard_detach();   /* 2026-10-23 — 해제된 카드를 다른 태스크가 쓰지 않게(10-23 11:57 크래시) */
         esp_vfs_fat_sdcard_unmount(SD_STORAGE_MOUNT_POINT, s_card);
         s_card = NULL;
         spi_bus_free(SD_SPI_HOST);
@@ -311,6 +315,7 @@ esp_err_t sd_storage_format(void)
         sd_guard_set_enabled(false);   /* f_mkfs 대량 쓰기는 확인하지 않음(B에는 같은 내용을 씀) */
         err = sd_guard_format_dual(card);
         sd_guard_set_enabled(true);
+        sd_guard_detach();   /* 2026-10-23 — 아래에서 해제할 임시 카드를 들고 있지 않게(마운트 때 다시 붙음) */
         sdspi_host_remove_device(h);
         heap_caps_free(card);
         spi_bus_free(SD_SPI_HOST);
@@ -326,6 +331,34 @@ esp_err_t sd_storage_format(void)
     }
     ESP_LOGI(TAG, "SD format done");
     return ESP_OK;
+}
+
+esp_err_t sd_storage_eject(void)
+{
+    ESP_LOGW(TAG, "SD eject: stopping SD reads/writes");
+    photo_storage_io_suspend();   /* 진행 중인 사진 저장이 끝나길 기다려 막음(재연결과 같은 잠금 순서: 사진 → 통계 → 감시) */
+    stats_store_io_suspend();
+    sd_health_io_suspend();
+    esp_err_t e = ESP_OK;
+    if (s_card) {
+        sd_guard_detach();   /* 진행 중인 카드 명령이 끝나길 기다려 놓음 — 그 뒤 FatFs 요청은 "준비 안 됨"(10-23 11:57 크래시) */
+        e = esp_vfs_fat_sdcard_unmount(SD_STORAGE_MOUNT_POINT, s_card);   /* FatFs 정리(열린 파일·FAT 창 기록) */
+        s_card = NULL;
+        spi_bus_free(SD_SPI_HOST);
+    }
+    ch422g_set_io(CH422G_IO_SD_CS, true);   /* 비선택 */
+    s_ejected = true;
+    sd_health_io_resume();
+    stats_store_io_resume();
+    photo_storage_io_resume();
+    storage_mgr_request_rescan();
+    ESP_LOGW(TAG, "SD eject: done (%s) - safe to power off or remove the card", esp_err_to_name(e));
+    return e;
+}
+
+bool sd_storage_is_ejected(void)
+{
+    return s_ejected;
 }
 
 /* 미마운트 등으로 지금 SD를 아예 못 쓰는 상태인지 — 주화면 상태표시가 씀 */

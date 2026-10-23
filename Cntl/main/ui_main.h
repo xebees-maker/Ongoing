@@ -64,6 +64,7 @@ typedef enum {
     UI_WEB_OP_ERR_CLEAR,       /* kind 'e'/'w', value = 코드 — 행 "지우기"(SD 5008/5009는 안 됨 — 해결로만) */
     UI_WEB_OP_SD_RECONNECT,    /* 해결 → 재마운트(검증 통과해야 성공·SD 에러 지움) */
     UI_WEB_OP_SD_FORMAT,       /* 해결 → 포맷(검증 통과해야 성공·SD 에러 지움) */
+    UI_WEB_OP_SD_EJECT,        /* 2026-10-23 — SD 꺼내기(웹서버 태스크가 아니라 LVGL 태스크에서 — 웹서버 태스크에서 했을 때 크래시) */
 } ui_web_op_type_t;
 
 /* 릴레이 팝업의 사용자 선택값(화면 위젯이 나타내는 값 그대로). relay_apply_choices()가 이걸 설정 구조체로 바꿈 —
@@ -128,7 +129,9 @@ typedef struct {
 } ui_stats_series_t;
 typedef struct {
     uint8_t chan_type;
-    char    name[40];                  /* 기기 사슬 이름("C->F", Alias 우선). 기기 없으면 "" */
+    uint8_t attr;                      /* 2026-10-23 — STATS_ATTR_*(어디·정밀도) — 웹이 언어에 맞춰 이름을 만듦 */
+    uint8_t ord;                       /* 같은 종류 센싱 안의 번호(배지 온도 N) */
+    char    name[40];                  /* (옛 기기 이름 — 2026-10-23부터 비움) */
     ui_stats_series_t d;
 } ui_stats_slot_t;
 typedef struct {
@@ -140,10 +143,14 @@ typedef struct { bool have; float mn, mx, avg; } ui_stats_mma_t;
 typedef struct {
     ui_stats_mma_t air_t[2], air_h[2]; /* [0] 간이, [1] 정밀 */
     ui_stats_mma_t agar_all, agar[3];  /* 혼합, Agar 슬롯 1..3 */
-    char           agar_name[3][40];   /* 기기 없는 슬롯은 "" */
+    char           agar_name[3][40];   /* (2026-10-23부터 비움) */
+    uint8_t        agar_ord[3];        /* 2026-10-23 — 배지 온도 번호(0 = 슬롯 없음) */
+    int            agar_count;         /* 있는 배지 온도 슬롯 수 */
+    bool           air_t_prec, air_h_prec;   /* 2026-10-23 — 정밀이 있으면 정밀(자동) */
     ui_stats_mma_t co2, nh3;
 } ui_stats_overview_t;
-/* group: 0 Air, 1 Agar, 2 Gas. offset: 0 = 지금 창, 1 = 한 창 앞 ... */
+/* group: 0 온도 묶음(공기 온습도 + 배지), 1 가스 묶음(2026-10-23). temp/humi_precise는 쓰지 않음(정밀이 있으면 정밀, 자동).
+ * offset: 0 = 지금 창, 1 = 한 창 앞 ... */
 bool ui_main_stats_graph(uint8_t scale, uint32_t offset, uint8_t group, bool temp_precise, bool humi_precise,
                          ui_stats_graph_t *out);
 bool ui_main_stats_overview(uint8_t scale, ui_stats_overview_t *out);
@@ -153,6 +160,8 @@ int ui_main_get_warn_codes(int *out, int cap);
 
 /* 통계 표의 기기 이름(Alias 우선, 콘 Record 표와 같음) */
 void ui_main_stats_device_name(const uint8_t mac[6], char *out, size_t cap);
+/* 2026-10-23 — 기록 한 줄 센싱의 번호(배지 온도 N) */
+void ui_main_stats_sensing_info(uint16_t sensing, uint8_t *ord);
 
 /* 2026-08-30(사용자 설계: "웹에 입력이 있으면, CNTL의 탭과 같은 입력 처리 과정을 거쳐야") —
  * 웹의 사진 가져오기도 온디바이스 탭과 같은 모델(s_selected_file_id)을 거치게 해서,

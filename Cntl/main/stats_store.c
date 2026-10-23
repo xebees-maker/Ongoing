@@ -112,6 +112,36 @@ static void unlock(void)
 void stats_store_io_suspend(void) { lock(); }
 void stats_store_io_resume(void) { unlock(); }
 
+/* 2026-10-23(센서 중심 구조 2단계) — 기록 형식 판(STATS_FORMAT_VERSION). 폴더의 fmt.bin이 지금 판이 아니면 그 폴더의 통계 파일을
+ * 모두 지우고 새 판으로 시작(사용자 결정 — 옛 기록은 버림). 내부 플래시(stats_store_init)·SD(rescan) 각각 */
+static bool fmt_check_reset(const char *dir)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "%s/fmt.bin", dir);
+    uint32_t v = 0;
+    FILE *f = fopen(path, "rb");
+    if (f) { if (fread(&v, sizeof(v), 1, f) != 1) v = 0; fclose(f); }
+    if (v == STATS_FORMAT_VERSION) return false;
+    DIR *d = opendir(dir);
+    uint32_t n = 0;
+    if (d) {
+        char *fp = heap_caps_malloc(300, MALLOC_CAP_SPIRAM);
+        struct dirent *e;
+        while (fp && (e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.' || e->d_type == DT_DIR) continue;
+            snprintf(fp, 300, "%s/%s", dir, e->d_name);
+            if (unlink(fp) == 0) n++;
+        }
+        heap_caps_free(fp);
+        closedir(d);
+    }
+    v = STATS_FORMAT_VERSION;
+    f = fopen(path, "wb");
+    if (f) { fwrite(&v, sizeof(v), 1, f); fclose(f); }
+    ESP_LOGW(TAG, "Stats format changed (now v%u) - %u old files removed in %s", (unsigned)STATS_FORMAT_VERSION, (unsigned)n, dir);
+    return true;
+}
+
 /* 호출부가 lock() 잡은 상태 — 버퍼가 없으면 한 번만 할당. 실패하면 false */
 static bool ensure_alloc_locked(void)
 {
@@ -394,13 +424,11 @@ static void lfs_flush_locked(void)
  * ════════════════════════════════════════════════════════════ */
 const uint32_t STATS_SCALE_SECONDS[STATS_SCALE_COUNT] = { 3600, 43200, 86400, 259200, 604800 };
 
-/* chan_type은 sensor_channel_type_t(esp_now_link.h)인데 이 파일은 저수준이라 그 헤더에
- * 의존 안 함 — 그냥 작은 고정크기 배열로 충분(현재 SENSOR_CHAN_TYPE_COUNT=5, 여유있게 8) */
+/* chan_type 범위 검사용(sensor_channel_type_t — 지금 5종, 여유 8) */
 #define STATS_AGG_MAX_CHAN_TYPES 8
 
-/* NODE_HUB_MAX_NODES(node_hub.h)와 같은 값이지만 이 파일은 저수준이라 그 헤더에
- * 의존 안 함(위 chan_type과 동일 원칙) — 실제 페어링 가능한 노드 수 이상은 어차피 안 옴 */
-#define STATS_AGG_MAX_MACS 8
+/* 2026-10-23(센서 중심 구조 2단계) — 누적 칸 = 센싱 하나. SREG_MAX_SENSINGS(sensor_registry.h)와 같은 값(저수준이라 의존 안 함) */
+#define STATS_AGG_MAX_SERIES 12
 
 /* 각 (스케일, chan_type, mac)마다 "지금 채워지는 중인" 버킷 하나만 RAM에 유지 */
 typedef struct {
@@ -411,8 +439,8 @@ typedef struct {
     uint16_t seen_count;     /* 이 버킷에 실제로 들어온 실측값 개수(진단용, sample_count로 기록) */
 } agg_accum_t;
 
-/* 2026-09-30(사용자 지시 — PSRAM 원칙) — [스케일][chan_type][기기 슬롯], 약 6.4KB, PSRAM */
-#define AGG_ACCUM_BYTES (sizeof(agg_accum_t) * STATS_SCALE_COUNT * STATS_AGG_MAX_CHAN_TYPES * STATS_AGG_MAX_MACS)
+/* 2026-09-30(사용자 지시 — PSRAM 원칙) — [스케일][센싱 슬롯](2026-10-23), PSRAM */
+#define AGG_ACCUM_BYTES (sizeof(agg_accum_t) * STATS_SCALE_COUNT * STATS_AGG_MAX_SERIES)
 
 typedef struct { uint8_t scale; uint32_t week; stats_bucket_t rec; } agg_pend_t;
 
@@ -420,10 +448,11 @@ typedef struct { uint8_t scale; uint32_t week; stats_bucket_t rec; } agg_pend_t;
  * (s_regen — 1시간마다 내부 플래시 기록으로 처음부터 다시 계산해서 SD에 씀). 같은 기록·같은 계산이라 결과가 같음 */
 typedef struct agg_state agg_state_t;
 struct agg_state {
-    agg_accum_t (*acc)[STATS_AGG_MAX_CHAN_TYPES][STATS_AGG_MAX_MACS];   /* PSRAM, 처음 쓸 때 */
-    uint8_t  macs[STATS_AGG_MAX_MACS][6];
-    uint8_t  slot_kind[STATS_AGG_MAX_MACS];      /* 슬롯을 넘겨줄 때 남은 버킷을 기록하는 데 씀 */
-    uint32_t slot_last[STATS_AGG_MAX_MACS];      /* 이 슬롯에 마지막으로 값이 들어온 시각 */
+    agg_accum_t (*acc)[STATS_AGG_MAX_SERIES];   /* PSRAM, 처음 쓸 때 */
+    uint16_t sensing[STATS_AGG_MAX_SERIES];      /* 슬롯의 센싱 ID */
+    uint8_t  slot_ct[STATS_AGG_MAX_SERIES];      /* 그 센싱의 chan_type·attr — 닫힌 칸을 내보낼 때 씀 */
+    uint8_t  slot_attr[STATS_AGG_MAX_SERIES];
+    uint32_t slot_last[STATS_AGG_MAX_SERIES];    /* 이 슬롯에 마지막으로 값이 들어온 시각 */
     int      n;
     void   (*emit)(uint8_t scale, const stats_bucket_t *rec);   /* 닫힌 칸 하나 */
 };
@@ -441,8 +470,9 @@ static uint32_t scale_width(uint8_t sc)
 static void agg_state_reset(agg_state_t *st)
 {
     if (st->acc) memset(st->acc, 0, AGG_ACCUM_BYTES);
-    memset(st->macs, 0, sizeof(st->macs));
-    memset(st->slot_kind, 0, sizeof(st->slot_kind));
+    memset(st->sensing, 0, sizeof(st->sensing));
+    memset(st->slot_ct, 0, sizeof(st->slot_ct));
+    memset(st->slot_attr, 0, sizeof(st->slot_attr));
     memset(st->slot_last, 0, sizeof(st->slot_last));
     st->n = 0;
 }
@@ -525,18 +555,17 @@ static uint32_t agg_write_sd_locked(agg_pend_t *pend, uint32_t n)
 }
 
 /* 닫힌 칸 하나를 그 누적기의 받는 곳으로 */
-static void agg_flush_bucket(agg_state_t *st, uint8_t scale_idx, uint8_t kind, uint8_t chan_type, const uint8_t mac[6],
-                             const agg_accum_t *acc)
+static void agg_flush_bucket(agg_state_t *st, uint8_t scale_idx, int slot, const agg_accum_t *acc)
 {
     if (!acc->have_value) return;
     stats_bucket_t rec = {
         .bucket_start_unix = acc->bucket_start,
-        .kind               = kind,
-        .chan_type          = chan_type,
+        .sensing            = st->sensing[slot],
+        .chan_type          = st->slot_ct[slot],
+        .attr               = st->slot_attr[slot],
         .sample_count       = (acc->seen_count > 255) ? 255 : (uint8_t)acc->seen_count,
         .avg_value          = acc->best_value,
     };
-    memcpy(rec.mac, mac, 6);
     st->emit(scale_idx, &rec);
 }
 
@@ -580,34 +609,31 @@ static void regen_emit(uint8_t scale, const stats_bucket_t *rec)
     s_regen_n++;
 }
 
-/* mac -> 누적 슬롯 인덱스. 처음 보는 mac이면 새로 등록.
- * 2026-09-28(사용자 설계 — 기기 교체) — 꽉 차면 가장 오래 값이 안 들어온 슬롯을 넘겨받음 — 동시에
- * 붙는 기기는 페어링 상한으로 8대를 넘지 않으므로 그 슬롯의 기기는 이미 떠난 기기. 넘기기 전에 그 기기의 진행
- * 중이던 칸을 내보냄(떠난 기기의 마지막 칸은 다음 값이 영영 안 와서 원래도 닫힐 일이 없었음) */
-static int agg_mac_slot(agg_state_t *st, const uint8_t mac[6], uint32_t unix_time)
+/* 센싱 -> 누적 슬롯. 처음 보는 센싱이면 새로 등록(2026-10-23 — 예전엔 보드 MAC). 꽉 차면 가장 오래 값이 안 들어온 슬롯을
+ * 넘겨받음 — 그 센싱의 진행 중이던 칸을 먼저 내보냄 */
+static int agg_series_slot(agg_state_t *st, const stats_record_t *r)
 {
     for (int i = 0; i < st->n; i++) {
-        if (memcmp(st->macs[i], mac, 6) == 0) return i;
+        if (st->sensing[i] == r->sensing) return i;
     }
     int slot;
-    if (st->n < STATS_AGG_MAX_MACS) {
+    if (st->n < STATS_AGG_MAX_SERIES) {
         slot = st->n++;
     } else {
         slot = 0;
-        for (int i = 1; i < STATS_AGG_MAX_MACS; i++) {
+        for (int i = 1; i < STATS_AGG_MAX_SERIES; i++) {
             if (st->slot_last[i] < st->slot_last[slot]) slot = i;
         }
         for (int sc = 0; sc < STATS_SCALE_COUNT; sc++) {
-            for (int ch = 0; ch < STATS_AGG_MAX_CHAN_TYPES; ch++) {
-                agg_flush_bucket(st, (uint8_t)sc, st->slot_kind[slot], (uint8_t)ch, st->macs[slot], &st->acc[sc][ch][slot]);
-                memset(&st->acc[sc][ch][slot], 0, sizeof(agg_accum_t));
-            }
+            agg_flush_bucket(st, (uint8_t)sc, slot, &st->acc[sc][slot]);
+            memset(&st->acc[sc][slot], 0, sizeof(agg_accum_t));
         }
-        if (st == &s_live) ESP_LOGI(TAG, "Aggregate slot of %02X%02X handed to %02X%02X", st->macs[slot][4],
-                                    st->macs[slot][5], mac[4], mac[5]);
+        if (st == &s_live) ESP_LOGI(TAG, "Aggregate slot of sensing %u handed to %u", (unsigned)st->sensing[slot], (unsigned)r->sensing);
     }
-    memcpy(st->macs[slot], mac, 6);
-    st->slot_last[slot] = unix_time;
+    st->sensing[slot] = r->sensing;
+    st->slot_ct[slot] = r->chan_type;
+    st->slot_attr[slot] = r->attr;
+    st->slot_last[slot] = r->unix_time;
     return slot;
 }
 
@@ -615,15 +641,14 @@ static int agg_mac_slot(agg_state_t *st, const uint8_t mac[6], uint32_t unix_tim
  * 실측값들 중 "버킷 중앙시각에 가장 가까운 값" 하나를 그대로(합성 없이) 저장. 좁은 스케일의
  * 값이 넓은 스케일보다 더 극단적일 수 없다는 부등식이 자동으로 지켜지고, "마지막 값"처럼
  * 버킷 후반부로 편향되지도 않음 */
-static void agg_update_scale(agg_state_t *st, uint8_t scale, int mac_slot, const uint8_t mac[6], uint8_t kind,
-                             uint8_t chan_type, uint32_t unix_time, float value)
+static void agg_update_scale(agg_state_t *st, uint8_t scale, int slot, uint32_t unix_time, float value)
 {
     uint32_t bucket_width = scale_width(scale);
     uint32_t bucket_start = (unix_time / bucket_width) * bucket_width;  /* 벽시계 정렬 */
 
-    agg_accum_t *acc = &st->acc[scale][chan_type][mac_slot];
+    agg_accum_t *acc = &st->acc[scale][slot];
     if (acc->have_value && acc->bucket_start != bucket_start) {
-        agg_flush_bucket(st, scale, kind, chan_type, mac, acc);
+        agg_flush_bucket(st, scale, slot, acc);
         acc->have_value  = false;
         acc->seen_count  = 0;
     }
@@ -645,14 +670,12 @@ static void agg_flush_ended(agg_state_t *st, uint32_t now_unix)
     if (!st->acc) return;
     for (int sc = 0; sc < STATS_SCALE_COUNT; sc++) {
         uint32_t width = scale_width((uint8_t)sc);
-        for (int ch = 0; ch < STATS_AGG_MAX_CHAN_TYPES; ch++) {
-            for (int slot = 0; slot < st->n; slot++) {
-                agg_accum_t *acc = &st->acc[sc][ch][slot];
-                if (!acc->have_value || acc->bucket_start + width > now_unix) continue;
-                agg_flush_bucket(st, (uint8_t)sc, st->slot_kind[slot], (uint8_t)ch, st->macs[slot], acc);
-                acc->have_value = false;
-                acc->seen_count = 0;
-            }
+        for (int slot = 0; slot < st->n; slot++) {
+            agg_accum_t *acc = &st->acc[sc][slot];
+            if (!acc->have_value || acc->bucket_start + width > now_unix) continue;
+            agg_flush_bucket(st, (uint8_t)sc, slot, acc);
+            acc->have_value = false;
+            acc->seen_count = 0;
         }
     }
 }
@@ -668,7 +691,7 @@ void stats_store_flush_ended_buckets(uint32_t now_unix)
 
 static void agg_update(agg_state_t *st, const stats_record_t *r)
 {
-    if (r->chan_type >= STATS_AGG_MAX_CHAN_TYPES) return;
+    if (r->chan_type >= STATS_AGG_MAX_CHAN_TYPES || r->sensing == 0) return;
     if (!st->acc) {
         st->acc = heap_caps_calloc(1, AGG_ACCUM_BYTES, MALLOC_CAP_SPIRAM);
         if (!st->acc) {
@@ -676,11 +699,10 @@ static void agg_update(agg_state_t *st, const stats_record_t *r)
             return;
         }
     }
-    int mac_slot = agg_mac_slot(st, r->mac, r->unix_time);
-    st->slot_kind[mac_slot] = r->kind;
-    if (r->unix_time > st->slot_last[mac_slot]) st->slot_last[mac_slot] = r->unix_time;
+    int slot = agg_series_slot(st, r);
+    if (r->unix_time > st->slot_last[slot]) st->slot_last[slot] = r->unix_time;
     for (int scale = 0; scale < STATS_SCALE_COUNT; scale++) {
-        agg_update_scale(st, (uint8_t)scale, mac_slot, r->mac, r->kind, r->chan_type, r->unix_time, r->value);
+        agg_update_scale(st, (uint8_t)scale, slot, r->unix_time, r->value);
     }
 }
 
@@ -858,7 +880,7 @@ uint32_t stats_store_get_count(void)
 /* 2026-10-15 — 레코드가 그 주 파일에 들어갈 수 있는 값인지(시각이 그 주, 채널 종류가 범위 안) */
 static bool record_ok(const stats_record_t *r, uint32_t week)
 {
-    return r->unix_time / STATS_WEEK_SEC == week && r->chan_type < STATS_AGG_MAX_CHAN_TYPES;
+    return r->unix_time / STATS_WEEK_SEC == week && r->chan_type < STATS_AGG_MAX_CHAN_TYPES && r->sensing != 0 && r->sensing != 0xFFFF;
 }
 
 void stats_store_sd_check(void)
@@ -1416,7 +1438,7 @@ int stats_store_sync_json(char *buf, size_t cap)
  * 하나만) → 집계를 원시 기록 전체로 다시 계산. 그동안 매시 SD 옮기기·정리는 쉼(내부 플래시엔 계속 쌓임).
  * 알림 = 마지막 백업에서 BACKUP_REMIND_SEC가 지나면 하루에 한 번 경고(W6003, 휴대폰 알림) — 사용자: 3개월, 시험 중엔 매일
  * ════════════════════════════════════════════════════════════ */
-#define BACKUP_MAGIC        0x31425343u   /* "CSB1" */
+#define BACKUP_MAGIC        0x32425343u   /* "CSB2" — 2026-10-23 기록 형식 2판(센싱). 옛 "CSB1" 백업은 복원하지 않음 */
 #define BACKUP_HDR_BYTES    32u
 #define BACKUP_REMIND_SEC   (90u * 86400u)   /* 3개월(사용자 지시 "3개월마다") — 10-18 시험 끝(시험 중엔 1일) */
 #define BACKUP_STATE_PATH   FS_MOUNT_POINT "/backup.bin"
@@ -1645,7 +1667,7 @@ static void rr_next(rec_reader_t *r) { r->i++; }
 
 static bool rec_sane(const stats_record_t *r)
 {
-    return r->unix_time >= 1704067200u && r->unix_time < 4102444800u && r->chan_type < STATS_AGG_MAX_CHAN_TYPES;
+    return r->unix_time >= 1704067200u && r->unix_time < 4102444800u && r->chan_type < STATS_AGG_MAX_CHAN_TYPES && r->sensing != 0 && r->sensing != 0xFFFF;
 }
 
 /* 주 week의 기존 원시 파일과, 올린 파일에서 지금 위치부터 같은 주인 레코드를 시간순으로 합쳐 새 파일로 쓰고 바꿔 끼움.
@@ -1814,6 +1836,7 @@ void stats_store_init(void)
     if (!s_rbuf) s_rbuf = heap_caps_malloc(sizeof(stats_record_t) * RBUF_MAX, MALLOC_CAP_SPIRAM);
     if (!s_sync_buf) s_sync_buf = heap_caps_malloc(sizeof(stats_record_t) * SYNC_CHUNK, MALLOC_CAP_SPIRAM);
     if (mkdir(LFS_DIR, 0777) != 0 && errno != EEXIST) ESP_LOGE(TAG, "Flash stats dir create failed (errno=%d)", errno);
+    fmt_check_reset(LFS_DIR);   /* 2026-10-23 — 형식 판이 바뀌었으면 내부 플래시 통계를 비움 */
 
     char *path = heap_caps_malloc(300, MALLOC_CAP_SPIRAM);   /* 긴 파일 이름(d_name 최대 255) — 스택에 두지 않음 */
     DIR *d = path ? opendir(LFS_DIR) : NULL;
@@ -1980,6 +2003,7 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
     if (!ensure_alloc_locked()) { unlock(); if (out_bad_entries) *out_bad_entries = 0; return; }
     s_week_count = 0;
     s_total_raw = 0;
+    if (sd_storage_is_mounted() && sd_health_writes_allowed()) fmt_check_reset(STATS_DIR);   /* 2026-10-23 — 형식 판이 바뀌었으면 SD 통계를 비움 */
 
     DIR *d = opendir(STATS_DIR);
     if (d) {
@@ -2004,6 +2028,7 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
             bool is_agg = (!is_raw && len == 15 && sscanf(name, "a%1u_%8u.%3s", &scale, &week, tail) == 3 &&
                            strcmp(tail, "bin") == 0 && scale < STATS_SCALE_COUNT);
             if (!is_raw && !is_agg) {
+                if (strcmp(name, "fmt.bin") == 0) continue;   /* 2026-10-23 — 형식 판 표시 */
                 if (len > 4 && strcmp(name + len - 4, ".tmp") == 0) {
                     unlink(path);  /* 예전 방식(다시 쓰기) 정리 도중 리셋으로 남은 임시파일 */
                 } else if (strncmp(name, "values", 6) == 0 || strncmp(name, "agg_", 4) == 0) {

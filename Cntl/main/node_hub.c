@@ -1,4 +1,5 @@
 #include "node_hub.h"
+#include "sensor_registry.h"
 #include "memdiag.h"
 #include <stdlib.h>
 #include "photo_rx.h"
@@ -738,7 +739,13 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (len < (int)ESP_NOW_PAIR_ACK_BASE_LEN) return;   /* 2026-10-20 — 옛 펌웨어는 캠 정보 필드 없이 짧게 보냄 */
         const esp_now_pair_ack_t *ack = (const esp_now_pair_ack_t *)data;
         /* 2026-10-20(사용자 결정 — 사진 버퍼 재설계) — 캠이 보낸 센서 PID·최대 해상도로 그 캠의 사진 수신 버퍼를 정함(잠금 밖) */
-        bool cam_info = len >= (int)sizeof(esp_now_pair_ack_t) && ack->cam_pid != 0;
+        bool cam_info = len >= (int)ESP_NOW_PAIR_ACK_CAM_LEN && ack->cam_pid != 0;   /* 2026-10-23 — 센서 목록이 붙어 sizeof가 커짐 */
+        /* 2026-10-23(센서 중심 구조) — 센스의 센서 목록(옛 펌웨어는 없음 = 0) */
+        uint8_t sensor_count = 0;
+        if (len >= (int)ESP_NOW_PAIR_ACK_SENSORS_LEN + 1) {
+            uint8_t c = ack->sensor_count <= ESP_NOW_MAX_SENSORS ? ack->sensor_count : ESP_NOW_MAX_SENSORS;
+            if (len >= (int)(ESP_NOW_PAIR_ACK_SENSORS_LEN + c * sizeof(esp_now_sensor_desc_t))) sensor_count = c;
+        }
         uint16_t cam_pid = cam_info ? ack->cam_pid : 0;
         uint8_t cam_max_fs = cam_info ? ack->cam_max_framesize : 0;
 
@@ -814,6 +821,17 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             }
         }
         xSemaphoreGive(s_nodes_mutex);
+        if (kind_copy == HUB_NODE_KIND_SENS && ack_full == NODE_QUOTA_NONE) {
+            /* 2026-10-23(센서 중심 구조) — 센서 목록 반영, 새 센서면 ID를 붙여 알려 줌(다음 체크인 때 신뢰 전송) */
+            esp_now_sensor_id_assign_t asg = { 0 };
+            uint8_t cc = ack->chan_count > ESP_NOW_MAX_CHANNELS ? ESP_NOW_MAX_CHANNELS : ack->chan_count;
+            if (sreg_on_pair(info->src_addr, ack->sensor_kind, cc, ack->chan_type, sensor_count, ack->sensors, &asg)) {
+                static const uint8_t s_sid_ack[] = { ESP_NOW_MSG_SENSOR_ID_ASSIGN_ACK };
+                node_hub_queue_action(info->src_addr, &asg, offsetof(esp_now_sensor_id_assign_t, ids) + asg.count * sizeof(asg.ids[0]),
+                                      s_sid_ack, 1, 500, 3, "Sensor ID");
+                ESP_LOGI(TAG, "Sensor IDs to " MACSTR ": %u queued", MAC2STR(info->src_addr), (unsigned)asg.count);
+            }
+        }
         if (cam_info && kind_copy == HUB_NODE_KIND_CAM && ack_full == NODE_QUOTA_NONE) {
             photo_rx_cam_info(info->src_addr, cam_pid, cam_max_fs);   /* 2026-10-20 — 사진 버퍼 재설계(photo_rx.c) */
             device_config_note_cam_sensor(info->src_addr, cam_pid);   /* 2026-10-22 — 센서별 수동 노출 기본값 */
@@ -1050,13 +1068,14 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             uint8_t rec_count = 0;
             for (uint8_t ci = 0; ci < n->chan_count; ci++) {
                 if (!n->chan_ok[ci] || n->chan_invalid[ci]) continue;
-                memcpy(recs[rec_count].mac, n->mac, 6);
-                /* 2026-09-19(계열 자기서술 재설계, 사용자 설계) — 지금 이 순간(라이브
-                 * PAIR_ACK로 이미 알고 있음) kind를 레코드에 직접 박아넣음 — 나중에 읽을 때
-                 * mac->kind 역조회가 전혀 필요 없어짐 */
-                recs[rec_count].kind       = n->sensor_kind;
-                recs[rec_count].chan_type  = n->chan_type[ci];
-                recs[rec_count].chan_index = ci;
+                /* 2026-10-23(센서 중심 구조 2단계) — 보드 채널 → 센싱(sensor_registry). 기록은 센싱 ID와 그 센싱의
+                 * 무엇을·어디·정밀도(자기서술). 센싱이 없으면(목록이 가득 참 등) 기록하지 않음 */
+                sreg_sensing_t sg;
+                if (!sreg_sensing_for(n->mac, ci, &sg)) continue;
+                recs[rec_count].sensing    = sg.id;
+                recs[rec_count].chan_type  = sg.what;
+                recs[rec_count].attr       = (sg.precise ? STATS_ATTR_PRECISE : 0) |
+                                             (sg.where == SENSING_WHERE_SUBSTRATE ? STATS_ATTR_SUBSTRATE : 0);
                 recs[rec_count].unix_time  = n->sensor_last_update_unix_time;
                 recs[rec_count].value      = n->chan_val[ci];
                 rec_count++;

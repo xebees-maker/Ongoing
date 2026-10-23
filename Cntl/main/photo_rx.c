@@ -381,7 +381,7 @@ static void handle_sr_meta(const uint8_t *mac, const uint8_t *body, size_t len)
     /* SD 열기는 잠금 밖에서(수 ms~) */
     s->writer = photo_storage_begin_ext(mac, meta.kind, cb_buf, cb_cap);
     /* 2026-10-14 — SD 고장 상태로 거부한 것이면 이미 5009·푸시로 알렸으니 엉뚱한 5008(마운트 실패)을 또 올리지 않음 */
-    if (!s->writer && sd_health_writes_allowed()) ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)meta.file_id);
+    if (!s->writer && sd_health_writes_allowed() && !sd_storage_is_ejected()) ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)meta.file_id);   /* 10-23 — SD를 꺼낸 동안은 알리지 않음 */
 }
 
 static void handle_sr_chunk(const uint8_t *mac, const uint8_t *body, size_t len)
@@ -476,7 +476,7 @@ static void handle_sr_done(const uint8_t *mac, const uint8_t *body, size_t len)
     } else if (!crc_ok) {
         ESP_LOGW(TAG, "CRC mismatch - photo dropped file_id=%u", (unsigned)file_id);
         ui_log_add_err(UI_ERR_CRC_MISMATCH, "Photo receive failed (CRC mismatch) file_id=%u", (unsigned)file_id);
-    } else if (sd_health_writes_allowed()) {
+    } else if (sd_health_writes_allowed() && !sd_storage_is_ejected()) {   /* 10-23 — SD를 꺼낸 동안은 알리지 않음 */
         ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)file_id);
     } else {
         /* 2026-10-15 — SD 고장 상태라 저장을 거부한 것(시작 단계와 같은 이유, 93a2fd3) — 이미 5009·푸시로 알렸으니 5008을 또 올리지 않음 */

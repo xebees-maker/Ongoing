@@ -32,6 +32,8 @@ void sd_guard_attach(sdmmc_card_t *card);
 uint32_t sd_guard_dual_a0(void);
 /* 마운트가 실패한 카드(초기화만) — 0번 섹터가 망가졌고 A·B 부트 섹터가 멀쩡하면 파티션 표를 다시 씀(true면 마운트 재시도) */
 bool sd_guard_repair_mbr(sdmmc_card_t *card);
+/* 2026-10-23 — 언마운트(꺼내기·재연결·포맷) 전에: 진행 중인 카드 명령이 끝나길 기다려 카드를 놓음(그 뒤 요청은 "준비 안 됨") */
+void sd_guard_detach(void);
 /* 마운트 안 된 카드(초기화만)를 듀얼로 포맷 */
 esp_err_t sd_guard_format_dual(sdmmc_card_t *card);
 /* 듀얼이면 true, delta = B 시작 - A 시작 */

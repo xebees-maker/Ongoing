@@ -1,4 +1,5 @@
 #include "ui_main.h"
+#include "sensor_registry.h"
 #include "ui_strings.h"
 #include "ui_font.h"
 #include "node_hub.h"
@@ -1023,6 +1024,20 @@ static void cb_screen_off_icon(lv_event_t *e)
     screen_off();
 }
 
+/* 2026-10-23(사용자 설계 — SD 꺼내기: 전원을 끄거나 카드를 빼기 전에 SD 읽기·쓰기를 멈춤. 10-23 11:43 플래시 리셋이 사진 저장 도중이라 카드가 응답하지 않게 됨 — 카드를 뺐다 꽂아야 풀림) — 상단바 화면 잠금 아이콘 옆 꺼내기 아이콘. 누르면 확인 뒤 멈춤, 멈춘 상태에서 누르면 다시 마운트 */
+static lv_obj_t *s_sd_eject_icon = NULL;
+static lv_color_t s_sd_eject_normal_color;   /* 화면 잠금 아이콘과 같은 테마 기본 글자색(만들 때 잡음) */
+static void refresh_storage_status_label(void);
+static void cb_sd_eject_icon(lv_event_t *e);   /* 아래(show_alert_popup 뒤) */
+
+static void sd_eject_icon_update(void)
+{
+    if (!s_sd_eject_icon) return;
+    /* 10-23 — 흰색으로 두었더니 밝은 상단바에서 안 보였음(사용자) — 평소엔 테마 기본색, 꺼낸 동안만 주황 */
+    lv_obj_set_style_text_color(s_sd_eject_icon, sd_storage_is_ejected() ? lv_palette_main(LV_PALETTE_ORANGE) : s_sd_eject_normal_color, 0);
+}
+
+
 static void cb_screen_off_changed(lv_event_t *e)
 {
     (void)e;
@@ -1966,6 +1981,11 @@ static void refresh_storage_status_label(void)
     /* 2026-09-11(사용자 지시 — "에러 시에는 용량이나 사용량을 표기할 수 없잖아. 그냥
      * 지금처럼 에러로만 표기하고, 상태버튼을 눌러서 조치하라고 문구 표시") — 라벨 자체는
      * 더 이상 탭 대상이 아님(조치는 상태아이콘 쪽으로 일원화), 문구도 그에 맞게 안내 */
+    sd_eject_icon_update();   /* 2026-10-23 — 웹 API로 꺼낸 경우도 아이콘에 반영 */
+    if (sd_storage_is_ejected()) {
+        set_storage_label_text(ui_str(STR_STATUS_SD_EJECTED), false);
+        return;
+    }
     if (s_sd_io_fail_active) {
         set_storage_label_text(ui_str(STR_STATUS_SD_IO_ERROR_MSG), true);
         return;
@@ -2038,6 +2058,57 @@ static void show_alert_popup(const char *message, modal_kind_t kind)
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
     add_modal_button(btn_row, STR_BTN_CLOSE, cb_modal_close, NULL);
+}
+
+/* 2026-10-23(사용자 지적 — "화면에 아무 반응이 없어서 몰랐네") — 몇 초 걸리는 꺼내기·재연결 동안 "진행 중" 팝업을 먼저 그려 둠.
+ * 작업은 LVGL 태스크에서 동기로 돌아 그 사이엔 다시 그려지지 않으므로 lv_refr_now로 먼저 그림. 끝나면 지우고 결과 팝업 */
+static lv_obj_t *show_busy_popup(const char *message)
+{
+    lv_obj_t *box = create_modal();
+    create_modal_title(box, STR_TITLE_NOTICE, MODAL_KIND_NORMAL);
+    lv_obj_t *msg = lv_label_create(box);
+    lv_label_set_text(msg, message);
+    lv_obj_set_width(msg, LV_PCT(100));
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_refr_now(NULL);
+    return box;
+}
+
+static void close_busy_popup(lv_obj_t *box)
+{
+    if (!box) return;
+    lv_obj_delete(lv_obj_get_parent(box));   /* create_modal의 오버레이째 */
+    resume_bg_timers();
+}
+
+static void cb_sd_eject_confirmed(void *ctx)
+{
+    (void)ctx;
+    lv_obj_t *busy = show_busy_popup(ui_str(STR_MSG_SD_EJECTING));   /* 멈추기는 저장이 끝나길 기다림(LVGL 태스크) */
+    esp_err_t e = sd_storage_eject();
+    close_busy_popup(busy);
+    sd_eject_icon_update();
+    refresh_storage_status_label();
+    show_alert_popup(ui_str(e == ESP_OK ? STR_MSG_SD_EJECT_DONE : STR_MSG_SD_EJECT_FAIL), e == ESP_OK ? MODAL_KIND_NORMAL : MODAL_KIND_WARNING);
+}
+
+static void cb_sd_eject_icon(lv_event_t *e)
+{
+    (void)e;
+    if (!sd_storage_is_ejected()) {
+        show_confirm_popup(ui_str(STR_MSG_SD_EJECT_CONFIRM), MODAL_KIND_NORMAL, cb_sd_eject_confirmed, NULL);
+        return;
+    }
+    /* 멈춘 상태 — 다시 마운트(해결 팝업의 재마운트와 같은 검증) */
+    lv_obj_t *busy = show_busy_popup(ui_str(STR_MSG_SD_REMOUNTING));
+    esp_err_t err = sd_storage_reconnect();
+    bool ok = (err == ESP_OK) && sd_verify_healthy();
+    close_busy_popup(busy);
+    if (ok) clear_sd_io_fail();
+    sd_eject_icon_update();
+    refresh_storage_status_label();
+    show_alert_popup(ui_str(ok ? STR_MSG_SD_RECONNECT_OK : STR_MSG_SD_RECONNECT_FAIL), ok ? MODAL_KIND_NORMAL : MODAL_KIND_WARNING);
 }
 
 /* 2026-09-11(사용자 지적 — "리마운트, 포맷 실패시 팝업이 모두 다 닫히네, 직전으로
@@ -3732,15 +3803,16 @@ static bool stats_classify_by_kind(uint8_t kind, uint8_t chan_type,
 #define STATS_WIN_MAX_SERIES  24
 #define STATS_WIN_MAX_BUCKETS (STATS_AGG_POINTS_PER_SCALE * STATS_WIN_MAX_SERIES)
 
-/* 2026-09-15(사용자 확인 — "가스도 빨파 중에... Agar도 빨파흑노... 최대 4개로 일단 한정").
- * 2026-09-28(사용자 설계 — 페어링 상한 Agar 3대) — 3개로, Gas처럼 기기가 없어도 항상 3슬롯 */
+/* 개괄·웹의 Agar(배지 온도) 줄 수 — 2026-10-23부터 배지 센싱은 개수 제한이 없지만(사용자) 개괄 순환·웹 개괄은 3개까지 */
 #define STATS_AGAR_MAX_SLOTS 3
 #define STATS_GAS_MAX_SLOTS  2
 
+/* 2026-10-23(사용자 설계 — 센서 중심 구조 3단계) — 계열 = 센싱(sensor_registry). 칸 자신이 무엇을(chan_type)·어디·정밀도(attr)를
+ * 들고 있음. 예전(09-28~10-22)엔 (보드 MAC, kind, chan_type) — 한 보드의 같은 값 종류가 섞였음 */
 typedef struct {
-    uint8_t  mac[6];
-    uint8_t  kind;       /* sensor_kind_t — 저장된 칸 자신이 들고 있는 값 */
+    uint16_t sensing;
     uint8_t  chan_type;
+    uint8_t  attr;       /* STATS_ATTR_* */
     uint32_t first_t;    /* 창 안에서 이 계열의 첫/마지막 칸 시작시각 */
     uint32_t last_t;
 } stats_win_series_t;
@@ -3784,12 +3856,12 @@ static bool stats_window_load(stats_window_t *w, uint8_t scale_idx, uint32_t sta
     for (uint32_t i = 0; i < w->nb; i++) {
         const stats_bucket_t *bk = &w->b[i];
         int k = 0;
-        while (k < w->ns && !(w->s[k].chan_type == bk->chan_type && memcmp(w->s[k].mac, bk->mac, 6) == 0)) k++;
+        while (k < w->ns && w->s[k].sensing != bk->sensing) k++;
         if (k == w->ns) {
             if (w->ns >= STATS_WIN_MAX_SERIES) { w->b_series[i] = 0xFF; continue; }
-            memcpy(w->s[k].mac, bk->mac, 6);
-            w->s[k].kind = bk->kind;
+            w->s[k].sensing = bk->sensing;
             w->s[k].chan_type = bk->chan_type;
+            w->s[k].attr = bk->attr;
             w->s[k].first_t = bk->bucket_start_unix;
             w->ns++;
         }
@@ -3799,83 +3871,86 @@ static bool stats_window_load(stats_window_t *w, uint8_t scale_idx, uint32_t sta
     return true;
 }
 
-/* (kind, chan_type)이 이 보기(그룹, Air면 정밀/간이까지)에 속하는지 */
-static bool stats_kind_in_view(uint8_t kind, uint8_t chan_type, stats_view_group_t group, bool want_precise)
+/* 2026-10-23 — (무엇을, 어디·정밀도)가 이 보기(그룹, 공기면 정밀/간이까지)에 속하는지 */
+static bool stats_attr_in_view(uint8_t chan_type, uint8_t attr, stats_view_group_t group, bool want_precise)
 {
-    stats_view_group_t g;
-    bool prec;
-    return stats_classify_by_kind(kind, chan_type, &g, &prec) && g == group &&
-           (group != STATS_VIEW_GROUP_AIR || prec == want_precise);
+    bool sub = (attr & STATS_ATTR_SUBSTRATE) != 0;
+    bool prec = (attr & STATS_ATTR_PRECISE) != 0;
+    switch (group) {
+        case STATS_VIEW_GROUP_AIR:  return !sub && (chan_type == SENSOR_CHAN_TEMP_C || chan_type == SENSOR_CHAN_HUMI_PCT) && prec == want_precise;
+        case STATS_VIEW_GROUP_AGAR: return sub && chan_type == SENSOR_CHAN_TEMP_C;
+        default:                    return chan_type == SENSOR_CHAN_CO2_PPM || chan_type == SENSOR_CHAN_NH3_PPM;
+    }
 }
 
-/* 슬롯 하나 = 기기 사슬. 기록 시간이 겹치지 않는(앞 기기의 마지막 칸 뒤에 시작한) 기기는 같은 슬롯을 이어 씀 —
- * 사용자 설계: Agar A,B,C,D 중 C를 F로 바꾸면 1주 창은 ABCD -> ABDF, 이름은 "C->F" */
+static uint8_t stats_sensing_attr(const sreg_sensing_t *g)
+{
+    return (g->precise ? STATS_ATTR_PRECISE : 0) | (g->where == SENSING_WHERE_SUBSTRATE ? STATS_ATTR_SUBSTRATE : 0);
+}
+
+/* 2026-10-23(사용자 결정 — 정밀이 있으면 간이는 쓰지 않음) — 공기 chan_type의 정밀 센싱이 시스템에 있는지 */
+static bool stats_precise_exists(uint8_t chan_type)
+{
+    sreg_sensing_t list[SREG_MAX_SENSINGS];
+    int n = sreg_list_sensings(list, SREG_MAX_SENSINGS);
+    for (int i = 0; i < n; i++) {
+        if (list[i].what == chan_type && list[i].where == SENSING_WHERE_AIR && list[i].precise) return true;
+    }
+    return false;
+}
+
+/* 슬롯 = 센싱 하나(2026-10-23 — 센서를 바꿔도 센싱이 이어지므로 예전의 기기 사슬 "C->F"는 필요 없음). 구조체는 그대로 두고 n은 0 또는 1 */
 #define STATS_CHAIN_MAX 4
 typedef struct {
-    uint8_t  mac[STATS_CHAIN_MAX][6];
-    int      series[STATS_CHAIN_MAX];  /* 창 안의 계열 인덱스, -1 = 창엔 기록 없는 연결 기기(이름만) */
+    uint16_t sensing[STATS_CHAIN_MAX];
+    int      series[STATS_CHAIN_MAX];  /* 창 안의 계열 인덱스, -1 = 창엔 기록 없는 붙어 있는 센싱(이름만) */
     int      n;
     uint32_t last_t;
 } stats_chain_t;
 
-/* 이 보기에 속하는 창 안의 계열을 시작 시각 순으로 사슬(슬롯)에 배정 + 지금 연결됐지만 창엔 기록이 없는 기기도
- * 슬롯에 넣음(사용자 결정 — 빈 그래프로 보임). 반환: 슬롯 수(<= max_slots) */
+/* 이 보기에 속하는 센싱을 슬롯으로 — 센싱 목록 순서(같은 종류는 번호순) + 목록에 없는 창 안 계열. 기기(센서)가 없고 창에도 기록이
+ * 없는 센싱은 그리지 않음(사용자 결정 10-23). 반환: 슬롯 수(<= max_slots) */
 static int stats_build_chains(const stats_window_t *w, stats_view_group_t group, uint8_t chan_type, bool want_precise,
                               stats_chain_t *out, int max_slots)
 {
-    int idx[STATS_WIN_MAX_SERIES];
-    int n = 0;
-    for (int k = 0; k < w->ns; k++) {
-        if (w->s[k].chan_type != chan_type) continue;
-        if (!stats_kind_in_view(w->s[k].kind, chan_type, group, want_precise)) continue;
-        int pos = n++;
-        while (pos > 0 && w->s[idx[pos - 1]].first_t > w->s[k].first_t) { idx[pos] = idx[pos - 1]; pos--; }
-        idx[pos] = k;
-    }
     int slots = 0;
-    for (int a = 0; a < n; a++) {
-        const stats_win_series_t *se = &w->s[idx[a]];
-        int target = -1;
-        for (int c = 0; c < slots; c++) {
-            if (out[c].n < STATS_CHAIN_MAX && out[c].last_t < se->first_t) { target = c; break; }
-        }
-        if (target < 0) {
-            if (slots >= max_slots) continue;  /* 페어링 상한으로 동시 기기는 슬롯 수를 넘지 않음 */
-            target = slots++;
-            out[target].n = 0;
-        }
-        stats_chain_t *ch = &out[target];
-        memcpy(ch->mac[ch->n], se->mac, 6);
-        ch->series[ch->n] = idx[a];
-        ch->n++;
-        ch->last_t = se->last_t;
+    sreg_sensing_t *list = heap_caps_malloc(sizeof(sreg_sensing_t) * SREG_MAX_SENSINGS, MALLOC_CAP_SPIRAM);
+    int nl = list ? sreg_list_sensings(list, SREG_MAX_SENSINGS) : 0;
+    for (int a = 1; a < nl; a++) {   /* 번호순 */
+        sreg_sensing_t t = list[a];
+        int b = a - 1;
+        while (b >= 0 && (list[b].ordinal > t.ordinal || (list[b].ordinal == t.ordinal && list[b].id > t.id))) { list[b + 1] = list[b]; b--; }
+        list[b + 1] = t;
     }
-    node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
-    if (!nodes) return slots;
-    int total = node_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, NODE_HUB_MAX_NODES);
-    for (int i = 0; i < total; i++) {
-        if (node_hub_get_conn_state(nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
-        if (!stats_kind_in_view(nodes[i].sensor_kind, chan_type, group, want_precise)) continue;
-        bool present = false;
-        for (int c = 0; c < slots && !present; c++) {
-            for (int m = 0; m < out[c].n; m++) {
-                if (memcmp(out[c].mac[m], nodes[i].mac, 6) == 0) { present = true; break; }
-            }
-        }
-        if (present) continue;
-        int target = -1;
-        if (slots < max_slots) { target = slots++; out[target].n = 0; out[target].last_t = 0; }
-        else if (max_slots == 1 && out[0].n == 0) target = 0;
-        if (target < 0 || out[target].n >= STATS_CHAIN_MAX) continue;
-        memcpy(out[target].mac[out[target].n], nodes[i].mac, 6);
-        out[target].series[out[target].n] = -1;
-        out[target].n++;
+    for (int i = 0; i < nl && slots < max_slots; i++) {
+        const sreg_sensing_t *g = &list[i];
+        if (g->what != chan_type || !stats_attr_in_view(g->what, stats_sensing_attr(g), group, want_precise)) continue;
+        int k = -1;
+        for (int q = 0; q < w->ns; q++) if (w->s[q].sensing == g->id) { k = q; break; }
+        uint8_t mac[6];
+        if (k < 0 && !sreg_sensing_board(g->id, mac)) continue;
+        out[slots].n = 1;
+        out[slots].sensing[0] = g->id;
+        out[slots].series[0] = k;
+        out[slots].last_t = (k >= 0) ? w->s[k].last_t : 0;
+        slots++;
     }
-    heap_caps_free(nodes);
+    heap_caps_free(list);
+    for (int q = 0; q < w->ns && slots < max_slots; q++) {   /* 목록에 없는 센싱의 옛 기록 */
+        if (w->s[q].chan_type != chan_type || !stats_attr_in_view(w->s[q].chan_type, w->s[q].attr, group, want_precise)) continue;
+        bool have = false;
+        for (int c = 0; c < slots; c++) if (out[c].sensing[0] == w->s[q].sensing) have = true;
+        if (have) continue;
+        out[slots].n = 1;
+        out[slots].sensing[0] = w->s[q].sensing;
+        out[slots].series[0] = q;
+        out[slots].last_t = w->s[q].last_t;
+        slots++;
+    }
     return slots;
 }
 
-/* 2026-09-28(사용자 설계) — Agar는 상한이 3대로 정해져 있어 Gas처럼 슬롯을 항상 3개 둠 — 모자라는 슬롯은 빈 사슬 */
+/* 배지 온도 슬롯(개괄·웹 개괄용) — 남는 칸은 빈 슬롯(n = 0). 반환: 실제 슬롯 수 */
 static int stats_build_agar_slots(const stats_window_t *w, stats_chain_t *out)
 {
     int n = stats_build_chains(w, STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false, out, STATS_AGAR_MAX_SLOTS);
@@ -3883,7 +3958,7 @@ static int stats_build_agar_slots(const stats_window_t *w, stats_chain_t *out)
         out[i].n = 0;
         out[i].last_t = 0;
     }
-    return STATS_AGAR_MAX_SLOTS;
+    return n;
 }
 
 static bool stats_chain_has_series(const stats_chain_t *ch, int series_idx)
@@ -3894,34 +3969,52 @@ static bool stats_chain_has_series(const stats_chain_t *ch, int series_idx)
     return false;
 }
 
-/* 사슬의 기기 이름을 "C->F"로 이어 붙임(Alias 우선). 화살표는 글꼴에 없을 수 있어 ASCII로.
- * 빈 사슬(Agar 고정 슬롯 중 기기 없는 것)은 호출부가 따로 "Agar N"으로 이름 붙임 */
-static void stats_chain_label_ex(const stats_chain_t *ch, char *out, size_t out_cap, bool display);
-
-/* 콘 화면용 — 별명은 로마자(2026-10-05) */
-static void stats_chain_label(const stats_chain_t *ch, char *out, size_t out_cap)
+/* 2026-10-23 — 센싱 이름(콘 화면): 배지 = "Agar N T", 공기 = "Air T(정밀)", 가스 = 값 이름. 사람이 보는 단위는 센싱 값(사용자) */
+static void stats_sensing_label(uint16_t sensing, uint8_t chan_type, uint8_t attr, char *out, size_t cap)
 {
-    stats_chain_label_ex(ch, out, out_cap, true);
-}
-
-/* display = false: 입력한 그대로(웹이 언어에 맞춰 고름) */
-static void stats_chain_label_ex(const stats_chain_t *ch, char *out, size_t out_cap, bool display)
-{
-    out[0] = '\0';
-    for (int m = 0; m < ch->n; m++) {
-        char devname[ESP_NOW_LINK_NAME_LEN];
-        find_node_name_by_mac(ch->mac[m], devname, sizeof(devname));
-        const char *alias = display ? device_config_get_alias_display(ch->mac[m]) : device_config_get_alias(ch->mac[m]);
-        size_t len = strlen(out);
-        snprintf(out + len, out_cap - len, "%s%s", (m > 0) ? "->" : "", (alias[0] != '\0') ? alias : devname);
+    ui_str_id_t lbl, unit;
+    if (attr & STATS_ATTR_SUBSTRATE) {
+        sreg_sensing_t g;
+        int ord = sreg_get_sensing(sensing, &g) ? g.ordinal : 0;
+        char a[24];
+        snprintf(a, sizeof(a), ui_str(STR_AGAR_SLOT_FMT), ord ? ord : 1);
+        snprintf(out, cap, "%s %s", a, ui_str(STR_CHAN_LABEL_TEMP_C));
+    } else if (chan_type == SENSOR_CHAN_TEMP_C || chan_type == SENSOR_CHAN_HUMI_PCT) {
+        snprintf(out, cap, "%s(%s)", ui_str(chan_type == SENSOR_CHAN_TEMP_C ? STR_OVERVIEW_AIR_TEMP : STR_OVERVIEW_AIR_HUMI),
+                 ui_str((attr & STATS_ATTR_PRECISE) ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
+    } else if (chan_type_to_strs(chan_type, &lbl, &unit)) {
+        snprintf(out, cap, "%s", ui_str(lbl));
+    } else {
+        snprintf(out, cap, "#%u", (unsigned)sensing);
     }
 }
 
-/* Agar 슬롯 i(0부터)의 이름 — 기기가 있으면 사슬 이름, 없으면 "Agar N" */
+/* 슬롯(센싱)의 이름 */
+static void stats_chain_label(const stats_chain_t *ch, char *out, size_t out_cap)
+{
+    out[0] = '\0';
+    if (ch->n == 0) return;
+    sreg_sensing_t g;
+    if (sreg_get_sensing(ch->sensing[0], &g)) stats_sensing_label(g.id, g.what, stats_sensing_attr(&g), out, out_cap);
+    else snprintf(out, out_cap, "#%u", (unsigned)ch->sensing[0]);
+}
+
+/* 배지 슬롯 i(0부터)의 이름 — 센싱이 있으면 그 이름, 없으면 "Agar N T" */
 static void stats_agar_slot_name(const stats_chain_t *ch, int slot_idx, char *out, size_t out_cap)
 {
-    if (ch->n > 0) stats_chain_label(ch, out, out_cap);
-    else snprintf(out, out_cap, ui_str(STR_AGAR_SLOT_FMT), slot_idx + 1);
+    if (ch->n > 0) { stats_chain_label(ch, out, out_cap); return; }
+    char a[24];
+    snprintf(a, sizeof(a), ui_str(STR_AGAR_SLOT_FMT), slot_idx + 1);
+    snprintf(out, out_cap, "%s %s", a, ui_str(STR_CHAN_LABEL_TEMP_C));
+}
+
+/* 웹용 — 슬롯 센싱의 구분값(웹이 언어에 맞춰 이름을 만듦) */
+static void stats_chain_attrs(const stats_chain_t *ch, uint8_t *attr, uint8_t *ord)
+{
+    *attr = 0;
+    *ord = 0;
+    sreg_sensing_t g;
+    if (ch->n > 0 && sreg_get_sensing(ch->sensing[0], &g)) { *attr = stats_sensing_attr(&g); *ord = g.ordinal; }
 }
 
 /* 사슬 하나의 창 안 min/max/avg(칸 값 전체). 데이터 없으면 false */
@@ -3989,9 +4082,11 @@ bool ui_main_query_power_source_value(const power_relay_config_t *cfg, float *ou
     bool have = false;
     if (cfg->source_kind == POWER_SRC_SINGLE_DEVICE) {
         stats_chain_t one = { .n = 0 };
-        for (int k = 0; k < s_pw_win->ns; k++) {
-            if (s_pw_win->s[k].chan_type == cfg->chan_type && memcmp(s_pw_win->s[k].mac, cfg->device_mac, 6) == 0) {
-                memcpy(one.mac[0], cfg->device_mac, 6);
+        for (int k = 0; k < s_pw_win->ns; k++) {   /* 2026-10-23 — 그 보드에 붙은 센싱 중 같은 값 종류(4단계에서 시나리오로 바뀜) */
+            uint8_t bmac[6];
+            if (s_pw_win->s[k].chan_type == cfg->chan_type && sreg_sensing_board(s_pw_win->s[k].sensing, bmac) &&
+                memcmp(bmac, cfg->device_mac, 6) == 0) {
+                one.sensing[0] = s_pw_win->s[k].sensing;
                 one.series[0] = k;
                 one.n = 1;
                 break;
@@ -4108,21 +4203,25 @@ static bool refresh_stats_overview_panel(void)
     stats_chain_t chains[STATS_AGAR_MAX_SLOTS];
     int n;
 
-    /* --- Air Temperature (정밀/간이 토글 — 줄은 항상 있음, 고른 쪽 기록이 없으면 데이터 없음) --- */
-    n = stats_build_chains(s_ov_win, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C, s_overview_air_temp_precise, chains, 1);
+    /* 2026-10-23(사용자 결정) — 정밀 센싱이 있으면 정밀, 없으면 간이(사용자 선택 없음) */
+    /* 2026-10-23(사용자 설계) — 정밀(Fine)을 기본으로, 간이(Basic)는 백업으로 탭해서 교대로. 정밀 센싱이 없으면 간이 */
+    bool t_prec = s_overview_air_temp_precise && stats_precise_exists(SENSOR_CHAN_TEMP_C);
+    bool h_prec = s_overview_air_humi_precise && stats_precise_exists(SENSOR_CHAN_HUMI_PCT);
+    /* --- Air Temperature --- */
+    n = stats_build_chains(s_ov_win, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_TEMP_C, t_prec, chains, 1);
     have = (n > 0) && stats_blend_chains(s_ov_win, chains, n, &mn, &mx, &avg);
     snprintf(label, sizeof(label), "%s(%s)", ui_str(STR_OVERVIEW_AIR_TEMP),
-             ui_str(s_overview_air_temp_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
+             ui_str(t_prec ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
     stats_format_overview_badge_value(badge, sizeof(badge), value, sizeof(value), label,
                                        STR_CHAN_UNIT_TEMP_C, have, mn, mx, avg);
     lv_label_set_text(s_overview_temp_badge, badge);
     lv_label_set_text(s_overview_temp_value, value);
 
     /* --- Air Humidity (정밀/간이 토글) --- */
-    n = stats_build_chains(s_ov_win, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_HUMI_PCT, s_overview_air_humi_precise, chains, 1);
+    n = stats_build_chains(s_ov_win, STATS_VIEW_GROUP_AIR, SENSOR_CHAN_HUMI_PCT, h_prec, chains, 1);
     have = (n > 0) && stats_blend_chains(s_ov_win, chains, n, &mn, &mx, &avg);
     snprintf(label, sizeof(label), "%s(%s)", ui_str(STR_OVERVIEW_AIR_HUMI),
-             ui_str(s_overview_air_humi_precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
+             ui_str(h_prec ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
     stats_format_overview_badge_value(badge, sizeof(badge), value, sizeof(value), label,
                                        STR_CHAN_UNIT_HUMI_PCT, have, mn, mx, avg);
     lv_label_set_text(s_overview_humi_badge, badge);
@@ -4168,6 +4267,7 @@ static bool refresh_stats_overview_panel(void)
     return true;
 }
 
+/* 2026-10-23(사용자 설계) — 탭하면 정밀 <-> 간이 교대(정밀이 기본, 간이는 백업). 통계 팝업을 다시 열면 정밀로 */
 static void cb_overview_air_temp_tap(lv_event_t *e)
 {
     (void)e;
@@ -4237,18 +4337,15 @@ static bool refresh_stats_table(void)
         for (uint32_t i = 0; i < got; i++) {
             const stats_record_t *r = &recs[got - 1 - i];
 
-            char name[ESP_NOW_LINK_NAME_LEN];
-            find_node_name_by_mac(r->mac, name, sizeof(name));
-            /* 2026-09-15(사용자 지시 — "통계에도 Alias가 있으면 Alias로 표기") — Sensor/Camera
-             * 판넬(device_config_get_alias 사용처 참고)과 동일 규칙: 빈 문자열=미지정 */
-            const char *alias = device_config_get_alias_display(r->mac);  /* 10-05 — 콘 화면은 로마자 */
-            const char *display_name = (alias[0] != '\0') ? alias : name;
+            /* 2026-10-23(센서 중심 구조) — 항목 = 센싱 이름(사람이 보는 단위는 센싱 값, 사용자) */
+            char display_name[48];
+            stats_sensing_label(r->sensing, r->chan_type, r->attr, display_name, sizeof(display_name));
 
             ui_str_id_t label_id, unit_id;
             char item_buf[64];
             char value_buf[32];
             if (chan_type_to_strs(r->chan_type, &label_id, &unit_id)) {
-                snprintf(item_buf, sizeof(item_buf), "%s %s", display_name, ui_str(label_id));
+                snprintf(item_buf, sizeof(item_buf), "%s", display_name);
                 /* 2026-09-15(사용자 지시 — "값도 마찬가지... 총 자리수를 4개로 고정") */
                 char num_buf[16];
                 format_value_capped(num_buf, sizeof(num_buf), r->value);
@@ -4443,19 +4540,23 @@ static bool stats_graph_local_trend(const bool has[], const float vals[], int po
  * min·max 라벨은 이 개수만큼 미리 만들어두고(아래 build_stats_tab), 그룹이 바뀔 때마다
  * 재사용(relabel/recolor/보이기·숨기기)만 함 — LVGL 오브젝트를 매번 새로 만들고 지우지
  * 않음(이번 세션 내내 겪은 malloc 관련 문제들을 감안한 저위험 선택) */
-static stats_view_group_t s_stats_active_group = STATS_VIEW_GROUP_AIR;
+/* 2026-10-23(사용자 설계) — 그래프 묶음: 온도(공기 온습도 + 배지 온도), 가스(이산화탄소·암모니아) */
+#define STATS_GRAPH_TEMP 0
+#define STATS_GRAPH_GAS  1
+static uint8_t s_stats_active_group = STATS_GRAPH_TEMP;
 static int     s_stats_slot_count = 0;
 static stats_chain_t s_stats_slot_chain[STATS_GRAPH_SERIES_COUNT];  /* 2026-09-28 — 슬롯 = 기기 사슬 */
 static uint8_t s_stats_slot_chan_type[STATS_GRAPH_SERIES_COUNT];
 static char    s_stats_slot_label[STATS_GRAPH_SERIES_COUNT][48];
 /* 그래프 자체의 정밀/간이 토글 상태 — 개괄 판넬(s_overview_air_*_precise)과 위젯이 달라서
  * 독립적으로 둠(둘을 동기화해야 한다는 지시는 없었음) */
-static bool s_stats_air_temp_precise = true;
+static bool s_stats_air_temp_precise = true;   /* 2026-10-23 — "정밀을 원함"(기본). 정밀 센싱이 없으면 간이로 그려짐 */
 static bool s_stats_air_humi_precise = true;
+static bool s_stats_slot_air[STATS_GRAPH_SERIES_COUNT];   /* 공기 온도·습도 슬롯(글씨 탭 = 정밀 <-> 간이) */
 
 /* 그룹 전환/토글 때 부름 — 2026-09-28부터 슬롯 자체는 창을 읽은 뒤(refresh_stats_graph) stats_graph_build_slots()가
  * 만듦(계열이 그 스케일의 창에 따라 달라지므로) */
-static void stats_graph_populate_slots_for_group(stats_view_group_t group)
+static void stats_graph_populate_slots_for_group(uint8_t group)
 {
     s_stats_active_group = group;
 }
@@ -4464,27 +4565,27 @@ static void stats_graph_populate_slots_for_group(stats_view_group_t group)
  * 토글을 못 누름). Agar는 창 안의 기기 사슬 + 지금 연결된 기기 */
 /* 2026-10-03(웹 통계) — 그룹의 슬롯(기기 사슬, 채널) 구성만 따로 — 콘 그래프(아래 stats_graph_build_slots)와 웹
  * (ui_main_stats_graph)이 같이 씀. 기록 없는 슬롯은 빈 사슬(n = 0). 반환: 슬롯 수 */
-static int stats_graph_slots(const stats_window_t *w, stats_view_group_t group, bool temp_precise, bool humi_precise,
+static int stats_graph_slots(const stats_window_t *w, uint8_t group, bool temp_want_precise, bool humi_want_precise,
                              stats_chain_t chains[STATS_GRAPH_SERIES_COUNT], uint8_t chan[STATS_GRAPH_SERIES_COUNT])
 {
+    /* 2026-10-23(사용자 설계) — 있는 센싱만(기기 없는 계열은 그리지 않음). 온도 묶음 = 공기 온도·습도(정밀이 있으면 정밀, 없으면 간이)
+     * + 배지 온도, 가스 묶음 = 이산화탄소·암모니아 */
     int count = 0;
-    if (group == STATS_VIEW_GROUP_AIR) {
+    if (group == STATS_GRAPH_TEMP) {
         static const uint8_t s_air_chan[2] = { SENSOR_CHAN_TEMP_C, SENSOR_CHAN_HUMI_PCT };
-        for (int a = 0; a < 2; a++) {
-            int n = stats_build_chains(w, STATS_VIEW_GROUP_AIR, s_air_chan[a], a == 0 ? temp_precise : humi_precise,
-                                       &chains[count], 1);
-            if (n == 0) chains[count].n = 0;
-            chan[count++] = s_air_chan[a];
+        for (int a = 0; a < 2 && count < STATS_GRAPH_SERIES_COUNT; a++) {
+            /* 정밀이 기본, 간이는 탭해서 교대(사용자 설계 10-23). 정밀 센싱이 없으면 간이 */
+            bool want = (a == 0) ? temp_want_precise : humi_want_precise;
+            int n = stats_build_chains(w, STATS_VIEW_GROUP_AIR, s_air_chan[a], want && stats_precise_exists(s_air_chan[a]), &chains[count], 1);
+            if (n > 0) chan[count++] = s_air_chan[a];
         }
-    } else if (group == STATS_VIEW_GROUP_AGAR) {
-        int n = stats_build_agar_slots(w, chains);  /* 항상 3슬롯 — 기기 없는 슬롯은 "Agar N T" 빈 그래프 */
-        for (; count < n && count < STATS_GRAPH_SERIES_COUNT; count++) chan[count] = SENSOR_CHAN_TEMP_C;
-    } else {  /* STATS_VIEW_GROUP_GAS — CO2, 암모니아 한 슬롯씩(상한 1대씩, 교체면 사슬) */
+        int n = stats_build_chains(w, STATS_VIEW_GROUP_AGAR, SENSOR_CHAN_TEMP_C, false, &chains[count], STATS_GRAPH_SERIES_COUNT - count);
+        for (int k = 0; k < n; k++) chan[count++] = SENSOR_CHAN_TEMP_C;
+    } else {
         static const uint8_t s_gas_chan[STATS_GAS_MAX_SLOTS] = { SENSOR_CHAN_CO2_PPM, SENSOR_CHAN_NH3_PPM };
-        for (int g = 0; g < STATS_GAS_MAX_SLOTS; g++) {
+        for (int g = 0; g < STATS_GAS_MAX_SLOTS && count < STATS_GRAPH_SERIES_COUNT; g++) {
             int n = stats_build_chains(w, STATS_VIEW_GROUP_GAS, s_gas_chan[g], false, &chains[count], 1);
-            if (n == 0) chains[count].n = 0;
-            chan[count++] = s_gas_chan[g];
+            if (n > 0) chan[count++] = s_gas_chan[g];
         }
     }
     return count;
@@ -4530,29 +4631,12 @@ static void stats_graph_build_slots(const stats_window_t *w)
                                            s_stats_slot_chain, chan);
     for (int s = 0; s < s_stats_slot_count; s++) {
         s_stats_slot_chan_type[s] = chan[s];
-        char *lbl = s_stats_slot_label[s];
-        const size_t cap = sizeof(s_stats_slot_label[0]);
-        if (s_stats_active_group == STATS_VIEW_GROUP_AIR) {
-            bool precise = (s == 0) ? s_stats_air_temp_precise : s_stats_air_humi_precise;
-            snprintf(lbl, cap, "%s(%s)", ui_str(s == 0 ? STR_OVERVIEW_AIR_TEMP : STR_OVERVIEW_AIR_HUMI),
-                     ui_str(precise ? STR_PRECISION_PRECISE : STR_PRECISION_BASIC));
-            continue;
-        }
-        char name[40];
-        if (s_stats_active_group == STATS_VIEW_GROUP_AGAR) {
-            stats_agar_slot_name(&s_stats_slot_chain[s], s, name, sizeof(name));
-            snprintf(lbl, cap, "%s %s", name, ui_str(STR_CHAN_LABEL_TEMP_C));
-        } else {
-            ui_str_id_t gas_label = (chan[s] == SENSOR_CHAN_CO2_PPM) ? STR_CHAN_LABEL_CO2_PPM : STR_CHAN_LABEL_NH3_PPM;
-            if (s_stats_slot_chain[s].n > 0) {
-                stats_chain_label(&s_stats_slot_chain[s], name, sizeof(name));
-                snprintf(lbl, cap, "%s %s", name, ui_str(gas_label));
-            } else {
-                snprintf(lbl, cap, "%s", ui_str(gas_label));
-            }
-        }
+        uint8_t at, od;
+        stats_chain_attrs(&s_stats_slot_chain[s], &at, &od);
+        s_stats_slot_air[s] = !(at & STATS_ATTR_SUBSTRATE) && (chan[s] == SENSOR_CHAN_TEMP_C || chan[s] == SENSOR_CHAN_HUMI_PCT);
+        stats_chain_label(&s_stats_slot_chain[s], s_stats_slot_label[s], sizeof(s_stats_slot_label[0]));
         /* 2026-09-15(사용자 지시 — "기기명(Alias)이 길어지면 ...으로... 스케일, << >> 공간을 확보해야되") */
-        trim_to_width(lbl, ui_font_get(UI_FONT_SIZE_18), 90);
+        trim_to_width(s_stats_slot_label[s], ui_font_get(UI_FONT_SIZE_18), 90);
     }
 }
 /* 2026-09-10/11(재설계 — 라인그래프, 계열 4개 온도/습도/CO2/암모니아, 스케일별 사전집계
@@ -4739,9 +4823,7 @@ static void cb_stats_chart_series_toggle(lv_event_t *e)
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     lv_obj_t *cb = s_stats_chart_checkbox[idx];
 
-    if (s_stats_active_group == STATS_VIEW_GROUP_AIR &&
-        (s_stats_slot_chan_type[idx] == SENSOR_CHAN_TEMP_C ||
-         s_stats_slot_chan_type[idx] == SENSOR_CHAN_HUMI_PCT)) {
+    if (s_stats_active_group == STATS_GRAPH_TEMP && s_stats_slot_air[idx]) {   /* 2026-10-23 — 공기 슬롯 글씨 탭 = 정밀 <-> 간이 */
         lv_indev_t *indev = lv_indev_active();
         lv_point_t p = { 0, 0 };
         if (indev) lv_indev_get_point(indev, &p);
@@ -4759,7 +4841,7 @@ static void cb_stats_chart_series_toggle(lv_event_t *e)
             } else {
                 s_stats_air_humi_precise = !s_stats_air_humi_precise;
             }
-            stats_graph_populate_slots_for_group(STATS_VIEW_GROUP_AIR);
+            stats_graph_populate_slots_for_group(STATS_GRAPH_TEMP);
             s_stats_graph_force_refresh = true;
             refresh_stats_graph();
             return;
@@ -4787,7 +4869,7 @@ static void cb_stats_chart_series_toggle(lv_event_t *e)
  * 두 버튼은 배경을 원래대로 되돌림(선택된 버튼만 강조) */
 static void cb_stats_graph_group_tap(lv_event_t *e)
 {
-    stats_view_group_t group = (stats_view_group_t)(intptr_t)lv_event_get_user_data(e);
+    uint8_t group = (uint8_t)(intptr_t)lv_event_get_user_data(e);
     for (int g = 0; g < 3; g++) {
         if (!s_stats_group_btn[g]) continue;
         lv_obj_set_style_bg_color(s_stats_group_btn[g],
@@ -7402,6 +7484,17 @@ void ui_init(void)
     lv_obj_set_ext_click_area(screen_off_icon, 10);
     lv_obj_add_event_cb(screen_off_icon, cb_screen_off_icon, LV_EVENT_CLICKED, NULL);
 
+    /* 2026-10-23(사용자 설계) — 화면 잠금 아이콘 옆, 같은 크기의 SD 꺼내기 아이콘 */
+    s_sd_eject_icon = lv_label_create(top_bar_left);
+    lv_label_set_text(s_sd_eject_icon, LV_SYMBOL_EJECT);
+    lv_obj_set_style_text_font(s_sd_eject_icon, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_pad_all(s_sd_eject_icon, 6, 0);
+    lv_obj_add_flag(s_sd_eject_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(s_sd_eject_icon, 10);
+    lv_obj_add_event_cb(s_sd_eject_icon, cb_sd_eject_icon, LV_EVENT_CLICKED, NULL);
+    s_sd_eject_normal_color = lv_obj_get_style_text_color(screen_off_icon, LV_PART_MAIN);
+    sd_eject_icon_update();
+
     lv_obj_t *top_bar_right = lv_obj_create(s_top_bar);
     lv_obj_set_size(top_bar_right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(top_bar_right, LV_FLEX_FLOW_ROW);
@@ -8459,13 +8552,10 @@ static void build_stats_tab(void)
     lv_obj_set_style_pad_all(chart_checkbox_row, 0, 0);
     lv_obj_set_style_pad_column(chart_checkbox_row, 8, 0);
 
-    static const stats_view_group_t s_group_btn_order[3] = {
-        STATS_VIEW_GROUP_AIR, STATS_VIEW_GROUP_AGAR, STATS_VIEW_GROUP_GAS
-    };
-    static const ui_str_id_t s_group_btn_label[3] = {
-        STR_VIEW_GROUP_AIR, STR_VIEW_GROUP_AGAR, STR_VIEW_GROUP_GAS
-    };
-    for (int g = 0; g < 3; g++) {
+    /* 2026-10-23(사용자 설계) — 그래프 묶음 2개: 온도(공기 온습도 + 배지), 가스 */
+    static const uint8_t s_group_btn_order[2] = { STATS_GRAPH_TEMP, STATS_GRAPH_GAS };
+    static const ui_str_id_t s_group_btn_label[2] = { STR_VIEW_GROUP_TEMP, STR_VIEW_GROUP_GAS };
+    for (int g = 0; g < 2; g++) {
         s_stats_group_btn[g] = lv_button_create(chart_checkbox_row);
         /* 2026-09-15(사용자 지시 — "Air, Agar, Gas 단추를 폭을 더 줄이고 높이도 낮춰") —
          * Scale 드랍다운이 이 줄에 새로 들어오게 되면서 폭이 부족해질 수 있어 더 좁힘.
@@ -8489,15 +8579,15 @@ static void build_stats_tab(void)
      * 이 크기에 맞춰") — 기본은 라벨 길이에 따라 폭이 제각각(LV_SIZE_CONTENT)이라, 레이아웃을
      * 강제로 한 번 계산시켜 가장 넓은 Agar(인덱스1) 폭을 읽은 뒤 셋 다 그 폭으로 고정 */
     lv_obj_update_layout(chart_checkbox_row);
-    int32_t group_btn_w = lv_obj_get_width(s_stats_group_btn[1]);
-    for (int g = 0; g < 3; g++) {
+    int32_t group_btn_w = lv_obj_get_width(s_stats_group_btn[0]);
+    if (lv_obj_get_width(s_stats_group_btn[1]) > group_btn_w) group_btn_w = lv_obj_get_width(s_stats_group_btn[1]);
+    for (int g = 0; g < 2; g++) {
         lv_obj_set_width(s_stats_group_btn[g], group_btn_w);
     }
     /* 2026-09-15(사용자 지적 — "Air, Agar, Gas 모두 선택되어 있어") — 버튼 기본 테마색이
      * 이미 파란 계열이라 선택 안 된 버튼도 선택된 것처럼 보였던 버그. 기본 그룹 = 온습도
      * (AIR)라 0번만 파랑, 나머지는 명시적으로 회색으로 깔아야 구분됨 */
     lv_obj_set_style_bg_color(s_stats_group_btn[1], lv_palette_main(LV_PALETTE_GREY), 0);
-    lv_obj_set_style_bg_color(s_stats_group_btn[2], lv_palette_main(LV_PALETTE_GREY), 0);
     lv_obj_set_style_bg_color(s_stats_group_btn[0], lv_palette_main(LV_PALETTE_BLUE), 0);
     stats_graph_populate_slots_for_group(STATS_VIEW_GROUP_AIR);
 
@@ -8717,6 +8807,9 @@ static void cb_stats_btn_tap(lv_event_t *e)
         show_alert_popup(ui_str(STR_MSG_STATS_BLOCKED_SD_FAIL), MODAL_KIND_WARNING);
         return;
     }
+    /* 2026-10-23(사용자 설계) — 열 때마다 공기 온습도는 정밀(기본)로 */
+    s_overview_air_temp_precise = s_overview_air_humi_precise = true;
+    s_stats_air_temp_precise = s_stats_air_humi_precise = true;
     build_stats_tab();
 }
 
@@ -9604,18 +9697,8 @@ static void relay_apply_choices(power_relay_config_t *f, const ui_web_relay_choi
             /* "정밀 우선" — Fine(SHT45류)이 지금 연결돼 있으면 정밀, 없으면 기본.
              * 2026-09-28 — 예전엔 1주 집계 파일 전체에서 찾았음(stats_agg_collect_macs 제거) — 판정은 실시간이라
              * 지금 연결된 기기로 봄 */
-            bool fine_connected = false;
-            node_hub_node_t *nodes = heap_caps_malloc(sizeof(node_hub_node_t) * NODE_HUB_MAX_NODES, MALLOC_CAP_SPIRAM);
-            if (nodes) {
-                int total = node_hub_get_nodes(HUB_NODE_KIND_SENS, nodes, NODE_HUB_MAX_NODES);
-                for (int i = 0; i < total && !fine_connected; i++) {
-                    if (node_hub_get_conn_state(nodes[i].mac) == HUB_CONN_STATE_WAITING) continue;
-                    fine_connected = stats_kind_in_view(nodes[i].sensor_kind, SENSOR_CHAN_TEMP_C,
-                                                        STATS_VIEW_GROUP_AIR, true);
-                }
-                heap_caps_free(nodes);
-            }
-            f->precise = fine_connected;
+            /* 2026-10-23(센서 중심 구조) — 정밀 공기 온도 센싱이 있으면 정밀(사용자 결정 — 정밀이 있으면 간이는 안 씀) */
+            f->precise = stats_precise_exists(SENSOR_CHAN_TEMP_C);
         } else {
             f->precise = false;
         }
@@ -11448,6 +11531,12 @@ static bool web_op_execute(const ui_web_op_t *op)
             refresh_storage_status_label();
             return ok;
         }
+        case UI_WEB_OP_SD_EJECT: {        /* 2026-10-23 — cb_sd_eject_confirmed(확인은 부른 쪽에서) */
+            bool ok = sd_storage_eject() == ESP_OK;
+            sd_eject_icon_update();
+            refresh_storage_status_label();
+            return ok;
+        }
         case UI_WEB_OP_SD_FORMAT: {       /* cb_sd_format_confirmed(확인은 웹에서) */
             bool ok = (sd_storage_format() == ESP_OK) && sd_verify_healthy();
             if (ok) clear_sd_io_fail();
@@ -11614,7 +11703,8 @@ int ui_main_get_warn_codes(int *out, int cap)
 bool ui_main_stats_graph(uint8_t scale, uint32_t offset, uint8_t group, bool temp_precise, bool humi_precise,
                          ui_stats_graph_t *out)
 {
-    if (!out || scale >= STATS_SCALE_COUNT || group > STATS_VIEW_GROUP_GAS) return false;
+    if (!out || scale >= STATS_SCALE_COUNT || group > STATS_GRAPH_GAS) return false;
+    /* 2026-10-23 — temp/humi_precise = 정밀을 원함(기본 1). 정밀 센싱이 없으면 간이 */
     static stats_window_t *s_web_win = NULL;
     static stats_chain_t *s_web_chains = NULL;
     if (!s_web_win) s_web_win = stats_window_alloc();
@@ -11631,12 +11721,12 @@ bool ui_main_stats_graph(uint8_t scale, uint32_t offset, uint8_t group, bool tem
 
     uint8_t chan[STATS_GRAPH_SERIES_COUNT];
     out->window_end = window_end;
-    out->slot_count = stats_graph_slots(s_web_win, (stats_view_group_t)group, temp_precise, humi_precise, s_web_chains, chan);
+    out->slot_count = stats_graph_slots(s_web_win, group, temp_precise, humi_precise, s_web_chains, chan);
     for (int s = 0; s < out->slot_count; s++) {
         ui_stats_slot_t *sl = &out->slot[s];
         sl->chan_type = chan[s];
         sl->name[0] = '\0';
-        if (s_web_chains[s].n > 0) stats_chain_label_ex(&s_web_chains[s], sl->name, sizeof(sl->name), false);
+        stats_chain_attrs(&s_web_chains[s], &sl->attr, &sl->ord);   /* 2026-10-23 — 웹이 언어에 맞춰 이름을 만듦 */
         stats_graph_series_compute(s_web_win, &s_web_chains[s], &sl->d);
     }
     return true;
@@ -11669,14 +11759,18 @@ bool ui_main_stats_overview(uint8_t scale, ui_stats_overview_t *out)
         m = &out->air_h[p];
         m->have = (n > 0) && stats_blend_chains(w, chains, n, &m->mn, &m->mx, &m->avg);
     }
+    out->air_t_prec = stats_precise_exists(SENSOR_CHAN_TEMP_C);   /* 2026-10-23 — 정밀이 있으면 정밀(자동) */
+    out->air_h_prec = stats_precise_exists(SENSOR_CHAN_HUMI_PCT);
     n = stats_build_agar_slots(w, chains);
+    out->agar_count = n;
     m = &out->agar_all;
     m->have = stats_blend_chains(w, chains, n, &m->mn, &m->mx, &m->avg);
     for (int i = 0; i < STATS_AGAR_MAX_SLOTS; i++) {
         m = &out->agar[i];
         m->have = stats_chain_stat(w, &chains[i], &m->mn, &m->mx, &m->avg);
         out->agar_name[i][0] = '\0';
-        if (chains[i].n > 0) stats_chain_label_ex(&chains[i], out->agar_name[i], sizeof(out->agar_name[i]), false);
+        uint8_t at;
+        stats_chain_attrs(&chains[i], &at, &out->agar_ord[i]);
     }
     n = stats_build_chains(w, STATS_VIEW_GROUP_GAS, SENSOR_CHAN_CO2_PPM, false, chains, 1);
     m = &out->co2;
@@ -11685,6 +11779,13 @@ bool ui_main_stats_overview(uint8_t scale, ui_stats_overview_t *out)
     m = &out->nh3;
     m->have = (n > 0) && stats_blend_chains(w, chains, n, &m->mn, &m->mx, &m->avg);
     return !stats_store_had_io_error();
+}
+
+/* 2026-10-23 — 기록 한 줄의 센싱 구분값(웹이 언어에 맞춰 이름을 만듦) */
+void ui_main_stats_sensing_info(uint16_t sensing, uint8_t *ord)
+{
+    sreg_sensing_t g;
+    *ord = sreg_get_sensing(sensing, &g) ? g.ordinal : 0;
 }
 
 void ui_main_stats_device_name(const uint8_t mac[6], char *out, size_t cap)
