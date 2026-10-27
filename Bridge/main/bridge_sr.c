@@ -49,6 +49,7 @@ typedef struct {
     int64_t  last_us;
     bool     status_pending;        /* 흐름 제어로 미룬 WINDOW_STATUS 요청 */
     uint16_t st_start, st_count;
+    can_bridge_sr_rx_diag_t diag;   /* 2026-10-26 — 세션 경과(DONE·중단 알림 끝에 붙여 콘으로) */
 } sr_cam_t;
 
 static sr_cam_t s_cams[SR_SESSIONS];
@@ -79,7 +80,12 @@ static void push_chunk(sr_cam_t *c, uint16_t idx, const uint8_t *data, uint16_t 
 static void push_done(sr_cam_t *c, uint8_t status)
 {
     can_bridge_sr_done_t d = { .file_id = c->file_id, .status = status };
-    push_to_cntl(CAN_DATA_SR_DONE, c->mac, &d, sizeof(d), NULL, 0);
+    /* 2026-10-26 — 세션 경과를 끝에 붙임 */
+    c->diag.total = c->total_chunks;
+    c->diag.next_idx = c->next_idx;
+    int64_t idle = (esp_timer_get_time() - c->last_us) / 1000;
+    c->diag.idle_ms = (uint16_t)(idle > 65535 ? 65535 : idle);
+    push_to_cntl(CAN_DATA_SR_DONE, c->mac, &d, sizeof(d), (const uint8_t *)&c->diag, sizeof(c->diag));
 }
 
 /* ---- 캠으로(ESP-NOW) — 응답은 짧은 쪽만 보냄(missing_idx는 실제 개수만큼) ---- */
@@ -156,6 +162,7 @@ static void answer_window_status(sr_cam_t *c)
      * 끝까지 빠진 걸 모두 알려 줌. 캠은 앞쪽 구멍부터 메우고 넘어가서 순서가 크게 뒤처지지 않음 */
     uint16_t from = (c->next_idx < c->st_start) ? c->next_idx : c->st_start;
     uint16_t n = collect_missing(c, from, (uint16_t)(c->st_start + c->st_count));
+    c->diag.ws_missing += n;   /* 2026-10-26 */
     reply_nack(c->mac, ESP_NOW_MSG_PHOTO_WINDOW_STATUS_ACK, c->file_id, n);
     c->status_pending = false;
 }
@@ -172,7 +179,11 @@ static void on_meta(const uint8_t *mac, const uint8_t *data, int len)
         return;
     }
     if (c->active && c->file_id == meta.file_id) {
+        if (c->diag.meta_resend < 255) c->diag.meta_resend++;   /* 2026-10-26 */
         /* META_ACK가 유실돼 캠이 META를 다시 보냄 — 응답만 다시 */
+        /* 2026-10-26(진단 — 캠이 META_ACK를 3번 모두 못 받고 사진을 버림, 할 일) — 재전송이 실제로 오는지 */
+        char r6[7]; bridge_log_mac6(mac, r6);
+        bridge_log_wireless("SR META resend(%s) id=%u - ACK again", r6, (unsigned)meta.file_id);
         esp_now_photo_done_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_PHOTO_META_ACK };
         reply(mac, &ack, sizeof(ack));
         return;
@@ -191,6 +202,7 @@ static void on_meta(const uint8_t *mac, const uint8_t *data, int len)
     c->status_pending = false;
     c->last_us = esp_timer_get_time();
     reset_holds(c);
+    memset(&c->diag, 0, sizeof(c->diag));   /* 2026-10-26 — 새 세션 */
 
     can_bridge_sr_meta_t m = {
         .file_id = meta.file_id, .total_size = meta.total_size, .total_chunks = meta.total_chunks,
@@ -214,15 +226,16 @@ static void on_chunk(const uint8_t *mac, const uint8_t *data, int len)
     if (clen > ESP_NOW_PHOTO_CHUNK_DATA_LEN || len < (int)offsetof(esp_now_photo_chunk_t, data) + clen) return;
     if (idx >= c->total_chunks) return;
     c->last_us = esp_timer_get_time();
+    c->diag.chunk_rx++;   /* 2026-10-26 */
 
-    if (idx < c->next_idx || is_held(c, idx)) return;  /* 중복 */
+    if (idx < c->next_idx || is_held(c, idx)) { c->diag.chunk_dup++; return; }  /* 중복 */
     if (idx == c->next_idx) {
         push_chunk(c, idx, ch->data, clen);
         c->next_idx++;
         drain_holds(c);
         return;
     }
-    if (idx >= c->next_idx + SR_HOLD) return;  /* 보관 범위 밖 — 버림(윈도 상태/DONE 누락 목록으로 다시 옴) */
+    if (idx >= c->next_idx + SR_HOLD) { c->diag.chunk_far++; return; }  /* 보관 범위 밖 — 버림(윈도 상태/DONE 누락 목록으로 다시 옴) */
     int slot = idx % SR_HOLD;
     memcpy(c->hold + (size_t)slot * ESP_NOW_PHOTO_CHUNK_DATA_LEN, ch->data, clen);
     c->hold_idx[slot] = idx;
@@ -245,6 +258,7 @@ static void on_window_status(const uint8_t *mac, const uint8_t *data, int len)
         return;
     }
     c->last_us = esp_timer_get_time();
+    c->diag.ws_rx++;   /* 2026-10-26 */
     ESP_LOGD(TAG, MACSTR " WINDOW_STATUS [%u,+%u) next=%u backlog=%u", MAC2STR(mac), req.range_start, req.range_count,
              c->next_idx, (unsigned)bridge_esp_now_data_backlog());
     c->st_start = req.range_start;
@@ -270,6 +284,7 @@ static void on_done(const uint8_t *mac)
         return;
     }
     c->last_us = esp_timer_get_time();
+    if (c->diag.done_rx < 255) c->diag.done_rx++;   /* 2026-10-26 */
     uint16_t n = collect_missing(c, c->next_idx, c->total_chunks);
     reply_nack(mac, ESP_NOW_MSG_PHOTO_DONE_ACK, c->file_id, n);
     if (n > 0) return;   /* 캠이 누락분을 다시 보내고 DONE을 다시 보냄 */

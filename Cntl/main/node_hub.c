@@ -1220,11 +1220,14 @@ void node_hub_init(void)
 uint32_t node_hub_node_timeout_ms(const node_hub_node_t *n)
 {
     if (n && n->kind == HUB_NODE_KIND_BORIL) return BORIL_NODE_TIMEOUT_MS;
-    uint32_t interval_sec = 0;
-    if (n && n->kind == HUB_NODE_KIND_SENS && n->has_deepsleep_stats) {
-        interval_sec = n->ds_last_sleep_interval_sec;
-    } else {
-        interval_sec = device_config_get_response_interval_sec();
+    /* 2026-10-27(사용자 지적 — 센스를 빼도 측정 주기 10분이라 한참 "끊김"이 안 뜸) — 센스가 인사에 실어 보내는 값은 측정 주기라
+     * (esp_now_node_cask.c sleep_interval_sec = 샘플 주기) 끊김 판단이 측정 주기 × 6(10분이면 1시간)이 됐음. 살아 있는지는 응답 주기
+     * 안에서 봐야 하므로, 콘이 실제로 보내는 잠잘 시간(send_cask_sleep_now — 응답 주기와 측정 주기 중 짧은 쪽)을 기준으로 함.
+     * 콘이 정해 보내는 값이니 콘이 기준을 쥠(센스가 보내는 값에 기대지 않음) */
+    uint32_t interval_sec = device_config_get_response_interval_sec();
+    if (n && n->kind == HUB_NODE_KIND_SENS && interval_sec != 0) {
+        uint32_t measure_sec = device_config_get_sens_sample_interval_sec(n->mac);
+        if (measure_sec < interval_sec) interval_sec = measure_sec;
     }
     if (interval_sec == 0) return NODE_HUB_NODE_TIMEOUT_MS;
     uint32_t computed = interval_sec * 1000U * HUB_NODE_TIMEOUT_MARGIN_MULT;

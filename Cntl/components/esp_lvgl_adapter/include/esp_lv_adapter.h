@@ -373,23 +373,18 @@ bool esp_lv_adapter_get_dummy_draw_enabled(lv_display_t *disp);
  * @brief Dummy draw callback collection
  *
  * All callbacks are optional; set any member to NULL to omit it.
- *
- * @note The on_vsync callback is executed in interrupt context on most panels,
- *       so implementations must be ISR-safe.
  */
 typedef struct {
-    void (*on_enable)(lv_display_t *disp, void *user_ctx);         /**< Called when dummy draw mode is enabled */
-    void (*on_disable)(lv_display_t *disp, void *user_ctx);        /**< Called when dummy draw mode is disabled */
-    void (*on_color_trans_done)(lv_display_t *disp, bool in_isr, void *user_ctx); /**< Called when color transfer is done */
-    void (*on_vsync)(lv_display_t *disp, bool in_isr, void *user_ctx); /**< Called on VSYNC signal (ISR context) */
+    void (*on_enable)(lv_display_t *disp, void *user_ctx);  /**< Called when dummy draw mode is enabled */
+    void (*on_disable)(lv_display_t *disp, void *user_ctx); /**< Called when dummy draw mode is disabled */
 } esp_lv_adapter_dummy_draw_callbacks_t;
 
 /**
  * @brief Register dummy draw callbacks for a display
  *
- * Callbacks allow applications to hook into dummy draw transitions and VSYNC
- * notifications (useful for self-refresh flows). Registering new callbacks
- * replaces any previously registered ones. Pass NULL to remove callbacks.
+ * Callbacks allow applications to hook into dummy draw mode transitions.
+ * Registering new callbacks replaces any previously registered ones.
+ * Pass NULL to remove callbacks.
  *
  * @param disp     Display handle
  * @param cbs      Pointer to callback collection (NULL to clear)
@@ -415,7 +410,7 @@ esp_err_t esp_lv_adapter_set_dummy_draw_callbacks(lv_display_t *disp,
  * @param[in] x_end Ending X coordinate (exclusive)
  * @param[in] y_end Ending Y coordinate (exclusive)
  * @param[in] frame_buffer Pointer to framebuffer data
- * @param[in] wait true to wait for completion, false to return immediately
+ * @param[in] wait true to wait for this color transfer, false to return after submission
  *
  * @return
  *      - ESP_OK: Success
@@ -429,6 +424,42 @@ esp_err_t esp_lv_adapter_dummy_draw_blit(lv_display_t *disp,
                                          int y_end,
                                          const void *frame_buffer,
                                          bool wait);
+
+/**
+ * @brief Get a free frame buffer from the display pipeline in dummy draw mode
+ *
+ * Returns the current writable back buffer. Call this before writing new content,
+ * then submit it with esp_lv_adapter_dummy_draw_flush_buf(). Requires one of
+ * DOUBLE_FULL, DOUBLE_DIRECT, TRIPLE_FULL, TRIPLE_PARTIAL or DOUBLE_PARTIAL
+ * tear avoidance modes to be configured.
+ *
+ * @param[in] disp Pointer to LVGL display object
+ *
+ * @return
+ *      - Pointer to a free buffer on success
+ *      - NULL if adapter not initialized, dummy draw not enabled, or an unsupported
+ *        tear avoidance mode is configured (NONE or TE_SYNC)
+ */
+void *esp_lv_adapter_dummy_draw_get_free_buf(lv_display_t *disp);
+
+/**
+ * @brief Submit a complete frame buffer to the display in dummy draw mode
+ *
+ * Submits the frame and obtains the next writable buffer, waiting if needed.
+ * A spare buffer can allow return before the hardware switch completes.
+ * On submission failure, the current writable buffer is retained for retry.
+ *
+ * @param[in] disp         Pointer to LVGL display object
+ * @param[in] frame_buffer Buffer previously obtained from esp_lv_adapter_dummy_draw_get_free_buf()
+ *
+ * @return
+ *      - ESP_OK: Success
+ *      - ESP_ERR_INVALID_STATE: Adapter not initialized or dummy draw not enabled
+ *      - ESP_ERR_INVALID_ARG: Invalid parameters
+ *      - ESP_ERR_NOT_SUPPORTED: Tear avoidance mode is NONE
+ *      - ESP_ERR_NOT_FOUND: Pipeline did not return a next buffer
+ */
+esp_err_t esp_lv_adapter_dummy_draw_flush_buf(lv_display_t *disp, void *frame_buffer);
 
 #if CONFIG_ESP_LVGL_ADAPTER_ENABLE_FPS_STATS
 /*****************************************************************************

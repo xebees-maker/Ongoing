@@ -55,6 +55,54 @@ menu "Sens Sensor Node"
             개발용 이스케이프 해치, CAM의 CAM_DEEPSLEEP_ENABLE과 동일 이유). 켜면 CNTL이
             정해준 샘플 주기로 딥슬립↔웨이크를 반복함(sens_deep_sleep_node.c app_main 참고).
 
+    # 2026-10-25(시험, 사용자 결정) — 이산화탄소 값이 빈 방에서도 단발 측정마다 크게 흔들림(중앙값 34ppm). 연속 측정 모드로
+    # 같은 센서를 돌려 흔들림을 비교 — 단발 절차 문제인지 센서 문제인지 가름. 켜면 통신·딥슬립 없이 값만 로그(시험 뒤 끔)
+    config SENS_SCD41_PERIODIC_TEST
+        bool "SCD41 연속 측정 시험(통신·딥슬립 없음, 로그만)"
+        default n
+        depends on SENS_SENSOR_SCD41
+
+    # 2026-10-26(시험 A, 사용자 지시 "원인을 찾아") — 연속 모드 시험은 측정 방식과 함께 통신·딥슬립도 꺼져 있었음. 이 시험은
+    # 지금 단발 절차(measure_scd41)를 그대로, 같은 간격(약 23.6초)으로 하되 통신·딥슬립만 끔 — 흔들림이 절차 탓인지 통신·전원 탓인지 가름
+    config SENS_SCD41_SINGLESHOT_LOOP_TEST
+        bool "SCD41 단발 절차 반복 시험(통신·딥슬립 없음, 로그만)"
+        default n
+        depends on SENS_SENSOR_SCD41 && !SENS_SCD41_PERIODIC_TEST
+
+    # 2026-10-26(시험 B) — 단발 반복 간격(ms). 보통 경로 실측 약 23.6초, 데이터시트가 전제한 간격은 5분(300000)
+    config SENS_SCD41_SSLOOP_INTERVAL_MS
+        int "단발 반복 시험 간격(ms)"
+        default 23600
+        depends on SENS_SCD41_SINGLESHOT_LOOP_TEST
+
+    # 2026-10-26(시험 C) — 연속 측정 시험을 저전력 연속 모드(약 30초 주기, 0x21AC)로
+    config SENS_SCD41_PERIODIC_LOWPOWER
+        bool "연속 측정 시험을 저전력 모드(30초)로"
+        default n
+        depends on SENS_SCD41_PERIODIC_TEST
+
+    # 2026-10-26(실험, 사용자 설계) — 센서까지 재울 때의 흔들림. 펌웨어 하나로 순서대로(통신·딥슬립 없음, 로그만):
+    #  1) 0~30분: 지금과 같은 약 24초 주기 단발(깨우기 → 버리는 측정 → 측정), 측정 뒤 센서 재움 — EXP1
+    #  2) 30~90분: 10분마다 센서를 깨워 연속 측정 13개(5초 간격) 기록 후 재움 — EXP2A
+    #  3) 90~150분: 10분마다 센서를 깨워 단발 5번 기록 후 재움 — EXP2B
+    config SENS_SCD41_SLEEP_EXPERIMENT
+        bool "SCD41 센서 재우기 실험(통신·딥슬립 없음, 로그만)"
+        default n
+        depends on SENS_SENSOR_SCD41 && !SENS_SCD41_PERIODIC_TEST && !SENS_SCD41_SINGLESHOT_LOOP_TEST
+
+    # 2026-10-27(실험, 사용자 설계) — 두 SCD41 보드 교차 비교: 같은 자리, 같은 일정. 10분마다 센서를 깨워 단발 13번 또는 연속 13번 후 재움.
+    # 첫 3시간: MAC 끝 0x04 보드(기존) 단발 / 다른 보드 연속, 다음 3시간: 서로 바꿈. 통신·딥슬립 없음, 로그만(XO)
+    config SENS_SCD41_CROSSOVER_TEST
+        bool "SCD41 두 보드 교차 비교 실험(통신·딥슬립 없음, 로그만)"
+        default n
+        depends on SENS_SENSOR_SCD41 && !SENS_SCD41_PERIODIC_TEST && !SENS_SCD41_SINGLESHOT_LOOP_TEST && !SENS_SCD41_SLEEP_EXPERIMENT
+
+    # 2026-10-27(실험, 사용자 지시 — 새 보드를 실외에서 1분 이상 연속 측정) — USB가 빠지므로 값을 메모리에 쌓고 30초마다 전부 다시 찍음
+    config SENS_SCD41_OUTDOOR_TEST
+        bool "SCD41 실외 연속 측정 시험(값을 쌓아 두고 30초마다 다시 출력)"
+        default n
+        depends on SENS_SENSOR_SCD41 && !SENS_SCD41_PERIODIC_TEST && !SENS_SCD41_SINGLESHOT_LOOP_TEST && !SENS_SCD41_SLEEP_EXPERIMENT && !SENS_SCD41_CROSSOVER_TEST
+
     config SENS_DEEPSLEEP_AWAKE_MARGIN_SEC
         int "RWDT 깨어있는 시간 마진(초)"
         default 30

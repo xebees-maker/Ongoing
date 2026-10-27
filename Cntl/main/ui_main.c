@@ -259,7 +259,8 @@ static lv_obj_t *s_xclk_label       = NULL;
 /* 2026-09-18 — 15(디폴트, SENS_SAMPLE_INTERVAL_SEC_DEFAULT)를 목록에 추가 — 디폴트값이
  * 프리셋에 실재하지 않으면 find_value_index()가 못 찾는 문제(오늘 지적받은 근본원인)가
  * 재발하므로, 디폴트는 항상 이 목록의 멤버여야 함 */
-static const uint32_t s_sens_measure_interval_values[] = { 10, 15, 30, 60, 300, 1800 };
+/* 2026-10-27(사용자 결정) — 15초(시험용)/1분/10분/30분/1시간. 운영은 10분 이상(Docs/설계_센스측정운용_2026-10-27.md) */
+static const uint32_t s_sens_measure_interval_values[] = { 15, 60, 600, 1800, 3600 };
 static lv_obj_t *s_sens_measure_dd          = NULL;
 static lv_obj_t *s_sens_measure_label       = NULL;
 
@@ -2345,6 +2346,28 @@ static void cb_camera_item_clicked(lv_event_t *e)
 /* 행 텍스트만(WAITING/PAIRED/ACTIVE 상태문구) 매 틱 갱신 — 구조(행 개수/순서)는 안 건드림,
  * refresh_camera_list()가 실제로 다시 그렸을 때만 s_camera_row_count가 갱신되므로 그 전까진
  * 이전 행 목록을 그대로 갱신함(요약판넬과 동일 패턴, 2026-08-10) */
+/* 2026-10-27(사용자 요청) — 대기 목록 행: 접속한 적 있는 기기는 "이전: 별명"(별명이 없으면 이름), 처음 보는 기기는 "새 장치".
+ * 글이 길어져 정적 버퍼(스택에 안 둠 — LVGL 태스크에서만 부름) */
+static char s_pending_row_text[160];
+static const char *pending_row_text(const uint8_t *mac, const char *name, ui_str_id_t status_id)
+{
+    if (device_config_is_known_device(mac)) {
+        const char *alias = device_config_get_alias_display(mac);
+        snprintf(s_pending_row_text, sizeof(s_pending_row_text), "%s (%s) %s %s", name, ui_str(status_id),
+                 ui_str(STR_PENDING_AS_WAS), alias[0] ? alias : name);
+    } else {
+        snprintf(s_pending_row_text, sizeof(s_pending_row_text), "%s (%s) %s", name, ui_str(status_id), ui_str(STR_PENDING_NEW));
+    }
+    return s_pending_row_text;
+}
+
+static uint32_t text_hash(const char *s)
+{
+    uint32_t h = 2166136261u;   /* FNV-1a */
+    while (*s) { h ^= (uint8_t)*s++; h *= 16777619u; }
+    return h;
+}
+
 static void refresh_camera_row_status_text(void)
 {
     for (int i = 0; i < s_camera_row_count; i++) {
@@ -2356,10 +2379,9 @@ static void refresh_camera_row_status_text(void)
         if (st == HUB_CONN_STATE_WAITING && node_hub_is_quota_blocked(s_camera_row_macs[i])) {
             status_id = STR_STATUS_QUOTA_FULL;
         }
-        char buf[48];
-        snprintf(buf, sizeof(buf), "%s (%s)", s_camera_row_names[i], ui_str(status_id));
+        const char *txt = pending_row_text(s_camera_row_macs[i], s_camera_row_names[i], status_id);
         lv_obj_t *lbl = lv_obj_get_child(s_camera_row_objs[i], 0);
-        if (lbl) lv_label_set_text(lbl, buf);
+        if (lbl) lv_label_set_text(lbl, txt);
     }
 }
 
@@ -2483,7 +2505,7 @@ static void cb_sensor_item_clicked(lv_event_t *e)
     show_pair_confirm_popup(node);
 }
 
-static char s_sensor_row_last_text[NODE_HUB_MAX_NODES][48];
+static uint32_t s_sensor_row_last_hash[NODE_HUB_MAX_NODES];   /* 2026-10-27 — 글 대신 해시(글이 길어짐) */
 
 static void refresh_sensor_row_status_text(void)
 {
@@ -2496,15 +2518,14 @@ static void refresh_sensor_row_status_text(void)
         if (st == HUB_CONN_STATE_WAITING && node_hub_is_quota_blocked(s_sensor_row_macs[i])) {
             status_id = STR_STATUS_QUOTA_FULL;
         }
-        char buf[48];
-        snprintf(buf, sizeof(buf), "%s (%s)", s_sensor_row_names[i], ui_str(status_id));
+        const char *txt = pending_row_text(s_sensor_row_macs[i], s_sensor_row_names[i], status_id);
         /* 2026-09-06(실기 발견 — s_summary_row_last_text 선언부 설명 참고) */
-        if (strcmp(s_sensor_row_last_text[i], buf) == 0) continue;
+        uint32_t hsh = text_hash(txt);
+        if (s_sensor_row_last_hash[i] == hsh) continue;
         lv_obj_t *lbl = lv_obj_get_child(s_sensor_row_objs[i], 0);
         if (lbl) {
-            lv_label_set_text(lbl, buf);
-            strncpy(s_sensor_row_last_text[i], buf, sizeof(s_sensor_row_last_text[i]) - 1);
-            s_sensor_row_last_text[i][sizeof(s_sensor_row_last_text[i]) - 1] = '\0';
+            lv_label_set_text(lbl, txt);
+            s_sensor_row_last_hash[i] = hsh;
         }
     }
 }
@@ -2554,7 +2575,7 @@ static void refresh_sensor_list(lv_timer_t *t)
                     memcpy(s_sensor_row_macs[i], s_sensor_nodes_prev[i].mac, 6);
                     strncpy(s_sensor_row_names[i], s_sensor_nodes_prev[i].name, ESP_NOW_LINK_NAME_LEN - 1);
                     s_sensor_row_names[i][ESP_NOW_LINK_NAME_LEN - 1] = '\0';
-                    s_sensor_row_last_text[i][0] = '\0';  /* 새로 만든 라벨 — 다음 틱에 무조건 한 번은 채워지도록 */
+                    s_sensor_row_last_hash[i] = 0;  /* 새로 만든 라벨 — 다음 틱에 무조건 한 번은 채워지도록 */
                 }
             }
             s_sensor_row_count = (count < NODE_HUB_MAX_NODES) ? count : NODE_HUB_MAX_NODES;

@@ -74,6 +74,24 @@ struct esp_lv_adapter_display_bridge {
                                  const void *frame_buffer,
                                  bool wait);
 
+    esp_err_t (*wait_dummy_draw_done)(esp_lv_adapter_display_bridge_t *bridge, int32_t timeout_ms);
+
+    /**
+     * @brief Get a free frame buffer from the pipeline for dummy draw
+     *
+     * Returns the current writable back buffer. Must be called only when dummy draw is enabled
+     * and a non-NONE tear avoidance mode is configured.
+     */
+    void *(*dummy_draw_get_free_buf)(esp_lv_adapter_display_bridge_t *bridge);
+
+    /**
+     * @brief Submit a complete frame buffer in dummy draw mode
+     *
+     * Submits the frame and obtains the next writable buffer, waiting if needed.
+     * A spare buffer can allow return before the hardware switch completes.
+     */
+    esp_err_t (*dummy_draw_flush_buf)(esp_lv_adapter_display_bridge_t *bridge, void *frame_buffer);
+
     /**
      * @brief Update panel handle and configuration for rebind
      *
@@ -123,6 +141,17 @@ struct esp_lv_adapter_display_bridge {
      * @return Whether a high-priority task should yield
      */
     bool (*notify_frame_done_from_isr)(esp_lv_adapter_display_bridge_t *bridge);
+
+    /**
+     * @brief Notify that an LCD frame-buffer transfer completed from an ISR.
+     *
+     * Drives the buffer-switch/pipeline release path (buffer-switch tear-avoid
+     * modes and dummy-draw) when an external owner holds the panel callbacks.
+     *
+     * @param bridge Bridge instance
+     * @return Whether a high-priority task should yield
+     */
+    bool (*notify_frame_buf_complete_from_isr)(esp_lv_adapter_display_bridge_t *bridge);
 };
 
 /**********************

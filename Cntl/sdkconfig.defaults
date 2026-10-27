@@ -91,3 +91,7 @@ CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT=y
 # 2026-10-22(듀얼 파티션) — 이중 쓰기 + 쓰기 보호로 한 FatFs 호출이 10초를 넘을 수 있음(32MB 칸 파일 만들기 15.9초) —
 # 다른 태스크의 FatFs 호출이 잠금 대기 시간 초과(ETIMEDOUT)로 실패하지 않게 60초
 CONFIG_FATFS_TIMEOUT_MS=60000
+
+# 2026-10-26 — LVGL 9.6으로 올리며 기본값이 꺼짐으로 바뀜. 9.5 때 동작(NULL·할당 실패 시 멈춤) 유지
+CONFIG_LV_USE_ASSERT_NULL=y
+CONFIG_LV_USE_ASSERT_MALLOC=y

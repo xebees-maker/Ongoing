@@ -1,5 +1,63 @@
 # ChangeLog
 
+## v0.7.3 (2026-10-09)
+
+* Fix LVGL 8/9 tear-avoid submission races, sequence wrap and early RGB completion.
+* Validate framebuffer setup and complete LVGL 8 callback forwarding.
+* Fix dummy draw completion, waiter lifetime and mode handoff.
+
+## v0.7.2 (2026-09-29)
+
+* Fix the LVGL FreeRTOS PSRAM-stack hook for LVGL 9.6's ESP-qualified `freertos/atomic.h` include while retaining compatibility with older LVGL 9 releases.
+
+## v0.7.1 (2026-09-18)
+
+* Add LVGL 9.6 compatibility for public/private headers, FreeType integration, and display color-format detection.
+* Keep the existing LVGL v8 and v9 bridge paths and compatibility range.
+* Require ESP-IDF >= 5.5.5.
+
+## v0.7.0 (2026-08-14)
+
+* Add a high-performance TE pipeline to improve rendering and display transfer efficiency while retaining TE synchronization.
+* Fix LVGL v8/v9 rotation with flash encryption or PSRAM ECC enabled.
+* Fix TE transfer error handling and ISR logging.
+
+## v0.6.4 (2026-08-12)
+
+* Fix the required framebuffer count for 180° rotation in `DOUBLE_FULL` and `DOUBLE_DIRECT` modes.
+
+## v0.6.3 (2026-07-17)
+
+* Optimize LVGL v8/v9 partial framebuffer repair for double/triple-buffer tear-avoid modes:
+  - Track per-framebuffer pending dirty regions and repair only `pending[target] - current_dirty`
+  - Support rotated partial refresh by converting LVGL dirty areas to physical framebuffer coordinates
+  - Keep baseline repair fallback for reset, stale history, framebuffer-index mismatch, or repair-region overflow
+
+## v0.6.2 (2026-07-03)
+
+* Add `esp_lv_adapter_display_notify_frame_buf_complete_from_isr()` to forward an LCD frame-buffer-complete event into the adapter's buffer-switch/pipeline release path from an ISR. This closes a gap in the external-callback-driven flow: when an external owner holds the ESP-IDF panel callbacks (after `esp_lv_adapter_set_default_display_idf_callback_registration_enabled(false)`), the existing `notify_color_trans_done_from_isr`/`notify_frame_done_from_isr` forwarders never release pipeline buffers, so buffer-switch tear-avoid modes and dummy-draw could block forever in the flush path waiting for a free buffer.
+  - Add `notify_frame_buf_complete_from_isr` to the display-bridge vtable and implement it in the LVGL v9 bridge (routes to the shared frame-buffer-switch handler)
+  - Add `display_manager_notify_frame_buf_complete_from_isr()` wrapper
+
+## v0.6.1 (2026-06-29)
+
+* Replace IDF version-number guards with header/symbol-based feature detection in CMake:
+  - `ESP_ASYNC_COLOR_CONVERT_AVAILABLE`: probed by checking for `esp_driver_dma/include/esp_async_color_convert.h`; replaces `ESP_IDF_VERSION >= 6.2.0` guards throughout the DMA2D paths
+  - `ESP_LCD_DPI_HAS_FRAME_BUF_COMPLETE_CB`: probed by searching for `esp_lcd_dpi_panel_frame_buf_complete_cb_t` in `esp_lcd_mipi_dsi.h`; replaces the `IDF_VERSION_MAJOR == 6 && IDF_VERSION_MINOR == 0` guard for `on_frame_buf_complete` vs `on_refresh_done`
+  - `bootloader_support` dependency: probed by checking for `esp_efuse_is_flash_encryption_enabled` in `esp_efuse.h`; avoids the component on IDF versions that expose the API directly
+* Add `#warning` build diagnostic when `on_frame_buf_complete` is unavailable, alerting that buffer-switch release and dummy-draw require an IDF update
+
+## v0.6.0 (2026-06-25)
+
+* Fix flash encryption API version guard boundary: switch the `esp_efuse_is_flash_encryption_enabled()` branch to IDF >= 6.0.1, falling back to `esp_flash_encryption_enabled()` below it, so both the `v6.0` tag (6.0.0) and the `release/v6.0` branch (6.0.1) compile
+
+## v0.6.0-beta (2026-06-23)
+
+* Unify anti-tearing ISR handling around `on_frame_buf_complete` for accurate buffer-switch synchronization
+* Add tear-free dummy draw pipeline APIs: `esp_lv_adapter_dummy_draw_get_free_buf()` and `esp_lv_adapter_dummy_draw_flush_buf()`
+* Update the dummy draw example to use the buffer-switch pipeline when available
+* **Breaking change**: remove `on_vsync` and `on_color_trans_done` from `esp_lv_adapter_dummy_draw_callbacks_t`; use the dummy draw pipeline APIs instead
+
 ## v0.5.3 (2026-06-22)
 
 * Set DMA2D burst size to 128 bytes for maximum PSRAM throughput on IDF >= 6.2

@@ -115,6 +115,16 @@ static volatile uint32_t s_reply_inflight = 0;
 #define SR_TX_INFLIGHT_MAX   6
 #define SR_TX_PACE_LIMIT_MS  1000   /* 송신 완료가 이만큼 안 오면 기다림을 그만두고 그냥 보냄(NO_MEM 재시도 경로가 그 뒤를 맡음) */
 static volatile int32_t s_tx_inflight = 0;
+/* 2026-10-26 — 사진 전송 경과(실패하면 CAM_CAPTURE_FAIL에 실어 콘으로). s_txd_on 동안만 셈 */
+static esp_now_photo_tx_diag_t s_txd;
+static volatile bool s_txd_on = false;
+static int64_t s_txd_t0 = 0;
+static void txd_end(uint8_t end)
+{
+    s_txd.end = end;
+    s_txd.elapsed_ms = (uint16_t)((esp_timer_get_time() - s_txd_t0) / 1000 > 65535 ? 65535 : (esp_timer_get_time() - s_txd_t0) / 1000);
+    s_txd_on = false;
+}
 
 esp_err_t __real_esp_now_send(const uint8_t *peer_addr, const uint8_t *data, size_t len);
 esp_err_t __wrap_esp_now_send(const uint8_t *peer_addr, const uint8_t *data, size_t len)
@@ -281,6 +291,9 @@ static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t statu
     /* 2026-09-25 — 송신 1건 완료 = 드라이버 송신 큐에 자리 생김. NO_MEM으로 대기 중인
      * esp_now_reliable_request()를 깨움(이벤트 방식, 대기 중인 게 없으면 아무 일도 안 함) */
     esp_now_reliable_on_send_done();
+    if (s_txd_on) {   /* 2026-10-26 — 전송 경과 */
+        if (status == ESP_NOW_SEND_SUCCESS) s_txd.mac_ok++; else s_txd.mac_fail++;
+    }
     /* 2026-10-20 — 송신 완료 1건(위 s_tx_inflight 주석) */
     if (__atomic_load_n(&s_tx_inflight, __ATOMIC_RELAXED) > 0) __atomic_sub_fetch(&s_tx_inflight, 1, __ATOMIC_RELAXED);
     /* 2026-09-26(할 일 8) — 송신 큐에 자리 생김: 응답 재전송 태스크와 청크 재전송 루프를 깨움 */
@@ -328,6 +341,7 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
                 if (s_tx_space_sem) xSemaphoreTake(s_tx_space_sem, pdMS_TO_TICKS(20));
                 else vTaskDelay(pdMS_TO_TICKS(5));
             }
+            if (s_txd_on && __atomic_load_n(&s_tx_inflight, __ATOMIC_RELAXED) >= SR_TX_INFLIGHT_MAX) s_txd.pace_to++;
         }
         esp_err_t err;
         int tries = 0;  /* 2026-10-19 — 예전엔 6번 다 실패해도 "(7 tries)"로 찍힘 */
@@ -338,6 +352,10 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
             /* 2026-09-26(할 일 8) — 20ms 무조건 대기(폴링) 대신 송신 완료 이벤트(send_cb)가 오면 바로 재시도, 상한 20ms */
             if (s_tx_space_sem) xSemaphoreTake(s_tx_space_sem, pdMS_TO_TICKS(20));
             else vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (s_txd_on) {   /* 2026-10-26 — 전송 경과 */
+            if (err == ESP_OK) s_txd.sent++;
+            else { s_txd.send_err++; s_txd.last_err = (int16_t)err; }
         }
         if (err != ESP_OK) {
             LOG_W_RL(TAG_PHOTO, "Resend failed (buf): chunk[%u] -> %s (%d tries)", idx, esp_err_to_name(err), tries);
@@ -369,6 +387,9 @@ static void resend_chunks_from_buffer(const uint8_t *jpeg_buf, size_t jpeg_len, 
  * 감시 타이머(RWDT)는 설정을 받을 때마다 100초로 다시 걸림. 이제 RWDT까지 남은 시간이 이보다 적을 때만 포기(잠들 여유) */
 #define SR_DONE_RWDT_MARGIN_US  (15LL * 1000 * 1000)
 static volatile int64_t s_last_hub_rx_us = 0;
+/* 2026-10-26(진단 — META_ACK를 3번 모두 못 받고 사진을 버림, 할 일) — META를 기다리는 동안 받은 프레임을 남김 */
+static volatile bool s_meta_wait_diag = false;
+
 
 /* 2026-09-18(SD 제거 재설계) — 촬영한 사진 1장을 SR로 CNTL에 푸시. 카메라 드라이버의 PSRAM
  * 프레임버퍼(jpeg_buf/jpeg_len)를 그대로 씀 — 호출자(cam_node.c의 camera_capture_one())가
@@ -380,6 +401,10 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
 {
     ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): start file_id=%u kind=%c len=%u", (unsigned)file_id, (char)kind, (unsigned)jpeg_len);
     uint16_t total_chunks = (uint16_t)((jpeg_len + ESP_NOW_PHOTO_CHUNK_DATA_LEN - 1) / ESP_NOW_PHOTO_CHUNK_DATA_LEN);
+    memset(&s_txd, 0, sizeof(s_txd));   /* 2026-10-26 — 전송 경과 시작 */
+    s_txd.total = total_chunks;
+    s_txd_t0 = esp_timer_get_time();
+    s_txd_on = true;
     uint32_t crc = esp_rom_crc32_le(0, jpeg_buf, jpeg_len);
     ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): CRC done crc=%08x total_chunks=%u", (unsigned)crc, total_chunks);
 
@@ -393,15 +418,20 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
         .crc32        = crc,
     };
     static const uint8_t s_meta_ack_types[] = { ESP_NOW_MSG_PHOTO_META_ACK };
+    s_meta_wait_diag = true;   /* 2026-10-26(진단) */
+    ESP_LOGI(TAG_PHOTO, "META -> hub %02X%02X%02X file_id=%u", s_hub_mac[3], s_hub_mac[4], s_hub_mac[5], (unsigned)file_id);
     esp_err_t meta_err = esp_now_reliable_request(s_hub_mac, &meta, sizeof(meta),
                                                    s_meta_ack_types, 1,
                                                    800, 3,
                                                    NULL, 0, NULL);
+    s_meta_wait_diag = false;
     ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): META_ACK: %s", esp_err_to_name(meta_err));
     if (meta_err != ESP_OK) {
         ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): META no response - giving up (file_id=%u)", (unsigned)file_id);
+        txd_end(CAM_TX_END_META);
         return false;
     }
+    s_txd.meta_ok = 1;
 
     static esp_now_photo_chunk_nack_t range_req;
     static esp_now_photo_chunk_nack_t status_ack;
@@ -441,6 +471,7 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
                                            SR_STATUS_TIMEOUT_MS, SR_STATUS_MAX_ATTEMPTS,
                                            &status_ack, sizeof(status_ack), &reply_len);
             status_requests++;
+            s_txd.ws_req++;
             if (err == ESP_OK) break;
             if (s_request_generation != my_generation) {
                 ESP_LOGI(TAG_PHOTO, "SR-push: superseded by newer request - stopped (file_id=%u)", (unsigned)file_id);
@@ -451,6 +482,8 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
                      window_base, window_base + window_count);
         }
         if (err == ESP_OK) {
+            s_txd.ws_ack++;
+            s_txd.ws_missing += status_ack.missing_count;
             if (status_ack.missing_count > 0) {
                 resend_chunks_from_buffer(jpeg_buf, jpeg_len, file_id, &status_ack);
                 total_sent_chunks += status_ack.missing_count;
@@ -481,11 +514,13 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
         if (s_request_generation != my_generation) return false;
         if (rwdt_guard_remaining_us() < SR_DONE_RWDT_MARGIN_US) {
             ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): time limit before watchdog - giving up (file_id=%u)", (unsigned)file_id);
+            txd_end(CAM_TX_END_TIME_LIMIT);
             return false;
         }
 
         size_t reply_len = 0;
         done_tries++;
+        if (s_txd.done_try < 255) s_txd.done_try++;
         esp_err_t err = esp_now_reliable_request(s_hub_mac, &done, sizeof(done),
                                                   s_sr_done_ack_types, 1,
                                                   800, 3,
@@ -495,14 +530,18 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
             if (silent > SR_HUB_SILENT_US) {
                 ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): DONE_ACK no response and hub silent %lldms - link lost, giving up (file_id=%u)",
                          (long long)(silent / 1000), (unsigned)file_id);
+                txd_end(CAM_TX_END_HUB_SILENT);
                 return false;
             }
             ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): DONE_ACK no response (try %d) - hub alive (%lldms ago), sending DONE again",
                      done_tries, (long long)(silent / 1000));
             continue;
         }
+        if (s_txd.done_ack < 255) s_txd.done_ack++;
+        s_txd.last_missing = done_ack.missing_count;
         if (done_ack.missing_count == 0) {
             ESP_LOGD(TAG_PHOTO, "CKPT(SR-push): DONE_ACK confirmed (DONE %d)", done_tries);
+            txd_end(CAM_TX_END_OK);
             return true;
         }
         if (done_ack.missing_count < best_missing) {
@@ -511,6 +550,7 @@ static bool send_photo_from_buffer_sr(const uint8_t *jpeg_buf, size_t jpeg_len, 
         } else if (++no_progress >= s_nack_max_rounds) {
             ESP_LOGW(TAG_PHOTO, "CKPT(SR-push): no progress for %d rounds - %u chunks still missing (file_id=%u)",
                      no_progress, (unsigned)done_ack.missing_count, (unsigned)file_id);
+            txd_end(CAM_TX_END_NO_PROGRESS);
             return false;
         }
         ESP_LOGD(TAG_PHOTO, "SR-push DONE_ACK: %u missing - resending (no-progress %d/%d)", (unsigned)done_ack.missing_count,
@@ -608,8 +648,10 @@ static volatile bool s_retry_inflight = false;   /* 2026-10-22 — 콘이 보낸
 
 static void send_capture_fail(uint8_t reason, uint8_t retry)
 {
+    if (s_txd_on) txd_end(CAM_TX_END_SUPERSEDED);   /* 2026-10-26 — 끝 표시 없이 빠져나온 전송(대체 등) */
     esp_now_cam_capture_fail_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_CAPTURE_FAIL,
                                        .reason = reason, .retry = retry };
+    if (reason == CAM_CAPFAIL_PUSH) msg.diag = s_txd;   /* 전송 실패일 때만(촬영 실패는 전송 경과 없음) */
     static const uint8_t s_fail_ack_types[] = { ESP_NOW_MSG_CAM_CAPTURE_FAIL_ACK };
     esp_err_t err = esp_now_reliable_request(s_hub_mac, &msg, sizeof(msg), s_fail_ack_types, 1, 800, 3, NULL, 0, NULL);
     ESP_LOGW(TAG_PHOTO, "Auto capture failed (reason %u%s) - CNTL notified: %s", (unsigned)reason, retry ? ", retry" : "",
@@ -724,8 +766,16 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 {
     if (len < 2) return;
     uint8_t msg_type = data[1];
+    if (s_meta_wait_diag) {
+        ESP_LOGW(TAG_PHOTO, "META wait: rx type %u len %d from %02X%02X%02X%s", (unsigned)msg_type, len,
+                 info ? info->src_addr[3] : 0, info ? info->src_addr[4] : 0, info ? info->src_addr[5] : 0,
+                 (info && memcmp(info->src_addr, s_hub_mac, 6) == 0) ? " (hub)" : "");
+    }
     /* 2026-10-20 — 허브(브)에서 무엇이든 받은 시각(DONE 재전송을 계속할지 판단, send_photo_from_buffer_sr) */
-    if (info && memcmp(info->src_addr, s_hub_mac, 6) == 0) s_last_hub_rx_us = esp_timer_get_time();
+    if (info && memcmp(info->src_addr, s_hub_mac, 6) == 0) {
+        s_last_hub_rx_us = esp_timer_get_time();
+        if (s_txd_on) s_txd.hub_rx++;   /* 2026-10-26 — 전송 경과 */
+    }
 
     /* ADVERTISE_ACK/CHANNEL_PONG 소비 — 그 외 타입은 조용히 무시하고 리턴하므로 아래 기존
      * dispatch와 안전하게 병행됨(2026-08-04, esp_now_channelsync.h 참고) */

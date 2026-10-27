@@ -16,11 +16,9 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "lvgl.h"
+#include "lvgl_port_private.h"
+#include "esp_err.h"
 #include "esp_lcd_panel_ops.h"
-#if LVGL_VERSION_MAJOR >= 9
-#include "lvgl_private.h"
-#endif
 #include "adapter_internal.h"
 #include "esp_attr.h"
 
@@ -30,18 +28,39 @@
 
 #define ESP_LV_ADAPTER_BRIDGE_BLOCK_SIZE_SMALL_DEFAULT  (32)
 #define ESP_LV_ADAPTER_BRIDGE_BLOCK_SIZE_LARGE_DEFAULT  (256)
+#define ESP_LV_ADAPTER_TE_BOUNCE_BUFFER_COUNT           (2U)
 
 #if SOC_DMA2D_SUPPORTED
-#include "esp_idf_version.h"
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 2, 0)
+typedef enum {
+    DISPLAY_BRIDGE_DMA2D_COPY_UNCHECKED = 0,
+    DISPLAY_BRIDGE_DMA2D_COPY_ENABLED,
+    DISPLAY_BRIDGE_DMA2D_COPY_DISABLED,
+} display_bridge_dma2d_copy_state_t;
+
+#ifdef ESP_ASYNC_COLOR_CONVERT_AVAILABLE
 #include "esp_async_color_convert.h"
 #else
 #include "esp_async_fbcpy.h"
 #endif
 #endif
 
+typedef struct {
+    uint8_t *buffers[ESP_LV_ADAPTER_TE_BOUNCE_BUFFER_COUNT];
+    uint8_t count;
+    size_t capacity;
+#if SOC_DMA2D_SUPPORTED
+    display_bridge_dma2d_copy_state_t dma2d_copy_state;
+#endif
+} display_bridge_te_bounce_t;
+
 /* Forward declaration */
 typedef struct esp_lv_adapter_display_bridge esp_lv_adapter_display_bridge_t;
+
+void display_bridge_te_bounce_alloc(display_bridge_te_bounce_t *bounce,
+                                    size_t requested_rows,
+                                    size_t row_bytes,
+                                    size_t alignment);
+void display_bridge_te_bounce_free(display_bridge_te_bounce_t *bounce);
 
 /*********************
  *      TYPEDEFS
@@ -264,6 +283,18 @@ void display_cache_msync_range(const void *addr,
 void display_cache_msync_framebuffer(void *buffer,
                                      size_t size);
 
+/**
+ * @brief Invalidate CPU cache for a framebuffer (Memory to Cache)
+ *
+ * Use after hardware accelerators (DMA2D/PPA) write directly to PSRAM,
+ * so subsequent CPU reads fetch fresh data from memory instead of stale cache.
+ *
+ * @param buffer Framebuffer pointer
+ * @param size Framebuffer size in bytes
+ */
+void display_cache_msync_invalidate_framebuffer(void *buffer,
+                                                size_t size);
+
 /* LCD operations */
 
 /**
@@ -296,6 +327,11 @@ esp_err_t display_lcd_blit_area(esp_lcd_panel_handle_t panel,
                                 int y_end,
                                 const void *frame_buffer);
 
+/* Copy incompatible DMA2D windows through the CPU before submitting a MIPI framebuffer. */
+esp_err_t display_lcd_blit_mipi_partial(esp_lcd_panel_handle_t panel,
+                                        const esp_lv_adapter_display_runtime_info_t *runtime,
+                                        const lv_area_t *area, const void *pixels);
+
 /**
  * @brief Acquire next available frame buffer for double/triple buffering
  *
@@ -311,6 +347,27 @@ void display_bridge_get_block_sizes(int *block_small, int *block_large);
 size_t display_bridge_get_cache_line_size(void);
 
 /* Pipeline management */
+
+typedef struct {
+    uint32_t submitted;
+    uint32_t completed;
+    uint32_t notifications_inflight;
+    TaskHandle_t waiter;
+} display_bridge_dummy_transfer_t;
+
+#define ESP_LV_ADAPTER_DUMMY_DRAW_EVT_COLOR_DONE (1U << 0)
+
+esp_err_t display_bridge_dummy_transfer_begin(display_bridge_dummy_transfer_t *transfer,
+                                              portMUX_TYPE *lock, uint32_t *ticket);
+void display_bridge_dummy_transfer_cancel(display_bridge_dummy_transfer_t *transfer,
+                                          portMUX_TYPE *lock, uint32_t ticket);
+/* Publish raw completion after forwarding the callback's display events. */
+bool display_bridge_dummy_transfer_done(display_bridge_dummy_transfer_t *transfer,
+                                        portMUX_TYPE *lock);
+esp_err_t display_bridge_dummy_transfer_wait(display_bridge_dummy_transfer_t *transfer,
+                                             portMUX_TYPE *lock, uint32_t ticket, int32_t timeout_ms);
+esp_err_t display_bridge_dummy_transfer_wait_idle(display_bridge_dummy_transfer_t *transfer,
+                                                  portMUX_TYPE *lock, int32_t timeout_ms);
 
 /**
  * @brief Initialize pipeline from runtime config (call from bridge create with impl's pipeline and cfg)
@@ -329,21 +386,22 @@ int display_bridge_pipeline_init_from_cfg(esp_lv_adapter_display_pipeline_t *pip
                                           esp_lv_adapter_display_runtime_config_t *cfg,
                                           void **out_disp_fb, void **out_draw_fb);
 
-/**
- * @brief Mark an element in the pipeline as busy
- */
-void display_bridge_pipeline_mark_buf_busy(esp_lv_adapter_display_pipeline_t *p, void *buf);
+/* Submit and publish ownership together; RGB preserves an early switch event. */
+esp_err_t display_bridge_pipeline_blit(esp_lv_adapter_display_pipeline_t *p,
+                                       esp_lcd_panel_handle_t panel,
+                                       const esp_lv_adapter_display_runtime_info_t *runtime,
+                                       void **front, void **pending, void *buffer,
+                                       bool rgb);
+
+void display_bridge_pipeline_color_done(esp_lv_adapter_display_pipeline_t *p);
 
 /**
- * @brief Release a buffer from the busy list to the empty list (ISR context)
+ * @brief Retire a busy buffer and publish its pending front (ISR context)
  *
- * Caller contract: when this is called from an ISR, the caller MUST subsequently
- * call vTaskNotifyGiveFromISR() on the task that may be blocked in
- * display_bridge_pipeline_wait_free_buf() (typically the LVGL adapter task).
- * Otherwise the waiter will never be woken. See v8/v9 VSync handlers for the
- * pattern: release_buf_isr(pipeline) then vTaskNotifyGiveFromISR(notify_task, &need_yield).
+ * On true, notify the producer with vTaskNotifyGiveFromISR() to wake pipeline waits.
  */
-void display_bridge_pipeline_release_buf_isr(esp_lv_adapter_display_pipeline_t *p);
+bool display_bridge_pipeline_release_buf_isr(esp_lv_adapter_display_pipeline_t *p,
+                                             void **front, void **pending);
 
 /**
  * @brief Take a free buffer from the pipeline (no wait)
@@ -362,13 +420,13 @@ struct display_pipeline_buf *display_bridge_pipeline_wait_free_buf(esp_lv_adapte
 /**
  * @brief Initialize runtime information from configuration
  *
- * @note This function is 100% identical in v8 and v9
+ * @note Shared runtime metadata initialization for LVGL v8 and v9.
  *
  * @param runtime Runtime info structure to initialize
  * @param cfg Display runtime configuration
  */
-void display_bridge_init_runtime_info(esp_lv_adapter_display_runtime_info_t *runtime,
-                                      const esp_lv_adapter_display_runtime_config_t *cfg);
+esp_err_t display_bridge_init_runtime_info(esp_lv_adapter_display_runtime_info_t *runtime,
+                                           const esp_lv_adapter_display_runtime_config_t *cfg);
 
 /**
  * @brief Record timestamp after a successful flush/blit operation
@@ -450,9 +508,9 @@ esp_err_t display_bridge_release_hw_resource(void);
 /**
  * @brief DMA2D completion callback
  *
- * @note This function is 100% identical in v8 and v9
+ * @note Shared by the LVGL v8 and v9 bridge implementations.
  */
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 2, 0)
+#ifdef ESP_ASYNC_COLOR_CONVERT_AVAILABLE
 bool display_bridge_dma2d_done_callback(async_color_convert_handle_t mcp,
                                         async_color_convert_event_data_t *event_data,
                                         void *cb_args);
@@ -465,13 +523,22 @@ bool display_bridge_dma2d_done_callback(esp_async_fbcpy_handle_t mcp,
 /**
  * @brief Synchronous DMA2D copy operation
  *
- * @note This function is 100% identical in v8 and v9
+ * @note Shared by the LVGL v8 and v9 bridge implementations.
  *
  * @param trans_desc DMA transfer descriptor
  * @param timeout_ms Timeout in milliseconds
  * @return esp_err_t ESP_OK on success
  */
 esp_err_t display_bridge_dma2d_copy_sync(void *trans_desc, uint32_t timeout_ms);
+
+esp_err_t display_bridge_copy_to_dma_buffer(const void *src,
+                                            void *dst,
+                                            size_t width,
+                                            size_t height,
+                                            uint8_t color_bytes,
+                                            size_t cache_line_size,
+                                            display_bridge_dma2d_copy_state_t *dma2d_state);
+
 #endif /* SOC_DMA2D_SUPPORTED */
 
 /**
@@ -509,29 +576,29 @@ esp_err_t display_bridge_resume_hw_resource_after_sleep(void);
 bool display_bridge_flash_encryption_active(void);
 
 /**
- * @brief Get the alignment required by DMA to encrypted external memory
+ * @brief Get the maximum DMA alignment required by external memory
  *
  * @return Alignment in bytes
  */
 size_t display_bridge_dma2d_ext_mem_alignment(void);
 
 /**
- * @brief Whether DMA to this buffer needs encryption alignment handling
+ * @brief Whether DMA to this buffer needs strict external-memory alignment
  *
- * Returns true only when flash encryption is enabled and the buffer resides in
- * encrypted external RAM. Internal RAM and carve-out no-encryption PSRAM do not
- * need the extra alignment handling.
+ * Uses the IDF MSPI constraints when available, including encryption and PSRAM
+ * ECC. Internal RAM is unrestricted; encryption-exempt PSRAM still requires
+ * alignment when ECC is enabled.
  *
  * @param buffer Buffer pointer
- * @return true if encrypted external-memory DMA alignment is required
+ * @return true if strict external-memory DMA alignment is required
  */
 bool display_bridge_dma2d_buffer_needs_alignment(const void *buffer);
 
 /**
  * @brief Whether X-axis rounding alone can make DMA2D accesses safe for this picture
  *
- * Returns true when stride bytes are already aligned to the encryption granule
- * AND the buffer requires encryption alignment handling. In this case X-axis
+ * Returns true when stride bytes satisfy the MSPI alignment and the buffer
+ * requires strict alignment handling. In this case X-axis
  * (offset and width) rounding is sufficient; Y does not need adjustment.
  *
  * @param buffer     Picture base pointer
@@ -544,7 +611,7 @@ bool display_bridge_dma2d_x_rounding_sufficient(const void *buffer,
                                                 uint8_t color_bytes);
 
 /**
- * @brief Whether a DMA2D window satisfies encrypted external-memory alignment
+ * @brief Whether a DMA2D window satisfies external-memory alignment
  *
  * @param buffer       Picture base pointer
  * @param stride_px    Picture stride in pixels
@@ -560,10 +627,10 @@ bool display_bridge_dma2d_window_is_compatible(const void *buffer,
                                                uint8_t color_bytes);
 
 /**
- * @brief Expand an LVGL invalidated area so DMA to encrypted external RAM stays aligned
+ * @brief Expand an LVGL invalidated area so external-memory DMA stays aligned
  *
  * Rounds x1 down and x2 up so the per-row byte offset and length are multiples
- * of the external-memory encryption granule for the given color depth. Y is not
+ * of the external-memory alignment for the given color depth. Y is not
  * adjusted because row-start alignment depends on stride bytes, not row index.
  *
  * @param area     Invalidated area, expanded in place
@@ -578,7 +645,7 @@ void display_bridge_align_area_for_enc_dma(lv_area_t *area, int hor_res, uint8_t
  * Releases hardware resources (PPA, DMA2D) with reference counting and
  * frees the bridge structure. Safe to call with NULL pointer.
  *
- * @note This function is 100% identical in v8 and v9
+ * @note Shared by the LVGL v8 and v9 bridge implementations.
  *
  * @param bridge Display bridge structure to destroy
  */

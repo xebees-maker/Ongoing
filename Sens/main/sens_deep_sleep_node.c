@@ -47,6 +47,8 @@
 #include "rwdt_guard.h"
 #include "rgb_status.h"
 #include "sensor_wait.h"   /* 2026-10-23 — 센서 타이밍 대기는 모두 sensor_wait_ms */
+#include "esp_mac.h"       /* 2026-10-27 — 교차 실험의 보드 구분(esp_efuse_mac_get_default) */
+#include "esp_rtc_time.h"  /* 2026-10-27 — 딥슬립을 넘는 시각(esp_rtc_get_time_us) — SCD41 측정 시작 시각 */
 
 /* 2026-09-12(사용자 지시 — "장치 종류가 달라도 프로토콜/루틴은 동일해야 한다") — 이 파일은
  * 이제 SCD41 전용이 아니라 캐스크(딥슬립) 구조를 쓰는 모든 센서 종류의 공용 루틴이다.
@@ -337,6 +339,7 @@ static void calib_task(void *arg)
     (void)arg;
     uint8_t asc = 0xFF;
     bool ok = scd41_factory_reset(&asc);
+    scd41_power_down();   /* 2026-10-27 — 측정할 때만 깨움(진행 중이던 측정은 초기화가 멈췄으므로 그 회차는 실패로 남음) */
     s_calib_done_seq = s_calib_run_seq;
     s_calib_done_result = ok ? SENS_CALIB_RESULT_OK : SENS_CALIB_RESULT_CMD_FAIL;
     s_calib_done_asc = asc;
@@ -521,8 +524,105 @@ static void note_measure_failed(void)
 #endif
 }
 
+#if CONFIG_SENS_SENSOR_SCD41
+/* 2026-10-27(사용자 설계 — Docs/설계_센스측정운용_2026-10-27.md) — SCD41 측정 흐름.
+ *  측정할 때가 되면 센서를 깨워 연속 측정을 시작만 하고(기다리지 않음) 평소처럼 통신·잠듦. 센서는 혼자 5초마다 잼.
+ *  시작 후 SCD_SETTLE_US가 지난 뒤 깨는 회차에서 최신 값(8번째 무렵)을 읽고, 연속 측정을 멈추고 센서를 재움(power_down).
+ *  응답 주기가 이보다 짧으면 그 뒤 응답 회차에서 읽고, 길면 그 시각에 맞춰 무선 없이 따로 깨서 읽음(s_scd_readwake).
+ *  근거: 깨운 뒤 연속 측정 8번째 값이 최종값에서 최대 7ppm, 단발은 몇 번을 재도 흔들림(실험 10-26~27). 단발 측정은 안 씀 */
+#define SCD_SETTLE_US  (41LL * 1000000)   /* 시작 명령 뒤 첫 값 약 1+5초, 8번째 약 41초 */
+static RTC_DATA_ATTR bool     s_scd_pending = false;       /* 연속 측정 중(아직 안 읽음) */
+static RTC_DATA_ATTR uint64_t s_scd_start_rtc_us = 0;      /* 시작 시각(RTC — 딥슬립을 넘어 이어짐) */
+static RTC_DATA_ATTR bool     s_scd_readwake = false;      /* 다음 깨어남은 읽기 전용(무선 없음) */
+static RTC_DATA_ATTR uint64_t s_scd_resp_due_rtc_us = 0;   /* 읽기 전용으로 깬 뒤 돌아갈 응답 깨어남 시각 */
+
+static int64_t scd_settle_left_us(void)
+{
+    return (int64_t)(s_scd_start_rtc_us + SCD_SETTLE_US) - (int64_t)esp_rtc_get_time_us();
+}
+
+static void scd_finish(void);
+
+/* 측정 시작 — 기다리지 않음. 실패하면 바로 실패로 처리 */
+static bool scd_start(void)
+{
+    scd41_wake_up();
+    if (!scd41_start_periodic()) {
+        ESP_LOGW(TAG, "SCD41 periodic start failed");
+        s_scd_pending = true;   /* scd_finish가 실패로 정리(읽기 실패 → 센서 재움 시도) */
+        s_scd_start_rtc_us = esp_rtc_get_time_us() - SCD_SETTLE_US;
+        scd_finish();
+        return false;
+    }
+    s_scd_pending = true;
+    s_scd_start_rtc_us = esp_rtc_get_time_us();
+    rgb_status_blink(RGB_STATUS_GREEN, 1);   /* 측정 시작 G 1번 */
+    ESP_LOGI(TAG, "SCD41 periodic started - read after %llds", (long long)(SCD_SETTLE_US / 1000000));
+    return true;
+}
+
+/* 안정된 뒤 최신 값 읽기 → 멈춤 → 재움 → 결과 반영 */
+static void scd_finish(void)
+{
+    float v[SENSOR_CHAN_COUNT] = { 0 };
+    uint8_t ok[SENSOR_CHAN_COUNT] = { 0 };
+    memset(s_attempt_sen_fault, 0, sizeof(s_attempt_sen_fault));
+    int co2 = 0;
+    float t = 0.0f, h = 0.0f;
+    bool rd = false;
+    scd41_clear_fault();
+    for (int k = 0; k < 60 && !rd; k++) {   /* 다음 값이 준비될 때까지 최대 6초 */
+        if (scd41_read(&co2, &t, &h)) rd = true; else sensor_wait_ms(100);
+    }
+    if (!rd) s_attempt_fault = scd41_last_fault() ? (uint8_t)scd41_last_fault() : SENSOR_FAULT_NOT_READY;
+    scd41_stop_periodic_measurement();
+    sensor_wait_ms(500);   /* stop 뒤 500ms는 명령을 안 받음(데이터시트) */
+    if (s_measurement_id % 40 == 0) scd41_log_calibration("periodic");   /* 멈춘 뒤에만 읽을 수 있음 */
+    bool pd = scd41_power_down();
+    s_scd_pending = false;
+    if (rd) {
+        v[0] = (float)co2; v[1] = t; v[2] = h;
+        for (int i = 0; i < SENSOR_CHAN_COUNT; i++) ok[i] = 1;
+    } else {
+        s_attempt_sen_fault[0] = s_attempt_fault;
+    }
+    note_sensor_results(ok);
+    if (rd) {
+        rgb_status_blink(RGB_STATUS_GREEN, 2);   /* 성공 G 2번 */
+        note_measure_recovered();
+        memcpy(s_cached_vals, v, sizeof(v));
+        for (int i = 0; i < SENSOR_CHAN_COUNT; i++) s_cached_chan_ok[i] = ok[i];
+        s_measurement_id++;
+        s_seconds_since_last_measurement = 0;
+        int t10 = (int)(t * 10.0f + 0.5f), h10 = (int)(h * 10.0f + 0.5f);
+        ESP_LOGI(TAG, "MEASMARK measurement ok - measID=%u co2=%d temp=%d.%d humi=%d.%d (periodic, %llds after start) pd=%d",
+                 (unsigned)s_measurement_id, co2, t10 / 10, t10 % 10, h10 / 10, h10 % 10,
+                 (long long)((esp_rtc_get_time_us() - s_scd_start_rtc_us) / 1000000), (int)pd);
+    } else {
+        rgb_status_blink(RGB_STATUS_RED, 1);     /* 실패 R 1번 */
+        note_measure_failed();
+    }
+}
+#endif
+
 static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
 {
+#if CONFIG_SENS_SENSOR_SCD41
+    /* 2026-10-27 — SCD41은 위 흐름(시작만 하고 나중에 읽음) */
+    (void)measurement_elapsed_ms;
+    if (s_scd_pending) {
+        if (scd_settle_left_us() <= 0) scd_finish();
+        return;
+    }
+    if (s_measurement_id == 0 || s_seconds_since_last_measurement >= esp_now_node_get_sample_interval_sec()) {
+        scd_start();
+    } else {
+        ESP_LOGI(TAG, "Measurement period (%us) not reached (elapsed %us) - skipped (measID=%u)",
+                 (unsigned)esp_now_node_get_sample_interval_sec(), (unsigned)s_seconds_since_last_measurement,
+                 (unsigned)s_measurement_id);
+    }
+    return;
+#endif
     uint32_t measure_period_sec = esp_now_node_get_sample_interval_sec();
     bool due_for_measurement = (s_measurement_id == 0) ||
                                (s_seconds_since_last_measurement >= measure_period_sec);
@@ -647,7 +747,8 @@ void app_main(void)
     if (!scd41_init_single_shot(BSP_C3_I2C_PORT, BSP_C3_I2C_SDA, BSP_C3_I2C_SCL)) {
         ESP_LOGW(TAG, "SCD41 init failed - check wiring (retry next cycle)");
     }
-    sensor_wait_ms(1000);  /* 싱글샷용 전원안정화 지연(위 주석 참고) */
+    /* 2026-10-27 — 전원 인가 뒤 1초(센서가 명령을 받을 준비) — 센서 전원은 딥슬립 동안에도 들어가 있으므로 전원 켤 때만 */
+    if (esp_reset_reason() != ESP_RST_DEEPSLEEP) sensor_wait_ms(1000);
     /* 2026-10-05(사용자 결정 — SCD41 개선 2단계) — Sensirion 단발 예제처럼 시작할 때 센서를 깨끗한 상태로:
      * stop_periodic(500ms) → reinit(30ms). 09-06에 "단발엔 필요 없다"며 뺐던 것을 되돌림.
      * 딥슬립에서 깰 때마다 할지 전원 켤 때만 할지는 Live에서 효과 확인 뒤 결정(사용자) — 지금은 부팅마다 */
@@ -659,7 +760,241 @@ void app_main(void)
         scd41_read_identity();   /* 2026-10-18(시험) — 예전 순서 그대로(scd41.c 주석) */
         scd41_ensure_asc_off();  /* 2026-10-05(SCD41 개선 3단계) */
         scd41_log_calibration("power-on");   /* 2026-10-23(보정 의심) — 전원 부팅마다 */
+#if !CONFIG_SENS_SCD41_PERIODIC_TEST && !CONFIG_SENS_SCD41_SINGLESHOT_LOOP_TEST && !CONFIG_SENS_SCD41_SLEEP_EXPERIMENT && \
+    !CONFIG_SENS_SCD41_CROSSOVER_TEST && !CONFIG_SENS_SCD41_OUTDOOR_TEST
+        s_scd_pending = false;
+        s_scd_readwake = false;
+        ESP_LOGI(TAG, "SCD41 power_down until first measurement: %d", (int)scd41_power_down());   /* 2026-10-27 — 측정할 때만 깨움 */
+#endif
     }
+#if !CONFIG_SENS_SCD41_PERIODIC_TEST && !CONFIG_SENS_SCD41_SINGLESHOT_LOOP_TEST && !CONFIG_SENS_SCD41_SLEEP_EXPERIMENT && \
+    !CONFIG_SENS_SCD41_CROSSOVER_TEST && !CONFIG_SENS_SCD41_OUTDOOR_TEST
+    /* 2026-10-27 — 읽기 전용 깨어남: 무선을 켜지 않고 값만 읽고 센서를 재운 뒤, 원래 응답 깨어남 시각까지 다시 잠 */
+    if (esp_reset_reason() == ESP_RST_DEEPSLEEP && s_scd_readwake) {
+        s_scd_readwake = false;
+        int64_t left = scd_settle_left_us();
+        if (left > 0) sensor_wait_ms((uint32_t)(left / 1000) + 1);
+        if (s_scd_pending) scd_finish();
+        int64_t to_us = (int64_t)s_scd_resp_due_rtc_us - (int64_t)esp_rtc_get_time_us();
+        if (to_us < 1000000) to_us = 1000000;
+        rgb_status_flush(1500);
+        ESP_LOGI(TAG, "SCD41 read wake done - sleep %llds until response wake", (long long)(to_us / 1000000));
+        esp_sleep_enable_timer_wakeup((uint64_t)to_us);
+        esp_deep_sleep_start();
+    }
+#endif
+#if CONFIG_SENS_SCD41_OUTDOOR_TEST
+    {
+        static uint16_t s_out[720];   /* 5초마다 1시간 */
+        static uint32_t s_out_t[720];
+        int n = 0;
+        /* 2026-10-27(사용자 지시) — 새 보드 센서 공장 초기화(FRC·ASC 이력 지움) 뒤 실외 측정. 초기화가 ASC를 다시 켜므로 안에서 끄고 저장 */
+        uint8_t asc_after = 0xFF;
+        bool fr = scd41_factory_reset(&asc_after);
+        ESP_LOGW(TAG, "OUT factory reset=%d asc_after=%u", (int)fr, (unsigned)asc_after);
+        scd41_log_calibration("after-factory-reset");
+        scd41_wake_up();
+        ESP_LOGW(TAG, "OUT start periodic=%d", (int)scd41_start_periodic());
+        int64_t last_dump = esp_timer_get_time();
+        for (;;) {
+            rwdt_guard_arm(60);
+            sensor_wait_ms(500);
+            int co2 = 0;
+            float t = 0.0f, h = 0.0f;
+            if (scd41_read(&co2, &t, &h)) {
+                if (n < 720) { s_out[n] = (uint16_t)co2; s_out_t[n] = (uint32_t)(esp_timer_get_time() / 1000000); n++; }
+                int t10 = (int)(t * 10.0f + 0.5f), h10 = (int)(h * 10.0f + 0.5f);
+                ESP_LOGI(TAG, "OUT t=%lus co2=%d temp=%d.%d humi=%d.%d", (unsigned long)(esp_timer_get_time() / 1000000), co2,
+                         t10 / 10, t10 % 10, h10 / 10, h10 % 10);
+                rgb_status_blink(RGB_STATUS_GREEN, 1);
+            }
+            if (esp_timer_get_time() - last_dump > 30LL * 1000000) {   /* 쌓인 값 전부 다시(USB를 다시 꽂으면 받을 수 있게) */
+                last_dump = esp_timer_get_time();
+                for (int i = 0; i < n; i += 12) {
+                    char line[160];
+                    int k = snprintf(line, sizeof(line), "OUTDUMP %d:", i);
+                    for (int j = i; j < n && j < i + 12 && k < (int)sizeof(line) - 12; j++)
+                        k += snprintf(line + k, sizeof(line) - k, " %lu=%u", (unsigned long)s_out_t[j], s_out[j]);
+                    ESP_LOGI(TAG, "%s", line);
+                }
+            }
+        }
+    }
+#endif
+#if CONFIG_SENS_SCD41_CROSSOVER_TEST
+    {
+        uint8_t mac[6] = { 0 };
+        esp_efuse_mac_get_default(mac);
+        int role = (mac[5] == 0x04) ? 0 : 1;   /* 0 = 첫 1시간 단발 */
+        int64_t t_start = esp_timer_get_time();
+        ESP_LOGW(TAG, "XO start mac ..%02X role=%d (hour1 %s, hour2 %s)", mac[5], role, role == 0 ? "single" : "periodic",
+                 role == 0 ? "periodic" : "single");
+        for (int cyc = 1; cyc <= 36; cyc++) {   /* 2026-10-27 — 3시간(18회)씩 교대(사용자) */
+            int64_t due = t_start + (int64_t)(cyc - 1) * 600 * 1000000LL;
+            while (esp_timer_get_time() < due) {
+                rwdt_guard_arm(60);
+                int64_t l = (due - esp_timer_get_time()) / 1000;
+                sensor_wait_ms((uint32_t)(l > 30000 ? 30000 : (l > 0 ? l : 1)));
+            }
+            int hour = cyc <= 18 ? 1 : 2;   /* 1 = 첫 3시간, 2 = 다음 3시간 */
+            bool single = (hour == 1) == (role == 0);
+            rwdt_guard_arm(60);
+            rgb_status_blink(RGB_STATUS_GREEN, 1);   /* 평소와 같게 — 측정 시작 G 1번(성공 G 2번 / 실패 R 1번은 아래) */
+            int xo_fail = 0;
+            scd41_wake_up();
+            if (single) {
+                for (int i = 1; i <= 13; i++) {   /* 2026-10-27 — 연속과 같은 13번(사용자) */
+                    rwdt_guard_arm(60);
+                    int co2 = 0;
+                    float t = 0.0f, h = 0.0f;
+                    bool rd = false, ok = false;
+                    if (scd41_trigger_single_shot()) {
+                        sensor_wait_ms(SCD41_MEASURE_MIN_WAIT_MS);
+                        for (int k = 0; k < 50 && !rd; k++) {
+                            if (scd41_poll_single_shot(&co2, &t, &h, &ok)) rd = true; else sensor_wait_ms(100);
+                        }
+                    }
+                    if (rd && ok) ESP_LOGI(TAG, "XO h=%d mode=S cyc=%d i=%d co2=%d", hour, cyc, i, co2);
+                    else { ESP_LOGW(TAG, "XO h=%d mode=S cyc=%d i=%d read failed", hour, cyc, i); xo_fail++; }
+                }
+            } else {
+                scd41_start_periodic();
+                int got = 0;
+                int64_t tb = esp_timer_get_time();
+                while (got < 13 && esp_timer_get_time() - tb < 120LL * 1000000) {
+                    rwdt_guard_arm(60);
+                    sensor_wait_ms(500);
+                    int co2 = 0;
+                    float t = 0.0f, h = 0.0f;
+                    if (scd41_read(&co2, &t, &h)) {
+                        got++;
+                        ESP_LOGI(TAG, "XO h=%d mode=P cyc=%d i=%d co2=%d", hour, cyc, got, co2);
+                    }
+                }
+                if (got < 13) xo_fail++;
+                scd41_stop_periodic_measurement();
+                sensor_wait_ms(500);
+            }
+            if (xo_fail) rgb_status_blink(RGB_STATUS_RED, 1); else rgb_status_blink(RGB_STATUS_GREEN, 2);
+            ESP_LOGW(TAG, "XO cyc=%d done pd=%d fail=%d", cyc, (int)scd41_power_down(), xo_fail);
+        }
+        ESP_LOGW(TAG, "XO all done - idle (sensor asleep)");
+        for (;;) { rwdt_guard_arm(60); sensor_wait_ms(30000); }
+    }
+#endif
+#if CONFIG_SENS_SCD41_SLEEP_EXPERIMENT
+    /* 2026-10-26(실험) — Kconfig 설명 참고. 기다림은 RWDT 예산(60초) 안에서 나눔 */
+    {
+        int64_t t_start = esp_timer_get_time();
+        #define EXP_MIN(m) (t_start + (int64_t)(m) * 60 * 1000000LL)
+        #define EXP_WAIT_UNTIL(t) do { while (esp_timer_get_time() < (t)) { rwdt_guard_arm(60); \
+            int64_t _l = ((t) - esp_timer_get_time()) / 1000; sensor_wait_ms((uint32_t)(_l > 30000 ? 30000 : (_l > 0 ? _l : 1))); } } while (0)
+        ESP_LOGW(TAG, "EXP start (1: 30min single+sleep, 2A: 60min periodic burst/10min, 2B: 60min 5 single/10min)");
+        /* 1) 약 24초 주기 단발 + 재움 — measure_scd41()은 깨우기 → 버리는 측정 → 측정 */
+        while (esp_timer_get_time() < EXP_MIN(30)) {
+            int64_t t0 = esp_timer_get_time();
+            rwdt_guard_arm(60);
+            float v[SENSOR_CHAN_COUNT] = { 0 };
+            pm_lock_no_light_sleep_acquire();
+            bool ok = measure_scd41(v);
+            bool pd = scd41_power_down();
+            pm_lock_no_light_sleep_release();
+            if (ok) ESP_LOGI(TAG, "EXP1 co2=%d pd=%d", (int)v[0], (int)pd);
+            else ESP_LOGW(TAG, "EXP1 read failed (fault=%u)", (unsigned)s_attempt_fault);
+            EXP_WAIT_UNTIL(t0 + 23600LL * 1000);
+        }
+        /* 2A) 10분마다: 깨우기 → 연속 측정 → 5초마다 13개 → 멈춤 → 재움 */
+        for (int cyc = 1; cyc <= 6; cyc++) {
+            EXP_WAIT_UNTIL(EXP_MIN(30 + (cyc - 1) * 10));
+            rwdt_guard_arm(60);
+            scd41_wake_up();
+            bool st = scd41_start_periodic();
+            int got = 0;
+            int64_t tb = esp_timer_get_time();
+            while (got < 13 && esp_timer_get_time() - tb < 120LL * 1000000) {
+                rwdt_guard_arm(60);
+                sensor_wait_ms(500);
+                int co2 = 0;
+                float t = 0.0f, h = 0.0f;
+                if (scd41_read(&co2, &t, &h)) {
+                    got++;
+                    ESP_LOGI(TAG, "EXP2A cyc=%d i=%d co2=%d st=%d", cyc, got, co2, (int)st);
+                }
+            }
+            scd41_stop_periodic_measurement();
+            sensor_wait_ms(500);
+            ESP_LOGW(TAG, "EXP2A cyc=%d done (%d values) pd=%d", cyc, got, (int)scd41_power_down());
+        }
+        /* 2B) 10분마다: 깨우기 → 단발 5번(각 5초, 버리지 않고 모두 기록) → 재움 */
+        for (int cyc = 1; cyc <= 6; cyc++) {
+            EXP_WAIT_UNTIL(EXP_MIN(90 + (cyc - 1) * 10));
+            rwdt_guard_arm(60);
+            scd41_wake_up();
+            for (int i = 1; i <= 5; i++) {
+                rwdt_guard_arm(60);
+                int co2 = 0;
+                float t = 0.0f, h = 0.0f;
+                bool rd = false, ok = false;
+                if (scd41_trigger_single_shot()) {
+                    sensor_wait_ms(SCD41_MEASURE_MIN_WAIT_MS);
+                    for (int k = 0; k < 50 && !rd; k++) {
+                        if (scd41_poll_single_shot(&co2, &t, &h, &ok)) rd = true; else sensor_wait_ms(100);
+                    }
+                }
+                if (rd && ok) ESP_LOGI(TAG, "EXP2B cyc=%d i=%d co2=%d", cyc, i, co2);
+                else ESP_LOGW(TAG, "EXP2B cyc=%d i=%d read failed", cyc, i);
+            }
+            ESP_LOGW(TAG, "EXP2B cyc=%d done pd=%d", cyc, (int)scd41_power_down());
+        }
+        ESP_LOGW(TAG, "EXP all done - idle (sensor asleep)");
+        for (;;) { rwdt_guard_arm(60); sensor_wait_ms(30000); }
+    }
+#endif
+#if CONFIG_SENS_SCD41_SINGLESHOT_LOOP_TEST
+    /* 2026-10-26(시험 A) — 보통 측정과 같은 measure_scd41()을 같은 간격(보통 경로 실측 약 23.6초)으로, 통신·딥슬립 없이.
+     * 라이트슬립 막기도 보통 경로(attempt_one_measurement)와 같게 */
+    ESP_LOGW(TAG, "SCD41 SINGLESHOT LOOP TEST: start");
+    for (;;) {
+        int64_t t0 = esp_timer_get_time();
+        rwdt_guard_arm(60);
+        float v[SENSOR_CHAN_COUNT] = { 0 };
+        pm_lock_no_light_sleep_acquire();
+        bool ok = measure_scd41(v);
+        pm_lock_no_light_sleep_release();
+        if (ok) {
+            int t10 = (int)(v[1] * 10.0f + 0.5f), h10 = (int)(v[2] * 10.0f + 0.5f);
+            ESP_LOGI(TAG, "SSLOOP co2=%d temp=%d.%d humi=%d.%d", (int)v[0], t10 / 10, t10 % 10, h10 / 10, h10 % 10);
+        } else {
+            ESP_LOGW(TAG, "SSLOOP read failed (fault=%u)", (unsigned)s_attempt_fault);
+        }
+        int64_t used_ms = (esp_timer_get_time() - t0) / 1000;
+        int64_t left_ms = CONFIG_SENS_SCD41_SSLOOP_INTERVAL_MS - used_ms;
+        while (left_ms > 0) {   /* 긴 간격(시험 B 5분)은 RWDT 예산(60초) 안에서 나눠 기다림 */
+            rwdt_guard_arm(60);
+            uint32_t w = left_ms > 30000 ? 30000 : (uint32_t)left_ms;
+            sensor_wait_ms(w);
+            left_ms -= w;
+        }
+    }
+#endif
+#if CONFIG_SENS_SCD41_PERIODIC_TEST
+    /* 2026-10-25(시험) — 연속 측정 모드로만 돌며 값을 로그(통신·딥슬립 없음). 측정 방식 하나만 바꿈 */
+#if CONFIG_SENS_SCD41_PERIODIC_LOWPOWER
+    ESP_LOGW(TAG, "SCD41 PERIODIC TEST (low power 30s): start=%s", scd41_start_low_power_periodic() ? "ok" : "FAIL");
+#else
+    ESP_LOGW(TAG, "SCD41 PERIODIC TEST: start=%s", scd41_start_periodic() ? "ok" : "FAIL");
+#endif
+    for (;;) {
+        rwdt_guard_arm(60);   /* 딥슬립 없이 계속 깨어 있으므로 예산을 계속 다시 잡음 */
+        sensor_wait_ms(1000);
+        int co2 = 0;
+        float t = 0.0f, h = 0.0f;
+        if (scd41_read(&co2, &t, &h)) {
+            int t10 = (int)(t * 10.0f + 0.5f), h10 = (int)(h * 10.0f + 0.5f);
+            ESP_LOGI(TAG, "PERIODIC co2=%d temp=%d.%d humi=%d.%d", co2, t10 / 10, t10 % 10, h10 / 10, h10 % 10);
+        }
+    }
+#endif
 #elif CONFIG_SENS_SENSOR_SHT45 || CONFIG_SENS_SENSOR_SHT45_DS2
     /* SHT4x는 SCD41과 달리 전원안정화 지연 요구사항이 문서화돼있지 않음(예전 sensor_node.c도
      * 지연 없이 바로 init) — I2C 버스 공유(BSP_C3_I2C_*)는 SCD41과 동일 자리 */
@@ -835,8 +1170,23 @@ void app_main(void)
         uint32_t live_now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         uint32_t live_awake_elapsed_sec = (live_now_ms - live_awake_baseline_ms) / 1000;
         uint32_t live_measure_period_sec = esp_now_node_get_sample_interval_sec();
+#if CONFIG_SENS_SENSOR_SCD41
+        /* 2026-10-27 — SCD41: 시작만 하고 안정되면 읽음(위 흐름과 같음) */
+        if (s_scd_pending) {
+            if (scd_settle_left_us() <= 0) {
+                scd_finish();
+                live_awake_baseline_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                if (s_sensor_fail_streak > 0) live_retry_after_ms = live_awake_baseline_ms + live_measure_period_sec * 1000u;
+            }
+        } else if (s_seconds_since_last_measurement + live_awake_elapsed_sec >= live_measure_period_sec &&
+                   (int32_t)(live_now_ms - live_retry_after_ms) >= 0) {
+            if (!scd_start()) live_retry_after_ms = (uint32_t)(esp_timer_get_time() / 1000) + live_measure_period_sec * 1000u;
+        }
+        if (false) {
+#else
         if (s_seconds_since_last_measurement + live_awake_elapsed_sec >= live_measure_period_sec &&
             (int32_t)(live_now_ms - live_retry_after_ms) >= 0) {
+#endif
             float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
             uint8_t fresh_chok[SENSOR_CHAN_COUNT] = { 0 };
             bool all_ok = attempt_one_measurement(fresh_vals, fresh_chok, &measurement_elapsed_ms);
@@ -887,7 +1237,20 @@ void app_main(void)
     esp_now_node_note_sleep_entry();
     ESP_LOGI(TAG, "Deep sleep: wake in %us (requested %us, %us spent measuring)",
              (unsigned)actual_sleep_sec, (unsigned)sleep_sec, (unsigned)measurement_elapsed_sec);
-    esp_sleep_enable_timer_wakeup((uint64_t)actual_sleep_sec * 1000000ULL);
+    uint64_t sleep_us = (uint64_t)actual_sleep_sec * 1000000ULL;
+#if CONFIG_SENS_SENSOR_SCD41
+    if (s_scd_pending) {   /* 2026-10-27 — 다음 응답 깨어남보다 읽을 때가 먼저면 그때 무선 없이 깸 */
+        int64_t left = scd_settle_left_us();
+        if (left < (int64_t)sleep_us) {
+            s_scd_resp_due_rtc_us = esp_rtc_get_time_us() + sleep_us;
+            s_scd_readwake = true;
+            sleep_us = (left > 100000) ? (uint64_t)left : 100000;
+            ESP_LOGI(TAG, "SCD41 read wake in %llums (response wake in %us)", (unsigned long long)(sleep_us / 1000),
+                     (unsigned)actual_sleep_sec);
+        }
+    }
+#endif
+    esp_sleep_enable_timer_wakeup(sleep_us);
     esp_now_node_wait_replies_sent(100);  /* 2026-10-08 — SLEEP_NOW 응답이 나가기 전에 잠들지 않게 */
     esp_deep_sleep_start();
 }

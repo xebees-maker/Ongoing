@@ -421,11 +421,58 @@ static void handle_sr_chunk(const uint8_t *mac, const uint8_t *body, size_t len)
     if (s->kind != 'T') node_hub_note_user_action();
 }
 
+/* 2026-10-26(사용자 지시 — 오류 때 경과를 못 잡는 일 반복) — 캠이 실패 알림에 실어 보낸 전송 경과(캠별 마지막 것). 브의 중단·실패
+ * 알림이 오면 그 글에 함께 붙임(캠 실패 알림이 먼저 옴 — 캠은 0.6초, 브 중단은 10초 뒤) */
+#define CAMDIAG_SLOTS 4
+static struct { bool valid; uint8_t mac[6]; int64_t us; esp_now_photo_tx_diag_t d; } s_camdiag[CAMDIAG_SLOTS];
+
+static void camdiag_store(const uint8_t *mac, const esp_now_photo_tx_diag_t *d)
+{
+    int slot = 0;
+    for (int i = 0; i < CAMDIAG_SLOTS; i++) {
+        if (s_camdiag[i].valid && memcmp(s_camdiag[i].mac, mac, 6) == 0) { slot = i; break; }
+        if (!s_camdiag[i].valid) slot = i;
+    }
+    s_camdiag[slot].valid = true;
+    memcpy(s_camdiag[slot].mac, mac, 6);
+    s_camdiag[slot].us = esp_timer_get_time();
+    s_camdiag[slot].d = *d;
+}
+
+/* out에 경과 글 — 알림 글(144자)에 들어가게 짧게. 없으면 빈 글
+ *  br<보낸 순서 조각>/<전체> r<받은 조각 프레임> d<중복> f<보관 범위 밖> w<창 상태 요청> m<알려 준 빠진 조각 합> D<DONE 받음>
+ *    M<META 재전송> i<마지막 수신 뒤 ms>
+ *  cam e<끝 이유 cam_tx_end_t> M<META 응답 받음> s<보낸 조각>/<전체> x<송신 거절>(<마지막 코드>) p<속도 조절 시간 초과>
+ *    a<무선 수신 확인 실패>/<성공> w<창 상태 응답>/<요청> m<빠졌다고 들은 합> D<DONE 응답>/<보냄> L<마지막 빠진 수> h<허브에서 받은 프레임> t<ms> */
+static void diag_text(const uint8_t *mac, const can_bridge_sr_rx_diag_t *br, char *out, size_t cap)
+{
+    size_t n = 0;
+    out[0] = '\0';
+    if (br) {
+        n += snprintf(out + n, cap - n, " br%u/%u r%u d%u f%u w%u m%u D%u M%u i%u",
+                      br->next_idx, br->total, br->chunk_rx, br->chunk_dup, br->chunk_far, br->ws_rx, br->ws_missing,
+                      br->done_rx, br->meta_resend, br->idle_ms);
+    }
+    for (int i = 0; i < CAMDIAG_SLOTS && n < cap; i++) {
+        if (!s_camdiag[i].valid || memcmp(s_camdiag[i].mac, mac, 6) != 0) continue;
+        if (esp_timer_get_time() - s_camdiag[i].us > 30000000LL) break;   /* 30초 넘은 건 다른 전송 */
+        const esp_now_photo_tx_diag_t *c = &s_camdiag[i].d;
+        snprintf(out + n, cap - n, " cam e%u M%u s%u/%u x%u(%d) p%u a%u/%u w%u/%u m%u D%u/%u L%u h%u t%u",
+                 c->end, c->meta_ok, c->sent, c->total, c->send_err, c->last_err, c->pace_to, c->mac_fail, c->mac_ok,
+                 c->ws_ack, c->ws_req, c->ws_missing, c->done_ack, c->done_try, c->last_missing, c->hub_rx, c->elapsed_ms);
+        break;
+    }
+}
+
 static void handle_sr_done(const uint8_t *mac, const uint8_t *body, size_t len)
 {
     if (len < sizeof(can_bridge_sr_done_t)) return;
     can_bridge_sr_done_t d;
     memcpy(&d, body, sizeof(d));
+    /* 2026-10-26 — 브가 붙인 세션 경과(옛 브는 없음) */
+    can_bridge_sr_rx_diag_t br_diag;
+    bool has_br = len >= sizeof(can_bridge_sr_done_t) + sizeof(br_diag);
+    if (has_br) memcpy(&br_diag, body + sizeof(can_bridge_sr_done_t), sizeof(br_diag));
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     sr_session_t *s = find_session_locked(mac);
@@ -467,15 +514,17 @@ static void handle_sr_done(const uint8_t *mac, const uint8_t *body, size_t len)
         finish_event(PHOTO_RX_STATE_READY);
         return;
     }
+    static char s_dtext[320];   /* 2026-10-26 — 경과 글(스택에 안 둠, 수신 처리는 한 태스크) */
+    diag_text(mac, has_br ? &br_diag : NULL, s_dtext, sizeof(s_dtext));
     if (d.status != CAN_BRIDGE_SR_DONE_COMPLETE) {
-        ESP_LOGW(TAG, "Photo transfer aborted (Bridge notice) file_id=%u", (unsigned)file_id);
-        ui_log_add_err(UI_ERR_CHUNK_MISSING, "Photo receive failed (transfer aborted) file_id=%u", (unsigned)file_id);
+        ESP_LOGW(TAG, "Photo transfer aborted (Bridge notice) " MACSTR " file_id=%u%s", MAC2STR(mac), (unsigned)file_id, s_dtext);
+        ui_log_add_err(UI_ERR_CHUNK_MISSING, "Photo receive failed (transfer aborted) file_id=%u%s", (unsigned)file_id, s_dtext);
     } else if (!complete) {
-        ESP_LOGW(TAG, "Photo incomplete (%u/%u chunks) file_id=%u", (unsigned)got, (unsigned)total, (unsigned)file_id);
-        ui_log_add_err(UI_ERR_CHUNK_MISSING, "Photo receive failed (incomplete) file_id=%u", (unsigned)file_id);
+        ESP_LOGW(TAG, "Photo incomplete (%u/%u chunks) file_id=%u%s", (unsigned)got, (unsigned)total, (unsigned)file_id, s_dtext);
+        ui_log_add_err(UI_ERR_CHUNK_MISSING, "Photo receive failed (incomplete) file_id=%u%s", (unsigned)file_id, s_dtext);
     } else if (!crc_ok) {
-        ESP_LOGW(TAG, "CRC mismatch - photo dropped file_id=%u", (unsigned)file_id);
-        ui_log_add_err(UI_ERR_CRC_MISMATCH, "Photo receive failed (CRC mismatch) file_id=%u", (unsigned)file_id);
+        ESP_LOGW(TAG, "CRC mismatch - photo dropped file_id=%u%s", (unsigned)file_id, s_dtext);
+        ui_log_add_err(UI_ERR_CRC_MISMATCH, "Photo receive failed (CRC mismatch) file_id=%u%s", (unsigned)file_id, s_dtext);
     } else if (sd_health_writes_allowed() && !sd_storage_is_ejected()) {   /* 10-23 — SD를 꺼낸 동안은 알리지 않음 */
         ui_log_add_err(UI_ERR_SD_MOUNT_FAILED, "Photo SD save failed file_id=%u", (unsigned)file_id);
     } else {
@@ -713,8 +762,17 @@ static void capw_note_auto_photo(const uint8_t *mac)
 /* 캠이 보낸 실패 알림 — ACK 하고 셈 */
 static void handle_capture_fail(const uint8_t *src_mac, const uint8_t *data, int len)
 {
-    if (!src_mac || len < (int)sizeof(esp_now_cam_capture_fail_t)) return;
+    if (!src_mac || len < (int)ESP_NOW_CAM_CAPTURE_FAIL_BASE_LEN) return;
     const esp_now_cam_capture_fail_t *m = (const esp_now_cam_capture_fail_t *)data;
+    /* 2026-10-26 — 캠의 전송 경과(옛 캠은 없음). 로그로 남기고 뒤따르는 브 중단 알림 글에 붙임 */
+    if (len >= (int)sizeof(esp_now_cam_capture_fail_t) && m->reason == CAM_CAPFAIL_PUSH) {
+        esp_now_photo_tx_diag_t dg;
+        memcpy(&dg, &m->diag, sizeof(dg));
+        camdiag_store(src_mac, &dg);
+        static char s_ctext[200];
+        diag_text(src_mac, NULL, s_ctext, sizeof(s_ctext));
+        ESP_LOGW(TAG, "CAM tx failed " MACSTR "%s", MAC2STR(src_mac), s_ctext);
+    }
     esp_now_cam_capture_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_CAPTURE_FAIL_ACK };
     can_bridge_relay_send(src_mac, (const uint8_t *)&ack, sizeof(ack));
     /* 캠의 신뢰 전송이 ACK를 못 받아 같은 알림을 다시 보낸 경우 두 번 세지 않게(5초 안 같은 캠) */

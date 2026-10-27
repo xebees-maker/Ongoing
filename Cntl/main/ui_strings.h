@@ -464,7 +464,9 @@ typedef enum {
     STR_QUOTA_CLASS_AMMONIA,     /* "암모니아 센서" / "Ammonia sensor" */
     STR_QUOTA_CLASS_AGAR,        /* "Agar 센서" / "Agar sensor" */
     STR_MSG_PAIR_QUOTA_FULL_FMT, /* %s=그룹명, %u=상한 */
-    STR_STATUS_QUOTA_FULL,       /* 대기 목록 상태: "상한 초과" / "Limit reached" */
+    STR_STATUS_QUOTA_FULL,
+    STR_PENDING_AS_WAS,          /* 2026-10-27 — 대기 목록: 접속한 적 있는 기기 "이전:" / "As was" + 별명 */
+    STR_PENDING_NEW,             /* 2026-10-27 — 대기 목록: 처음 보는 기기 "새 장치" / "Newly incoming" */       /* 대기 목록 상태: "상한 초과" / "Limit reached" */
     STR_CAMERA_POPUP_LOADING,    /* 카메라 팝업을 연 직후 */
     STR_CAMERA_POPUP_NONE,       /* 연결된 적 있는 카메라도, 사진도 없음 */
     STR_AGAR_SLOT_FMT,           /* 기기 없는 Agar 슬롯 이름, %d=1..3 */

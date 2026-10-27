@@ -26,10 +26,7 @@
 #if SOC_MIPI_DSI_SUPPORTED
 #include "esp_lcd_mipi_dsi.h"
 #endif
-#include "lvgl.h"
-#if LVGL_VERSION_MAJOR >= 9
-#include "lvgl_private.h"
-#endif
+#include "lvgl_port_private.h"
 #include "adapter_internal.h"
 #include "display_bridge.h"
 #include "bridge/common/display_bridge_common.h"
@@ -125,6 +122,20 @@ bool IRAM_ATTR display_manager_notify_frame_done_from_isr(lv_display_t *disp)
     return node->bridge->notify_frame_done_from_isr(node->bridge);
 }
 
+bool IRAM_ATTR display_manager_notify_frame_buf_complete_from_isr(lv_display_t *disp)
+{
+    if (!disp) {
+        return false;
+    }
+
+    esp_lv_adapter_display_node_t *node = display_manager_find_node(disp);
+    if (!node || !node->bridge || !node->bridge->notify_frame_buf_complete_from_isr) {
+        return false;
+    }
+
+    return node->bridge->notify_frame_buf_complete_from_isr(node->bridge);
+}
+
 /* Buffer management */
 #if LVGL_VERSION_MAJOR >= 9
 static bool display_manager_prepare_buffers(esp_lv_adapter_display_node_t *node,
@@ -135,7 +146,7 @@ static bool display_manager_prepare_buffers(esp_lv_adapter_display_node_t *node,
                                             esp_lv_adapter_display_render_mode_t mode,
                                             size_t color_size);
 #endif
-static void *display_manager_alloc_draw_buffer(size_t size, bool use_psram);
+static void *display_manager_alloc_draw_buffer(size_t size, bool use_psram, bool dma_capable);
 static bool display_manager_alloc_mono_buffer(esp_lv_adapter_display_runtime_config_t *cfg,
                                               const esp_lv_adapter_display_profile_t *profile);
 static size_t display_manager_ppa_alignment(void);
@@ -150,6 +161,13 @@ static size_t display_manager_align_up(size_t value, size_t align)
 {
     return (value + align - 1) & ~(align - 1);
 }
+
+/* Dummy draw buffer redirect helpers */
+static esp_err_t display_manager_redirect_dummy_draw_buffer(esp_lv_adapter_display_node_t *node);
+static void display_manager_dummy_draw_mark_all_framebuffers_dirty(esp_lv_adapter_display_node_t *node);
+static void display_manager_dummy_draw_clear_if_dirty(esp_lv_adapter_display_node_t *node, void *buf);
+static bool display_manager_draw_buffers_use_panel_framebuffers(const esp_lv_adapter_display_node_t *node);
+static esp_err_t display_manager_clear_panel_framebuffers(esp_lv_adapter_display_node_t *node);
 
 /* Frame buffer helpers */
 static bool display_manager_fetch_panel_frame_buffers(esp_lv_adapter_display_node_t *node,
@@ -339,6 +357,43 @@ esp_err_t display_manager_dummy_draw_blit(lv_display_t *disp,
     return node->bridge->dummy_draw_blit(node->bridge, x_start, y_start, x_end, y_end, frame_buffer, wait);
 }
 
+void *display_manager_dummy_draw_get_free_buf(lv_display_t *disp)
+{
+    if (!disp) {
+        return NULL;
+    }
+
+    esp_lv_adapter_display_node_t *node = display_manager_find_node(disp);
+    if (!node || !node->cfg.dummy_draw_enabled) {
+        return NULL;
+    }
+
+    if (!node->bridge || !node->bridge->dummy_draw_get_free_buf) {
+        ESP_LOGE(TAG, "Bridge does not support dummy draw get free buf");
+        return NULL;
+    }
+
+    void *buf = node->bridge->dummy_draw_get_free_buf(node->bridge);
+    if (buf) {
+        display_manager_dummy_draw_clear_if_dirty(node, buf);
+    }
+    return buf;
+}
+
+esp_err_t display_manager_dummy_draw_flush_buf(lv_display_t *disp, void *frame_buffer)
+{
+    ESP_RETURN_ON_FALSE(disp, ESP_ERR_INVALID_ARG, TAG, "Display handle cannot be NULL");
+    ESP_RETURN_ON_FALSE(frame_buffer, ESP_ERR_INVALID_ARG, TAG, "Frame buffer cannot be NULL");
+
+    esp_lv_adapter_display_node_t *node = display_manager_find_node(disp);
+    ESP_RETURN_ON_FALSE(node, ESP_ERR_INVALID_ARG, TAG, "Display not registered");
+    ESP_RETURN_ON_FALSE(node->cfg.dummy_draw_enabled, ESP_ERR_INVALID_STATE, TAG, "Dummy draw not enabled");
+    ESP_RETURN_ON_FALSE(node->bridge && node->bridge->dummy_draw_flush_buf,
+                        ESP_ERR_NOT_SUPPORTED, TAG, "Bridge does not support dummy draw flush buf");
+
+    return node->bridge->dummy_draw_flush_buf(node->bridge, frame_buffer);
+}
+
 void display_manager_request_full_refresh(lv_display_t *disp)
 {
     if (!disp) {
@@ -430,20 +485,185 @@ static void display_manager_free_draw_buffers(esp_lv_adapter_display_node_t *nod
 
     esp_lv_adapter_display_runtime_config_t *cfg = &node->cfg;
 
-    /* Free primary buffer if it's not from panel frame buffer */
+    /* Skip panel frame buffers and the private dummy buffer (freed in destroy_node). */
     if (cfg->draw_buf_primary &&
+            cfg->draw_buf_primary != cfg->dummy_draw_buf_primary &&
             !display_manager_is_panel_frame_buffer(node, cfg->draw_buf_primary)) {
         free(cfg->draw_buf_primary);
         cfg->draw_buf_primary = NULL;
     }
 
-    /* Free secondary buffer if it's not from panel frame buffer */
     if (cfg->draw_buf_secondary &&
+            cfg->draw_buf_secondary != cfg->dummy_draw_buf_primary &&
             !display_manager_is_panel_frame_buffer(node, cfg->draw_buf_secondary)) {
         free(cfg->draw_buf_secondary);
         cfg->draw_buf_secondary = NULL;
     }
 
+}
+
+/**
+ * @brief Mark every panel frame buffer as needing a clear before reuse in dummy draw
+ */
+static void display_manager_dummy_draw_mark_all_framebuffers_dirty(esp_lv_adapter_display_node_t *node)
+{
+    if (!node || node->cfg.frame_buffer_count == 0) {
+        return;
+    }
+    uint8_t mask = 0;
+    for (uint8_t i = 0; i < node->cfg.frame_buffer_count && i < ESP_LV_ADAPTER_MAX_FRAME_BUFFERS; i++) {
+        if (node->cfg.frame_buffers[i]) {
+            mask |= (uint8_t)(1U << i);
+        }
+    }
+    node->cfg.dummy_draw_fb_dirty_mask = mask;
+}
+
+/**
+ * @brief Clear a panel frame buffer on its first acquisition in dummy draw mode
+ */
+static void display_manager_dummy_draw_clear_if_dirty(esp_lv_adapter_display_node_t *node, void *buf)
+{
+    if (!node || !buf || node->cfg.frame_buffer_size == 0) {
+        return;
+    }
+    for (uint8_t i = 0; i < node->cfg.frame_buffer_count && i < ESP_LV_ADAPTER_MAX_FRAME_BUFFERS; i++) {
+        if (node->cfg.frame_buffers[i] != buf) {
+            continue;
+        }
+        if ((node->cfg.dummy_draw_fb_dirty_mask & (uint8_t)(1U << i)) == 0) {
+            return;
+        }
+        memset(buf, 0, node->cfg.frame_buffer_size);
+        display_cache_msync_framebuffer(buf, node->cfg.frame_buffer_size);
+        node->cfg.dummy_draw_fb_dirty_mask &= (uint8_t)~(uint8_t)(1U << i);
+        return;
+    }
+}
+
+/**
+ * @brief Check whether the LVGL draw buffers currently point at panel frame buffers
+ */
+static bool display_manager_draw_buffers_use_panel_framebuffers(const esp_lv_adapter_display_node_t *node)
+{
+    if (!node) {
+        return false;
+    }
+
+    return display_manager_is_panel_frame_buffer(node, node->cfg.draw_buf_primary) ||
+           display_manager_is_panel_frame_buffer(node, node->cfg.draw_buf_secondary);
+}
+
+/**
+ * @brief Mark panel frame buffers for lazy clearing when entering dummy draw
+ */
+static esp_err_t display_manager_clear_panel_framebuffers(esp_lv_adapter_display_node_t *node)
+{
+    ESP_RETURN_ON_FALSE(node, ESP_ERR_INVALID_ARG, TAG, "Display node cannot be NULL");
+
+    if (node->cfg.frame_buffer_count == 0 || node->cfg.frame_buffer_size == 0) {
+        return ESP_OK;
+    }
+
+    /* Defer the memset to first acquisition so the scanned-out buffer is untouched. */
+    display_manager_dummy_draw_mark_all_framebuffers_dirty(node);
+    return ESP_OK;
+}
+
+/**
+ * @brief Redirect LVGL rendering to a private buffer while dummy draw owns the panel FBs
+ */
+static esp_err_t display_manager_redirect_dummy_draw_buffer(esp_lv_adapter_display_node_t *node)
+{
+    ESP_RETURN_ON_FALSE(node && node->lv_disp, ESP_ERR_INVALID_ARG, TAG, "Invalid display node");
+
+    esp_lv_adapter_display_runtime_config_t *cfg = &node->cfg;
+    if (!display_manager_draw_buffers_use_panel_framebuffers(node)) {
+        cfg->dummy_draw_redirected = false;
+        return ESP_OK;
+    }
+
+    if (cfg->dummy_draw_redirected) {
+        return ESP_OK;
+    }
+
+    if (!cfg->dummy_draw_buf_primary) {
+        size_t draw_buf_pixels = cfg->base.profile.hor_res ? cfg->base.profile.hor_res : 1;
+#if LVGL_VERSION_MAJOR >= 9
+        lv_color_format_t color_format = lv_display_get_color_format(node->lv_disp);
+        size_t draw_buf_bytes = display_manager_calc_draw_buf_bytes(&cfg->base.profile,
+                                                                    draw_buf_pixels,
+                                                                    color_format);
+#else
+        size_t draw_buf_bytes = draw_buf_pixels * sizeof(lv_color_t);
+#endif
+        ESP_RETURN_ON_FALSE(draw_buf_bytes > 0, ESP_ERR_INVALID_STATE, TAG, "Dummy draw buffer size invalid");
+
+        void *buf = display_manager_alloc_draw_buffer(draw_buf_bytes, cfg->base.profile.use_psram, false);
+        ESP_RETURN_ON_FALSE(buf, ESP_ERR_NO_MEM, TAG, "Failed to allocate dummy draw buffer");
+
+        memset(buf, 0, draw_buf_bytes);
+        cfg->dummy_draw_buf_primary = buf;
+        cfg->dummy_draw_buf_pixels = draw_buf_pixels;
+        cfg->dummy_draw_buf_bytes = draw_buf_bytes;
+    }
+
+    cfg->draw_buf_primary = cfg->dummy_draw_buf_primary;
+    cfg->draw_buf_secondary = NULL;
+    cfg->draw_buf_pixels = cfg->dummy_draw_buf_pixels;
+    cfg->dummy_draw_redirected = true;
+
+#if LVGL_VERSION_MAJOR >= 9
+    lv_display_set_buffers(node->lv_disp,
+                           cfg->draw_buf_primary,
+                           NULL,
+                           cfg->dummy_draw_buf_bytes,
+                           LV_DISPLAY_RENDER_MODE_PARTIAL);
+#else
+    lv_disp_draw_buf_init(&node->draw_buf,
+                          (lv_color_t *)cfg->draw_buf_primary,
+                          NULL,
+                          cfg->dummy_draw_buf_pixels);
+    /* Match partial mode to the one-line buffer (active driver = disp->driver). */
+    node->lv_disp->driver->full_refresh = 0;
+    node->lv_disp->driver->direct_mode = 0;
+#endif
+
+    return ESP_OK;
+}
+
+esp_err_t display_manager_prepare_dummy_draw(lv_display_t *disp)
+{
+    ESP_RETURN_ON_FALSE(disp, ESP_ERR_INVALID_ARG, TAG, "Display handle cannot be NULL");
+
+    esp_lv_adapter_display_node_t *node = display_manager_find_node(disp);
+    ESP_RETURN_ON_FALSE(node, ESP_ERR_INVALID_ARG, TAG, "Display not registered");
+
+    esp_err_t ret = display_manager_clear_panel_framebuffers(node);
+    ESP_RETURN_ON_ERROR(ret, TAG, "Failed to clear panel framebuffers");
+
+    ret = display_manager_redirect_dummy_draw_buffer(node);
+    ESP_RETURN_ON_ERROR(ret, TAG, "Failed to redirect dummy draw buffer");
+
+    return ESP_OK;
+}
+
+esp_err_t display_manager_restore_dummy_draw(lv_display_t *disp)
+{
+    ESP_RETURN_ON_FALSE(disp, ESP_ERR_INVALID_ARG, TAG, "Display handle cannot be NULL");
+
+    esp_lv_adapter_display_node_t *node = display_manager_find_node(disp);
+    ESP_RETURN_ON_FALSE(node, ESP_ERR_INVALID_ARG, TAG, "Display not registered");
+
+    if (!node->cfg.dummy_draw_redirected) {
+        return ESP_OK;
+    }
+
+    esp_err_t ret = display_manager_rebind_draw_buffers(disp);
+    if (ret == ESP_OK) {
+        node->cfg.dummy_draw_redirected = false;
+    }
+    return ret;
 }
 
 /**
@@ -465,6 +685,21 @@ static void display_manager_destroy_node(esp_lv_adapter_display_node_t *node)
     if (node->cfg.mono_buf) {
         free(node->cfg.mono_buf);
         node->cfg.mono_buf = NULL;
+    }
+
+    /* Free the private dummy draw buffer (used while LVGL is redirected) */
+    if (node->cfg.dummy_draw_buf_primary) {
+        if (node->cfg.draw_buf_primary == node->cfg.dummy_draw_buf_primary) {
+            node->cfg.draw_buf_primary = NULL;
+        }
+        if (node->cfg.draw_buf_secondary == node->cfg.dummy_draw_buf_primary) {
+            node->cfg.draw_buf_secondary = NULL;
+        }
+        free(node->cfg.dummy_draw_buf_primary);
+        node->cfg.dummy_draw_buf_primary = NULL;
+        node->cfg.dummy_draw_buf_pixels = 0;
+        node->cfg.dummy_draw_buf_bytes = 0;
+        node->cfg.dummy_draw_redirected = false;
     }
 
     /* Destroy the bridge (hardware interface) */
@@ -655,12 +890,19 @@ static bool display_manager_init_node(esp_lv_adapter_display_node_t *node)
         return false;
     }
 
+    const bool async_te_rotation = pub->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC &&
+                                   pub->te_sync.pipeline == ESP_LV_ADAPTER_TE_PIPELINE_ASYNC_FULL;
     if ((pub->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE ||
             pub->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC) &&
             pub->profile.rotation != ESP_LV_ADAPTER_ROTATE_0 &&
             pub->profile.interface == ESP_LV_ADAPTER_PANEL_IF_OTHER &&
-            pub->profile.mono_layout == ESP_LV_ADAPTER_MONO_LAYOUT_NONE) {
+            pub->profile.mono_layout == ESP_LV_ADAPTER_MONO_LAYOUT_NONE &&
+            !async_te_rotation) {
         ESP_LOGW(TAG, "SPI rotation is not handled by adapter; use esp_lcd_panel_swap_xy/esp_lcd_panel_mirror in panel init");
+    }
+
+    if (async_te_rotation && pub->profile.rotation != ESP_LV_ADAPTER_ROTATE_0) {
+        ESP_LOGI(TAG, "Async TE software rotation enabled: %d degrees", pub->profile.rotation);
     }
 
     if (pub->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC) {
@@ -719,9 +961,12 @@ static bool display_manager_init_node(esp_lv_adapter_display_node_t *node)
 
     size_t buf_bytes = display_manager_calc_draw_buf_bytes(&pub->profile, cfg->draw_buf_pixels, color_format);
 
+    void *lvgl_secondary = (pub->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC &&
+                            pub->te_sync.pipeline != ESP_LV_ADAPTER_TE_PIPELINE_SYNC_FULL) ?
+                           NULL : cfg->draw_buf_secondary;
     lv_display_set_buffers(disp,
                            cfg->draw_buf_primary,
-                           cfg->draw_buf_secondary,
+                           lvgl_secondary,
                            buf_bytes,
                            render_mode == ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_FULL ? LV_DISPLAY_RENDER_MODE_FULL :
                            render_mode == ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_DIRECT ? LV_DISPLAY_RENDER_MODE_DIRECT :
@@ -796,9 +1041,12 @@ static bool display_manager_init_node(esp_lv_adapter_display_node_t *node)
         return false;
     }
 
+    lv_color_t *lvgl_secondary = (pub->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC &&
+                                  pub->te_sync.pipeline != ESP_LV_ADAPTER_TE_PIPELINE_SYNC_FULL) ?
+                                 NULL : (lv_color_t *)cfg->draw_buf_secondary;
     lv_disp_draw_buf_init(&node->draw_buf,
                           (lv_color_t *)cfg->draw_buf_primary,
-                          (lv_color_t *)cfg->draw_buf_secondary,
+                          lvgl_secondary,
                           cfg->draw_buf_pixels);
 
     lv_disp_drv_init(&node->disp_drv);
@@ -905,8 +1153,11 @@ static size_t display_manager_ppa_alignment(void)
 /**
  * @brief Allocate a draw buffer with optional PPA alignment
  */
-static void *display_manager_alloc_draw_buffer(size_t size, bool use_psram)
+static void *display_manager_alloc_draw_buffer(size_t size, bool use_psram, bool dma_capable)
 {
+#if !SOC_PSRAM_DMA_CAPABLE
+    (void)dma_capable;
+#endif
     const bool enc_active = display_bridge_flash_encryption_active();
     size_t align = display_manager_ppa_alignment();
     size_t alloc_size = size;
@@ -918,7 +1169,11 @@ static void *display_manager_alloc_draw_buffer(size_t size, bool use_psram)
         }
         alloc_size = display_manager_align_up(size, align);
 #if CONFIG_SPIRAM_ENC_EXEMPT
-        void *buf = heap_caps_aligned_alloc(align, alloc_size, MALLOC_CAP_SPIRAM_NO_ENC);
+        uint32_t caps = MALLOC_CAP_SPIRAM_NO_ENC;
+#if SOC_PSRAM_DMA_CAPABLE
+        caps |= dma_capable ? MALLOC_CAP_DMA : 0;
+#endif
+        void *buf = heap_caps_aligned_alloc(align, alloc_size, caps);
         if (buf && esp_psram_ptr_is_no_enc(buf)) {
             return buf;
         }
@@ -928,7 +1183,10 @@ static void *display_manager_alloc_draw_buffer(size_t size, bool use_psram)
 #endif
     }
 
-    const uint32_t caps = use_psram ? MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT : MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    uint32_t caps = use_psram ? MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT : MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+#if SOC_PSRAM_DMA_CAPABLE
+    caps |= dma_capable ? MALLOC_CAP_DMA : 0;
+#endif
 
     if (align > 0) {
         void *buf = heap_caps_aligned_alloc(align, alloc_size, caps);
@@ -981,7 +1239,7 @@ static bool display_manager_alloc_mono_buffer(esp_lv_adapter_display_runtime_con
     size_t mono_bytes = display_manager_i1_buffer_bytes(profile->hor_res,
                                                         profile->ver_res,
                                                         false);
-    cfg->mono_buf = display_manager_alloc_draw_buffer(mono_bytes, profile->use_psram);
+    cfg->mono_buf = display_manager_alloc_draw_buffer(mono_bytes, profile->use_psram, false);
     if (!cfg->mono_buf) {
         ESP_LOGE(TAG, "alloc monochrome buffer %zu bytes failed", mono_bytes);
         return false;
@@ -1043,8 +1301,10 @@ static bool display_manager_rebind_panel_draw_buffers(esp_lv_adapter_display_nod
     switch (cfg->base.tear_avoid_mode) {
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_DIRECT:
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_FULL:
+        rebound = display_manager_use_panel_buffers(node, full_pixels, 1, 0);
+        break;
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_FULL:
-        rebound = display_manager_use_panel_buffers(node, full_pixels, 0, 1);
+        rebound = display_manager_use_panel_buffers(node, full_pixels, 1, 2);
         break;
     default:
         rebound = true; /* Modes that do not rely on panel buffers keep existing draw buffers */
@@ -1075,10 +1335,17 @@ static bool display_manager_setup_tear_buffers(esp_lv_adapter_display_node_t *no
 
     switch (mode) {
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_DIRECT:
-    case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_FULL:
+    case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_FULL: {
+        size_t full_pixels = (size_t)profile->hor_res * profile->ver_res;
+        if (!display_manager_use_panel_buffers(node, full_pixels, 1, 0)) {
+            ESP_LOGW(TAG, "tear mode %d: panel buffers unavailable", mode);
+            return false;
+        }
+        break;
+    }
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_FULL: {
         size_t full_pixels = (size_t)profile->hor_res * profile->ver_res;
-        if (!display_manager_use_panel_buffers(node, full_pixels, 0, 1)) {
+        if (!display_manager_use_panel_buffers(node, full_pixels, 1, 2)) {
             ESP_LOGW(TAG, "tear mode %d: panel buffers unavailable", mode);
             return false;
         }
@@ -1092,7 +1359,7 @@ static bool display_manager_setup_tear_buffers(esp_lv_adapter_display_node_t *no
             return false;
         }
         cfg->draw_buf_pixels = (size_t)profile->hor_res * profile->buffer_height;
-        void *buf = display_manager_alloc_draw_buffer(cfg->draw_buf_pixels * color_size, false);
+        void *buf = display_manager_alloc_draw_buffer(cfg->draw_buf_pixels * color_size, false, false);
         if (!buf) {
             ESP_LOGE(TAG, "alloc partial draw buffer %zu bytes failed", cfg->draw_buf_pixels * color_size);
             return false;
@@ -1159,17 +1426,16 @@ static bool display_manager_prepare_buffers(esp_lv_adapter_display_node_t *node,
         have_panel_fb = display_manager_fetch_panel_frame_buffers(node, required_frames, color_size);
     }
 
-    /* Tear-avoidance modes: unified buffer + pipeline setup */
-    if (have_panel_fb && pub->tear_avoid_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE &&
+    /* Scanout tear avoidance cannot fall back to an uninitialized pipeline. */
+    if ((profile->interface == ESP_LV_ADAPTER_PANEL_IF_RGB ||
+            profile->interface == ESP_LV_ADAPTER_PANEL_IF_MIPI_DSI) &&
+            pub->tear_avoid_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE &&
             pub->tear_avoid_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC) {
-        if (display_manager_setup_tear_buffers(node, color_size)) {
+        if (have_panel_fb && display_manager_setup_tear_buffers(node, color_size)) {
             return true;
         }
-        /* Reset any state setup_tear_buffers might have partially set */
-        cfg->draw_buf_pixels = 0;
-        cfg->draw_buf_primary = NULL;
-        cfg->draw_buf_secondary = NULL;
-        ESP_LOGW(TAG, "tear mode %d setup failed, falling back to allocated buffers", pub->tear_avoid_mode);
+        ESP_LOGE(TAG, "panel framebuffer setup failed for tear mode %d", pub->tear_avoid_mode);
+        return false;
     }
 
     /* Allocate buffers manually */
@@ -1195,7 +1461,7 @@ static bool display_manager_prepare_buffers(esp_lv_adapter_display_node_t *node,
     bool use_psram = profile->use_psram;
 
     if (!cfg->draw_buf_primary) {
-        void *buf = display_manager_alloc_draw_buffer(buf_bytes, use_psram);
+        void *buf = display_manager_alloc_draw_buffer(buf_bytes, use_psram, false);
         if (!buf) {
             ESP_LOGE(TAG, "alloc primary buffer %zu bytes failed", buf_bytes);
             return false;
@@ -1204,7 +1470,9 @@ static bool display_manager_prepare_buffers(esp_lv_adapter_display_node_t *node,
     }
 
     if (need_secondary && !cfg->draw_buf_secondary) {
-        void *buf = display_manager_alloc_draw_buffer(buf_bytes, use_psram);
+        const bool dma_shadow = pub->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC &&
+                                pub->te_sync.pipeline == ESP_LV_ADAPTER_TE_PIPELINE_ASYNC_FULL;
+        void *buf = display_manager_alloc_draw_buffer(buf_bytes, use_psram, dma_shadow);
         if (!buf) {
             ESP_LOGE(TAG, "alloc secondary buffer %zu bytes failed", buf_bytes);
             cfg->draw_buf_secondary = NULL;
@@ -1246,18 +1514,16 @@ static bool display_manager_prepare_buffers(esp_lv_adapter_display_node_t *node,
         have_panel_fb = display_manager_fetch_panel_frame_buffers(node, required_frames, color_size);
     }
 
-    /* Tear-avoidance modes: unified buffer + pipeline setup */
-    if (have_panel_fb && pub->tear_avoid_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE &&
+    /* Scanout tear avoidance cannot fall back to an uninitialized pipeline. */
+    if ((profile->interface == ESP_LV_ADAPTER_PANEL_IF_RGB ||
+            profile->interface == ESP_LV_ADAPTER_PANEL_IF_MIPI_DSI) &&
+            pub->tear_avoid_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE &&
             pub->tear_avoid_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC) {
-        if (display_manager_setup_tear_buffers(node, color_size)) {
+        if (have_panel_fb && display_manager_setup_tear_buffers(node, color_size)) {
             return true;
         }
-        /* Reset any state setup_tear_buffers might have partially set */
-        cfg->draw_buf_pixels = 0;
-        cfg->draw_buf_primary = NULL;
-        cfg->draw_buf_secondary = NULL;
-        ESP_LOGW(TAG, "tear mode %d setup failed, falling back to allocated buffers", pub->tear_avoid_mode);
-
+        ESP_LOGE(TAG, "panel framebuffer setup failed for tear mode %d", pub->tear_avoid_mode);
+        return false;
     }
 
     /* Allocate buffers manually */
@@ -1284,7 +1550,7 @@ static bool display_manager_prepare_buffers(esp_lv_adapter_display_node_t *node,
     bool use_psram = profile->use_psram;
 
     if (!cfg->draw_buf_primary) {
-        void *buf = display_manager_alloc_draw_buffer(buf_bytes, use_psram);
+        void *buf = display_manager_alloc_draw_buffer(buf_bytes, use_psram, false);
         if (!buf) {
             ESP_LOGE(TAG, "alloc primary buffer %zu bytes failed", buf_bytes);
             return false;
@@ -1293,7 +1559,9 @@ static bool display_manager_prepare_buffers(esp_lv_adapter_display_node_t *node,
     }
 
     if (need_secondary && !cfg->draw_buf_secondary) {
-        void *buf = display_manager_alloc_draw_buffer(buf_bytes, use_psram);
+        const bool dma_shadow = pub->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC &&
+                                pub->te_sync.pipeline == ESP_LV_ADAPTER_TE_PIPELINE_ASYNC_FULL;
+        void *buf = display_manager_alloc_draw_buffer(buf_bytes, use_psram, dma_shadow);
         if (!buf) {
             ESP_LOGE(TAG, "alloc secondary buffer %zu bytes failed", buf_bytes);
             cfg->draw_buf_secondary = NULL;
@@ -1396,7 +1664,7 @@ static uint8_t display_manager_required_buffer_count(const esp_lv_adapter_displa
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_DIRECT:
         return 2;
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC:
-        return 1;  /* Single buffer for strict TE synchronization */
+        return cfg->base.te_sync.pipeline != ESP_LV_ADAPTER_TE_PIPELINE_SYNC_FULL ? 2 : 1;
     default:
         break;
     }
@@ -1417,10 +1685,14 @@ static uint8_t display_manager_required_buffer_count(const esp_lv_adapter_displa
 uint8_t display_manager_required_frame_buffer_count(esp_lv_adapter_tear_avoid_mode_t tear_avoid_mode,
                                                     esp_lv_adapter_rotation_t rotation)
 {
-    /* Rotation 90° or 270° always requires 3 buffers for rotation processing.
+    if (tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC) {
+        return 1;
+    }
+
+    /* Any non-zero rotation requires 3 buffers for rotation processing.
      * DOUBLE_PARTIAL has its own drawing buffers and is out of scope here.
      */
-    if ((rotation == ESP_LV_ADAPTER_ROTATE_90 || rotation == ESP_LV_ADAPTER_ROTATE_270)
+    if (rotation != ESP_LV_ADAPTER_ROTATE_0
             && tear_avoid_mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_PARTIAL) {
         return 3;
     }
@@ -1435,7 +1707,6 @@ uint8_t display_manager_required_frame_buffer_count(esp_lv_adapter_tear_avoid_mo
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_PARTIAL:
         return 2;
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE:
-    case ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC:
         /* Return 1 for RGB/MIPI DSI hardware minimum requirement */
         return 1;
     default:
@@ -1452,7 +1723,8 @@ static size_t display_manager_default_buffer_pixels(const esp_lv_adapter_display
     const esp_lv_adapter_display_profile_t *profile = &cfg->base.profile;
 
     size_t full_pixels = (size_t)profile->hor_res * profile->ver_res;
-    if (mode == ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_FULL) {
+    if (mode == ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_FULL ||
+            mode == ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_DIRECT) {
         return full_pixels;
     }
 
@@ -1494,6 +1766,10 @@ static void display_manager_configure_te_timing(esp_lv_adapter_display_runtime_c
     }
 
     esp_lv_adapter_te_sync_config_t *te_cfg = &cfg->base.te_sync;
+
+    if (te_cfg->bounce_buffer_enabled && !te_cfg->bounce_buffer_rows) {
+        te_cfg->bounce_buffer_rows = ESP_LV_ADAPTER_TE_BOUNCE_BUFFER_ROWS_DEFAULT;
+    }
 
     cfg->te_intr_type = GPIO_INTR_DISABLE;
     cfg->te_prefer_refresh_end = false;
@@ -1574,6 +1850,23 @@ static bool display_manager_validate_tearing_mode(const esp_lv_adapter_display_c
     bool te_gpio_enabled = esp_lv_adapter_te_sync_is_enabled(&cfg->te_sync);
     bool mono_enabled = (cfg->profile.mono_layout != ESP_LV_ADAPTER_MONO_LAYOUT_NONE);
 
+    if (cfg->te_sync.pipeline != ESP_LV_ADAPTER_TE_PIPELINE_SYNC_FULL &&
+            cfg->te_sync.pipeline != ESP_LV_ADAPTER_TE_PIPELINE_ASYNC_FULL) {
+        ESP_LOGE(TAG, "invalid TE pipeline %d", cfg->te_sync.pipeline);
+        return false;
+    }
+
+    if (cfg->te_sync.pipeline != ESP_LV_ADAPTER_TE_PIPELINE_SYNC_FULL &&
+            mode != ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC) {
+        ESP_LOGE(TAG, "asynchronous TE pipeline requires TE_SYNC mode");
+        return false;
+    }
+
+    if (cfg->te_sync.pipeline != ESP_LV_ADAPTER_TE_PIPELINE_SYNC_FULL && mono_enabled) {
+        ESP_LOGE(TAG, "asynchronous TE pipeline does not support monochrome displays");
+        return false;
+    }
+
     if (mono_enabled) {
         if (cfg->profile.interface != ESP_LV_ADAPTER_PANEL_IF_OTHER) {
             ESP_LOGE(TAG, "monochrome requires panel interface OTHER");
@@ -1624,8 +1917,10 @@ static esp_lv_adapter_display_render_mode_t display_manager_pick_render_mode(con
     switch (cfg->base.tear_avoid_mode) {
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_FULL:
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_FULL:
-    case ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC:
         return ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_FULL;
+    case ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC:
+        return cfg->base.te_sync.pipeline != ESP_LV_ADAPTER_TE_PIPELINE_SYNC_FULL ?
+               ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_DIRECT : ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_FULL;
     case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_DIRECT:
         return ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_DIRECT;
     default:
@@ -1693,7 +1988,7 @@ esp_err_t display_manager_wait_flush_done(lv_display_t *disp, int32_t timeout_ms
     int64_t start_time = esp_timer_get_time();
     int64_t timeout_us = (timeout_ms < 0) ? INT64_MAX : ((int64_t)timeout_ms * 1000);
 
-    while (disp->rendering_in_progress) {
+    while (disp->rendering_in_progress || disp->flushing) {
         vTaskDelay(pdMS_TO_TICKS(1));
 
         if (esp_timer_get_time() - start_time > timeout_us) {
@@ -1719,11 +2014,31 @@ esp_err_t display_manager_wait_flush_done(lv_display_t *disp, int32_t timeout_ms
     }
 #endif
 
+    esp_err_t te_ret = esp_lv_adapter_te_sync_wait_idle(node->cfg.te_ctx, timeout_ms);
+    if (te_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Timeout waiting for asynchronous TE transfer completion");
+        return te_ret;
+    }
+
+    ESP_RETURN_ON_ERROR(display_manager_wait_dummy_draw_done(disp, timeout_ms), TAG,
+                        "Timeout waiting for dummy draw transfer completion");
+
     /* Additional safety: wait one more frame for any hardware operations */
     vTaskDelay(pdMS_TO_TICKS(20));
 
     ESP_LOGD(TAG, "Flush completion confirmed");
     return ESP_OK;
+}
+
+esp_err_t display_manager_wait_dummy_draw_done(lv_display_t *disp, int32_t timeout_ms)
+{
+    ESP_RETURN_ON_FALSE(disp, ESP_ERR_INVALID_ARG, TAG, "Invalid display handle");
+    esp_lv_adapter_display_node_t *node = display_manager_find_node(disp);
+    ESP_RETURN_ON_FALSE(node, ESP_ERR_NOT_FOUND, TAG, "Display not found");
+    if (!node->bridge || !node->bridge->wait_dummy_draw_done) {
+        return ESP_OK;
+    }
+    return node->bridge->wait_dummy_draw_done(node->bridge, timeout_ms);
 }
 
 /**
@@ -1815,16 +2130,26 @@ esp_err_t display_manager_rebind_draw_buffers(lv_display_t *disp)
         lv_mode = LV_DISPLAY_RENDER_MODE_DIRECT;
     }
 
+    void *lvgl_secondary = (cfg->base.tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC &&
+                            cfg->base.te_sync.pipeline != ESP_LV_ADAPTER_TE_PIPELINE_SYNC_FULL) ?
+                           NULL : cfg->draw_buf_secondary;
     lv_display_set_buffers(disp,
                            cfg->draw_buf_primary,
-                           cfg->draw_buf_secondary,
+                           lvgl_secondary,
                            buf_bytes,
                            lv_mode);
 #else
+    lv_color_t *lvgl_secondary = (cfg->base.tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC &&
+                                  cfg->base.te_sync.pipeline != ESP_LV_ADAPTER_TE_PIPELINE_SYNC_FULL) ?
+                                 NULL : (lv_color_t *)cfg->draw_buf_secondary;
     lv_disp_draw_buf_init(&node->draw_buf,
                           (lv_color_t *)cfg->draw_buf_primary,
-                          (lv_color_t *)cfg->draw_buf_secondary,
+                          lvgl_secondary,
                           cfg->draw_buf_pixels);
+    /* Restore the render-mode flags redirect may have cleared (active driver). */
+    esp_lv_adapter_display_render_mode_t render_mode = display_manager_pick_render_mode(cfg);
+    disp->driver->full_refresh = (render_mode == ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_FULL) ? 1 : 0;
+    disp->driver->direct_mode = (render_mode == ESP_LV_ADAPTER_DISPLAY_RENDER_MODE_DIRECT) ? 1 : 0;
 #endif
 
     ESP_LOGD(TAG, "LVGL draw buffers rebound successfully");

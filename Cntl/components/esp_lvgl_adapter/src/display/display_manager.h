@@ -94,6 +94,23 @@ esp_err_t display_manager_dummy_draw_blit(lv_display_t *disp,
                                           bool wait);
 
 /**
+ * @brief Get a free frame buffer from the pipeline in dummy draw mode
+ *
+ * @param disp Display handle
+ * @return Pointer to a free buffer, or NULL if unavailable
+ */
+void *display_manager_dummy_draw_get_free_buf(lv_display_t *disp);
+
+/**
+ * @brief Submit a complete frame buffer in dummy draw mode
+ *
+ * @param disp Display handle
+ * @param frame_buffer Buffer obtained from display_manager_dummy_draw_get_free_buf
+ * @return ESP_OK on success
+ */
+esp_err_t display_manager_dummy_draw_flush_buf(lv_display_t *disp, void *frame_buffer);
+
+/**
  * @brief Request a full refresh on the specified display
  *
  * Marks the entire active screen as dirty so that LVGL will redraw on the next cycle.
@@ -132,6 +149,11 @@ bool display_manager_notify_color_trans_done_from_isr(lv_display_t *disp);
 bool display_manager_notify_frame_done_from_isr(lv_display_t *disp);
 
 /**
+ * @brief Notify bridge that an LCD frame-buffer transfer completed from an ISR.
+ */
+bool display_manager_notify_frame_buf_complete_from_isr(lv_display_t *disp);
+
+/**
  * @brief Calculate number of panel frame buffers required
  *
  * @param tear_avoid_mode Tearing effect avoidance mode
@@ -164,6 +186,8 @@ struct esp_lv_adapter_display_node *display_manager_get_node(lv_display_t *disp)
  */
 esp_err_t display_manager_wait_flush_done(lv_display_t *disp, int32_t timeout_ms);
 
+esp_err_t display_manager_wait_dummy_draw_done(lv_display_t *disp, int32_t timeout_ms);
+
 /**
  * @brief Refetch framebuffers from LCD panel and update all references
  *
@@ -195,6 +219,41 @@ esp_err_t display_manager_refetch_framebuffers(lv_display_t *disp);
  *      - ESP_ERR_INVALID_STATE: Draw buffer state invalid
  */
 esp_err_t display_manager_rebind_draw_buffers(lv_display_t *disp);
+
+/**
+ * @brief Prepare a display for dummy draw by unloading LVGL from the panel framebuffers
+ *
+ * Marks the panel frame buffers for lazy clearing and, when the LVGL draw buffers
+ * are the panel frame buffers, redirects LVGL rendering to a private partial buffer.
+ * After this call the panel frame buffers are owned solely by the dummy draw path,
+ * which shares the same pipeline free-buffer mechanism as the normal LVGL flush.
+ *
+ * Must be called with the LVGL lock held and after any in-flight flush has finished.
+ *
+ * @param disp Display handle
+ * @return
+ *      - ESP_OK: Success
+ *      - ESP_ERR_INVALID_ARG: Invalid display handle or display not registered
+ *      - ESP_ERR_NO_MEM: Failed to allocate the private dummy draw buffer
+ *      - ESP_ERR_INVALID_STATE: Draw buffer size invalid
+ */
+esp_err_t display_manager_prepare_dummy_draw(lv_display_t *disp);
+
+/**
+ * @brief Restore LVGL draw buffers to the panel framebuffers after dummy draw
+ *
+ * Undoes display_manager_prepare_dummy_draw() by rebinding the LVGL draw buffers
+ * back to the panel frame buffers. No-op if rendering was never redirected.
+ *
+ * Must be called with the LVGL lock held.
+ *
+ * @param disp Display handle
+ * @return
+ *      - ESP_OK: Success
+ *      - ESP_ERR_INVALID_ARG: Invalid display handle or display not registered
+ *      - ESP_ERR_INVALID_STATE: Draw buffer state invalid
+ */
+esp_err_t display_manager_restore_dummy_draw(lv_display_t *disp);
 
 #ifdef __cplusplus
 }

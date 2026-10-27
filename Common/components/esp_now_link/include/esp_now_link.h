@@ -206,12 +206,47 @@ typedef enum {
     CAM_CAPFAIL_PUSH     = 3,   /* 콘으로 전송 실패 */
 } cam_capfail_reason_t;
 
+/* 2026-10-26(사용자 지시 — "에러나면 로그로 잡으려고 준비시킨 게 한두 개가 아닌데 못 잡는 상황이 반복") — 사진 전송이 실패하면
+ * 실패한 장치가 그 경과를 직접 세어 콘으로 보냄(USB 시리얼에 기대지 않음 — 캠은 전송 중 USB가 끊겨 로그가 안 남았음).
+ * 캠: CAM_CAPTURE_FAIL 끝에 esp_now_photo_tx_diag_t. 브: CAN_DATA_SR_DONE 끝에 can_bridge_sr_rx_diag_t.
+ * 콘은 둘을 로그와 오류 알림 글에 남김 */
+typedef enum {
+    CAM_TX_END_OK          = 0,
+    CAM_TX_END_META        = 1,   /* META 응답 없음 */
+    CAM_TX_END_SUPERSEDED  = 2,   /* 새 요청이 대체 */
+    CAM_TX_END_TIME_LIMIT  = 3,   /* 감시 타이머 전 시간 상한 */
+    CAM_TX_END_HUB_SILENT  = 4,   /* DONE 응답 없음 + 허브 조용함 */
+    CAM_TX_END_NO_PROGRESS = 5,   /* 빠진 조각 수가 줄지 않음 */
+} cam_tx_end_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  end;           /* cam_tx_end_t */
+    uint8_t  meta_ok;       /* META 응답 받음 */
+    uint16_t total;         /* 전체 조각 */
+    uint16_t sent;          /* esp_now_send가 받아들인 조각 프레임(재전송 포함) */
+    uint16_t send_err;      /* esp_now_send가 거절한 조각 프레임 */
+    int16_t  last_err;      /* 마지막 거절 코드(esp_err_t 하위 16비트) */
+    uint16_t pace_to;       /* 송신 완료를 기다리다 시간 초과한 횟수 */
+    uint16_t mac_fail;      /* 송신 완료 콜백이 실패(상대의 무선 수신 확인 없음)로 온 수 — 이 전송 동안 전부 */
+    uint16_t mac_ok;        /* 송신 완료 콜백 성공 수 */
+    uint16_t ws_req;        /* 창 상태 요청 */
+    uint16_t ws_ack;        /* 창 상태 응답 받음 */
+    uint16_t ws_missing;    /* 창 상태 응답이 알려 준 빠진 조각 합 */
+    uint8_t  done_try;      /* DONE 보냄 */
+    uint8_t  done_ack;      /* DONE 응답 받음 */
+    uint16_t last_missing;  /* 마지막 DONE 응답의 빠진 조각 수 */
+    uint16_t hub_rx;        /* 이 전송 동안 허브에서 받은 프레임 수 */
+    uint16_t elapsed_ms;
+} esp_now_photo_tx_diag_t;
+
 typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
     uint8_t reason;   /* cam_capfail_reason_t */
     uint8_t retry;    /* 1 = 콘이 보낸 재촬영이 실패 */
+    esp_now_photo_tx_diag_t diag;   /* 2026-10-26 — 끝에 붙임(옛 캠은 없음, 콘은 ESP_NOW_CAM_CAPTURE_FAIL_BASE_LEN 이상이면 받음) */
 } esp_now_cam_capture_fail_t;
+#define ESP_NOW_CAM_CAPTURE_FAIL_BASE_LEN  offsetof(esp_now_cam_capture_fail_t, diag)
 
 typedef struct __attribute__((packed)) {
     uint8_t version;

@@ -375,7 +375,8 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             s_sample_interval_sec = cfg->sample_interval_sec;
             /* cam_node_set_response_interval_sec()과 동일 위치/이유 — 실제 샘플주기가
              * 확정되는 순간 RWDT 예산을 그 값 기준으로 재무장 */
-            rwdt_guard_arm(s_sample_interval_sec + CONFIG_SENS_DEEPSLEEP_AWAKE_MARGIN_SEC);
+            /* 2026-10-27 — 측정 주기가 길어져도(최대 1시간) 깨어 있는 시간은 짧음(측정은 시작만 하고 나중에 읽음) — 60초로 상한 */
+            rwdt_guard_arm((s_sample_interval_sec < 60 ? s_sample_interval_sec : 60) + CONFIG_SENS_DEEPSLEEP_AWAKE_MARGIN_SEC);
         }
         if (cfg->unix_time != 0) {
             struct timeval tv = { .tv_sec = (time_t)cfg->unix_time, .tv_usec = 0 };

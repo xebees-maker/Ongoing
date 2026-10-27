@@ -102,7 +102,7 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_FMT_CAPTURE_ON_WAKE]        = { "캠이 깨어나면 촬영합니다(최대 약 %u초)", "Shoots when the CAM wakes (up to ~%us)" },
     [STR_OPT_XCLK_LIST]              = { "5MHz\n10MHz\n20MHz",  "5MHz\n10MHz\n20MHz" },   /* 2026-10-21 — 24MHz 뺌(ui_main s_xclk_values 주석) */
     [STR_LABEL_SENS_MEASURE_INTERVAL]    = { "측정 주기",                 "Measure period" },
-    [STR_OPT_SENS_MEASURE_INTERVAL_LIST] = { "10초\n15초\n30초\n1분\n5분\n30분", "10S\n15S\n30S\n1M\n5M\n30M" },
+    [STR_OPT_SENS_MEASURE_INTERVAL_LIST] = { "15초\n1분\n10분\n30분\n1시간", "15S\n1M\n10M\n30M\n1H" },   /* 2026-10-27 */
     [STR_BTN_APPLY]                  = { "적용",                       "Apply" },
     [STR_CONFIG_APPLY_PROGRESS]      = { "설정 적용 중...",             "Applying settings..." },
     [STR_CONFIG_APPLY_STALLED]       = { "응답 없음 — 연결 상태를 확인하세요", "No response — check connection" },
@@ -464,6 +464,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_MSG_PAIR_QUOTA_FULL_FMT] = { "%s: 최대 %u대까지 연결할 수 있습니다.\n기존 기기를 먼저 연결 해제하세요.",
                                       "%s: up to %u can be connected.\nDisconnect one first." },
     [STR_STATUS_QUOTA_FULL]       = { "상한 초과",     "Limit reached" },
+    [STR_PENDING_AS_WAS]          = { "이전:",         "As was" },
+    [STR_PENDING_NEW]             = { "새 장치",       "Newly incoming" },
     [STR_CAMERA_POPUP_LOADING]    = { "카메라 목록을 불러오는 중...", "Loading cameras..." },
     [STR_CAMERA_POPUP_NONE]       = { "카메라도 사진도 아직 없습니다.", "No cameras or photos yet." },
     [STR_AGAR_SLOT_FMT]           = { "Agar %d",       "Agar %d" },

@@ -190,6 +190,23 @@ typedef struct __attribute__((packed)) {
     uint8_t  status;        /* can_bridge_sr_done_status_t */
 } can_bridge_sr_done_t;
 
+/* 2026-10-26(사용자 지시 — "에러나면 로그로 잡으려고 준비시킨 게 한두 개가 아닌데 못 잡는 상황이 반복") — 사진 전송이 실패하면
+ * 실패한 장치가 그 경과를 직접 세어 콘으로 보냄(USB 시리얼에 기대지 않음 — 캠은 전송 중 USB가 끊겨 로그가 안 남았음).
+ * 캠: CAM_CAPTURE_FAIL 끝에 esp_now_photo_tx_diag_t. 브: CAN_DATA_SR_DONE 끝에 can_bridge_sr_rx_diag_t.
+ * 콘은 둘을 로그와 오류 알림 글에 남김 */
+typedef struct __attribute__((packed)) {
+    uint16_t total;         /* 전체 조각 */
+    uint16_t next_idx;      /* 순서대로 콘에 보낸 조각 수 */
+    uint16_t chunk_rx;      /* 이 세션에서 받은 조각 프레임(중복·범위 밖 포함) */
+    uint16_t chunk_dup;     /* 그중 중복 */
+    uint16_t chunk_far;     /* 그중 보관 범위 밖이라 버림 */
+    uint16_t ws_rx;         /* 창 상태 요청 받음 */
+    uint16_t ws_missing;    /* 창 상태 응답으로 알려 준 빠진 조각 합 */
+    uint8_t  done_rx;       /* DONE 받음 */
+    uint8_t  meta_resend;   /* 같은 META 다시 받음 */
+    uint16_t idle_ms;       /* 마지막으로 이 캠에서 받은 뒤 지난 시간 */
+} can_bridge_sr_rx_diag_t;   /* CAN_DATA_SR_DONE 본문(can_bridge_sr_done_t) 뒤에 붙음 — 옛 브는 없음 */
+
 /* ---- 경로 분류(설계 §2) — 판단은 이 두 함수에만 둠(콘/브가 각자 판단하면 언젠가 어긋남) ----
  * SR(사진 전송) 7종만 DATA, 나머지 전부 CONTROL:
  *   PHOTO_META / META_ACK / PHOTO_CHUNK / WINDOW_STATUS_REQUEST / WINDOW_STATUS_ACK / PHOTO_DONE / DONE_ACK */

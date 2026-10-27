@@ -16,7 +16,10 @@
 
 #include "esp_cache.h"
 #include "esp_private/esp_cache_private.h"
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+#if __has_include("esp_private/esp_mspi_align.h")
+#include "esp_private/esp_mspi_align.h"
+#endif
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 1)
 #include "esp_efuse.h"
 #else
 #include "esp_flash_encrypt.h"
@@ -35,8 +38,55 @@
 
 static const char *TAG = "esp_lvgl:bridge";
 
+void display_bridge_te_bounce_free(display_bridge_te_bounce_t *bounce)
+{
+    if (!bounce) {
+        return;
+    }
+    for (size_t i = 0; i < ESP_LV_ADAPTER_TE_BOUNCE_BUFFER_COUNT; i++) {
+        free(bounce->buffers[i]);
+        bounce->buffers[i] = NULL;
+    }
+    bounce->count = 0;
+    bounce->capacity = 0;
+#if SOC_DMA2D_SUPPORTED
+    bounce->dma2d_copy_state = DISPLAY_BRIDGE_DMA2D_COPY_UNCHECKED;
+#endif
+}
+
+void display_bridge_te_bounce_alloc(display_bridge_te_bounce_t *bounce,
+                                    size_t requested_rows,
+                                    size_t row_bytes,
+                                    size_t alignment)
+{
+    if (!bounce || !requested_rows || !row_bytes || !alignment) {
+        return;
+    }
+
+    for (size_t rows = requested_rows; rows; rows /= 2U) {
+        size_t bytes = row_bytes * rows;
+        uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT;
+        uint8_t count = 0;
+        for (; count < ESP_LV_ADAPTER_TE_BOUNCE_BUFFER_COUNT; count++) {
+            bounce->buffers[count] = heap_caps_aligned_alloc(alignment, bytes, caps);
+            if (!bounce->buffers[count]) {
+                break;
+            }
+        }
+        if (count == ESP_LV_ADAPTER_TE_BOUNCE_BUFFER_COUNT) {
+            bounce->count = count;
+            bounce->capacity = bytes;
+            ESP_LOGI(TAG, "Async TE bounce enabled: rows=%zu, count=%u, bytes=%zu each",
+                     rows, count, bytes);
+            return;
+        }
+        display_bridge_te_bounce_free(bounce);
+    }
+    ESP_LOGW(TAG, "Async TE bounce allocation failed; using LCD driver fallback");
+}
+
 /**********************
- *  FLASH ENC DMA ALIGN
+ *  EXTERNAL MEMORY DMA ALIGN
  **********************/
 
 #if defined(SOC_GDMA_EXT_MEM_ENC_ALIGNMENT)
@@ -49,7 +99,7 @@ bool display_bridge_flash_encryption_active(void)
 {
     static int s_state = -1;
     if (s_state < 0) {
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 1)
         s_state = esp_efuse_is_flash_encryption_enabled() ? 1 : 0;
 #else
         s_state = esp_flash_encryption_enabled() ? 1 : 0;
@@ -60,16 +110,10 @@ bool display_bridge_flash_encryption_active(void)
 
 size_t display_bridge_dma2d_ext_mem_alignment(void)
 {
-    return DISPLAY_BRIDGE_ENC_DMA_ALIGN;
-}
-
-static bool display_bridge_psram_is_no_enc(const void *buffer)
-{
-#if CONFIG_SPIRAM_ENC_EXEMPT
-    return buffer && esp_psram_ptr_is_no_enc(buffer);
+#if __has_include("esp_private/esp_mspi_align.h")
+    return esp_mspi_get_alignment(NULL);
 #else
-    (void)buffer;
-    return false;
+    return DISPLAY_BRIDGE_ENC_DMA_ALIGN;
 #endif
 }
 
@@ -92,15 +136,26 @@ static size_t display_bridge_dma2d_align_pixels(uint8_t color_bytes)
 
 bool display_bridge_dma2d_buffer_needs_alignment(const void *buffer)
 {
-    if (!buffer || !display_bridge_flash_encryption_active()) {
+    if (!buffer) {
         return false;
     }
-
+#if __has_include("esp_private/esp_mspi_align.h")
+    return esp_mspi_get_alignment(buffer) > 1;
+#else
     if (!esp_ptr_external_ram(buffer)) {
         return false;
     }
-
-    return !display_bridge_psram_is_no_enc(buffer);
+#if CONFIG_SPIRAM_ECC_ENABLE
+    return true;
+#else
+#if CONFIG_SPIRAM_ENC_EXEMPT
+    if (esp_psram_ptr_is_no_enc(buffer)) {
+        return false;
+    }
+#endif
+    return display_bridge_flash_encryption_active();
+#endif
+#endif
 }
 
 bool display_bridge_dma2d_x_rounding_sufficient(const void *buffer,
@@ -241,6 +296,23 @@ void display_dirty_region_capture(esp_lv_adapter_display_dirty_region_t *dst,
  *   ROTATION & COPY OPERATIONS
  **********************/
 
+static inline void IRAM_ATTR display_copy_pixel(const uint8_t *src, uint8_t *dst, uint8_t color_bytes)
+{
+    if (color_bytes == 1) {
+        *dst = *src;
+    } else if (color_bytes == 2) {
+        *(uint16_t *)dst = *(const uint16_t *)src;
+    } else if (color_bytes == 3) {
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+    } else if (color_bytes == 4) {
+        memcpy(dst, src, 4);
+    } else {
+        memcpy(dst, src, color_bytes);
+    }
+}
+
 /**
  * @brief Rotate and copy a region with stride support (IRAM optimized)
  *
@@ -317,8 +389,10 @@ void IRAM_ATTR display_rotate_copy_region(const void *src,
     }
 
     /* Select block size based on rotation for optimal cache usage */
-    int block_w = (rotation == ESP_LV_ADAPTER_ROTATE_90 || rotation == ESP_LV_ADAPTER_ROTATE_270) ? block_size_small : block_size_large;
-    int block_h = (rotation == ESP_LV_ADAPTER_ROTATE_90 || rotation == ESP_LV_ADAPTER_ROTATE_270) ? block_size_large : block_size_small;
+    int block_w = block_size_small;
+    int block_h = block_size_large;
+    size_t src_stride_bytes = (size_t)src_stride_px * color_bytes;
+    size_t dst_stride_bytes = (size_t)phys_w * color_bytes;
 
     /* Process in blocks for better cache locality */
     for (int i = 0; i < rect_h; i += block_h) {
@@ -327,32 +401,23 @@ void IRAM_ATTR display_rotate_copy_region(const void *src,
         for (int j = 0; j < rect_w; j += block_w) {
             int max_width = (j + block_w > rect_w) ? rect_w : j + block_w;
 
-            /* Copy pixels within current block - fully inlined for performance */
+            /* Rotation is invariant for the whole region; keep it out of the pixel loop. */
             for (int y = i; y < max_height; y++) {
+                const uint8_t *src_pixel = (const uint8_t *)src + (size_t)y * src_stride_bytes +
+                                           (size_t)j * color_bytes;
+                int gy = lv_y_start + y;
+                int gx = lv_x_start + j;
+                int dy = (rotation == ESP_LV_ADAPTER_ROTATE_90) ? gx : ver_res - 1 - gx;
+                int dx = (rotation == ESP_LV_ADAPTER_ROTATE_90) ? phys_w - 1 - gy : gy;
+                uint8_t *dst_pixel = (uint8_t *)dst_fb + (size_t)(dy * phys_w + dx) * color_bytes;
+                ptrdiff_t dst_step = (rotation == ESP_LV_ADAPTER_ROTATE_90) ?
+                                     (ptrdiff_t)dst_stride_bytes : -(ptrdiff_t)dst_stride_bytes;
+
                 for (int x = j; x < max_width; x++) {
-                    int gx = lv_x_start + x;
-                    int gy = lv_y_start + y;
-                    int dx, dy;
-
-                    /* Inline coordinate transformation - eliminates function call overhead */
-                    if (rotation == ESP_LV_ADAPTER_ROTATE_90) {
-                        dx = phys_w - 1 - gy;
-                        dy = gx;
-                    } else { /* ESP_LV_ADAPTER_ROTATE_270 */
-                        dx = gy;
-                        dy = ver_res - 1 - gx;
-                    }
-
-                    const uint8_t *src_pixel = (const uint8_t *)src + (size_t)(y * src_stride_px + x) * color_bytes;
-                    uint8_t *dst_pixel = (uint8_t *)dst_fb + (size_t)(dy * phys_w + dx) * color_bytes;
-
-                    /* Inline pixel copy - eliminates function call overhead */
-                    if (color_bytes == 2) {
-                        *(uint16_t *)dst_pixel = *(const uint16_t *)src_pixel;
-                    } else if (color_bytes == 3) {
-                        dst_pixel[0] = src_pixel[0];
-                        dst_pixel[1] = src_pixel[1];
-                        dst_pixel[2] = src_pixel[2];
+                    display_copy_pixel(src_pixel, dst_pixel, color_bytes);
+                    src_pixel += color_bytes;
+                    if (x + 1 < max_width) {
+                        dst_pixel += dst_step;
                     }
                 }
             }
@@ -491,6 +556,26 @@ void display_cache_msync_framebuffer(void *buffer,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 }
 
+void display_cache_msync_invalidate_framebuffer(void *buffer,
+                                                size_t size)
+{
+    if (!buffer || size == 0) {
+        return;
+    }
+
+    size_t line_size = display_bridge_get_cache_line_size_by_addr(buffer);
+    if (line_size == 0) {
+        return;
+    }
+
+    uintptr_t start_addr = (uintptr_t)buffer;
+    uintptr_t aligned_start = start_addr & ~((uintptr_t)line_size - 1);
+    size_t align_padding = start_addr - aligned_start;
+    size_t aligned_size = ((size + align_padding + line_size - 1) / line_size) * line_size;
+
+    esp_cache_msync((void *)aligned_start, aligned_size, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
+}
+
 /**********************
  *   LCD OPERATIONS
  **********************/
@@ -534,6 +619,32 @@ esp_err_t display_lcd_blit_area(esp_lcd_panel_handle_t panel,
                                      x_end,
                                      y_end,
                                      frame_buffer);
+}
+
+esp_err_t display_lcd_blit_mipi_partial(esp_lcd_panel_handle_t panel,
+                                        const esp_lv_adapter_display_runtime_info_t *runtime,
+                                        const lv_area_t *area, const void *pixels)
+{
+    void *fb = runtime->frame_buffers[0];
+    size_t width = lv_area_get_width(area);
+    size_t height = lv_area_get_height(area);
+    size_t row_bytes = width * runtime->color_bytes;
+    size_t stride = (size_t)runtime->hor_res * runtime->color_bytes;
+
+    if (fb && (!display_bridge_dma2d_window_is_compatible(pixels, width, 0, width, runtime->color_bytes) ||
+               !display_bridge_dma2d_window_is_compatible(fb, runtime->hor_res, area->x1,
+                                                          width, runtime->color_bytes))) {
+        const uint8_t *src = pixels;
+        uint8_t *dst = (uint8_t *)fb + (size_t)area->y1 * stride + (size_t)area->x1 * runtime->color_bytes;
+        for (size_t y = 0; y < height; y++) {
+            memcpy(dst, src, row_bytes);
+            src += row_bytes;
+            dst += stride;
+        }
+        /* Passing the panel framebuffer bypasses its copy hook and writes back cache. */
+        pixels = fb;
+    }
+    return esp_lcd_panel_draw_bitmap(panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1, pixels);
 }
 
 /**
@@ -613,8 +724,7 @@ size_t display_bridge_get_cache_line_size(void)
 #endif
 
 #if SOC_DMA2D_SUPPORTED
-#include "esp_idf_version.h"
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 2, 0)
+#ifdef ESP_ASYNC_COLOR_CONVERT_AVAILABLE
 #include "esp_async_color_convert.h"
 #else
 #include "esp_async_fbcpy.h"
@@ -628,7 +738,7 @@ size_t display_bridge_get_cache_line_size(void)
 #if CONFIG_SOC_DMA2D_SUPPORTED
 static inline esp_err_t s_dma2d_install(void **out_handle)
 {
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 2, 0)
+#ifdef ESP_ASYNC_COLOR_CONVERT_AVAILABLE
     async_color_convert_config_t cfg = {
         .dma_burst_size = 128,
     };
@@ -641,7 +751,7 @@ static inline esp_err_t s_dma2d_install(void **out_handle)
 
 static inline void s_dma2d_uninstall(void *handle)
 {
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 2, 0)
+#ifdef ESP_ASYNC_COLOR_CONVERT_AVAILABLE
     esp_async_color_convert_uninstall((async_color_convert_handle_t)handle);
 #else
     esp_async_fbcpy_uninstall((esp_async_fbcpy_handle_t)handle);
@@ -653,13 +763,13 @@ static inline void s_dma2d_uninstall(void *handle)
 /**
  * @brief Initialize runtime information from configuration
  *
- * This function is 100% identical in both v8 and v9 implementations
+ * Shared runtime metadata initialization for the LVGL v8 and v9 bridges.
  */
-void display_bridge_init_runtime_info(esp_lv_adapter_display_runtime_info_t *runtime,
-                                      const esp_lv_adapter_display_runtime_config_t *cfg)
+esp_err_t display_bridge_init_runtime_info(esp_lv_adapter_display_runtime_info_t *runtime,
+                                           const esp_lv_adapter_display_runtime_config_t *cfg)
 {
     if (!runtime || !cfg) {
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
 
     runtime->hor_res = cfg->base.profile.hor_res;
@@ -672,15 +782,47 @@ void display_bridge_init_runtime_info(esp_lv_adapter_display_runtime_info_t *run
         runtime->frame_buffers[i] = cfg->frame_buffers[i];
     }
 
-    /* Calculate color bytes from buffer size */
+    /* Derive panel framebuffer pixel size from the configured framebuffer geometry. */
     size_t total_pixels = (size_t)runtime->hor_res * runtime->ver_res;
     uint8_t color_bytes = 0;
+    size_t lvgl_color_bytes = 0;
 
     if (runtime->frame_buffer_size && total_pixels) {
+        if ((runtime->frame_buffer_size % total_pixels) != 0 &&
+                cfg->base.profile.mono_layout == ESP_LV_ADAPTER_MONO_LAYOUT_NONE) {
+            ESP_LOGE(TAG, "frame_buffer_size=%zu is not pixel-aligned for %ux%u panel",
+                     runtime->frame_buffer_size, runtime->hor_res, runtime->ver_res);
+            return ESP_ERR_INVALID_ARG;
+        }
         color_bytes = runtime->frame_buffer_size / total_pixels;
     }
-    if (color_bytes == 0 && LV_COLOR_DEPTH % 8 == 0) {
-        color_bytes = LV_COLOR_DEPTH / 8;
+
+#if LVGL_VERSION_MAJOR >= 9
+    if (cfg->lv_disp) {
+        lv_color_format_t color_format = lv_display_get_color_format(cfg->lv_disp);
+        if (color_format != LV_COLOR_FORMAT_I1) {
+            lvgl_color_bytes = lv_color_format_get_size(color_format);
+        }
+    }
+#else
+    if (LV_COLOR_DEPTH % 8 == 0) {
+        lvgl_color_bytes = LV_COLOR_DEPTH / 8;
+    } else if (cfg->base.profile.mono_layout == ESP_LV_ADAPTER_MONO_LAYOUT_NONE) {
+        ESP_LOGE(TAG, "LV_COLOR_DEPTH=%d is not supported for non-monochrome display", LV_COLOR_DEPTH);
+        return ESP_ERR_INVALID_ARG;
+    }
+#endif
+
+    if (cfg->base.profile.mono_layout == ESP_LV_ADAPTER_MONO_LAYOUT_NONE &&
+            color_bytes && lvgl_color_bytes && color_bytes != lvgl_color_bytes) {
+        ESP_LOGE(TAG, "LVGL/LCD color size mismatch: LVGL=%zu bytes, framebuffer_size=%zu, panel=%ux%u, panel_color_bytes=%u",
+                 lvgl_color_bytes, runtime->frame_buffer_size,
+                 runtime->hor_res, runtime->ver_res, color_bytes);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (color_bytes == 0) {
+        color_bytes = lvgl_color_bytes;
     }
     if (color_bytes == 0) {
         color_bytes = sizeof(lv_color_t);
@@ -706,6 +848,8 @@ void display_bridge_init_runtime_info(esp_lv_adapter_display_runtime_info_t *run
         ESP_LOGW(TAG, "color depth %u bytes not HW-accelerated; using CPU fallback",
                  runtime->color_bytes);
     }
+
+    return ESP_OK;
 }
 
 #if SOC_DMA2D_SUPPORTED
@@ -868,7 +1012,7 @@ esp_err_t display_bridge_release_hw_resource(void)
  *
  * IRAM: Executed in ISR context for fast response
  */
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 2, 0)
+#ifdef ESP_ASYNC_COLOR_CONVERT_AVAILABLE
 bool IRAM_ATTR display_bridge_dma2d_done_callback(async_color_convert_handle_t mcp,
                                                   async_color_convert_event_data_t *event_data,
                                                   void *cb_args)
@@ -908,7 +1052,7 @@ esp_err_t display_bridge_dma2d_copy_sync(void *trans_desc, uint32_t timeout_ms)
     /* Clear completion semaphore */
     xSemaphoreTake((SemaphoreHandle_t)hw->dma2d_done_sem, 0);
 
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 2, 0)
+#ifdef ESP_ASYNC_COLOR_CONVERT_AVAILABLE
     ret = esp_async_color_convert(hw->fbcpy_handle,
                                   (const async_color_convert_request_t *)trans_desc,
                                   display_bridge_dma2d_done_callback,
@@ -930,6 +1074,87 @@ release_mutex:
 
 out:
     return ret;
+}
+
+static esp_err_t display_bridge_dma2d_copy_contiguous_sync(const void *src,
+                                                           void *dst,
+                                                           size_t width,
+                                                           size_t height,
+                                                           uint8_t color_bytes)
+{
+    if ((color_bytes != 2 && color_bytes != 3) ||
+            !display_bridge_dma2d_window_is_compatible(src, width, 0, width, color_bytes) ||
+            !display_bridge_dma2d_window_is_compatible(dst, width, 0, width, color_bytes)) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+#ifdef ESP_ASYNC_COLOR_CONVERT_AVAILABLE
+    async_color_convert_request_t transfer = {
+        .src_buffer = src,
+        .src_stride = width,
+        .src_height = height,
+        .dst_buffer = dst,
+        .dst_stride = width,
+        .dst_height = height,
+        .copy_width = width,
+        .copy_height = height,
+        .src_color_format = color_bytes == 2 ? ESP_COLOR_FOURCC_RGB16 : ESP_COLOR_FOURCC_RGB24,
+        .dst_color_format = color_bytes == 2 ? ESP_COLOR_FOURCC_RGB16 : ESP_COLOR_FOURCC_RGB24,
+    };
+#else
+    esp_async_fbcpy_trans_desc_t transfer = {
+        .src_buffer = (void *)src,
+        .src_buffer_size_x = width,
+        .src_buffer_size_y = height,
+        .dst_buffer = dst,
+        .dst_buffer_size_x = width,
+        .dst_buffer_size_y = height,
+        .copy_size_x = width,
+        .copy_size_y = height,
+#if defined(ESP_COLOR_FOURCC_RGB16) && defined(ESP_COLOR_FOURCC_RGB24)
+        .pixel_format_fourcc_id = color_bytes == 2 ? ESP_COLOR_FOURCC_RGB16 : ESP_COLOR_FOURCC_RGB24,
+#else
+        .pixel_format_unique_id = {
+            .color_type_id = color_bytes == 2 ?
+            COLOR_TYPE_ID(COLOR_SPACE_RGB, COLOR_PIXEL_RGB565) :
+            COLOR_TYPE_ID(COLOR_SPACE_RGB, COLOR_PIXEL_RGB888),
+        },
+#endif
+    };
+#endif
+    return display_bridge_dma2d_copy_sync(&transfer, portMAX_DELAY);
+}
+
+esp_err_t display_bridge_copy_to_dma_buffer(const void *src,
+                                            void *dst,
+                                            size_t width,
+                                            size_t height,
+                                            uint8_t color_bytes,
+                                            size_t cache_line_size,
+                                            display_bridge_dma2d_copy_state_t *dma2d_state)
+{
+    ESP_RETURN_ON_FALSE(src && dst && width && height && color_bytes,
+                        ESP_ERR_INVALID_ARG, TAG, "invalid DMA buffer copy");
+
+    if (dma2d_state && *dma2d_state != DISPLAY_BRIDGE_DMA2D_COPY_DISABLED) {
+        esp_err_t ret = display_bridge_dma2d_copy_contiguous_sync(src, dst, width, height, color_bytes);
+        if (ret == ESP_OK) {
+            if (*dma2d_state == DISPLAY_BRIDGE_DMA2D_COPY_UNCHECKED) {
+                ESP_LOGI(TAG, "DMA2D bounce copy enabled");
+            }
+            *dma2d_state = DISPLAY_BRIDGE_DMA2D_COPY_ENABLED;
+            return ESP_OK;
+        }
+        if (ret != ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGW(TAG, "DMA2D bounce copy failed (%s), using CPU fallback", esp_err_to_name(ret));
+        }
+        *dma2d_state = DISPLAY_BRIDGE_DMA2D_COPY_DISABLED;
+    }
+
+    size_t data_size = width * height * color_bytes;
+    memcpy(dst, src, data_size);
+    display_cache_msync_range(dst, data_size, cache_line_size);
+    return ESP_OK;
 }
 
 #endif /* SOC_DMA2D_SUPPORTED */
@@ -1013,6 +1238,111 @@ void display_bridge_common_destroy(esp_lv_adapter_display_bridge_t *bridge)
  *   PIPELINE HELPERS
  **********************/
 
+esp_err_t display_bridge_dummy_transfer_begin(display_bridge_dummy_transfer_t *transfer,
+                                              portMUX_TYPE *lock, uint32_t *ticket)
+{
+    portENTER_CRITICAL(lock);
+    if (transfer->waiter != NULL) {
+        portEXIT_CRITICAL(lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    *ticket = ++transfer->submitted;
+    portEXIT_CRITICAL(lock);
+    return ESP_OK;
+}
+
+void display_bridge_dummy_transfer_cancel(display_bridge_dummy_transfer_t *transfer,
+                                          portMUX_TYPE *lock, uint32_t ticket)
+{
+    portENTER_CRITICAL(lock);
+    if (transfer->submitted == ticket && transfer->completed != ticket) {
+        --transfer->submitted;
+    }
+    portEXIT_CRITICAL(lock);
+}
+
+bool IRAM_ATTR display_bridge_dummy_transfer_done(display_bridge_dummy_transfer_t *transfer,
+                                                  portMUX_TYPE *lock)
+{
+    TaskHandle_t waiter = NULL;
+    portENTER_CRITICAL_SAFE(lock);
+    if (transfer->completed != transfer->submitted) {
+        ++transfer->completed;
+        waiter = transfer->waiter;
+        if (waiter != NULL) {
+            ++transfer->notifications_inflight;
+        }
+    }
+    portEXIT_CRITICAL_SAFE(lock);
+
+    BaseType_t need_yield = pdFALSE;
+    if (waiter != NULL) {
+        if (xPortInIsrContext()) {
+            xTaskNotifyFromISR(waiter, ESP_LV_ADAPTER_DUMMY_DRAW_EVT_COLOR_DONE,
+                               eSetBits, &need_yield);
+        } else {
+            xTaskNotify(waiter, ESP_LV_ADAPTER_DUMMY_DRAW_EVT_COLOR_DONE, eSetBits);
+        }
+        portENTER_CRITICAL_SAFE(lock);
+        --transfer->notifications_inflight;
+        portEXIT_CRITICAL_SAFE(lock);
+    }
+    return need_yield == pdTRUE;
+}
+
+esp_err_t display_bridge_dummy_transfer_wait(display_bridge_dummy_transfer_t *transfer,
+                                             portMUX_TYPE *lock, uint32_t ticket, int32_t timeout_ms)
+{
+    TaskHandle_t task = xTaskGetCurrentTaskHandle();
+    portENTER_CRITICAL(lock);
+    /* Sequence distance is bounded by the panel's transaction queue. */
+    bool completed = (int32_t)(transfer->completed - ticket) >= 0 &&
+                     transfer->notifications_inflight == 0;
+    if (transfer->waiter != NULL) {
+        portEXIT_CRITICAL(lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (completed) {
+        portEXIT_CRITICAL(lock);
+        return ESP_OK;
+    }
+    transfer->waiter = task;
+    portEXIT_CRITICAL(lock);
+
+    const TickType_t timeout = timeout_ms < 0 ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    const TickType_t start = timeout_ms < 0 ? 0 : xTaskGetTickCount();
+    for (;;) {
+        TickType_t elapsed = timeout_ms < 0 ? 0 : xTaskGetTickCount() - start;
+        portENTER_CRITICAL(lock);
+        completed = (int32_t)(transfer->completed - ticket) >= 0;
+        bool notifying = transfer->notifications_inflight != 0;
+        if (!notifying && (completed || (timeout_ms >= 0 && elapsed >= timeout))) {
+            transfer->waiter = NULL;
+            portEXIT_CRITICAL(lock);
+            return completed ? ESP_OK : ESP_ERR_TIMEOUT;
+        }
+        portEXIT_CRITICAL(lock);
+        if (notifying) {
+            /* Keep the waiter alive until notification delivery finishes. */
+            vTaskDelay(1);
+            continue;
+        }
+        TickType_t wait_ticks = timeout_ms < 0 ? portMAX_DELAY : timeout - elapsed;
+        uint32_t events = 0;
+        (void)xTaskNotifyWait(0, ESP_LV_ADAPTER_DUMMY_DRAW_EVT_COLOR_DONE,
+                              &events, wait_ticks);
+    }
+}
+
+esp_err_t display_bridge_dummy_transfer_wait_idle(display_bridge_dummy_transfer_t *transfer,
+                                                  portMUX_TYPE *lock, int32_t timeout_ms)
+{
+    portENTER_CRITICAL(lock);
+    uint32_t ticket = transfer->submitted;
+    portEXIT_CRITICAL(lock);
+    return display_bridge_dummy_transfer_wait(transfer, lock, ticket, timeout_ms);
+}
+
 int display_bridge_pipeline_init_from_cfg(esp_lv_adapter_display_pipeline_t *pipeline,
                                           esp_lv_adapter_display_runtime_config_t *cfg,
                                           void **out_disp_fb, void **out_draw_fb)
@@ -1029,9 +1359,9 @@ int display_bridge_pipeline_init_from_cfg(esp_lv_adapter_display_pipeline_t *pip
     const bool rotated = (cfg->base.profile.rotation != ESP_LV_ADAPTER_ROTATE_0);
     const bool use_pipeline = (mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_PARTIAL ||
                                mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_PARTIAL ||
+                               mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_DIRECT ||
                                mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_FULL ||
-                               mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_FULL ||
-                               (rotated && mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_DIRECT));
+                               mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_FULL);
     if (!use_pipeline || cfg->frame_buffer_count == 0) {
         return 0;
     }
@@ -1040,6 +1370,10 @@ int display_bridge_pipeline_init_from_cfg(esp_lv_adapter_display_pipeline_t *pip
     uint8_t fb_count = cfg->frame_buffer_count;
 
     pipeline->lock = (portMUX_TYPE)portMUX_INITIALIZER_UNLOCKED;
+    pipeline->rgb.complete_seq = 0;
+    pipeline->rgb.submit_seq = 0;
+    pipeline->rgb.submitting = false;
+    pipeline->rgb.color_done = false;
     STAILQ_INIT(&pipeline->busy_list);
     STAILQ_INIT(&pipeline->empty_list);
     pipeline->elem_count = fb_count;
@@ -1082,9 +1416,9 @@ int display_bridge_pipeline_init_from_cfg(esp_lv_adapter_display_pipeline_t *pip
         }
         *out_disp_fb = fb[1];
         *out_draw_fb = fb[2];
-    } else if (mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_FULL ||
+    } else if (mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_DIRECT ||
+               mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_FULL ||
                mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_FULL) {
-        /* non-rotated full: fb[0]=disp, fb[1]=draw, fb[2..]=free */
         uint8_t required = (mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_FULL) ? 3 : 2;
         if (fb_count < required) {
             ESP_LOGE(TAG, "FULL mode %d requires %d frame buffers, got %d", mode, required, fb_count);
@@ -1094,7 +1428,8 @@ int display_bridge_pipeline_init_from_cfg(esp_lv_adapter_display_pipeline_t *pip
 
         *out_disp_fb = fb[0];
         *out_draw_fb = fb[1];
-        for (int i = 1; i < fb_count; i++) {
+        int free_start = (mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_FULL) ? 2 : 1;
+        for (int i = free_start; i < fb_count; i++) {
             STAILQ_INSERT_TAIL(&pipeline->empty_list, &pipeline->elems[i], entry);
         }
     }
@@ -1108,33 +1443,123 @@ err:
     return ret;
 }
 
-void display_bridge_pipeline_mark_buf_busy(esp_lv_adapter_display_pipeline_t *p, void *buf)
+static bool pipeline_buffer_is_queued(esp_lv_adapter_display_pipeline_t *p, void *buffer)
 {
-    if (!p) {
-        return;
-    }
-    for (int i = 0; i < p->elem_count; i++) {
-        if (p->elems[i].buffer == buf) {
-            portENTER_CRITICAL(&p->lock);
-            STAILQ_INSERT_TAIL(&p->busy_list, &p->elems[i], entry);
-            portEXIT_CRITICAL(&p->lock);
-            return;
+    struct display_pipeline_buf *elem;
+    STAILQ_FOREACH(elem, &p->busy_list, entry) {
+        if (elem->buffer == buffer) {
+            return true;
         }
     }
+    STAILQ_FOREACH(elem, &p->empty_list, entry) {
+        if (elem->buffer == buffer) {
+            return true;
+        }
+    }
+    return false;
 }
 
-void IRAM_ATTR display_bridge_pipeline_release_buf_isr(esp_lv_adapter_display_pipeline_t *p)
+esp_err_t display_bridge_pipeline_blit(esp_lv_adapter_display_pipeline_t *p,
+                                       esp_lcd_panel_handle_t panel,
+                                       const esp_lv_adapter_display_runtime_info_t *runtime,
+                                       void **front, void **pending, void *buffer,
+                                       bool rgb)
+{
+    if (!p || !p->elems || !front || !*front || !buffer || *front == buffer) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* RGB and a single pending slot must retire before the next switch. */
+    if (rgb || pending != NULL) {
+        for (;;) {
+            ulTaskNotifyValueClear(NULL, ULONG_MAX);
+            portENTER_CRITICAL(&p->lock);
+            bool busy = !STAILQ_EMPTY(&p->busy_list);
+            portEXIT_CRITICAL(&p->lock);
+            if (!busy) {
+                break;
+            }
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        }
+    }
+
+    void *old_front = *front;
+    struct display_pipeline_buf *old = NULL;
+    bool known_buffer = false;
+    portENTER_CRITICAL(&p->lock);
+    for (int i = 0; i < p->elem_count; ++i) {
+        if (p->elems[i].buffer == old_front) {
+            old = &p->elems[i];
+        }
+        known_buffer |= p->elems[i].buffer == buffer;
+    }
+    bool valid = old && known_buffer && !pipeline_buffer_is_queued(p, old_front) &&
+                 !pipeline_buffer_is_queued(p, buffer);
+    if (valid) {
+        p->rgb.submitting = true;
+        p->rgb.color_done = false;
+    }
+    portEXIT_CRITICAL(&p->lock);
+    if (!valid) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = display_lcd_blit_full(panel, runtime, buffer);
+    portENTER_CRITICAL(&p->lock);
+    p->rgb.submitting = false;
+    if (ret != ESP_OK) {
+        portEXIT_CRITICAL(&p->lock);
+        return ret;
+    }
+    if (rgb && p->rgb.color_done && p->rgb.complete_seq != p->rgb.submit_seq) {
+        STAILQ_INSERT_TAIL(&p->empty_list, old, entry);
+        if (pending) {
+            *front = buffer;
+            *pending = NULL;
+        }
+    } else {
+        STAILQ_INSERT_TAIL(&p->busy_list, old, entry);
+        if (pending) {
+            *pending = buffer;
+        }
+    }
+    portEXIT_CRITICAL(&p->lock);
+    return ESP_OK;
+}
+
+void IRAM_ATTR display_bridge_pipeline_color_done(esp_lv_adapter_display_pipeline_t *p)
 {
     if (!p || !p->elems) {
         return;
     }
+    portENTER_CRITICAL_SAFE(&p->lock);
+    if (p->rgb.submitting) {
+        p->rgb.submit_seq = p->rgb.complete_seq;
+        p->rgb.color_done = true;
+    }
+    portEXIT_CRITICAL_SAFE(&p->lock);
+}
+
+bool IRAM_ATTR display_bridge_pipeline_release_buf_isr(esp_lv_adapter_display_pipeline_t *p,
+                                                       void **front, void **pending)
+{
+    if (!p || !p->elems) {
+        return false;
+    }
     portENTER_CRITICAL_ISR(&p->lock);
+    ++p->rgb.complete_seq;
     struct display_pipeline_buf *elem = STAILQ_FIRST(&p->busy_list);
-    if (elem) {
+    bool released = elem && (!pending || *pending);
+    if (released) {
         STAILQ_REMOVE_HEAD(&p->busy_list, entry);
         STAILQ_INSERT_TAIL(&p->empty_list, elem, entry);
+        if (pending) {
+            *front = *pending;
+            *pending = NULL;
+        }
     }
     portEXIT_CRITICAL_ISR(&p->lock);
+    return released;
 }
 
 struct display_pipeline_buf *display_bridge_pipeline_take_free_buf(esp_lv_adapter_display_pipeline_t *p)

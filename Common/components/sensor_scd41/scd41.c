@@ -221,6 +221,32 @@ bool scd41_init(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
     return true;
 }
 
+/* 2026-10-25(시험 — 빈 방에서도 단발 연속값이 중앙값 34ppm씩 흔들림) — 이미 만든 버스에서 연속 측정(5초 주기) 시작 */
+bool scd41_start_periodic(void)
+{
+    if (!s_dev) return false;
+    s_single_shot_mode = false;
+    return start_measurement_sequence();
+}
+
+/* 2026-10-26(시험 C) — 저전력 연속 측정(start_low_power_periodic_measurement 0x21AC, 약 30초 주기). 정지 후 시작 */
+bool scd41_start_low_power_periodic(void)
+{
+    if (!s_dev) return false;
+    s_single_shot_mode = false;
+    send_cmd(CMD_STOP_PERIODIC_MEASUREMENT);
+    sensor_wait_ms(500);
+    return send_cmd(0x21AC);
+}
+
+/* 2026-10-26(실험, 사용자 설계 — 운영에선 측정 사이에 센서도 재움) — power_down(0x36E0, 실행 1ms). 유휴 상태에서만 받음.
+ * 깨우기는 scd41_wake_up()(0x36F6 — 센서가 ACK하지 않음, 30ms) */
+bool scd41_power_down(void)
+{
+    if (!s_dev) return false;
+    return send_cmd(0x36E0);
+}
+
 bool scd41_init_single_shot(int i2c_port, gpio_num_t sda_gpio, gpio_num_t scl_gpio)
 {
     s_single_shot_mode = true;

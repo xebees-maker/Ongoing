@@ -191,8 +191,11 @@ static void relay_task(void *arg)
  * 용도가 없음 */
 static void send_cb(const esp_now_send_info_t *info, esp_now_send_status_t status)
 {
-    (void)info;
-    (void)status;
+    /* 2026-10-26(진단 — 캠이 META_ACK를 못 받음, 할 일) — 상대가 무선으로 받았다는 확인(MAC ACK)이 없으면 남김.
+     * 잠든 노드로 보낸 것도 여기 걸리므로 D 단계 */
+    if (status != ESP_NOW_SEND_SUCCESS && info) {
+        ESP_LOGD(TAG, "Send no MAC-ACK -> %02X%02X%02X", info->des_addr[3], info->des_addr[4], info->des_addr[5]);
+    }
     esp_now_reliable_on_send_done();
 }
 

@@ -85,6 +85,12 @@ void scd41_read_identity(void);
 void scd41_ensure_asc_off(void);
 /* 2026-10-23 — 보정 관련 설정(ASC 켜짐·목표·기간, 온도 오프셋, 고도, 기압)을 읽어 한 줄 로그. when = 어느 시점인지(로그 표시용) */
 void scd41_log_calibration(const char *when);
+/* 2026-10-25(시험) — 이미 만든 버스에서 연속 측정(5초 주기) 시작. 값은 scd41_read()로 */
+bool scd41_start_periodic(void);
+/* 2026-10-26(시험 C) — 저전력 연속 측정(약 30초 주기) 시작 */
+bool scd41_start_low_power_periodic(void);
+/* 2026-10-26(실험) — 센서 재우기(power_down). 깨우기는 scd41_wake_up() */
+bool scd41_power_down(void);
 /* 2026-10-13 — 센서 공장 초기화(FRC·ASC 이력 지움) 후 ASC 끄고 persist. 약 2.5초 블로킹. asc_after = 끝난 뒤 ASC(0xFF 못 읽음) */
 bool scd41_factory_reset(uint8_t *asc_after);
 /* 2026-10-06(시험) — wake_up(결과 무시, 30ms) */
