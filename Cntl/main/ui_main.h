@@ -125,7 +125,8 @@ typedef struct {
     float trend[UI_STATS_POINTS];
     bool  low[UI_STATS_POINTS];        /* 저신뢰(점선) */
     bool  have_range;                  /* 창 안 실측 최소·최대 */
-    float mn, mx;
+    float mn, mx;                      /* 2026-10-28 — 그래프 축의 아래·위(실측 최소·최대를 최소 폭까지 넓힌 것) */
+    uint8_t dec;                       /* 2026-10-28 — 축 값 소수 자릿수(측정량마다) */
 } ui_stats_series_t;
 typedef struct {
     uint8_t chan_type;

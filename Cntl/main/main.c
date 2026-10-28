@@ -572,6 +572,42 @@ static esp_err_t api_statsfile_get_handler(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+/* 2026-10-28(임시 — 출시 전 제거, 메모리 project_cntl_test_apis_remove_later) — GET /api/screen: 지금 패널에 나가는 프레임
+ * 버퍼를 PSRAM에 한 번 복사해서 16비트 BMP(RGB565, 위→아래)로 내려줌. Claude가 콘 화면을 직접 보려고(그래프 점선 확인) */
+extern void *esp_lv_adapter_cntl_front_fb(void);   /* components/esp_lvgl_adapter 로컬 패치 */
+static esp_err_t api_screen_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    const int w = EXAMPLE_LCD_H_RES, h = EXAMPLE_LCD_V_RES;
+    const size_t img = (size_t)w * h * 2;
+    const void *fb = esp_lv_adapter_cntl_front_fb();
+    if (!fb) return httpd_resp_send_500(req);
+    uint8_t *copy = heap_caps_malloc(img, MALLOC_CAP_SPIRAM);
+    if (!copy) return httpd_resp_send_500(req);
+    memcpy(copy, fb, img);
+
+    uint8_t hdr[66] = { 0 };   /* 파일 헤더 14 + BITMAPINFOHEADER 40 + 색 마스크 12(BI_BITFIELDS) */
+    const uint32_t off = sizeof(hdr), fsize = off + (uint32_t)img;
+    const uint32_t f[] = { fsize, 0, off, 40, (uint32_t)w, (uint32_t)-h };
+    hdr[0] = 'B'; hdr[1] = 'M';
+    memcpy(&hdr[2], &f[0], 4); memcpy(&hdr[10], &f[2], 4);
+    memcpy(&hdr[14], &f[3], 4); memcpy(&hdr[18], &f[4], 4); memcpy(&hdr[22], &f[5], 4);   /* 높이 음수 = 위에서 아래로 */
+    const uint16_t planes = 1, bpp = 16;
+    const uint32_t comp = 3, isize = (uint32_t)img, masks[3] = { 0xF800, 0x07E0, 0x001F };
+    memcpy(&hdr[26], &planes, 2); memcpy(&hdr[28], &bpp, 2); memcpy(&hdr[30], &comp, 4); memcpy(&hdr[34], &isize, 4);
+    memcpy(&hdr[54], masks, 12);
+
+    httpd_resp_set_type(req, "image/bmp");
+    esp_err_t err = httpd_resp_send_chunk(req, (const char *)hdr, sizeof(hdr));
+    for (size_t pos = 0; err == ESP_OK && pos < img; pos += 8192) {
+        size_t n = img - pos < 8192 ? img - pos : 8192;
+        err = httpd_resp_send_chunk(req, (const char *)copy + pos, n);
+    }
+    free(copy);
+    if (err != ESP_OK) return err;
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
 static esp_err_t api_set_response_interval_get_handler(httpd_req_t *req)
 {
     WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
@@ -1056,6 +1092,9 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_statsfile_uri = { .uri = "/api/statsfile", .method = HTTP_GET,
                                                    .handler = api_statsfile_get_handler };
     httpd_register_uri_handler(server, &api_statsfile_uri);
+    static const httpd_uri_t api_screen_uri = { .uri = "/api/screen", .method = HTTP_GET,
+                                                .handler = api_screen_get_handler };   /* 10-28 임시 */
+    httpd_register_uri_handler(server, &api_screen_uri);
     static const httpd_uri_t api_delete_stats_uri = { .uri = "/api/delete_stats", .method = HTTP_GET,
                                                         .handler = api_delete_stats_get_handler };
     httpd_register_uri_handler(server, &api_delete_stats_uri);

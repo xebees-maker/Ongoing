@@ -1867,7 +1867,6 @@
   function slotColor(i) { return i === 2 ? getComputedStyle(document.body).color : ['#f44336', '#2196f3', '', '#fbc02d'][i]; }  /* 콘: 빨강·파랑·검정·짙은 노랑 */
   function prec(p) { return S(p ? 'STR_PRECISION_PRECISE' : 'STR_PRECISION_BASIC'); }
   function f2(v) { return Number(v).toFixed(2); }
-  function f1(v) { return Number(v).toFixed(1); }
   function statsBlockedSd(e) { return e && e.message === 'HTTP 503'; }
 
   function openStats() {
@@ -1951,8 +1950,9 @@
       var c = slotColor(i), on = st.show[i];
       if (on && sl.min !== undefined) {
         var u = S(CHAN_STR[sl.chan][1]);
-        mx += '<span style="color:' + c + '">' + esc(f1(sl.max) + u) + '</span>';
-        mn += '<span style="color:' + c + '">' + esc(f1(sl.min) + u) + '</span>';
+        /* 10-28 — min/max = 축 아래·위(콘이 최소 폭까지 넓힌 값), 자릿수 = 값의 최소 단위(dec) */
+        mx += '<span style="color:' + c + '">' + esc(Number(sl.max).toFixed(sl.dec) + u) + '</span>';
+        mn += '<span style="color:' + c + '">' + esc(Number(sl.min).toFixed(sl.dec) + u) + '</span>';
       }
       return '<span class="slot"><i data-sbox="' + i + '" style="border-color:' + c + ';background:' + (on ? c : 'transparent') + '"></i><span class="tap" data-slab="' + i + '">' +
              esc(slotLabel(sl)) + '</span></span>';

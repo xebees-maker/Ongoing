@@ -602,6 +602,15 @@ static lv_obj_t *s_stats_delete_lbl  = NULL;
 /* 2026-10-28(사용자 지적 — "실제 데이터가 없는 경우만 점선") — 측정 주기를 아는 계열은 빈 구간이 주기의 이 배수를 넘을 때만 점선
  * (측정이 빠짐). 실제 간격은 설정 주기보다 조금 김(SCD41 600초 설정 → 약 685초) */
 #define STATS_GRAPH_MISSING_FACTOR    2
+/* 2026-10-28(사용자 선택 — 길이로 잰 점선) — LVGL은 수평·수직 선만 점선 스타일로 그리고 기운 선은 실선으로 그림. 그래서 점선
+ * 차트의 선은 숨기고(line_opa 0) 그리기 이벤트(cb_stats_gap_draw)에서 칸 사이 선을 따라 길이로 잰 점선(그림 ON, 빈틈 OFF px)을
+ * 직접 그림 — 기울기와 상관없이 고른 점선 */
+#define STATS_GRAPH_DASH_ON_PX        6
+#define STATS_GRAPH_DASH_OFF_PX       4
+/* 2026-10-28(사용자 지시 — 최대·최소가 그래프 위아래 끝에 닿지 않게 2px씩 여유) — 계열 값은 0~STATS_GRAPH_NORM_MAX로 정규화하고,
+ * 차트 축은 위아래로 STATS_GRAPH_EDGE_PX만큼 늘린 범위(s_stats_axis_margin, 차트 높이에서 계산). 정밀도 때문에 0~100에서 0~1000으로 */
+#define STATS_GRAPH_NORM_MAX          1000
+#define STATS_GRAPH_EDGE_PX           2
 static lv_obj_t          *s_stats_chart               = NULL;  /* 실데이터 — 선만(점마커 숨김) */
 static lv_obj_t          *s_stats_gap_chart           = NULL;  /* 2026-09-11(그래프 재설계) —
     * "값이 없는 슬롯마다 그 자리에 계열 고정높이로 점만" — s_stats_chart의 자식으로 만들어
@@ -609,6 +618,7 @@ static lv_obj_t          *s_stats_gap_chart           = NULL;  /* 2026-09-11(그
     * 보이고 선은 숨김. CLICKABLE을 꺼서 탭이 밑의 실데이터 차트로 그대로 전달되게 함 */
 static lv_chart_series_t *s_stats_chart_series[STATS_GRAPH_SERIES_COUNT];
 static lv_chart_series_t *s_stats_gap_series[STATS_GRAPH_SERIES_COUNT];
+static bool               s_stats_gap_hidden[STATS_GRAPH_SERIES_COUNT];   /* 2026-10-28 — cb_stats_gap_draw용(lv_chart_hide_series와 같이) */
 static lv_obj_t          *s_stats_chart_checkbox[STATS_GRAPH_SERIES_COUNT];
 static lv_obj_t          *s_stats_chart_tap_label      = NULL;
 static int                 s_stats_chart_tap_shown_series = -1;  /* 지금 탭 박스에 표시 중인 계열, -1=없음 */
@@ -617,7 +627,9 @@ static bool                 s_stats_chart_has_value[STATS_GRAPH_SERIES_COUNT][ST
 static uint32_t             s_stats_chart_shown_points  = 0;  /* 이번에 실제로 그려진 포인트 수(<=STATS_GRAPH_POINT_COUNT) */
 /* 2026-09-11(그래프 재설계 — "값 없는 슬롯은 계열 고정높이로 점만") — 정규화축(0~100) 기준
  * 온도7/10·습도6/10·이산화탄소5/10·암모니아4/10, chan_types 배열과 동일 순서 */
-static const int32_t s_stats_gap_ref_height[STATS_GRAPH_SERIES_COUNT] = { 70, 60, 50, 40 };
+static const int32_t s_stats_gap_ref_height[STATS_GRAPH_SERIES_COUNT] = {
+    STATS_GRAPH_NORM_MAX * 7 / 10, STATS_GRAPH_NORM_MAX * 6 / 10, STATS_GRAPH_NORM_MAX * 5 / 10, STATS_GRAPH_NORM_MAX * 4 / 10 };
+static int32_t s_stats_axis_margin = 0;  /* 2026-10-28 — 축 위아래 여유(정규화 단위), refresh_stats_graph에서 차트 높이로 계산 */
 /* 2026-09-11(사용자 지적 — "내가 원한건 그래프 상단에 4계열의 최대값, 하단에 4계열의
  * 최소값을 표시하는 거야") — 정규화가 계열별 자기 min~max를 0~100에 매핑하므로, 각 계열의
  * 실제 최대값은 그 계열 선이 차트 "맨 위"에 닿는 지점, 최소값은 "맨 아래"에 닿는 지점과
@@ -3835,6 +3847,19 @@ static bool chan_type_to_strs(uint8_t chan_type, ui_str_id_t *label_id, ui_str_i
     }
 }
 
+/* 2026-10-28(사용자 결정 — 데이터에서 뽑는 일반 공식은 측정이 적은 창에서 틀려서 측정량마다 정함) — 그래프 축의 최소 폭과
+ * 축 값 소수 자릿수. 창의 실측 폭이 이보다 좁을 때만 이 폭까지 넓힘(stats_graph_series_compute). 0이면 넓히지 않음 */
+static void chan_type_axis(uint8_t chan_type, float *min_span, uint8_t *dec)
+{
+    switch (chan_type) {
+        case SENSOR_CHAN_TEMP_C:   *min_span = 3.0f;   *dec = 1; return;
+        case SENSOR_CHAN_HUMI_PCT: *min_span = 3.0f;   *dec = 1; return;
+        case SENSOR_CHAN_CO2_PPM:  *min_span = 100.0f; *dec = 0; return;
+        case SENSOR_CHAN_NH3_PPM:  *min_span = 0.1f;   *dec = 2; return;
+        default:                   *min_span = 0.0f;   *dec = 1; return;
+    }
+}
+
 /* 2026-09-15(사용자 설계 — "각 센서별로 T, H, C, A로 값을 표기") — 센서 판넬 행 전용
  * 한글자 태그(표/그래프의 STR_CHAN_LABEL_*와 별개 — CO2/암모니아는 거기선 아직 "CO2"/
  * "Ammonia"라 여기선 더 짧게 감) */
@@ -4774,7 +4799,7 @@ static int stats_graph_slots(const stats_window_t *w, uint8_t group, bool temp_w
 
 /* 2026-10-03(웹 통계) — 슬롯 하나의 칸 값·창 최소/최대·국소 추세·저신뢰 계산만 따로(refresh_stats_graph에서 꺼냄) —
  * 콘 그래프와 웹이 같이 씀. 칸 위치는 창의 시작·칸 폭 기준 */
-static void stats_graph_series_compute(const stats_window_t *w, const stats_chain_t *ch, ui_stats_series_t *d)
+static void stats_graph_series_compute(const stats_window_t *w, const stats_chain_t *ch, uint8_t chan_type, ui_stats_series_t *d)
 {
     for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) { d->has[i] = false; d->vals[i] = 0.0f; }
     for (uint32_t i = 0; i < w->nb; i++) {
@@ -4795,6 +4820,18 @@ static void stats_graph_series_compute(const stats_window_t *w, const stats_chai
             if (d->vals[i] < d->mn) d->mn = d->vals[i];
             if (d->vals[i] > d->mx) d->mx = d->vals[i];
         }
+    }
+    /* 2026-10-28(사용자 결정) — 실측 폭이 측정량의 최소 폭(chan_type_axis)보다 좁으면 그 폭까지 넓힘 — 작은 흔들림(예: 암모니아
+     * 0.01ppm)이 그래프 높이 전체로 부풀지 않게. 위아래 같게 넓히되, 데이터가 넘지 않은 0은 축도 넘지 않음(남는 폭은 반대쪽으로) */
+    float min_span;
+    chan_type_axis(chan_type, &min_span, &d->dec);
+    float need = min_span - (d->mx - d->mn);
+    if (d->have_range && need > 0.0f) {
+        float lo = d->mn - need / 2.0f, hi = d->mx + need / 2.0f;
+        if (d->mn >= 0.0f && lo < 0.0f) { hi -= lo; lo = 0.0f; }
+        if (d->mx <= 0.0f && hi > 0.0f) { lo -= hi; hi = 0.0f; }
+        d->mn = lo;
+        d->mx = hi;
     }
     /* 2026-10-28 — 이 계열(센싱)의 지금 보드 측정 주기. 보드가 없으면 0(옛 기준) */
     uint32_t interval_sec = 0;
@@ -4821,6 +4858,28 @@ static void stats_graph_series_compute(const stats_window_t *w, const stats_chai
         else                                span_slots = (uint32_t)next_has - i;
         d->low[i] = (span_slots - 1) * w->bucket_width > missing_sec;
     }
+    /* 2026-10-28(사용자 지적 — 3d 암모니아 마지막 측정 뒤 추세가 0.02 → 4.81까지 치솟음) — 2차 회귀는 거리 제한이 없어 빈 구간
+     * 멀리까지 포물선을 늘려 그렸음. 점선(저신뢰) 칸은 회귀값 대신: 앞뒤 실측이 다 있으면 둘을 잇는 직선, 한쪽만 있으면 그 값 그대로 */
+    for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
+        if (!d->low[i] || !d->trend_has[i]) continue;
+        int p = -1, n = -1;
+        for (int j = (int)i - 1; j >= 0; j--) if (d->has[j]) { p = j; break; }
+        for (uint32_t j = i + 1; j < STATS_GRAPH_POINT_COUNT; j++) if (d->has[j]) { n = (int)j; break; }
+        if (p >= 0 && n >= 0) d->trend[i] = d->vals[p] + (d->vals[n] - d->vals[p]) * (float)((int)i - p) / (float)(n - p);
+        else if (p >= 0)      d->trend[i] = d->vals[p];
+        else if (n >= 0)      d->trend[i] = d->vals[n];
+    }
+}
+
+/* 2026-10-28 — 축 값 라벨: dec 자리까지(LVGL에 %f가 없어 정수로 나눠 찍음) */
+static void stats_graph_format_axis(float v, uint8_t dec, const char *unit, char *buf, size_t n)
+{
+    int p = 1;
+    for (uint8_t k = 0; k < dec; k++) p *= 10;
+    int sc = (int)(fabsf(v) * p + 0.5f);
+    const char *sign = (v < 0.0f && sc) ? "-" : "";
+    if (dec) snprintf(buf, n, "%s%d.%0*d%s", sign, sc / p, (int)dec, sc % p, unit);
+    else     snprintf(buf, n, "%s%d%s", sign, sc, unit);
 }
 
 static void stats_graph_build_slots(const stats_window_t *w)
@@ -4901,6 +4960,15 @@ static bool refresh_stats_graph(void)
     lv_chart_set_point_count(s_stats_chart, STATS_GRAPH_POINT_COUNT);
     lv_chart_set_point_count(s_stats_gap_chart, STATS_GRAPH_POINT_COUNT);
     s_stats_chart_shown_points = STATS_GRAPH_POINT_COUNT;
+    /* 2026-10-28 — 정규화 0~NORM_MAX가 차트 위아래 끝에서 STATS_GRAPH_EDGE_PX씩 떨어지게 축을 늘림(차트 높이로 계산, 두 차트 같게) */
+    {
+        lv_obj_update_layout(s_stats_chart);   /* 처음 열 때는 아직 배치 전이라 높이가 0일 수 있음 */
+        int32_t ch = lv_obj_get_content_height(s_stats_chart);
+        s_stats_axis_margin = (ch > 2 * STATS_GRAPH_EDGE_PX)
+            ? (STATS_GRAPH_EDGE_PX * STATS_GRAPH_NORM_MAX + (ch - 2 * STATS_GRAPH_EDGE_PX) / 2) / (ch - 2 * STATS_GRAPH_EDGE_PX) : 0;
+        lv_chart_set_axis_range(s_stats_chart, LV_CHART_AXIS_PRIMARY_Y, -s_stats_axis_margin, STATS_GRAPH_NORM_MAX + s_stats_axis_margin);
+        lv_chart_set_axis_range(s_stats_gap_chart, LV_CHART_AXIS_PRIMARY_Y, -s_stats_axis_margin, STATS_GRAPH_NORM_MAX + s_stats_axis_margin);
+    }
 
     /* 지금 그룹의 슬롯 수보다 많이 켜져 있던 이전 그룹의 계열(예: Agar 4개 -> 가스 2개로
      * 전환)은 숨기고 값도 비워서, 다음 탭 조회 등에서 stale 데이터가 안 잡히게 함 */
@@ -4921,7 +4989,7 @@ static bool refresh_stats_graph(void)
          * 2026-10-03 — 칸 값·최소/최대·추세·저신뢰는 웹과 같이 쓰는 stats_graph_series_compute()로 */
         int64_t t_regr_start_us = esp_timer_get_time();
         const ui_stats_series_t *d = s_graph_ser;
-        stats_graph_series_compute(s_graph_win, &s_stats_slot_chain[s], s_graph_ser);
+        stats_graph_series_compute(s_graph_win, &s_stats_slot_chain[s], s_stats_slot_chan_type[s], s_graph_ser);
         bool have_range = d->have_range;
         float mn = d->mn, mx = d->mx;
         float span = (have_range && mx > mn) ? (mx - mn) : 0.0f;
@@ -4930,14 +4998,14 @@ static bool refresh_stats_graph(void)
         int32_t gap_vals[STATS_GRAPH_POINT_COUNT];
         int32_t slot_norm[STATS_GRAPH_POINT_COUNT];
 
-        /* 1차 패스 — 탭 표시용 실측값과 추세값의 정규화(0~100) */
+        /* 1차 패스 — 탭 표시용 실측값과 추세값의 정규화(0~STATS_GRAPH_NORM_MAX) */
         for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
             s_stats_chart_has_value[s][i] = d->has[i];  /* 탭-값 표시는 실측일 때만(추세값 아님) */
             if (d->has[i]) s_stats_chart_real_values[s][i] = d->vals[i];
             if (d->trend_has[i]) {
-                int32_t n = (span > 0.0f) ? (int32_t)(((d->trend[i] - mn) / span) * 100.0f + 0.5f) : 50;
+                int32_t n = (span > 0.0f) ? (int32_t)(((d->trend[i] - mn) / span) * STATS_GRAPH_NORM_MAX + 0.5f) : STATS_GRAPH_NORM_MAX / 2;
                 if (n < 0) n = 0;
-                if (n > 100) n = 100;
+                if (n > STATS_GRAPH_NORM_MAX) n = STATS_GRAPH_NORM_MAX;
                 slot_norm[i] = n;
             }
         }
@@ -4966,10 +5034,11 @@ static bool refresh_stats_graph(void)
                  (long long)(t_regr_end_us - t_regr_start_us));
 
         lv_chart_set_series_values(s_stats_chart, s_stats_chart_series[s], norm_vals, STATS_GRAPH_POINT_COUNT);
+        /* 점선 차트는 칸 값만 들고, 그리기는 cb_stats_gap_draw가 선을 따라 직접 */
         lv_chart_set_series_values(s_stats_gap_chart, s_stats_gap_series[s], gap_vals, STATS_GRAPH_POINT_COUNT);
 
         /* 2026-09-11(사용자 지적 — "상단에 4계열 최대값, 하단에 4계열 최소값") — 정규화상
-         * 100=그 계열의 실제 최대, 0=실제 최소라서 차트 맨 위/맨 아래와 항상 일치함 */
+         * NORM_MAX=그 계열의 축 위, 0=축 아래라서 차트 맨 위/맨 아래와 항상 일치함(10-28부터 축은 최소 폭까지 넓힌 값) */
         bool checked = lv_obj_has_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED);
         bool show = checked && have_range;
         ui_str_id_t label_id, unit_id;
@@ -4978,8 +5047,7 @@ static bool refresh_stats_graph(void)
         char numbuf[24];
         if (s_stats_graph_max_label[s]) {
             if (show) {
-                int mx_scaled = (int)(mx * 10.0f + (mx >= 0 ? 0.5f : -0.5f));
-                snprintf(numbuf, sizeof(numbuf), "%d.%d%s", mx_scaled / 10, abs(mx_scaled % 10), ui_str(unit_id));
+                stats_graph_format_axis(mx, d->dec, ui_str(unit_id), numbuf, sizeof(numbuf));
                 lv_label_set_text(s_stats_graph_max_label[s], numbuf);
                 lv_obj_remove_flag(s_stats_graph_max_label[s], LV_OBJ_FLAG_HIDDEN);
             } else {
@@ -4988,8 +5056,7 @@ static bool refresh_stats_graph(void)
         }
         if (s_stats_graph_min_label[s]) {
             if (show) {
-                int mn_scaled = (int)(mn * 10.0f + (mn >= 0 ? 0.5f : -0.5f));
-                snprintf(numbuf, sizeof(numbuf), "%d.%d%s", mn_scaled / 10, abs(mn_scaled % 10), ui_str(unit_id));
+                stats_graph_format_axis(mn, d->dec, ui_str(unit_id), numbuf, sizeof(numbuf));
                 lv_label_set_text(s_stats_graph_min_label[s], numbuf);
                 lv_obj_remove_flag(s_stats_graph_min_label[s], LV_OBJ_FLAG_HIDDEN);
             } else {
@@ -5052,6 +5119,7 @@ static void cb_stats_chart_series_toggle(lv_event_t *e)
     /* 2026-09-11(사용자 지적 — "계열을 해제해도 점은 계속 찍혀") — 실데이터 차트만 숨기고
      * 겹쳐그린 공백점 차트는 안 숨겼던 버그 */
     lv_chart_hide_series(s_stats_gap_chart, s_stats_gap_series[idx], !checked);
+    s_stats_gap_hidden[idx] = !checked;
     if (!checked) {
         if (s_stats_graph_max_label[idx]) lv_obj_add_flag(s_stats_graph_max_label[idx], LV_OBJ_FLAG_HIDDEN);
         if (s_stats_graph_min_label[idx]) lv_obj_add_flag(s_stats_graph_min_label[idx], LV_OBJ_FLAG_HIDDEN);
@@ -5087,6 +5155,7 @@ static void cb_stats_graph_group_tap(lv_event_t *e)
         lv_obj_add_state(s_stats_chart_checkbox[s], LV_STATE_CHECKED);  /* 새 그룹은 전부 보이는 채로 시작 */
         lv_chart_hide_series(s_stats_chart, s_stats_chart_series[s], false);
         lv_chart_hide_series(s_stats_gap_chart, s_stats_gap_series[s], false);
+        s_stats_gap_hidden[s] = false;
     }
     s_stats_graph_force_refresh = true;
     refresh_stats_graph();
@@ -8541,6 +8610,61 @@ static void build_record_tab(void)
     disable_scroll_recursive(record_page);
 }
 
+/* 2026-10-28 — 점선 차트의 칸 값으로 칸 사이 선을 따라 점선을 직접 그림. 좌표는 lv_chart의
+ * draw_series_line과 같은 식(x = 폭*i/(점수-1), y = 0~100을 아래→위로). 점선 무늬는 이어진 칸끼리 이어짐(끊기면 처음부터) */
+static void cb_stats_gap_draw(lv_event_t *e)
+{
+    lv_obj_t *chart = lv_event_get_target(e);
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_area_t ca;
+    lv_obj_get_content_coords(chart, &ca);
+    const int32_t w = lv_area_get_width(&ca), h = lv_area_get_height(&ca);
+    const uint32_t cnt = lv_chart_get_point_count(chart);
+    if (cnt < 2 || w <= 0 || h <= 0) return;
+
+    lv_draw_line_dsc_t dsc;
+    lv_draw_line_dsc_init(&dsc);
+    dsc.base.layer = layer;
+    dsc.width = lv_obj_get_style_line_width(s_stats_chart, LV_PART_ITEMS);   /* 실선과 같은 굵기 */
+    dsc.opa = LV_OPA_COVER;
+    const float period = STATS_GRAPH_DASH_ON_PX + STATS_GRAPH_DASH_OFF_PX;
+
+    for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
+        if (!s_stats_gap_series[s] || s_stats_gap_hidden[s]) continue;
+        const int32_t *y = lv_chart_get_series_y_array(chart, s_stats_gap_series[s]);
+        dsc.color = lv_chart_get_series_color(chart, s_stats_gap_series[s]);
+        float phase = 0.0f;   /* 지금 무늬 위치(0~period) */
+        for (uint32_t i = 0; i + 1 < cnt; i++) {
+            if (y[i] == LV_CHART_POINT_NONE || y[i + 1] == LV_CHART_POINT_NONE) { phase = 0.0f; continue; }
+            float x0 = ca.x1 + (float)((w * (int32_t)i) / (int32_t)(cnt - 1));
+            float x1 = ca.x1 + (float)((w * (int32_t)(i + 1)) / (int32_t)(cnt - 1));
+            float y0 = (float)lv_map(y[i], -s_stats_axis_margin, STATS_GRAPH_NORM_MAX + s_stats_axis_margin, ca.y1 + h, ca.y1);
+            float y1 = (float)lv_map(y[i + 1], -s_stats_axis_margin, STATS_GRAPH_NORM_MAX + s_stats_axis_margin, ca.y1 + h, ca.y1);
+            float len = sqrtf((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
+            if (len <= 0.0f) continue;
+            float t = 0.0f;
+            /* 2026-10-28(LVGL 태스크 멈춤 — float 오차로 step이 0에 가까우면 t + step == t라 영원히 돎) — 매 회 반드시
+             * 나아가게: 경계에 거의 닿았으면 무늬만 다음 상태로, 남은 길이가 거의 없으면 끝 */
+            while (len - t >= 0.01f) {
+                bool on = phase < STATS_GRAPH_DASH_ON_PX;
+                float step = (on ? STATS_GRAPH_DASH_ON_PX : period) - phase;
+                if (step < 0.01f) { phase = on ? STATS_GRAPH_DASH_ON_PX : 0.0f; continue; }
+                float t_end = t + step < len ? t + step : len;
+                if (on) {
+                    dsc.p1.x = (int32_t)(x0 + (x1 - x0) * t / len + 0.5f);
+                    dsc.p1.y = (int32_t)(y0 + (y1 - y0) * t / len + 0.5f);
+                    dsc.p2.x = (int32_t)(x0 + (x1 - x0) * t_end / len + 0.5f);
+                    dsc.p2.y = (int32_t)(y0 + (y1 - y0) * t_end / len + 0.5f);
+                    lv_draw_line(layer, &dsc);
+                }
+                phase += t_end - t;
+                if (phase >= period) phase -= period;
+                t = t_end;
+            }
+        }
+    }
+}
+
 /* 2026-09-08(재설계 — 상단바 통계 버튼이 여는 전체화면 팝업) */
 static void build_stats_tab(void)
 {
@@ -8835,7 +8959,7 @@ static void build_stats_tab(void)
     lv_obj_set_flex_grow(s_stats_chart, 1);
     lv_chart_set_type(s_stats_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(s_stats_chart, STATS_GRAPH_POINT_COUNT);
-    lv_chart_set_axis_range(s_stats_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    lv_chart_set_axis_range(s_stats_chart, LV_CHART_AXIS_PRIMARY_Y, 0, STATS_GRAPH_NORM_MAX);   /* 여유는 refresh_stats_graph에서 */
     lv_chart_set_div_line_count(s_stats_chart, 3, 0);
     lv_obj_add_event_cb(s_stats_chart, cb_stats_chart_tap, LV_EVENT_CLICKED, NULL);
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
@@ -8916,7 +9040,7 @@ static void build_stats_tab(void)
     lv_obj_set_style_pad_all(s_stats_gap_chart, 0, 0);
     lv_chart_set_type(s_stats_gap_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(s_stats_gap_chart, STATS_GRAPH_POINT_COUNT);
-    lv_chart_set_axis_range(s_stats_gap_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    lv_chart_set_axis_range(s_stats_gap_chart, LV_CHART_AXIS_PRIMARY_Y, 0, STATS_GRAPH_NORM_MAX);
     lv_chart_set_div_line_count(s_stats_gap_chart, 0, 0);
     /* 2026-09-15(사용자 지적 — "내가 의도한 건 점을 찍는 게 아니고, 선의 스타일이 점으로
      * 바뀌는 건데") — 점마커 오버레이 대신 점선 스타일의 선으로 변경. LVGL 차트는 LV_PART_
@@ -8925,12 +9049,14 @@ static void build_stats_tab(void)
      * refresh_stats_graph()에서 두 시리즈가 같은 슬롯에 동시에 값을 안 갖도록 상호배타적으로
      * 고침 — 경계 슬롯 하나씩만 겹쳐서 실선<->점선이 끊김 없이 이어지게 함 */
     lv_obj_set_style_line_width(s_stats_gap_chart, lv_obj_get_style_line_width(s_stats_chart, LV_PART_ITEMS), LV_PART_ITEMS);   /* 실선과 같은 굵기 */
-    lv_obj_set_style_line_dash_width(s_stats_gap_chart, 6, LV_PART_ITEMS);
-    lv_obj_set_style_line_dash_gap(s_stats_gap_chart, 5, LV_PART_ITEMS);
+    /* 2026-10-28 — 점선 스타일(dash 6/5)은 뺌: 기운 선엔 안 먹어서 직접 그리기로 점선을 만듦 */
+    lv_obj_set_style_line_opa(s_stats_gap_chart, LV_OPA_TRANSP, LV_PART_ITEMS);   /* 차트 자체 선은 숨기고 */
+    lv_obj_add_event_cb(s_stats_gap_chart, cb_stats_gap_draw, LV_EVENT_DRAW_MAIN_END, NULL);
     lv_obj_set_style_width(s_stats_gap_chart, 0, LV_PART_INDICATOR);
     lv_obj_set_style_height(s_stats_gap_chart, 0, LV_PART_INDICATOR);
     for (int s = 0; s < STATS_GRAPH_SERIES_COUNT; s++) {
         s_stats_gap_series[s] = lv_chart_add_series(s_stats_gap_chart, chart_colors_rt[s], LV_CHART_AXIS_PRIMARY_Y);
+        s_stats_gap_hidden[s] = false;
     }
 
     /* 2026-09-12(사용자 지시 — 좌상단 고정 박스는 지우고 탭 위치에 다시 만듦, "연한 노란색은
@@ -12101,7 +12227,7 @@ bool ui_main_stats_graph(uint8_t scale, uint32_t offset, uint8_t group, bool tem
         sl->chan_type = chan[s];
         sl->name[0] = '\0';
         stats_chain_attrs(&s_web_chains[s], &sl->attr, &sl->ord);   /* 2026-10-23 — 웹이 언어에 맞춰 이름을 만듦 */
-        stats_graph_series_compute(s_web_win, &s_web_chains[s], &sl->d);
+        stats_graph_series_compute(s_web_win, &s_web_chains[s], chan[s], &sl->d);
     }
     return true;
 }

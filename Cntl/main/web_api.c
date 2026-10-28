@@ -1085,6 +1085,7 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
             jb_float(&b, d->mn);
             jb_printf(&b, ",\"max\":");
             jb_float(&b, d->mx);
+            jb_printf(&b, ",\"dec\":%u", (unsigned)d->dec);   /* 10-28 — 축 값 소수 자릿수 */
         }
         jb_printf(&b, ",\"v\":[");
         for (int i = 0; i < UI_STATS_POINTS; i++) {

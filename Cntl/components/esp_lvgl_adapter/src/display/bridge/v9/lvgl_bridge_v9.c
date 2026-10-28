@@ -152,6 +152,8 @@ typedef struct esp_lv_adapter_display_bridge_v9 {
     display_bridge_v9_diff_tracker_t diff_tracker;
 } esp_lv_adapter_display_bridge_v9_t;
 
+static esp_lv_adapter_display_bridge_v9_t *s_cntl_capture_impl;   /* 2026-10-28 Cntl 로컬 패치 — esp_lv_adapter_cntl_front_fb */
+
 #if CONFIG_SOC_PPA_SUPPORTED || CONFIG_SOC_DMA2D_SUPPORTED
 typedef struct display_bridge_v9_hw_resource {
     size_t data_cache_line_size;
@@ -1242,9 +1244,19 @@ esp_lv_adapter_display_bridge_t *esp_lv_adapter_display_bridge_v9_create(const e
         return NULL;
     }
 
+    s_cntl_capture_impl = impl;   /* 2026-10-28 Cntl 로컬 패치 — 화면 캡처(시험용) */
     return &impl->base;
 #endif
 }
+
+/* 2026-10-28 Cntl 로컬 패치(시험용 — 출시 전 제거) — 지금 패널에 나가고 있는 프레임 버퍼(front). 디스플레이는 하나뿐이라
+ * 마지막으로 만든 bridge를 기억. 버퍼가 바뀌는 중에 읽으면 한 장 안에 두 프레임이 섞일 수 있음(캡처용으로는 충분) */
+#if LVGL_VERSION_MAJOR >= 9
+void *esp_lv_adapter_cntl_front_fb(void)
+{
+    return s_cntl_capture_impl ? s_cntl_capture_impl->disp_fb : NULL;
+}
+#endif
 
 #if LVGL_VERSION_MAJOR >= 9
 
@@ -1259,6 +1271,9 @@ esp_lv_adapter_display_bridge_t *esp_lv_adapter_display_bridge_v9_create(const e
 static void display_bridge_v9_destroy(esp_lv_adapter_display_bridge_t *bridge)
 {
     esp_lv_adapter_display_bridge_v9_t *impl = (esp_lv_adapter_display_bridge_v9_t *)bridge;
+    if (impl == s_cntl_capture_impl) {
+        s_cntl_capture_impl = NULL;
+    }
 
     /* Remove rounder event callback if exists */
     if (impl && impl->cfg.lv_disp) {
