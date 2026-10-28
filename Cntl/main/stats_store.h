@@ -62,6 +62,10 @@ uint32_t stats_store_get_append_seq(void);
 typedef void (*stats_store_job_fn_t)(const uint8_t *arg);
 bool stats_store_post_job(stats_store_job_fn_t fn, const void *arg, size_t arg_len);
 
+/* 2026-10-28(사용자 설계 — 고정 자리) — 저장된 기록의 센싱 번호를 from[i] → to[i]로(자리 합치기). to가 NULL이거나 to[i] = 0이면
+ * 그 센싱의 기록을 지움(완전히 지우기). 기록 태스크에서 내부 플래시·SD 파일을 그 자리에서 고침(접수만 하고 바로 돌아옴) */
+bool stats_store_remap_sensings(const uint16_t *from, const uint16_t *to, int n);
+
 /* 2026-09-30(사용자 지시 — "새 측정값이 올 때 갱신해야지") — stats_store_append_batch()가 원시 기록을 하나라도 쓰면
  * 부르는 콜백(Record 표 갱신용). 부르는 쪽 태스크(ESP-NOW 처리)에서 불리므로 UI는 lv_async_call로 넘겨야 함 */
 typedef void (*stats_store_appended_cb_t)(void);

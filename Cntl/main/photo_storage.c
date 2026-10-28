@@ -1,6 +1,7 @@
 #include "photo_storage.h"
 #include "sd_storage.h"
 #include "storage_mgr.h"
+#include "sensor_registry.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -22,6 +23,10 @@
 #include "freertos/task.h"
 
 static const char *TAG = "PHOTO";
+
+/* 2026-10-28(사용자 설계 — 고정 자리, sensor_registry.h) — 캠 보드 주소 → 그 캠 자리의 저장 키. 대치된 캠은 옛 캠의 사진 폴더를
+ * 이어 씀. 주소를 받는 공개 함수마다 첫머리에서(키를 다시 넣어도 그대로 — 키 주소의 보드는 붙어 있지 않음) */
+#define SLOT_KEY(mac) uint8_t slot_key_[6]; sreg_cam_storage_mac((mac), slot_key_); (mac) = slot_key_
 
 /* 파일명: <kind 1글자><8자리 십진수 순번>.jpg — 카메라 폴더 하나당 최대 99,999,999장
  * (콘은 CAM의 예전 500장 링버퍼와 달리 영구 저장소라 base36 4자리보다 훨씬 넉넉하게 잡음,
@@ -411,6 +416,7 @@ photo_storage_writer_t *photo_storage_begin_ext(const uint8_t mac[6], uint8_t ki
 
 static photo_storage_writer_t *begin_common(const uint8_t mac[6], uint8_t kind, uint8_t *ext_buf, size_t ext_cap)
 {
+    SLOT_KEY(mac);
     if (!sd_storage_is_mounted()) {
         ESP_LOGW(TAG, "Save start failed - SD not mounted");
         return NULL;
@@ -988,6 +994,7 @@ uint32_t photo_storage_trim_to(uint64_t target_bytes)
 /* 2026-10-01(할 일 H) — 아래 세 함수는 화면(LVGL 태스크)이 부르므로 폴더를 읽지 않고 색인만 봄 */
 uint32_t photo_storage_get_count(const uint8_t mac[6])
 {
+    SLOT_KEY(mac);
     if (!sd_storage_is_mounted()) return 0;  /* 예전(폴더 열기 실패 = 0)과 같게 */
     lock();
     photo_idx_cam_t *c = cam_find_locked(mac, false, NULL);
@@ -999,6 +1006,7 @@ uint32_t photo_storage_get_count(const uint8_t mac[6])
 uint32_t photo_storage_read_page(const uint8_t mac[6], uint32_t page_index, uint32_t page_size,
                                   photo_storage_item_t *out, uint32_t out_cap)
 {
+    SLOT_KEY(mac);
     uint32_t got = 0;
     if (!sd_storage_is_mounted()) return 0;
     lock();
@@ -1065,6 +1073,7 @@ static bool slot_read(const photo_idx_entry_t *e, const uint8_t mac[6], uint8_t 
 bool photo_storage_read_file(const uint8_t mac[6], uint8_t kind, uint32_t seq,
                               uint8_t *out_buf, size_t buf_cap, size_t *out_len)
 {
+    SLOT_KEY(mac);
     photo_idx_entry_t ie;
     if (index_find(mac, kind, seq, &ie) && ie.slot != SLOT_NONE) return slot_read(&ie, mac, out_buf, buf_cap, out_len);
     char file_path[96];
@@ -1103,6 +1112,7 @@ bool photo_storage_read_file(const uint8_t mac[6], uint8_t kind, uint32_t seq,
 
 bool photo_storage_get_size(const uint8_t mac[6], uint8_t kind, uint32_t seq, size_t *out_size)
 {
+    SLOT_KEY(mac);
     photo_idx_entry_t ie;
     if (index_find(mac, kind, seq, &ie) && ie.slot != SLOT_NONE) { *out_size = ie.size; return true; }
     char file_path[96];
@@ -1116,6 +1126,7 @@ bool photo_storage_get_size(const uint8_t mac[6], uint8_t kind, uint32_t seq, si
 bool photo_storage_read_part(const uint8_t mac[6], uint8_t kind, uint32_t seq, size_t offset,
                              uint8_t *out_buf, size_t cap, size_t *out_len, size_t *out_total)
 {
+    SLOT_KEY(mac);
     *out_len = 0;
     photo_idx_entry_t ie;
     if (index_find(mac, kind, seq, &ie) && ie.slot != SLOT_NONE) {
@@ -1167,6 +1178,7 @@ bool photo_storage_read_part(const uint8_t mac[6], uint8_t kind, uint32_t seq, s
 
 bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq)
 {
+    SLOT_KEY(mac);
     photo_idx_entry_t ie;
     if (index_find(mac, kind, seq, &ie) && ie.slot != SLOT_NONE) {   /* 2026-10-15 — 칸 사진: 머리를 빈 칸으로 */
         wlock();
@@ -1192,7 +1204,20 @@ bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq)
     return true;
 }
 
+static uint32_t delete_all_key(const uint8_t mac[6]);
+
 uint32_t photo_storage_delete_all(const uint8_t mac[6])
+{
+    SLOT_KEY(mac);
+    return delete_all_key(mac);
+}
+
+uint32_t photo_storage_delete_all_key(const uint8_t key[6])
+{
+    return delete_all_key(key);
+}
+
+static uint32_t delete_all_key(const uint8_t mac[6])
 {
     char dir_path[64];
     camera_dir_path(mac, dir_path, sizeof(dir_path));

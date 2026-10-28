@@ -3,6 +3,7 @@
 #include "memdiag.h"
 #include <stdlib.h>
 #include "photo_rx.h"
+#include "photo_storage.h"
 #include "ui_main.h"   /* ui_main_on_cam_light — 2026-10-20 */
 #include "can_bridge.h"
 #include "power_relay.h"
@@ -15,6 +16,7 @@
 #include "alarm.h"
 #include "stats_store.h"
 #include "main.h"
+#include "fs.h"
 
 #include <string.h>
 #include <assert.h>
@@ -257,80 +259,247 @@ static node_hub_node_t *find_node(const uint8_t *mac)
 }
 
 /* ════════════════════════════════════════════════════════════
- * 2026-09-28(사용자 설계) — 페어링 구성 강제: 그룹별 동시 연결 상한
+ * 2026-10-28(사용자 설계 — 고정 자리, sensor_registry.h) — 페어링 관문: 보드의 센서마다 자리가 정해져야 붙음.
+ * 예전(09-28)의 보드 종류별 동시 연결 상한(캠 2·정밀 1·간이 1·암모니아 1·Agar 3)을 대신함 — 상한은 이제 종류별 자리 수.
+ * 처음 보는 센스는 센서 목록을 PAIR_ACK에서야 알아서 그때 판정(자리가 없으면 UNPAIR로 돌려보내고 목록을 기억 — 다음 광고부터는
+ * PAIR_REQUEST 전에 걸러짐)
  * ════════════════════════════════════════════════════════════ */
-static const uint8_t s_quota_limit[NODE_QUOTA_COUNT] = {
-    [NODE_QUOTA_NONE]    = 0,
-    [NODE_QUOTA_CAM]     = 2,
-    [NODE_QUOTA_FINE]    = 1,
-    [NODE_QUOTA_BASIC]   = 1,
-    [NODE_QUOTA_AMMONIA] = 1,
-    [NODE_QUOTA_AGAR]    = 3,
-};
-
 static node_hub_pair_rejected_cb_t s_pair_rejected_cb = NULL;
-
-uint8_t node_hub_quota_limit(node_quota_class_t cls)
-{
-    return (cls < NODE_QUOTA_COUNT) ? s_quota_limit[cls] : 0;
-}
 
 void node_hub_set_pair_rejected_cb(node_hub_pair_rejected_cb_t cb)
 {
     s_pair_rejected_cb = cb;
 }
 
-/* s_nodes_mutex를 쥔 상태. 센스 종류는 이번 부팅의 PAIR_ACK 값, 없으면 영구 저장값(sens_kind_store) — 처음 보는
- * 센스는 둘 다 없어서 NONE(PAIR_ACK 때 다시 판정) */
-static node_quota_class_t quota_class_locked(const node_hub_node_t *n)
+/* 연결된 기기 = 이번 부팅에 붙었고, 사용자가 끊지 않았고, 아직 응답이 살아있는 기기(교체로 뗀 기기는 타임아웃이 지나면 연결 없음) */
+static bool node_live_locked(const node_hub_node_t *n, uint32_t now_ms)
 {
-    if (n->kind == HUB_NODE_KIND_CAM) return NODE_QUOTA_CAM;
-    if (n->kind != HUB_NODE_KIND_SENS) return NODE_QUOTA_NONE;
-    uint8_t kind = n->sensor_kind ? n->sensor_kind : sens_kind_store_get(n->mac);
-    switch (kind) {
-        case SENSOR_KIND_SHT45: return NODE_QUOTA_FINE;
-        case SENSOR_KIND_SCD41: return NODE_QUOTA_BASIC;
-        case SENSOR_KIND_MQ137:
-        case SENSOR_KIND_SC05:  return NODE_QUOTA_AMMONIA;
-        case SENSOR_KIND_PT100:
-        case SENSOR_KIND_DS18B20: return NODE_QUOTA_AGAR;
-        default:                return NODE_QUOTA_NONE;
+    return n->ever_paired && !n->user_unpaired && !n->slot_kicked && elapsed_ms(now_ms, n->last_seen_ms) <= node_hub_node_timeout_ms(n);
+}
+
+/* 자리 판정 작업 칸(PSRAM, s_nodes_mutex 아래에서만 씀 — 스택에 안 둠) */
+typedef struct {
+    uint8_t live[NODE_HUB_MAX_NODES + SREG_MAX_SENSORS][6];
+    uint8_t owners[SREG_MAX_SENSORS][6];   /* 2026-10-28 — 재시작 유예용 자리 주인 목록 */
+    bool    owner_cam[SREG_MAX_SENSORS];
+    sreg_plan_t plan;
+    esp_now_sensor_id_assign_t asg;
+    uint8_t replaced[6];
+} slot_scratch_t;
+static slot_scratch_t *s_slot = NULL;
+static const uint8_t s_cam_chan[1] = { SREG_WHAT_CAMERA };
+
+/* 2026-10-28(실기 — 콘 재시작 뒤 같은 측정이 받은 시각으로 한 번 더 기록됨) — 보드별 마지막으로 기록한 측정 번호를 LittleFS에 둠.
+ * 센스는 깨어날 때마다 마지막 측정을 같은 번호로 다시 보내는데, 콘이 그 번호를 RAM에만 두면 재시작 뒤 첫 수신을 새 측정으로 봄.
+ * 새 측정을 기록할 때만 씀(보드당 측정 주기마다 한 번). s_nodes_mutex 아래에서만 읽고 고침 */
+#define MEAS_ID_FILE   FS_MOUNT_POINT "/meas_ids.bin"
+#define MEAS_ID_SLOTS  16
+typedef struct {
+    uint8_t  mac[6];
+    uint32_t id;
+    uint32_t seq;      /* 마지막으로 고친 차례(가득 차면 가장 오래된 칸을 씀) */
+} meas_id_entry_t;
+typedef struct {
+    uint32_t        seq;
+    meas_id_entry_t e[MEAS_ID_SLOTS];
+} meas_id_table_t;
+static meas_id_table_t *s_meas = NULL;   /* PSRAM */
+
+static void meas_id_load(void)
+{
+    s_meas = heap_caps_calloc(1, sizeof(*s_meas), MALLOC_CAP_SPIRAM);
+    if (!s_meas) return;
+    FILE *f = fopen(MEAS_ID_FILE, "rb");
+    if (!f) return;
+    if (fread(s_meas, sizeof(*s_meas), 1, f) != 1) memset(s_meas, 0, sizeof(*s_meas));
+    fclose(f);
+}
+
+/* 모르는 보드 = 0(센스 측정 번호는 첫 측정부터 1) */
+static uint32_t meas_id_get_locked(const uint8_t mac[6])
+{
+    if (!s_meas) return 0;
+    for (int i = 0; i < MEAS_ID_SLOTS; i++) {
+        if (s_meas->e[i].seq && memcmp(s_meas->e[i].mac, mac, 6) == 0) return s_meas->e[i].id;
     }
+    return 0;
 }
 
-/* 자리를 차지하는 기기 = 이번 부팅에 붙었고, 사용자가 끊지 않았고, 아직 응답이 살아있는 기기(교체로 뗀 기기는
- * 타임아웃이 지나면 자리를 내줌) */
-static bool occupies_quota_locked(const node_hub_node_t *n, uint32_t now_ms)
+static void meas_id_save_job(const uint8_t *arg)
 {
-    return n->ever_paired && !n->user_unpaired && elapsed_ms(now_ms, n->last_seen_ms) <= node_hub_node_timeout_ms(n);
+    (void)arg;
+    meas_id_table_t *copy = heap_caps_malloc(sizeof(*copy), MALLOC_CAP_SPIRAM);
+    if (!copy) return;
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    memcpy(copy, s_meas, sizeof(*copy));
+    xSemaphoreGive(s_nodes_mutex);
+    FILE *f = fopen(MEAS_ID_FILE, "wb");
+    if (f) {
+        fwrite(copy, sizeof(*copy), 1, f);
+        fclose(f);
+    }
+    heap_caps_free(copy);
 }
 
-/* s_nodes_mutex를 쥔 상태. self를 뺀 같은 그룹 기기가 이미 상한이면 그 그룹을, 아니면 NONE */
-static node_quota_class_t quota_full_locked(const node_hub_node_t *self)
+static void meas_id_set_locked(const uint8_t mac[6], uint32_t id)
 {
-    node_quota_class_t cls = quota_class_locked(self);
-    if (cls == NODE_QUOTA_NONE) return NODE_QUOTA_NONE;
+    if (!s_meas) return;
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < MEAS_ID_SLOTS; i++) {
+        if (s_meas->e[i].seq && memcmp(s_meas->e[i].mac, mac, 6) == 0) { slot = i; break; }
+        if (s_meas->e[i].seq < s_meas->e[oldest].seq) oldest = i;
+    }
+    if (slot < 0) slot = oldest;
+    memcpy(s_meas->e[slot].mac, mac, 6);
+    s_meas->e[slot].id = id;
+    s_meas->e[slot].seq = ++s_meas->seq;
+    stats_store_post_job(meas_id_save_job, NULL, 0);   /* 통신 밖(기록 태스크)에서 씀 */
+}
+
+/* 노드의 센서 목록(자리 판정용). 모르면 false — 캠은 보드 하나 = 캠 자리 하나 */
+static bool node_board_locked(const node_hub_node_t *n, sreg_board_t *b)
+{
+    memset(b, 0, sizeof(*b));
+    if (n->kind == HUB_NODE_KIND_CAM) {
+        b->node_kind = SREG_KIND_CAM;
+        b->chan_count = 1;
+        b->chan_type = s_cam_chan;
+        return true;
+    }
+    if (n->kind != HUB_NODE_KIND_SENS || !n->sensors_known) return false;
+    b->node_kind = n->sensor_kind;
+    b->chan_count = n->chan_count;
+    b->chan_type = n->chan_type;
+    b->sensor_count = n->n_sensors;
+    b->sensors = n->sensors;
+    return true;
+}
+
+static uint32_t timeout_ms_for(uint8_t kind, const uint8_t *mac);
+
+/* 2026-10-28 — 대치 때 설정 옮기기(기록 태스크). arg = 옛 보드 6 + 새 보드 6 */
+static void job_move_device_settings(const uint8_t *arg)
+{
+    device_config_move_device(arg, arg + 6);
+}
+
+/* 연결된 기기 목록(self 빼고).
+ * 2026-10-28(실기 — 콘 재시작 직후 대기 보드가 먼저 와서 자리 주인을 자동 대치함) — 재시작 뒤 아직 소식이 없는 자리 주인은 "연결
+ * 없음"이 아니라 "아직 모름". 그 주인의 끊김 판정 시간이 지나기 전까지는 연결된 것으로 봄(이번 부팅에 사용자가 끊었거나 자리를
+ * 잃어 풀린 보드는 빼고). 그 시간이 지나도록 안 오면 그때 연결 없음 */
+static sreg_live_t live_locked(const node_hub_node_t *self)
+{
+    const int cap = (int)(sizeof(s_slot->live) / sizeof(s_slot->live[0]));
+    sreg_live_t live = { .mac = (const uint8_t (*)[6])s_slot->live, .n = 0 };
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-    int used = 0;
-    for (int i = 0; i < s_node_count; i++) {
+    for (int i = 0; i < s_node_count && live.n < cap; i++) {
         const node_hub_node_t *o = &s_nodes[i];
-        if (o == self || !occupies_quota_locked(o, now_ms)) continue;
-        if (quota_class_locked(o) == cls) used++;
+        if (o == self || !node_live_locked(o, now_ms)) continue;
+        memcpy(s_slot->live[live.n++], o->mac, 6);
     }
-    return (used >= s_quota_limit[cls]) ? cls : NODE_QUOTA_NONE;
+    int no = sreg_list_owner_boards(s_slot->owners, s_slot->owner_cam, SREG_MAX_SENSORS);
+    for (int k = 0; k < no && live.n < cap; k++) {
+        const uint8_t *mac = s_slot->owners[k];
+        if (self && memcmp(self->mac, mac, 6) == 0) continue;
+        if (now_ms > timeout_ms_for(s_slot->owner_cam[k] ? HUB_NODE_KIND_CAM : HUB_NODE_KIND_SENS, mac)) continue;
+        const node_hub_node_t *o = find_node(mac);
+        if (o && (o->ever_paired || o->user_unpaired || o->slot_kicked)) continue;   /* 이번 부팅에 소식이 있음 — 위 판정대로 */
+        bool dup = false;
+        for (int j = 0; j < live.n && !dup; j++) dup = memcmp(s_slot->live[j], mac, 6) == 0;
+        if (!dup) memcpy(s_slot->live[live.n++], mac, 6);
+    }
+    return live;
 }
 
-bool node_hub_is_quota_blocked(const uint8_t *mac)
+/* s_nodes_mutex를 쥔 상태. plan이 NULL이면 작업 칸에 */
+static node_slot_gate_t slot_gate_locked(const node_hub_node_t *n, sreg_plan_t *plan)
 {
-    bool blocked = false;
+    sreg_board_t b;
+    if (!s_slot || !node_board_locked(n, &b)) return NODE_GATE_OK;
+    if (!plan) plan = &s_slot->plan;
+    sreg_live_t live = live_locked(n);
+    if (sreg_plan(n->mac, &b, &n->slot_dec, &live, plan)) return NODE_GATE_OK;
+    for (int i = 0; i < plan->n; i++) if (plan->it[i].state == SREG_ITEM_BLOCKED) return NODE_GATE_BLOCKED;
+    return NODE_GATE_ASK;
+}
+
+static const char *gate_text(node_slot_gate_t g)
+{
+    return g == NODE_GATE_ASK ? "replace or new not chosen" : "slot taken by a connected device";
+}
+
+node_slot_gate_t node_hub_slot_gate(const uint8_t *mac, sreg_plan_t *plan)
+{
+    if (plan) plan->n = 0;
+    node_slot_gate_t g = NODE_GATE_OK;
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    node_hub_node_t *n = find_node(mac);
+    if (n) g = slot_gate_locked(n, plan);
+    xSemaphoreGive(s_nodes_mutex);
+    return g;
+}
+
+void node_hub_set_slot_decision(const uint8_t *mac, const sreg_decision_t *dec)
+{
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     node_hub_node_t *n = find_node(mac);
     if (n) {
-        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
-        blocked = !occupies_quota_locked(n, now_ms) && quota_full_locked(n) != NODE_QUOTA_NONE;
+        n->slot_dec = *dec;
+        n->quota_logged = false;
     }
     xSemaphoreGive(s_nodes_mutex);
-    return blocked;
+}
+
+/* 캠 자리 사진 지우기 — SD 작업이라 기록 태스크에서(화면 태스크를 막지 않게) */
+static void job_delete_cam_photos(const uint8_t *key)
+{
+    uint32_t d = photo_storage_delete_all_key(key);
+    ESP_LOGW(TAG, "Camera slot photos deleted: %u (" MACSTR ")", (unsigned)d, MAC2STR(key));
+}
+
+/* 완전히 지우기 공통 — 지운 자리의 기록(캠은 사진·설정)을 지움 */
+static void forget_cleanup(const sreg_sensing_t *gone, int n)
+{
+    uint16_t ids[SREG_MAX_SENSINGS];
+    int k = 0;
+    for (int i = 0; i < n && k < SREG_MAX_SENSINGS; i++) {
+        if (gone[i].what == SREG_WHAT_CAMERA) {
+            stats_store_post_job(job_delete_cam_photos, gone[i].key_mac, 6);
+            device_config_forget_device(gone[i].key_mac);
+        } else {
+            ids[k++] = gone[i].id;
+        }
+    }
+    if (k) stats_store_remap_sensings(ids, NULL, k);
+}
+
+void node_hub_forget_board(const uint8_t *mac)
+{
+    node_hub_unpair(mac);
+    sreg_sensing_t *gone = heap_caps_malloc(sizeof(sreg_sensing_t) * SREG_MAX_SENSINGS, MALLOC_CAP_SPIRAM);
+    if (!gone) return;
+    int n = sreg_forget_board(mac, gone, SREG_MAX_SENSINGS);
+    forget_cleanup(gone, n);
+    heap_caps_free(gone);
+    device_config_forget_device(mac);
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    node_hub_node_t *nd = find_node(mac);
+    if (nd) {   /* 다음에 보이면 처음 보는 기기처럼 */
+        nd->sensors_known = false;
+        memset(&nd->slot_dec, 0, sizeof(nd->slot_dec));
+    }
+    xSemaphoreGive(s_nodes_mutex);
+    ESP_LOGW(TAG, "Board " MACSTR " forgotten (%d slots)", MAC2STR(mac), n);
+}
+
+void node_hub_forget_slot_row(const sreg_slot_row_t *row)
+{
+    sreg_sensing_t *gone = heap_caps_malloc(sizeof(sreg_sensing_t) * SREG_MAX_SENSINGS, MALLOC_CAP_SPIRAM);
+    if (!gone) return;
+    int n = sreg_forget_row(row, gone, SREG_MAX_SENSINGS);
+    forget_cleanup(gone, n);
+    heap_caps_free(gone);
+    if (row->sensor && !sreg_board_has_sensors(row->board)) device_config_forget_device(row->board);
 }
 
 /* 2026-08-26(사용자 지시) — 노드별 사용자 액션 대기 큐. photo_rx.c의 5개 액션 함수가
@@ -585,11 +754,11 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         name_copy[sizeof(name_copy) - 1] = '\0';
         uint8_t mac_copy[6];
         memcpy(mac_copy, info->src_addr, sizeof(mac_copy));
-        /* 2026-09-28(페어링 구성 강제) — 종류를 이미 아는 기기(캠, 전에 붙었던 센스)는 PAIR_REQUEST 전에 그룹 상한을
-         * 봄. 처음 보는 센스는 여기선 NONE이라 통과 — PAIR_ACK에서 종류를 받은 뒤 다시 판정 */
-        node_quota_class_t quota_full = quota_full_locked(n);
+        /* 2026-09-28(페어링 구성 강제) → 2026-10-28(고정 자리) — 센서 목록을 아는 기기(캠, 이번 부팅에 PAIR_ACK를 받은 센스)는
+         * PAIR_REQUEST 전에 자리를 봄. 모르는 센스는 통과 — PAIR_ACK에서 목록을 받은 뒤 판정 */
+        node_slot_gate_t gate = slot_gate_locked(n, NULL);
         bool quota_log_first = false;
-        if (quota_full != NODE_QUOTA_NONE) {
+        if (gate != NODE_GATE_OK) {
             if (user_pair_wanted) {
                 n->user_pair_wanted = false;  /* 수동 요청은 이걸로 끝 — 팝업으로 알림 */
                 n->pair_req_attempts_left = 0;
@@ -627,13 +796,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             (device_config_get_auto_connect_new() ||
              (device_config_get_auto_connect_known() && device_config_is_known_device(mac_copy)));
         bool pair_wanted = was_paired || (ever_paired && !was_user_unpaired) || user_pair_wanted || auto_connect_wanted;
-        if (pair_wanted && quota_full != NODE_QUOTA_NONE) {
+        if (pair_wanted && gate != NODE_GATE_OK) {
             /* 수동 연결은 팝업(UI 쪽 콜백), 자동 연결은 팝업 없이 Dev Log에만 기기마다 부팅 후 한 번(사용자 결정) */
             if (user_pair_wanted) {
-                if (s_pair_rejected_cb) s_pair_rejected_cb(mac_copy, quota_full);
+                if (s_pair_rejected_cb) s_pair_rejected_cb(mac_copy, gate);
             } else if (quota_log_first) {
-                ESP_LOGW(TAG_LINK, "%s auto-connect refused - group limit %u reached", name_copy,
-                         (unsigned)s_quota_limit[quota_full]);
+                ESP_LOGW(TAG_LINK, "%s auto-connect refused - %s", name_copy, gate_text(gate));
             }
         } else if (pair_wanted) {
             node_hub_pair(mac_copy, user_pair_wanted);
@@ -758,13 +926,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                                               참고 */
         char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
         hub_node_kind_t kind_copy = HUB_NODE_KIND_UNKNOWN;
-        node_quota_class_t ack_full = NODE_QUOTA_NONE;
-        bool reject_manual = false, reject_unpair = false, reject_log = false;
+        node_slot_gate_t ack_gate = NODE_GATE_OK;
+        bool reject_manual = false, reject_unpair = false, reject_log = false, reject_kick = false;
+        bool slot_assign = false, slot_replaced = false;
+        uint8_t replaced_mac[6] = { 0 };
         if (n) {
             kind_copy = n->kind;
-            /* 2026-09-28(페어링 구성 강제) — 생존 시각을 갱신하기 전에, 이 기기가 이미 자리를 차지하고 있었는지 봄
-             * (이미 붙어 있던 기기의 keepalive는 판정하지 않음) */
-            bool occupied_before = occupies_quota_locked(n, now_ms);
+            /* 2026-09-28(페어링 구성 강제) — 생존 시각을 갱신하기 전에, 이 기기가 이미 연결돼 있었는지 봄
+             * (이미 붙어 있던 기기의 keepalive는 거절하지 않음) */
+            bool occupied_before = node_live_locked(n, now_ms);
             /* 2026-09-05(사용자 지시) — 센서종류/채널구성은 페어링 완료 이 순간에 1회만
              * 옴(esp_now_pair_ack_t 참고, 매 캐스크마다 다시 안 옴) — 여기서 받아서 기억해두면
              * 이후 WAKE_HELLO_SENS 처리(node_hub.c 아래쪽)가 이 값을 계속 재사용함.
@@ -774,6 +944,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 n->chan_count      = ack->chan_count > ESP_NOW_MAX_CHANNELS ? ESP_NOW_MAX_CHANNELS : ack->chan_count;
                 memcpy(n->chan_type, ack->chan_type, n->chan_count);
                 n->has_sensor_data = true;
+                /* 2026-10-28(고정 자리) — 센서 목록을 기억(자리가 없어 거절돼도 — 다음 광고부터 PAIR_REQUEST 전에 판정) */
+                n->n_sensors = sensor_count;
+                memcpy(n->sensors, ack->sensors, sensor_count * sizeof(esp_now_sensor_desc_t));
+                n->sensors_known = true;
                 /* 2026-09-19(통계 분류 영구저장) — 재부팅 후 이 센스가 아직 재접속 전이어도
                  * stats_store의 과거 기록을 분류할 수 있게 mac별 sensor_kind를 SD에 영구
                  * 기록. sens_kind_store_set() 자체가 값이 안 바뀌면 파일 재기록을 생략하므로,
@@ -800,17 +974,33 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             bool was_ever_paired = n->ever_paired;
             n->pair_req_attempts_left = 0;  /* 성사됐으니 남은 시도 카운트 해제 */
             n->user_pair_wanted = false;
-            /* 2026-09-28(페어링 구성 강제) — 처음 보는 센스는 여기서 종류를 처음 알게 되므로 다시 판정. 넘치면
-             * 페어드로 안 올리고 UNPAIR로 돌려보냄 — 다음 광고부터는 종류를 알아서 PAIR_REQUEST 전에 걸러짐 */
-            if (!n->user_unpaired && !occupied_before) ack_full = quota_full_locked(n);
-            if (ack_full != NODE_QUOTA_NONE) {
-                reject_unpair = (n->conn_state == NODE_CONN_PAIR_PENDING);  /* 우리가 요청한 페어링에만 */
+            /* 2026-09-28(페어링 구성 강제) → 2026-10-28(고정 자리) — 처음 보는 센스는 여기서 센서 목록을 처음 알게 되므로 다시
+             * 판정. 자리가 정해지지 않으면 페어드로 안 올리고 UNPAIR로 돌려보냄 — 다음 광고부터는 PAIR_REQUEST 전에 걸러짐.
+             * 이미 연결돼 있던 기기라도 자리가 없으면(다른 보드가 그 자리를 대치함 등) 연결을 풀어 대기 목록으로 — 연결돼 있는데
+             * 값이 기록되지 않는 상태를 두지 않음 */
+            node_slot_gate_t gate_now = slot_gate_locked(n, NULL);
+            if (!n->user_unpaired) ack_gate = gate_now;
+            if (gate_now == NODE_GATE_OK && (n->kind == HUB_NODE_KIND_SENS || n->kind == HUB_NODE_KIND_CAM) && s_slot) {
+                sreg_board_t b;
+                node_board_locked(n, &b);
+                sreg_live_t live = live_locked(n);
+                memset(&s_slot->asg, 0, sizeof(s_slot->asg));
+                slot_assign = sreg_on_pair(n->mac, &b, &n->slot_dec, &live, &s_slot->asg, replaced_mac);
+                static const uint8_t zero6[6] = { 0 };
+                slot_replaced = memcmp(replaced_mac, zero6, 6) != 0;
+                memset(&n->slot_dec, 0, sizeof(n->slot_dec));   /* 고른 것은 적용됐음 */
+            }
+            if (ack_gate != NODE_GATE_OK) {
+                reject_unpair = (n->conn_state == NODE_CONN_PAIR_PENDING) || occupied_before;  /* 우리가 요청한 페어링, 또는 연결돼 있던 기기 */
+                reject_kick = occupied_before;
+                if (reject_kick) n->slot_kicked = true;
                 reject_manual = reject_unpair && n->pair_manual;
                 if (!reject_manual && !n->quota_logged) { n->quota_logged = true; reject_log = true; }
                 n->conn_state = NODE_CONN_ORPHAN;
                 n->pair_manual = false;
                 strncpy(name_copy, n->name, sizeof(name_copy) - 1);
             } else if (!n->user_unpaired) {
+                n->slot_kicked = false;
                 n->conn_state = NODE_CONN_PAIRED;
                 n->ever_paired = true;  /* 2026-08-10 — 한 번 세팅되면 이번 부팅 세션 내내
                                             유지, ADVERTISE 핸들러의 자동 재페어링 판단에 씀 */
@@ -821,32 +1011,41 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             }
         }
         xSemaphoreGive(s_nodes_mutex);
-        if (kind_copy == HUB_NODE_KIND_SENS && ack_full == NODE_QUOTA_NONE) {
-            /* 2026-10-23(센서 중심 구조) — 센서 목록 반영, 새 센서면 ID를 붙여 알려 줌(다음 체크인 때 신뢰 전송) */
-            esp_now_sensor_id_assign_t asg = { 0 };
-            uint8_t cc = ack->chan_count > ESP_NOW_MAX_CHANNELS ? ESP_NOW_MAX_CHANNELS : ack->chan_count;
-            if (sreg_on_pair(info->src_addr, ack->sensor_kind, cc, ack->chan_type, sensor_count, ack->sensors, &asg)) {
-                static const uint8_t s_sid_ack[] = { ESP_NOW_MSG_SENSOR_ID_ASSIGN_ACK };
-                node_hub_queue_action(info->src_addr, &asg, offsetof(esp_now_sensor_id_assign_t, ids) + asg.count * sizeof(asg.ids[0]),
-                                      s_sid_ack, 1, 500, 3, "Sensor ID");
-                ESP_LOGI(TAG, "Sensor IDs to " MACSTR ": %u queued", MAC2STR(info->src_addr), (unsigned)asg.count);
+        if (slot_replaced) {
+            /* 2026-10-28(고정 자리) — 대치: 옛 보드의 설정(별명, 캠 설정, 측정 주기)을 새 보드로. 캠 사진은 자리의 저장 키로 이어짐.
+             * 파일을 쓰므로 기록 태스크로 넘김(이 통신 태스크 스택 4KB에서 바로 부르면 넘침 — 10-28 크래시) */
+            uint8_t pair_macs[12];
+            memcpy(pair_macs, replaced_mac, 6);
+            memcpy(pair_macs + 6, info->src_addr, 6);
+            if (!stats_store_post_job(job_move_device_settings, pair_macs, sizeof(pair_macs))) {
+                ESP_LOGW(TAG, "Settings move not queued " MACSTR " -> " MACSTR, MAC2STR(replaced_mac), MAC2STR(info->src_addr));
             }
         }
-        if (cam_info && kind_copy == HUB_NODE_KIND_CAM && ack_full == NODE_QUOTA_NONE) {
+        if (slot_assign && kind_copy == HUB_NODE_KIND_SENS) {
+            /* 2026-10-23(센서 중심 구조) — 새 센서면 ID를 붙여 알려 줌(다음 체크인 때 신뢰 전송). asg는 이 태스크만 씀 */
+            static const uint8_t s_sid_ack[] = { ESP_NOW_MSG_SENSOR_ID_ASSIGN_ACK };
+            node_hub_queue_action(info->src_addr, &s_slot->asg, offsetof(esp_now_sensor_id_assign_t, ids) + s_slot->asg.count * sizeof(s_slot->asg.ids[0]),
+                                  s_sid_ack, 1, 500, 3, "Sensor ID");
+            ESP_LOGI(TAG, "Sensor IDs to " MACSTR ": %u queued", MAC2STR(info->src_addr), (unsigned)s_slot->asg.count);
+        }
+        if (cam_info && kind_copy == HUB_NODE_KIND_CAM && ack_gate == NODE_GATE_OK) {
             photo_rx_cam_info(info->src_addr, cam_pid, cam_max_fs);   /* 2026-10-20 — 사진 버퍼 재설계(photo_rx.c) */
             device_config_note_cam_sensor(info->src_addr, cam_pid);   /* 2026-10-22 — 센서별 수동 노출 기본값 */
         }
-        if (ack_full != NODE_QUOTA_NONE) {
+        if (ack_gate != NODE_GATE_OK) {
+            if (reject_kick) {
+                ESP_LOGW(TAG_LINK, "%s disconnected - no slot (%s)", name_copy, gate_text(ack_gate));
+                fire_connect_event();   /* 화면·웹 갱신(node_hub_unpair와 같음) */
+            }
             if (reject_unpair) {
                 esp_now_unpair_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_UNPAIR };
                 static const uint8_t s_reject_unpair_ack_types[] = { ESP_NOW_MSG_UNPAIR_ACK };
                 node_request_enqueue(info->src_addr, &msg, sizeof(msg), s_reject_unpair_ack_types, 1, 300, 3, "UNPAIR(limit)");
             }
             if (reject_manual) {
-                if (s_pair_rejected_cb) s_pair_rejected_cb(info->src_addr, ack_full);
+                if (s_pair_rejected_cb) s_pair_rejected_cb(info->src_addr, ack_gate);
             } else if (reject_log) {
-                ESP_LOGW(TAG_LINK, "%s auto-connect refused - group limit %u reached", name_copy,
-                         (unsigned)s_quota_limit[ack_full]);
+                ESP_LOGW(TAG_LINK, "%s auto-connect refused - %s", name_copy, gate_text(ack_gate));
             }
         }
         if (became_paired) {
@@ -905,7 +1104,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
         xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
         node_hub_node_t *n = find_node(info->src_addr);
-        if (!n || !n->ever_paired || n->user_unpaired) {
+        if (!n || !n->ever_paired || n->user_unpaired || n->slot_kicked) {
             xSemaphoreGive(s_nodes_mutex);
             return;
         }
@@ -989,7 +1188,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         memset(&s_hello_sens, 0, sizeof(s_hello_sens));
         memcpy(&s_hello_sens, data, len < (int)sizeof(s_hello_sens) ? (size_t)len : sizeof(s_hello_sens));
         node_hub_node_t *n = find_node(info->src_addr);
-        if (!n || !n->ever_paired || n->user_unpaired) {
+        if (!n || !n->ever_paired || n->user_unpaired || n->slot_kicked) {
             xSemaphoreGive(s_nodes_mutex);
             return;
         }
@@ -1001,6 +1200,23 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
             esp_now_wake_hello_sens_ack_t dup_ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_WAKE_HELLO_SENS_ACK };
             can_bridge_relay_send(info->src_addr, (const uint8_t *)&dup_ack, sizeof(dup_ack));
             ESP_LOGD(TAG, "WAKE_HELLO_SENS resend <- %s - ACK only (CASK skipped)", dup_name);
+            return;
+        }
+        /* 2026-10-28(고정 자리) — 연결된 보드라도 자리를 잃었으면(다른 보드가 그 자리를 대치함 등) 연결을 풂 — 값이 기록되지 않는
+         * 연결 상태를 두지 않음. 자리가 다시 나면 광고 때 관문을 통과해 다시 붙음 */
+        node_slot_gate_t hello_gate = slot_gate_locked(n, NULL);
+        if (hello_gate != NODE_GATE_OK) {
+            char kick_name[ESP_NOW_LINK_NAME_LEN];
+            strncpy(kick_name, n->name, sizeof(kick_name) - 1);
+            kick_name[sizeof(kick_name) - 1] = '\0';
+            n->conn_state = NODE_CONN_ORPHAN;
+            n->slot_kicked = true;
+            xSemaphoreGive(s_nodes_mutex);
+            esp_now_unpair_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_UNPAIR };
+            static const uint8_t s_kick_unpair_ack_types[] = { ESP_NOW_MSG_UNPAIR_ACK };
+            node_request_enqueue(info->src_addr, &msg, sizeof(msg), s_kick_unpair_ack_types, 1, 300, 3, "UNPAIR(slot)");
+            ESP_LOGW(TAG_LINK, "%s disconnected - no slot (%s)", kick_name, gate_text(hello_gate));
+            fire_connect_event();
             return;
         }
         n->last_seen_ms    = now_ms;
@@ -1057,11 +1273,13 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * 캐시값을 매 캐스크마다 실어보내므로, measurement_id가 직전과 같으면(새로 측정
          * 안 됨) 값 갱신을 건너뜀 — 중복 처리 방지. 새 값일 때만 "콘이 이 측정을 처음 본
          * 시각"도 같이 찍어서 상황판 표시(Time: HH:MM:SS)의 기준으로 씀 */
-        bool is_new_measurement = (hello->measurement_id != n->sensor_measurement_id);
+        /* 2026-10-28 — 비교 기준은 LittleFS에 남긴 마지막 기록 번호(재시작해도 이어짐) */
+        bool is_new_measurement = (hello->measurement_id != meas_id_get_locked(n->mac));
         if (is_new_measurement) {
             memcpy(n->chan_ok,  hello->chan_ok,  n->chan_count);
             memcpy(n->chan_val, hello->chan_val, n->chan_count * sizeof(float));
             n->sensor_measurement_id      = hello->measurement_id;
+            meas_id_set_locked(n->mac, hello->measurement_id);
             n->sensor_last_update_unix_time = rtc_sync_get_unix_time();
 
             /* 2026-09-07(사용자 지시 — "이산화탄소 0으로 오면...") — SCD41이 CRC는 통과하지만
@@ -1171,6 +1389,8 @@ void node_hub_init(void)
      * s_nodes[]를 건드릴 수 있음 */
     s_nodes_mutex = xSemaphoreCreateMutex();
     assert(s_nodes_mutex != NULL);
+    s_slot = heap_caps_calloc(1, sizeof(*s_slot), MALLOC_CAP_SPIRAM);   /* 2026-10-28 — 자리 판정 작업 칸 */
+    meas_id_load();   /* 2026-10-28 — 보드별 마지막 기록 측정 번호 */
     s_connect_event_sem = xSemaphoreCreateBinary();
 
     /* 2026-08-22 — Cntl 자신은 배터리가 없지만, CAM/Sens가 보고해오는 mV값을 %%로 바꾸려면
@@ -1217,21 +1437,27 @@ void node_hub_init(void)
  * 있을 뿐인 Sens가 "무응답"으로 오판되어 목록에서 깜빡임 — 노드 자신이 리포트한
  * ds_last_sleep_interval_sec(WAKE_HELLO_SENS로 옴)이 있으면 그걸 쓰고, 없으면(아직 한 번도
  * 못 받음, 또는 CAM) 기존처럼 전역 응답성 설정으로 폴백 */
-uint32_t node_hub_node_timeout_ms(const node_hub_node_t *n)
+/* 2026-10-28 — 종류·주소만으로(콘 재시작 직후 아직 소식이 없는 자리 주인의 유예 시간에도 씀) */
+static uint32_t timeout_ms_for(uint8_t kind, const uint8_t *mac)
 {
-    if (n && n->kind == HUB_NODE_KIND_BORIL) return BORIL_NODE_TIMEOUT_MS;
+    if (kind == HUB_NODE_KIND_BORIL) return BORIL_NODE_TIMEOUT_MS;
     /* 2026-10-27(사용자 지적 — 센스를 빼도 측정 주기 10분이라 한참 "끊김"이 안 뜸) — 센스가 인사에 실어 보내는 값은 측정 주기라
      * (esp_now_node_cask.c sleep_interval_sec = 샘플 주기) 끊김 판단이 측정 주기 × 6(10분이면 1시간)이 됐음. 살아 있는지는 응답 주기
      * 안에서 봐야 하므로, 콘이 실제로 보내는 잠잘 시간(send_cask_sleep_now — 응답 주기와 측정 주기 중 짧은 쪽)을 기준으로 함.
      * 콘이 정해 보내는 값이니 콘이 기준을 쥠(센스가 보내는 값에 기대지 않음) */
     uint32_t interval_sec = device_config_get_response_interval_sec();
-    if (n && n->kind == HUB_NODE_KIND_SENS && interval_sec != 0) {
-        uint32_t measure_sec = device_config_get_sens_sample_interval_sec(n->mac);
+    if (kind == HUB_NODE_KIND_SENS && mac && interval_sec != 0) {
+        uint32_t measure_sec = device_config_get_sens_sample_interval_sec(mac);
         if (measure_sec < interval_sec) interval_sec = measure_sec;
     }
     if (interval_sec == 0) return NODE_HUB_NODE_TIMEOUT_MS;
     uint32_t computed = interval_sec * 1000U * HUB_NODE_TIMEOUT_MARGIN_MULT;
     return computed > NODE_HUB_NODE_TIMEOUT_MS ? computed : NODE_HUB_NODE_TIMEOUT_MS;
+}
+
+uint32_t node_hub_node_timeout_ms(const node_hub_node_t *n)
+{
+    return n ? timeout_ms_for(n->kind, n->mac) : timeout_ms_for(HUB_NODE_KIND_UNKNOWN, NULL);
 }
 
 int node_hub_get_nodes(hub_node_kind_t kind, node_hub_node_t *out, int max)
@@ -1279,7 +1505,7 @@ hub_conn_state_t node_hub_get_conn_state(const uint8_t *mac)
     bool ever_paired = n && n->ever_paired;
     bool radio_paired = n && (n->conn_state == NODE_CONN_PAIRED);
     bool recently_active = n && (elapsed_ms(now_ms, n->last_seen_ms) < HUB_NODE_ACTIVE_WINDOW_MS);
-    bool user_unpaired = n && n->user_unpaired;
+    bool user_unpaired = n && (n->user_unpaired || n->slot_kicked);   /* 2026-10-28 — 자리를 잃어 풀린 기기도 대기 */
     xSemaphoreGive(s_nodes_mutex);
 
     /* 2026-08-21 — user_unpaired(사용자가 명시적으로 "연결해제"를 누른 상태)는
@@ -1348,15 +1574,16 @@ static void node_hub_pair(const uint8_t *mac, bool manual)
 /* 2026-08-24(사용자 지시) — "연결" 버튼의 새 진입점. 여기선 아무것도 안 보내고 플래그만
  * 세움 — 실제 전송은 ADVERTISE 핸들러가 이 노드의 광고를 실제로 받는 순간에 node_hub_pair()
  * 를 부르면서 함(그 순간 채널이 같다는 게 이미 증명됨) */
-node_quota_class_t node_hub_request_pair(const uint8_t *mac)
+node_slot_gate_t node_hub_request_pair(const uint8_t *mac)
 {
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     node_hub_node_t *n = find_node(mac);
     char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
     bool ok = (n && n->conn_state != NODE_CONN_PAIRED);
-    /* 2026-09-28(페어링 구성 강제) — 종류를 아는 기기면 지금 바로 판정해서, 상한이면 요청 자체를 안 받음 */
-    node_quota_class_t full = ok ? quota_full_locked(n) : NODE_QUOTA_NONE;
-    if (full != NODE_QUOTA_NONE) ok = false;
+    /* 2026-09-28(페어링 구성 강제) → 2026-10-28(고정 자리) — 센서 목록을 아는 기기면 지금 바로 판정해서, 자리가 정해지지
+     * 않으면 요청 자체를 안 받음(호출부가 대치 팝업) */
+    node_slot_gate_t gate = ok ? slot_gate_locked(n, NULL) : NODE_GATE_OK;
+    if (gate != NODE_GATE_OK) ok = false;
     if (ok) {
         n->user_unpaired = false;
         n->user_pair_wanted = true;
@@ -1367,7 +1594,7 @@ node_quota_class_t node_hub_request_pair(const uint8_t *mac)
     if (ok) {
         ESP_LOGI(TAG_LINK, "%s connect requested - PAIR_REQUEST on next ADVERTISE", name_copy);
     }
-    return full;
+    return gate;
 }
 
 void node_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)

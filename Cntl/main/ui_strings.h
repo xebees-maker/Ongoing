@@ -457,16 +457,25 @@ typedef enum {
     /* 2026-09-18(사용자 지시 — "설정에서 로그를 시스템 판넬에 넣어. Log 공백 View 단추 형식으로") */
     STR_BTN_VIEW,                /* 시스템 판넬의 로그 행 버튼: "보기" / "View" */
 
-    /* 2026-09-28(사용자 설계 — 페어링 구성 강제) */
-    STR_QUOTA_CLASS_CAM,         /* "카메라" / "Camera" */
-    STR_QUOTA_CLASS_FINE,        /* "정밀 센서" / "Fine sensor" */
-    STR_QUOTA_CLASS_BASIC,       /* "간이 센서" / "Basic sensor" */
-    STR_QUOTA_CLASS_AMMONIA,     /* "암모니아 센서" / "Ammonia sensor" */
-    STR_QUOTA_CLASS_AGAR,        /* "Agar 센서" / "Agar sensor" */
-    STR_MSG_PAIR_QUOTA_FULL_FMT, /* %s=그룹명, %u=상한 */
-    STR_STATUS_QUOTA_FULL,
+    /* 2026-09-28(사용자 설계 — 페어링 구성 강제) → 2026-10-28(고정 자리 — sensor_registry.h) */
+    STR_STATUS_QUOTA_FULL,       /* 대기 목록 상태: 자리의 기기가 연결돼 있음 "상한 초과" / "Limit reached" */
+    STR_STATUS_CHOOSE,           /* 대기 목록 상태: 대치/신규를 골라야 함 */
     STR_PENDING_AS_WAS,          /* 2026-10-27 — 대기 목록: 접속한 적 있는 기기 "이전:" / "As was" + 별명 */
-    STR_PENDING_NEW,             /* 2026-10-27 — 대기 목록: 처음 보는 기기 "새 장치" / "Newly incoming" */       /* 대기 목록 상태: "상한 초과" / "Limit reached" */
+    STR_PENDING_NEW,             /* 2026-10-27 — 대기 목록: 처음 보는 기기 "새 장치" / "Newly incoming" */
+    STR_TITLE_SLOT,              /* 대치 팝업 제목 */
+    STR_MSG_SLOT_REPLACE_FMT,    /* %s=새 기기, %s=기존 자리 */
+    STR_MSG_SLOT_ASK_FMT,        /* %s=새 기기 */
+    STR_MSG_SLOT_REPLACE_LIVE_FMT, /* %s=연결된 기존 자리 */
+    STR_BTN_REPLACE,
+    STR_BTN_NEW,
+    STR_SLOT_LIVE,               /* 자리 상태: 연결됨 */
+    STR_SLOT_NOT_LIVE,           /* 자리 상태: 연결 없음 */
+    STR_CAM_SLOT_FMT,            /* 캠 자리 이름, %u=1..2 */
+    STR_BTN_FORGET,              /* 기기 팝업: 완전히 지우기 */
+    STR_MSG_FORGET_CONFIRM_FMT,  /* %s=기기 또는 자리 */
+    STR_LABEL_SLOTS,             /* 설정: 자리 목록 행 */
+    STR_TITLE_SLOTS,             /* 자리 목록 팝업 제목 */
+    STR_SLOTS_EMPTY,             /* 자리 목록이 비었음 */
     STR_CAMERA_POPUP_LOADING,    /* 카메라 팝업을 연 직후 */
     STR_CAMERA_POPUP_NONE,       /* 연결된 적 있는 카메라도, 사진도 없음 */
     STR_AGAR_SLOT_FMT,           /* 기기 없는 Agar 슬롯 이름, %d=1..3 */

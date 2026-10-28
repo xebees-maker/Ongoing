@@ -988,6 +988,14 @@ static uint32_t sd_read_range_locked(uint64_t start_record, uint64_t end_record,
     return got;
 }
 
+/* 2026-10-28(완전히 지우기) — 지운 기록(센싱 0)을 빼고 앞으로 당김. 반환 = 남은 개수 */
+static uint32_t drop_removed(stats_record_t *r, uint32_t n)
+{
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++) if (r[i].sensing != 0) r[k++] = r[i];
+    return k;
+}
+
 uint32_t stats_store_read_page(uint32_t page_index, uint32_t page_size,
                                 stats_record_t *out, uint32_t out_cap)
 {
@@ -1015,7 +1023,7 @@ uint32_t stats_store_read_page(uint32_t page_index, uint32_t page_size,
     if (start < sdn) {
         uint64_t e = (end < sdn) ? end : sdn;
         got = sd_read_range_locked(start, e, out);
-        if (got != (uint32_t)(e - start)) { unlock(); return got; }
+        if (got != (uint32_t)(e - start)) { unlock(); return drop_removed(out, got); }
     }
     uint64_t pos = start + got;
     if (pos < end && pos < sdn + lfn) {
@@ -1023,7 +1031,7 @@ uint32_t stats_store_read_page(uint32_t page_index, uint32_t page_size,
         uint32_t want = (uint32_t)(e - pos);
         uint32_t r = lfs_read_unsynced_locked((uint32_t)(pos - sdn), want, out + got);
         got += r;
-        if (r != want) { unlock(); return got; }
+        if (r != want) { unlock(); return drop_removed(out, got); }
         pos += r;
     }
     while (pos < end) {
@@ -1031,7 +1039,7 @@ uint32_t stats_store_read_page(uint32_t page_index, uint32_t page_size,
         pos++;
     }
     unlock();
-    return got;
+    return drop_removed(out, got);
 }
 
 /* ---- "cutoff 이후" 순차 순회(read_since / min_max_avg_since / min_max 공용) ----
@@ -2085,6 +2093,143 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
 #define APPEND_Q_DEPTH 32
 #define APPEND_MAX_RECS 8
 /* 2026-10-08 — fn이 있으면 측정값 대신 "통신 밖에서 할 저장 작업"(stats_store_post_job) */
+/* ════════════════════════════════════════════════════════════
+ * 2026-10-28(사용자 설계 — 고정 자리) — 센싱 번호 바꾸기(자리 합치기)·지우기(완전히 지우기)
+ * 원시 기록(12바이트)과 집계 칸(13바이트) 모두 센싱 번호가 4바이트째, 값 종류가 6바이트째 — 파일 크기를 바꾸지 않고 그 자리에서
+ * 고쳐 씀. 지우기 = 센싱 0·값 종류 0(값 종류로 거르는 조회는 저절로 건너뜀, 기록 목록은 drop_removed, 그래프는 센싱 0을 건너뜀).
+ * 파일 하나씩 잠가서(화면이 오래 멈추지 않게), 매시 옮기기·복원과는 s_sync_mtx로 겹치지 않게
+ * ════════════════════════════════════════════════════════════ */
+#define REMAP_PAIRS   4
+#define REMAP_BUF     (12 * 13 * 32)   /* 12·13바이트 레코드가 둘 다 딱 나눠지는 크기 */
+typedef struct { uint16_t from[REMAP_PAIRS]; uint16_t to[REMAP_PAIRS]; } remap_arg_t;
+_Static_assert(sizeof(remap_arg_t) <= STATS_STORE_JOB_ARG_MAX, "remap arg too big");
+_Static_assert(offsetof(stats_record_t, sensing) == 4 && offsetof(stats_record_t, chan_type) == 6, "record layout");
+_Static_assert(offsetof(stats_bucket_t, sensing) == 4 && offsetof(stats_bucket_t, chan_type) == 6, "bucket layout");
+
+static bool remap_one(uint16_t *sensing, uint8_t *chan_type, const remap_arg_t *m)
+{
+    for (int k = 0; k < REMAP_PAIRS; k++) {
+        if (!m->from[k] || *sensing != m->from[k]) continue;
+        *sensing = m->to[k];
+        if (!m->to[k]) *chan_type = 0;
+        return true;
+    }
+    return false;
+}
+
+static void remap_state(agg_state_t *st, const remap_arg_t *m)
+{
+    for (int i = 0; i < st->n; i++) {
+        uint16_t s = st->sensing[i];
+        uint8_t ct = st->slot_ct[i];
+        if (!remap_one(&s, &ct, m)) continue;
+        st->sensing[i] = s;
+        st->slot_ct[i] = ct;
+        if (s == 0 && st->acc) for (int sc = 0; sc < STATS_SCALE_COUNT; sc++) memset(&st->acc[sc][i], 0, sizeof(agg_accum_t));
+    }
+}
+
+/* 한 파일. 반환 = 고친 레코드 수. 실패는 로그 */
+static uint32_t remap_file(const char *path, size_t rec_size, const remap_arg_t *m, uint8_t *buf)
+{
+    FILE *f = fopen(path, "r+b");
+    if (!f) { if (errno != ENOENT) ESP_LOGE(TAG, "Remap open failed (errno=%d): %s", errno, path); return 0; }
+    size_t per = REMAP_BUF / rec_size;
+    uint32_t changed = 0;
+    long pos = 0;
+    size_t got;
+    while ((got = fread(buf, rec_size, per, f)) > 0) {
+        bool dirty = false;
+        for (size_t i = 0; i < got; i++) {
+            uint8_t *r = buf + i * rec_size;
+            uint16_t sg;
+            memcpy(&sg, r + 4, 2);
+            if (!remap_one(&sg, &r[6], m)) continue;
+            memcpy(r + 4, &sg, 2);
+            dirty = true;
+            changed++;
+        }
+        if (dirty && (fseek(f, pos, SEEK_SET) != 0 || fwrite(buf, rec_size, got, f) != got)) {
+            ESP_LOGE(TAG, "Remap write failed (errno=%d): %s", errno, path);
+            break;
+        }
+        pos += (long)(got * rec_size);
+        if (fseek(f, pos, SEEK_SET) != 0) break;   /* 쓰기 뒤 읽기 전에 위치를 다시 잡음 */
+    }
+    if (fclose(f) != 0) ESP_LOGE(TAG, "Remap close failed (errno=%d): %s", errno, path);
+    return changed;
+}
+
+static void remap_job(const uint8_t *arg)
+{
+    remap_arg_t m;
+    memcpy(&m, arg, sizeof(m));
+    uint8_t *buf = heap_caps_malloc(REMAP_BUF, MALLOC_CAP_SPIRAM);
+    if (!buf) { ESP_LOGE(TAG, "Remap buffer alloc failed"); return; }
+    if (s_sync_mtx) xSemaphoreTake(s_sync_mtx, portMAX_DELAY);
+    uint32_t n_ram = 0, n_lfs = 0, n_raw = 0, n_agg = 0;
+
+    lock();
+    for (uint32_t i = 0; i < s_rbuf_n; i++) {
+        uint16_t sg = s_rbuf[i].sensing;
+        uint8_t ct = s_rbuf[i].chan_type;
+        if (remap_one(&sg, &ct, &m)) { s_rbuf[i].sensing = sg; s_rbuf[i].chan_type = ct; n_ram++; }
+    }
+    for (uint32_t k = 0; k < s_disp_n; k++) {
+        uint16_t sg = s_disp[k].rec.sensing;
+        uint8_t ct = s_disp[k].rec.chan_type;
+        if (remap_one(&sg, &ct, &m)) { s_disp[k].rec.sensing = sg; s_disp[k].rec.chan_type = ct; n_ram++; }
+    }
+    remap_state(&s_live, &m);
+    remap_state(&s_regen, &m);
+    uint32_t days[LFS_MAX_DAYS];
+    int nd = s_lfs_nd;
+    for (int i = 0; i < nd; i++) days[i] = s_lfs_days[i].day;
+    unlock();
+
+    for (int i = 0; i < nd; i++) {   /* 내부 플래시 날 파일 */
+        char path[40];
+        lfs_day_path(days[i], path, sizeof(path));
+        lock();
+        n_lfs += remap_file(path, sizeof(stats_record_t), &m, buf);
+        unlock();
+    }
+    if (sd_storage_is_mounted()) {   /* SD 주 파일(원시·집계) */
+        for (uint32_t i = 0;; i++) {
+            lock();
+            if (!s_weeks || i >= s_week_count) { unlock(); break; }
+            uint32_t week = s_weeks[i].week;
+            char path[48];
+            raw_path(week, path, sizeof(path));
+            n_raw += remap_file(path, sizeof(stats_record_t), &m, buf);
+            for (uint8_t sc = 0; sc < STATS_SCALE_COUNT; sc++) {
+                agg_path(sc, week, path, sizeof(path));
+                n_agg += remap_file(path, sizeof(stats_bucket_t), &m, buf);
+            }
+            unlock();
+        }
+    }
+    if (s_sync_mtx) xSemaphoreGive(s_sync_mtx);
+    heap_caps_free(buf);
+    ESP_LOGW(TAG, "Sensing remap %u->%u %u->%u %u->%u %u->%u done: RAM %u, flash %u, SD raw %u, SD aggregate %u",
+             (unsigned)m.from[0], (unsigned)m.to[0], (unsigned)m.from[1], (unsigned)m.to[1], (unsigned)m.from[2], (unsigned)m.to[2],
+             (unsigned)m.from[3], (unsigned)m.to[3], (unsigned)n_ram, (unsigned)n_lfs, (unsigned)n_raw, (unsigned)n_agg);
+}
+
+bool stats_store_remap_sensings(const uint16_t *from, const uint16_t *to, int n)
+{
+    bool ok = true;
+    for (int base = 0; base < n; base += REMAP_PAIRS) {
+        remap_arg_t m = { 0 };
+        for (int k = 0; k < REMAP_PAIRS && base + k < n; k++) {
+            m.from[k] = from[base + k];
+            m.to[k] = to ? to[base + k] : 0;
+        }
+        ok &= stats_store_post_job(remap_job, &m, sizeof(m));
+    }
+    return ok;
+}
+
 typedef struct {
     uint8_t count;
     stats_record_t recs[APPEND_MAX_RECS];

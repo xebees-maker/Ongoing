@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stddef.h>
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_heap_caps.h"
 
 static const char *TAG = "SYS";
@@ -191,20 +192,26 @@ static void device_config_save(void)
         ESP_LOGW(TAG, "Save failed (fopen): %s", DEVICE_CONFIG_PATH);
         return;
     }
-    device_config_file_t s = {
-        .version = DEVICE_CONFIG_VERSION,
-        .response_interval_sec   = s_response_interval_sec,
-        .adaptive_response_sec   = s_adaptive_response_sec,
-        .wifi_ap_mode            = s_wifi_ap_mode ? 1 : 0,
-        .auto_connect_known      = s_auto_connect_known ? 1 : 0,
-        .auto_connect_new        = s_auto_connect_new ? 1 : 0,
-    };
-    memcpy(s.sta_credentials, s_sta_credentials, sizeof(s.sta_credentials));
-    memcpy(s.sens_intervals, s_sens_intervals, sizeof(s.sens_intervals));
-    memcpy(s.aliases, s_aliases, sizeof(s.aliases));
-    memcpy(s.cam_settings, s_cam_settings, sizeof(s.cam_settings));
-    fwrite(&s, sizeof(s), 1, f);
+    /* 2026-10-28 — 파일 내용(약 1.4KB)은 PSRAM에(스택에 큰 구조체 안 둠 — 여러 태스크에서 불림) */
+    device_config_file_t *s = heap_caps_calloc(1, sizeof(*s), MALLOC_CAP_SPIRAM);
+    if (!s) {
+        fclose(f);
+        ESP_LOGW(TAG, "Save failed (no memory)");
+        return;
+    }
+    s->version = DEVICE_CONFIG_VERSION;
+    s->response_interval_sec = s_response_interval_sec;
+    s->adaptive_response_sec = s_adaptive_response_sec;
+    s->wifi_ap_mode          = s_wifi_ap_mode ? 1 : 0;
+    s->auto_connect_known    = s_auto_connect_known ? 1 : 0;
+    s->auto_connect_new      = s_auto_connect_new ? 1 : 0;
+    memcpy(s->sta_credentials, s_sta_credentials, sizeof(s->sta_credentials));
+    memcpy(s->sens_intervals, s_sens_intervals, sizeof(s->sens_intervals));
+    memcpy(s->aliases, s_aliases, sizeof(s->aliases));
+    memcpy(s->cam_settings, s_cam_settings, sizeof(s->cam_settings));
+    fwrite(s, sizeof(*s), 1, f);
     fclose(f);
+    heap_caps_free(s);
 }
 
 void device_config_load(void)
@@ -615,6 +622,49 @@ void device_config_mark_known_device(const uint8_t *mac)
 {
     if (find_alias_slot(mac)) return;
     device_config_set_alias(mac, "");
+}
+
+/* 2026-10-28(사용자 설계 — 고정 자리) — 대치: 옛 보드의 설정(별명, 측정 주기, 캠 설정)을 새 보드로(설정은 자리에 속함).
+ * 별명은 옮김 — 옛 보드는 별명을 비워 기기 번호로 보임(복사하면 같은 이름 보드가 둘 생겨 사용자가 엉뚱한 보드를 고침, 10-28 실기).
+ * 파일을 쓰므로 기록 태스크에서만 부름(통신 태스크 스택에서 부르면 넘침 — 10-28 크래시) */
+void device_config_move_device(const uint8_t *from, const uint8_t *to)
+{
+    if (!from || !to || memcmp(from, to, 6) == 0) return;
+    alias_entry_t *a = find_alias_slot(from);
+    if (a) {
+        device_config_set_alias(to, a->alias);   /* to의 칸은 다른 칸이라 그대로 넘김(스택에 복사 안 둠) */
+        a->alias[0] = '\0';                      /* 칸(알고 있는 기기 기록)은 남김 */
+        alias_disp_refresh((int)(a - s_aliases));
+    }
+    if (device_config_sens_sample_interval_is_set(from)) {
+        device_config_set_sens_sample_interval_sec(to, device_config_get_sens_sample_interval_sec(from));
+    }
+    cam_settings_entry_t *c = find_cam_settings_slot(from);
+    if (c) {
+        cam_settings_entry_t *d = find_or_create_cam_settings_slot(to);
+        if (d) {
+            cam_settings_entry_t keep = *c;
+            memcpy(keep.mac, to, 6);
+            *d = keep;
+        }
+    }
+    device_config_save();
+    ESP_LOGI(TAG, "Device settings moved " MACSTR " -> " MACSTR, MAC2STR(from), MAC2STR(to));
+}
+
+/* 2026-10-28(사용자 설계) — 완전히 지우기: 그 보드의 별명(= 알고 있는 기기 기록), 측정 주기, 캠 설정을 지움 */
+void device_config_forget_device(const uint8_t *mac)
+{
+    if (!mac) return;
+    bool changed = false;
+    alias_entry_t *a = find_alias_slot(mac);
+    if (a) { memset(a, 0, sizeof(*a)); alias_disp_refresh((int)(a - s_aliases)); changed = true; }
+    for (int i = 0; s_sens_intervals && i < SENS_INTERVAL_SLOTS; i++) {
+        if (s_sens_intervals[i].in_use && memcmp(s_sens_intervals[i].mac, mac, 6) == 0) { memset(&s_sens_intervals[i], 0, sizeof(s_sens_intervals[i])); changed = true; }
+    }
+    cam_settings_entry_t *c = find_cam_settings_slot(mac);
+    if (c) { memset(c, 0, sizeof(*c)); changed = true; }
+    if (changed) device_config_save();
 }
 
 bool device_config_get_auto_connect_known(void) { return s_auto_connect_known; }

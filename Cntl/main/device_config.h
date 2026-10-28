@@ -118,6 +118,10 @@ bool        device_config_is_known_device(const uint8_t *mac);
 /* 페어링 성공 시 node_hub가 호출 — 슬롯이 없으면 alias 빈 문자열로 새로 만듦(이미 있으면
  * 손 안 댐, 기존 alias 보존) */
 void        device_config_mark_known_device(const uint8_t *mac);
+/* 2026-10-28(사용자 설계 — 고정 자리) — 대치 때 옛 보드 설정을 새 보드로 옮김(별명은 옛 보드에서 비움, 파일 씀 — 기록 태스크에서만) /
+ * 완전히 지우기 때 그 보드 설정을 지움 */
+void        device_config_move_device(const uint8_t *from, const uint8_t *to);
+void        device_config_forget_device(const uint8_t *mac);
 
 /* 자동연결(2026-09-08, 사용자 설계) — 대기중 장치를 수동 확인 없이 즉시 페어링.
  * auto_connect_new가 켜지면 처음 보는 장치까지 포함하므로 auto_connect_known을 사실상

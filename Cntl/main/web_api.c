@@ -904,7 +904,9 @@ static esp_err_t api_cam_list_get_handler(httpd_req_t *req)
     for (int k = 0; k < nk; k++) {  /* 사진 이력만 있는 캠 */
         bool listed = false;
         for (int i = 0; i < n && !listed; i++) {
-            listed = memcmp(nodes[i].mac, known[k], 6) == 0 && node_hub_get_conn_state(nodes[i].mac) != HUB_CONN_STATE_WAITING;
+            uint8_t key[6];   /* 2026-10-28(고정 자리) — 대치된 캠은 옛 캠의 사진 폴더를 씀 */
+            sreg_cam_storage_mac(nodes[i].mac, key);
+            listed = memcmp(key, known[k], 6) == 0 && node_hub_get_conn_state(nodes[i].mac) != HUB_CONN_STATE_WAITING;
         }
         if (listed) continue;
         jb_printf(&b, "%s{\"mac\":", out++ ? "," : "");
@@ -1476,6 +1478,19 @@ static esp_err_t api_alarm_sim_post_handler(httpd_req_t *req)
     return send_simple(req, NULL, "{\"ok\":true}");
 }
 
+/* 2026-10-28(임시 — 출시 전 제거, 메모리 project_cntl_test_apis_remove_later) — POST /api/sensing/merge?from=10&to=1
+ * 10-27에 갈라진 자리 합치기: from 자리의 센서를 to 자리로 옮기고 from 자리를 지운 뒤, 저장된 기록의 센싱 번호도 from → to */
+static esp_err_t api_sensing_merge_post_handler(httpd_req_t *req)
+{
+    if (!web_auth_check(req)) return web_auth_reject(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    int from = query_int(s_w->query, "from", 0), to = query_int(s_w->query, "to", 0);
+    if (from <= 0 || to <= 0 || !sreg_merge_sensing((uint16_t)from, (uint16_t)to)) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    uint16_t f = (uint16_t)from, t = (uint16_t)to;
+    stats_store_remap_sensings(&f, &t, 1);
+    return send_simple(req, NULL, "{\"ok\":true}");
+}
+
 /* POST /api/stats/delete_all — 콘 Record 팝업 Delete All 확인 Yes와 같음 */
 static esp_err_t api_stats_delete_all_post_handler(httpd_req_t *req)
 {
@@ -1548,8 +1563,10 @@ void web_api_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &notify_test_uri);
     static const httpd_uri_t alarms_uri = { .uri = "/api/alarms", .method = HTTP_GET, .handler = api_alarms_get_handler };
     static const httpd_uri_t alarm_sim_uri = { .uri = "/api/alarm_sim", .method = HTTP_POST, .handler = api_alarm_sim_post_handler };
+    static const httpd_uri_t sensing_merge_uri = { .uri = "/api/sensing/merge", .method = HTTP_POST, .handler = api_sensing_merge_post_handler };   /* 10-28 임시 */
     httpd_register_uri_handler(server, &alarms_uri);
     httpd_register_uri_handler(server, &alarm_sim_uri);
+    httpd_register_uri_handler(server, &sensing_merge_uri);
     static const httpd_uri_t cam_list_uri = { .uri = "/api/cam/list", .method = HTTP_GET, .handler = api_cam_list_get_handler };
     static const httpd_uri_t cam_photos_uri = { .uri = "/api/cam/photos", .method = HTTP_GET, .handler = api_cam_photos_get_handler };
     static const httpd_uri_t cam_photo_uri = { .uri = "/api/cam/photo", .method = HTTP_GET, .handler = api_cam_photo_get_handler };

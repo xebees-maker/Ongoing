@@ -231,6 +231,8 @@ static lv_obj_t *s_auto_connect_known_switch = NULL;
 static lv_obj_t *s_auto_connect_known_label  = NULL;
 static lv_obj_t *s_auto_connect_new_switch   = NULL;
 static lv_obj_t *s_auto_connect_new_label    = NULL;
+static lv_obj_t *s_slots_label                = NULL;   /* 2026-10-28 — 설정: 센서·캠 자리 */
+static void cb_option_slots_btn_tap(lv_event_t *e);
 
 /* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영) — "자동 노출/색"(AGC·AEC·AWB 함께, 예전 AGC·AEC 스위치 둘을 대신함)과 끈 때의 수동값
  * (노출 줄, 게인 배, AWB R·G·B 배) — 카메라별, 스위치는 즉시 저장, 수동값은 적용 버튼 */
@@ -596,7 +598,10 @@ static lv_obj_t *s_stats_delete_lbl  = NULL;
 /* 이 슬롯의 가장 가까운 실측값까지 거리(슬롯 단위)가 이보다 크면 "근거 부족" — 겹침
  * 차트(s_stats_gap_chart)를 점선 스타일 선으로 표시(LV_PART_ITEMS의 line_dash_width/gap,
  * lv_chart.c가 이 스타일을 그대로 벡터 드로잉에 반영함 확인) */
-#define STATS_GRAPH_LOW_SUPPORT_SLOTS 3
+#define STATS_GRAPH_LOW_SUPPORT_SLOTS 3   /* 측정 주기를 모를 때(자리에 보드가 없음)만 씀 */
+/* 2026-10-28(사용자 지적 — "실제 데이터가 없는 경우만 점선") — 측정 주기를 아는 계열은 빈 구간이 주기의 이 배수를 넘을 때만 점선
+ * (측정이 빠짐). 실제 간격은 설정 주기보다 조금 김(SCD41 600초 설정 → 약 685초) */
+#define STATS_GRAPH_MISSING_FACTOR    2
 static lv_obj_t          *s_stats_chart               = NULL;  /* 실데이터 — 선만(점마커 숨김) */
 static lv_obj_t          *s_stats_gap_chart           = NULL;  /* 2026-09-11(그래프 재설계) —
     * "값이 없는 슬롯마다 그 자리에 계열 고정높이로 점만" — s_stats_chart의 자식으로 만들어
@@ -1316,6 +1321,7 @@ static void refresh_lang_texts(void)
         lv_label_set_text(s_network_label, ui_str(STR_LABEL_NETWORK));
         lv_label_set_text(s_auto_connect_known_label, ui_str(STR_LABEL_AUTO_CONNECT_KNOWN));
         lv_label_set_text(s_auto_connect_new_label, ui_str(STR_LABEL_AUTO_CONNECT_NEW));
+        if (s_slots_label) lv_label_set_text(s_slots_label, ui_str(STR_LABEL_SLOTS));
         /* 2026-08-29 버그수정 — 캡션을 무조건 "찾기"로 덮어쓰면 연결된 상태(캡션=SSID)일 때
          * 언어 전환 시 SSID가 사라지고 "찾기"로 잘못 바뀜. 현재 상태 기준으로 다시 계산 */
         refresh_network_right_zone();
@@ -2229,42 +2235,193 @@ static void fill_rgb565_dsc(lv_image_dsc_t *dsc, uint8_t *pixel_buf, uint16_t w,
 /* ════════════════════════════════════════════════════════════
  * 장치 연결/설정 팝업 — 미연결(연결 허용 확인) / 연결됨(설정+연결해제)
  * ════════════════════════════════════════════════════════════ */
-/* 2026-09-28(사용자 설계 — 페어링 구성 강제) — 수동 연결이 그룹 상한으로 거절됐을 때의 알림 팝업 */
-static void show_pair_quota_popup(node_quota_class_t cls)
+/* ════════════════════════════════════════════════════════════
+ * 2026-10-28(사용자 설계 — 고정 자리, sensor_registry.h) — 대치 팝업. 새 보드의 센서가 자리를 못 정하면(자리가 1개인 종류인데
+ * 그 자리의 기기가 연결돼 있음 / 자리가 여럿인 종류) 센서마다 하나씩 물음. 고른 것은 node_hub에 기억시키고 다시 연결 요청 —
+ * 남은 질문이 있으면 다음 팝업. 예전(09-28)의 "상한 초과, 먼저 연결 해제하세요" 알림을 대신함
+ * ════════════════════════════════════════════════════════════ */
+static void stats_sensing_label(uint16_t sensing, uint8_t chan_type, uint8_t attr, char *out, size_t cap);
+static uint8_t stats_sensing_attr(const sreg_sensing_t *g);
+
+typedef struct {
+    uint8_t          mac[6];
+    sreg_decision_t  dec;
+    sreg_plan_t      plan;
+    sreg_plan_item_t item;     /* 지금 묻는 센서 */
+    int              pick;     /* 고른 후보(연결된 기기 확인용) */
+    char             text[256];
+    char             cand_text[SREG_MAX_SLOTS][96];
+} slot_question_t;
+static slot_question_t *s_slotq = NULL;   /* PSRAM, 처음 쓸 때 */
+
+/* 자리 이름: 캠은 "캠 N", 센서는 그래프·기록과 같은 센싱 이름 */
+static void slot_label(uint16_t sensing, char *out, size_t cap)
 {
-    static const ui_str_id_t s_class_str[NODE_QUOTA_COUNT] = {
-        [NODE_QUOTA_NONE]    = STR_QUOTA_CLASS_CAM,  /* 안 쓰임(NONE은 거절 사유가 아님) */
-        [NODE_QUOTA_CAM]     = STR_QUOTA_CLASS_CAM,
-        [NODE_QUOTA_FINE]    = STR_QUOTA_CLASS_FINE,
-        [NODE_QUOTA_BASIC]   = STR_QUOTA_CLASS_BASIC,
-        [NODE_QUOTA_AMMONIA] = STR_QUOTA_CLASS_AMMONIA,
-        [NODE_QUOTA_AGAR]    = STR_QUOTA_CLASS_AGAR,
-    };
-    if (cls <= NODE_QUOTA_NONE || cls >= NODE_QUOTA_COUNT) return;
-    char msg[160];
-    snprintf(msg, sizeof(msg), ui_str(STR_MSG_PAIR_QUOTA_FULL_FMT), ui_str(s_class_str[cls]),
-             (unsigned)node_hub_quota_limit(cls));
-    show_alert_popup(msg, MODAL_KIND_WARNING);
+    sreg_sensing_t g;
+    if (!sreg_get_sensing(sensing, &g)) { snprintf(out, cap, "#%u", (unsigned)sensing); return; }
+    if (g.what == SREG_WHAT_CAMERA) { snprintf(out, cap, ui_str(STR_CAM_SLOT_FMT), (unsigned)g.ordinal); return; }
+    stats_sensing_label(g.id, g.what, stats_sensing_attr(&g), out, cap);
 }
 
-/* 처음 보는 센스는 종류를 PAIR_ACK에서야 알아서, 거절이 recv 태스크에서 늦게 옴 — LVGL 태스크로 넘겨 팝업 */
-static void cb_async_pair_quota_popup(void *user_data)
+/* 보드 이름: 별명, 없으면 주소 끝 3바이트(기기 이름 "S023E04"의 뒤와 같음) */
+static void board_label(const uint8_t mac[6], char *out, size_t cap)
 {
-    show_pair_quota_popup((node_quota_class_t)(intptr_t)user_data);
+    const char *a = device_config_get_alias_display(mac);
+    if (a[0]) snprintf(out, cap, "%s", a);
+    else snprintf(out, cap, "%02X%02X%02X", mac[3], mac[4], mac[5]);
 }
 
-static void on_pair_rejected_event(const uint8_t mac[6], node_quota_class_t cls)
+/* 후보 한 줄: "자리 (보드) · 연결됨" */
+static void slot_cand_text(const sreg_cand_t *c, char *out, size_t cap)
 {
-    (void)mac;
-    ui_post(cb_async_pair_quota_popup, (void *)(intptr_t)cls);
+    char sl[40], bl[40];
+    slot_label(c->sensing, sl, sizeof(sl));
+    if (c->sensor) board_label(c->board, bl, sizeof(bl));
+    else bl[0] = '\0';
+    snprintf(out, cap, "%s%s%s%s · %s", sl, bl[0] ? " (" : "", bl, bl[0] ? ")" : "",
+             ui_str(c->live ? STR_SLOT_LIVE : STR_SLOT_NOT_LIVE));
+}
+
+static void show_slot_question_popup(void);
+
+/* 고른 것을 기억하고 다시 연결 요청 — 다 정해지면 연결이 진행되고, 남은 질문이 있으면 다음 팝업 */
+static void slot_choose(uint16_t target)
+{
+    sreg_decision_t *d = &s_slotq->dec;
+    int k = 0;
+    while (k < d->n && d->c[k].port != s_slotq->item.port) k++;
+    if (k == d->n) {
+        if (d->n >= ESP_NOW_MAX_SENSORS) return;
+        d->n++;
+    }
+    d->c[k].port = s_slotq->item.port;
+    d->c[k].target = target;
+    node_hub_set_slot_decision(s_slotq->mac, d);
+    if (node_hub_request_pair(s_slotq->mac) != NODE_GATE_OK) show_slot_question_popup();
+}
+
+/* 연결된 기존 기기를 끊고 그 자리를 대치(확인 뒤) */
+static void slot_replace_live_yes(void *ctx)
+{
+    (void)ctx;
+    const sreg_cand_t *c = &s_slotq->item.cand[s_slotq->pick];
+    node_hub_unpair(c->board);
+    slot_choose(c->sensor);
+}
+
+static void cb_slot_pick(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    cb_modal_close(e);
+    if (i < 0) { slot_choose(0); return; }   /* 신규 */
+    s_slotq->pick = i;
+    const sreg_cand_t *c = &s_slotq->item.cand[i];
+    if (!c->live) { slot_choose(c->sensor); return; }
+    snprintf(s_slotq->text, sizeof(s_slotq->text), ui_str(STR_MSG_SLOT_REPLACE_LIVE_FMT), s_slotq->cand_text[i]);
+    show_confirm_popup(s_slotq->text, MODAL_KIND_WARNING, slot_replace_live_yes, NULL);
+}
+
+/* 모달 버튼(글을 직접 받음 — 후보 이름) */
+static lv_obj_t *add_modal_text_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb, void *user_data)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
+    lv_obj_set_user_data(btn, (void *)cb);   /* 웹 합성용(add_modal_button과 같음) */
+    lv_obj_set_width(btn, LV_PCT(100));
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_center(lbl);
+    return btn;
+}
+
+static void show_slot_question_popup(void)
+{
+    if (!s_slotq) return;
+    node_hub_slot_gate(s_slotq->mac, &s_slotq->plan);
+    const sreg_plan_item_t *it = NULL;
+    for (int i = 0; i < s_slotq->plan.n && !it; i++) {
+        uint8_t st = s_slotq->plan.it[i].state;
+        if (st == SREG_ITEM_ASK || st == SREG_ITEM_BLOCKED) it = &s_slotq->plan.it[i];
+    }
+    if (!it) return;
+    s_slotq->item = *it;
+    it = &s_slotq->item;
+    char newname[40];
+    board_label(s_slotq->mac, newname, sizeof(newname));
+    for (int i = 0; i < it->ncand; i++) slot_cand_text(&it->cand[i], s_slotq->cand_text[i], sizeof(s_slotq->cand_text[i]));
+
+    lv_obj_t *box = create_modal();
+    create_modal_title(box, STR_TITLE_SLOT, MODAL_KIND_NORMAL);
+    lv_obj_t *msg = lv_label_create(box);
+    lv_obj_set_width(msg, LV_PCT(100));
+    lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(msg, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    if (it->state == SREG_ITEM_BLOCKED) {
+        /* 자리가 1개인 종류 — 연결된 기존 기기를 끊고 대치할지 */
+        int c = 0;
+        while (c < it->ncand && it->cand[c].sensor != it->target) c++;
+        if (c == it->ncand) c = 0;
+        s_slotq->pick = c;
+        snprintf(s_slotq->text, sizeof(s_slotq->text), ui_str(STR_MSG_SLOT_REPLACE_FMT), newname,
+                 it->ncand ? s_slotq->cand_text[c] : "?");
+        lv_label_set_text(msg, s_slotq->text);
+        s_confirm_state.fn = slot_replace_live_yes;
+        s_confirm_state.ctx = NULL;
+        lv_obj_t *btn_row = create_modal_btn_row(box);
+        add_modal_button(btn_row, STR_BTN_CANCEL, cb_modal_close, NULL);
+        add_modal_button(btn_row, STR_BTN_REPLACE, cb_confirm_yes_trampoline, &s_confirm_state);
+        return;
+    }
+    /* 자리가 여럿인 종류 — 대치할 자리를 고르거나 신규 */
+    snprintf(s_slotq->text, sizeof(s_slotq->text), ui_str(STR_MSG_SLOT_ASK_FMT), newname);
+    lv_label_set_text(msg, s_slotq->text);
+    lv_obj_t *col = lv_obj_create(box);
+    lv_obj_set_size(col, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(col, 0, 0);
+    lv_obj_set_style_pad_all(col, 0, 0);
+    lv_obj_set_style_pad_row(col, 6, 0);
+    for (int i = 0; i < it->ncand; i++) {
+        if (!it->cand[i].sensor) continue;   /* 센서 없는 옛 자리는 고를 수 없음(자리 목록에서 지움) */
+        add_modal_text_button(col, s_slotq->cand_text[i], cb_slot_pick, (void *)(intptr_t)i);
+    }
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    add_modal_button(btn_row, STR_BTN_CANCEL, cb_modal_close, NULL);
+    if (it->can_new) add_modal_button(btn_row, STR_BTN_NEW, cb_slot_pick, (void *)(intptr_t)-1);
+}
+
+static void start_slot_question(const uint8_t mac[6])
+{
+    if (!s_slotq) s_slotq = heap_caps_calloc(1, sizeof(*s_slotq), MALLOC_CAP_SPIRAM);
+    if (!s_slotq) return;
+    if (memcmp(s_slotq->mac, mac, 6) != 0) memset(&s_slotq->dec, 0, sizeof(s_slotq->dec));   /* 다른 기기면 새로 */
+    memcpy(s_slotq->mac, mac, 6);
+    show_slot_question_popup();
+}
+
+/* 처음 보는 센스는 센서 목록을 PAIR_ACK에서야 알아서, 거절이 recv 태스크에서 늦게 옴 — LVGL 태스크로 넘겨 팝업 */
+static uint8_t s_rejected_mac[6];
+static void cb_async_slot_question(void *user_data)
+{
+    (void)user_data;
+    start_slot_question(s_rejected_mac);
+}
+
+static void on_pair_rejected_event(const uint8_t mac[6], node_slot_gate_t gate)
+{
+    (void)gate;
+    memcpy(s_rejected_mac, mac, 6);
+    ui_post(cb_async_slot_question, NULL);
 }
 
 static void cb_pair_confirm(lv_event_t *e)
 {
     node_hub_node_t *node = (node_hub_node_t *)lv_event_get_user_data(e);
-    node_quota_class_t full = node_hub_request_pair(node->mac);
+    node_slot_gate_t gate = node_hub_request_pair(node->mac);
     cb_modal_close(e);
-    if (full != NODE_QUOTA_NONE) show_pair_quota_popup(full);
+    if (gate != NODE_GATE_OK) start_slot_question(node->mac);
 }
 
 static void cb_unpair_confirm(void *ctx)
@@ -2375,9 +2532,10 @@ static void refresh_camera_row_status_text(void)
         ui_str_id_t status_id = (st == HUB_CONN_STATE_WAITING) ? STR_STATUS_CONNECTING
                                : (st == HUB_CONN_STATE_ACTIVE) ? STR_STATUS_ACTIVE
                                : STR_STATUS_PAIRED;
-        /* 2026-09-28(페어링 구성 강제) — 그룹 상한 때문에 자동 연결이 거절되는 기기 */
-        if (st == HUB_CONN_STATE_WAITING && node_hub_is_quota_blocked(s_camera_row_macs[i])) {
-            status_id = STR_STATUS_QUOTA_FULL;
+        /* 2026-09-28(페어링 구성 강제) → 2026-10-28(고정 자리) — 자리가 정해지지 않아 자동 연결이 안 되는 기기 */
+        if (st == HUB_CONN_STATE_WAITING) {
+            node_slot_gate_t g = node_hub_slot_gate(s_camera_row_macs[i], NULL);
+            if (g != NODE_GATE_OK) status_id = (g == NODE_GATE_ASK) ? STR_STATUS_CHOOSE : STR_STATUS_QUOTA_FULL;
         }
         const char *txt = pending_row_text(s_camera_row_macs[i], s_camera_row_names[i], status_id);
         lv_obj_t *lbl = lv_obj_get_child(s_camera_row_objs[i], 0);
@@ -2514,9 +2672,10 @@ static void refresh_sensor_row_status_text(void)
         ui_str_id_t status_id = (st == HUB_CONN_STATE_WAITING) ? STR_STATUS_CONNECTING
                                : (st == HUB_CONN_STATE_ACTIVE) ? STR_STATUS_ACTIVE
                                : STR_STATUS_PAIRED;
-        /* 2026-09-28(페어링 구성 강제) — 그룹 상한 때문에 자동 연결이 거절되는 기기 */
-        if (st == HUB_CONN_STATE_WAITING && node_hub_is_quota_blocked(s_sensor_row_macs[i])) {
-            status_id = STR_STATUS_QUOTA_FULL;
+        /* 2026-09-28(페어링 구성 강제) → 2026-10-28(고정 자리) — 자리가 정해지지 않아 자동 연결이 안 되는 기기 */
+        if (st == HUB_CONN_STATE_WAITING) {
+            node_slot_gate_t g = node_hub_slot_gate(s_sensor_row_macs[i], NULL);
+            if (g != NODE_GATE_OK) status_id = (g == NODE_GATE_ASK) ? STR_STATUS_CHOOSE : STR_STATUS_QUOTA_FULL;
         }
         const char *txt = pending_row_text(s_sensor_row_macs[i], s_sensor_row_names[i], status_id);
         /* 2026-09-06(실기 발견 — s_summary_row_last_text 선언부 설명 참고) */
@@ -3876,6 +4035,7 @@ static bool stats_window_load(stats_window_t *w, uint8_t scale_idx, uint32_t sta
     if (w->nb == 0 && stats_store_had_io_error()) return false;
     for (uint32_t i = 0; i < w->nb; i++) {
         const stats_bucket_t *bk = &w->b[i];
+        if (bk->sensing == 0) { w->b_series[i] = 0xFF; continue; }   /* 2026-10-28 — 지운 기록(완전히 지우기) */
         int k = 0;
         while (k < w->ns && w->s[k].sensing != bk->sensing) k++;
         if (k == w->ns) {
@@ -4636,12 +4796,30 @@ static void stats_graph_series_compute(const stats_window_t *w, const stats_chai
             if (d->vals[i] > d->mx) d->mx = d->vals[i];
         }
     }
-    /* 슬롯마다 추세값/저신뢰 여부(근처 실측이 STATS_GRAPH_LOW_SUPPORT_SLOTS보다 멀면 저신뢰) */
+    /* 2026-10-28 — 이 계열(센싱)의 지금 보드 측정 주기. 보드가 없으면 0(옛 기준) */
+    uint32_t interval_sec = 0;
+    uint8_t board[6];
+    if (ch->n > 0 && sreg_sensing_board(ch->sensing[0], board)) interval_sec = device_config_get_sens_sample_interval_sec(board);
+    uint32_t missing_sec = interval_sec * STATS_GRAPH_MISSING_FACTOR;
+    /* 슬롯마다 추세값/저신뢰 여부. 주기를 알면: 그 슬롯이 든 빈 구간(앞뒤 실측 칸 사이, 한쪽만 있으면 그 실측 칸까지)에서 확실히
+     * 비어 있던 시간(사이 빈 칸 수 × 칸 폭 — 칸이 넓은 스케일에서 진행 중인 마지막 칸을 빠짐으로 보지 않게)이 missing_sec보다
+     * 길면 저신뢰. 모르면: 근처 실측이 STATS_GRAPH_LOW_SUPPORT_SLOTS보다 멀면 저신뢰 */
+    int prev_has = -1;
     for (uint32_t i = 0; i < STATS_GRAPH_POINT_COUNT; i++) {
         int nearest_dist = -1;
         d->trend[i] = 0.0f;
         d->trend_has[i] = stats_graph_local_trend(d->has, d->vals, STATS_GRAPH_POINT_COUNT, (int)i, &nearest_dist, &d->trend[i]);
-        d->low[i] = d->trend_has[i] && (nearest_dist > STATS_GRAPH_LOW_SUPPORT_SLOTS);
+        if (d->has[i]) prev_has = (int)i;
+        if (!d->trend_has[i]) { d->low[i] = false; continue; }
+        if (missing_sec == 0) { d->low[i] = nearest_dist > STATS_GRAPH_LOW_SUPPORT_SLOTS; continue; }
+        if (d->has[i]) { d->low[i] = false; continue; }
+        int next_has = -1;
+        for (uint32_t j = i + 1; j < STATS_GRAPH_POINT_COUNT; j++) if (d->has[j]) { next_has = (int)j; break; }
+        uint32_t span_slots;
+        if (prev_has >= 0 && next_has >= 0) span_slots = (uint32_t)(next_has - prev_has);
+        else if (prev_has >= 0)             span_slots = i - (uint32_t)prev_has;
+        else                                span_slots = (uint32_t)next_has - i;
+        d->low[i] = (span_slots - 1) * w->bucket_width > missing_sec;
     }
 }
 
@@ -5666,7 +5844,9 @@ static void refresh_dashboard(lv_timer_t *t)
     for (int i = 0; i < known_cam_count_raw && dd_count < NODE_HUB_MAX_NODES; i++) {
         bool already_live = false;
         for (int j = 0; j < cam_count; j++) {
-            if (memcmp(known_cam_macs[i], cam_macs[j], 6) == 0) { already_live = true; break; }
+            uint8_t key[6];   /* 2026-10-28(고정 자리) — 대치된 캠은 옛 캠의 사진 폴더를 씀 */
+            sreg_cam_storage_mac(cam_macs[j], key);
+            if (memcmp(known_cam_macs[i], key, 6) == 0) { already_live = true; break; }
         }
         if (already_live) continue;
         memcpy(dd_macs[dd_count], known_cam_macs[i], 6);
@@ -8731,6 +8911,9 @@ static void build_stats_tab(void)
     lv_obj_remove_flag(s_stats_gap_chart, LV_OBJ_FLAG_CLICKABLE);  /* 탭이 밑 실데이터 차트로 전달되게 */
     lv_obj_set_style_bg_opa(s_stats_gap_chart, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_stats_gap_chart, 0, 0);
+    /* 2026-10-28(사용자 지적 — 1시간 그래프가 이어지지 않고 겹쳐 보임) — 테마 여백(pad_small, 약 10px)이 남아 점선이 실선보다
+     * 사방으로 안쪽에 그려져 경계에서 어긋났음. 부모(실선 차트)의 안쪽 영역을 그대로 채우므로 여백 0이어야 좌표가 같음 */
+    lv_obj_set_style_pad_all(s_stats_gap_chart, 0, 0);
     lv_chart_set_type(s_stats_gap_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(s_stats_gap_chart, STATS_GRAPH_POINT_COUNT);
     lv_chart_set_axis_range(s_stats_gap_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
@@ -8741,7 +8924,7 @@ static void build_stats_tab(void)
      * 실데이터 차트(s_stats_chart)와 저신뢰 구간이 겹쳐 그려지던 버그(실선+점 동시 표시)도
      * refresh_stats_graph()에서 두 시리즈가 같은 슬롯에 동시에 값을 안 갖도록 상호배타적으로
      * 고침 — 경계 슬롯 하나씩만 겹쳐서 실선<->점선이 끊김 없이 이어지게 함 */
-    lv_obj_set_style_line_width(s_stats_gap_chart, 2, LV_PART_ITEMS);
+    lv_obj_set_style_line_width(s_stats_gap_chart, lv_obj_get_style_line_width(s_stats_chart, LV_PART_ITEMS), LV_PART_ITEMS);   /* 실선과 같은 굵기 */
     lv_obj_set_style_line_dash_width(s_stats_gap_chart, 6, LV_PART_ITEMS);
     lv_obj_set_style_line_dash_gap(s_stats_gap_chart, 5, LV_PART_ITEMS);
     lv_obj_set_style_width(s_stats_gap_chart, 0, LV_PART_INDICATOR);
@@ -8990,6 +9173,24 @@ static void cb_device_disconnect_clicked(lv_event_t *e)
     char msg[64];
     snprintf(msg, sizeof(msg), "%s\n%s", s_device_popup_node.name, ui_str(STR_MSG_UNPAIR_CONFIRM));
     show_confirm_popup(msg, MODAL_KIND_NORMAL, cb_device_disconnect_confirm, &s_device_popup_node);
+}
+
+/* 2026-10-28(사용자 설계) — 완전히 지우기: 연결을 끊고 이 보드의 자리·센서·기록·설정(캠은 사진)을 지움 */
+static void cb_device_forget_confirm(void *ctx)
+{
+    node_hub_node_t *node = (node_hub_node_t *)ctx;
+    node_hub_forget_board(node->mac);
+    teardown_device_popup();
+}
+
+static void cb_device_forget_clicked(lv_event_t *e)
+{
+    (void)e;
+    static char *s_forget_msg = NULL;   /* PSRAM, 처음 쓸 때 */
+    if (!s_forget_msg) s_forget_msg = heap_caps_malloc(200, MALLOC_CAP_SPIRAM);
+    if (!s_forget_msg) return;
+    snprintf(s_forget_msg, 200, ui_str(STR_MSG_FORGET_CONFIRM_FMT), s_device_popup_node.name);
+    show_confirm_popup(s_forget_msg, MODAL_KIND_WARNING, cb_device_forget_confirm, &s_device_popup_node);
 }
 
 static void cb_close_device_popup(lv_event_t *e)
@@ -9366,7 +9567,20 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
 
         disconnect_parent = bottom_row;
     }
-    lv_obj_t *disconnect_btn = lv_button_create(disconnect_parent);
+    /* 2026-10-28(사용자 설계 — 고정 자리) — 연결끊기 왼쪽에 "완전히 지우기"(자리·기록·설정까지, 되돌릴 수 없어 경고 확인) */
+    lv_obj_t *end_cluster = lv_obj_create(disconnect_parent);
+    lv_obj_set_size(end_cluster, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(end_cluster, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(end_cluster, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(end_cluster, 0, 0);
+    lv_obj_set_style_pad_all(end_cluster, 0, 0);
+    lv_obj_set_style_pad_column(end_cluster, 12, 0);
+    lv_obj_t *forget_btn = lv_button_create(end_cluster);
+    lv_obj_add_event_cb(forget_btn, cb_device_forget_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *forget_lbl = lv_label_create(forget_btn);
+    lv_label_set_text(forget_lbl, ui_str(STR_BTN_FORGET));
+    lv_obj_set_style_text_font(forget_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_t *disconnect_btn = lv_button_create(end_cluster);
     s_device_disconnect_btn = disconnect_btn;
     lv_obj_set_style_bg_color(disconnect_btn, lv_palette_main(LV_PALETTE_RED), 0);
     lv_obj_add_event_cb(disconnect_btn, cb_device_disconnect_clicked, LV_EVENT_CLICKED, NULL);
@@ -10753,6 +10967,7 @@ static void teardown_option_tab(void)
     s_auto_connect_known_label = NULL;
     s_auto_connect_new_switch = NULL;
     s_auto_connect_new_label = NULL;
+    s_slots_label = NULL;
 }
 
 /* 2026-09-08(재설계) — s_option_content(설정 팝업의 헤더 아래 콘텐츠 영역) 안에 설정
@@ -10859,6 +11074,23 @@ static void build_option_tab(void)
         lv_obj_add_state(s_auto_connect_known_switch, LV_STATE_DISABLED);
     }
     lv_obj_add_event_cb(s_auto_connect_known_switch, cb_auto_connect_known_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* 2026-10-28(사용자 설계 — 고정 자리) — 센서·캠 자리 목록(전원이 꺼져 대기 목록에 안 보이는 보드의 자리도 여기서 완전히 지움) */
+    lv_obj_t *slots_row = lv_obj_create(cntl_box);
+    lv_obj_set_size(slots_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(slots_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(slots_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(slots_row, 0, 0);
+    lv_obj_set_style_pad_hor(slots_row, 12, 0);
+    lv_obj_set_style_pad_ver(slots_row, 0, 0);
+    s_slots_label = lv_label_create(slots_row);
+    lv_label_set_text(s_slots_label, ui_str(STR_LABEL_SLOTS));
+    lv_obj_set_style_text_font(s_slots_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_t *slots_view_btn = lv_button_create(create_row_right_cluster(slots_row));
+    lv_obj_add_event_cb(slots_view_btn, cb_option_slots_btn_tap, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *slots_view_lbl = lv_label_create(slots_view_btn);
+    lv_label_set_text(slots_view_lbl, ui_str(STR_BTN_VIEW));
+    lv_obj_set_style_text_font(slots_view_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 재시작 버튼 — 물리적 전원 재연결 없이 소프트 리셋(2026-08-01, 사용자 요청) */
     lv_obj_t *restart_row = lv_obj_create(cntl_box);
@@ -11176,6 +11408,127 @@ static void cb_settings_btn_tap(lv_event_t *e)
 }
 
 /* 설정 팝업 안 "로그" 버튼 — 같은 팝업 안에서 콘텐츠만 바꿔치기(설정 지우고 로그 지음) */
+/* ════════════════════════════════════════════════════════════
+ * 2026-10-28(사용자 설계 — 고정 자리) — 자리 목록 팝업(설정 > 센서·캠 자리). 줄 = 센서 하나(그 센서의 자리들) 또는 센서 없는 옛 자리.
+ * 연결된 보드의 자리는 지우기 단추 없음(기기 팝업의 "완전히 지우기"로 — 연결된 채 자리만 지우면 다음 연결 때 바로 다시 생김)
+ * ════════════════════════════════════════════════════════════ */
+typedef struct {
+    sreg_slot_row_t rows[SREG_MAX_SENSORS + SREG_MAX_SENSINGS];
+    int             n;
+    int             pick;
+    char            text[200];
+    char            row[160];
+} slots_view_t;
+static slots_view_t *s_slots = NULL;   /* PSRAM, 처음 쓸 때 */
+static lv_obj_t *s_slots_popup = NULL;
+static lv_obj_t *s_slots_list = NULL;
+
+static bool slot_board_connected(const sreg_slot_row_t *r)
+{
+    return r->sensor && node_hub_get_conn_state(r->board) != HUB_CONN_STATE_WAITING;
+}
+
+/* "자리, 자리 (보드) · 연결됨" */
+static void slot_row_text(const sreg_slot_row_t *r, char *out, size_t cap)
+{
+    size_t n = 0;
+    out[0] = '\0';
+    for (int k = 0; k < r->nsensing && n < cap; k++) {
+        char sl[40];
+        slot_label(r->sensing[k], sl, sizeof(sl));
+        int w = snprintf(out + n, cap - n, "%s%s", k ? ", " : "", sl);
+        if (w > 0) n += (size_t)w;
+    }
+    if (r->sensor && n < cap) {
+        char bl[40];
+        board_label(r->board, bl, sizeof(bl));
+        int w = snprintf(out + n, cap - n, " (%s)", bl);
+        if (w > 0) n += (size_t)w;
+    }
+    if (n < cap) snprintf(out + n, cap - n, " · %s", ui_str(slot_board_connected(r) ? STR_SLOT_LIVE : STR_SLOT_NOT_LIVE));
+}
+
+static void cb_slot_delete(lv_event_t *e);
+
+static void slots_fill(void)
+{
+    if (!s_slots_list || !s_slots) return;
+    lv_obj_clean(s_slots_list);
+    s_slots->n = sreg_list_slots(s_slots->rows, (int)(sizeof(s_slots->rows) / sizeof(s_slots->rows[0])));
+    if (s_slots->n == 0) {
+        lv_obj_t *l = lv_label_create(s_slots_list);
+        lv_label_set_text(l, ui_str(STR_SLOTS_EMPTY));
+        lv_obj_set_style_text_font(l, ui_font_get(UI_FONT_SIZE_18), 0);
+        return;
+    }
+    for (int i = 0; i < s_slots->n; i++) {
+        const sreg_slot_row_t *r = &s_slots->rows[i];
+        lv_obj_t *row = lv_obj_create(s_slots_list);
+        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_hor(row, 12, 0);
+        lv_obj_set_style_pad_ver(row, 4, 0);
+        slot_row_text(r, s_slots->text, sizeof(s_slots->text));
+        lv_obj_t *l = lv_label_create(row);
+        lv_label_set_text(l, s_slots->text);
+        lv_obj_set_flex_grow(l, 1);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_font(l, ui_font_get(UI_FONT_SIZE_18), 0);
+        if (slot_board_connected(r)) continue;
+        lv_obj_t *b = lv_button_create(row);
+        lv_obj_set_style_bg_color(b, lv_palette_main(LV_PALETTE_RED), 0);
+        lv_obj_add_event_cb(b, cb_slot_delete, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *bl = lv_label_create(b);
+        lv_label_set_text(bl, ui_str(STR_BTN_DELETE));
+        lv_obj_set_style_text_font(bl, ui_font_get(UI_FONT_SIZE_18), 0);
+    }
+}
+
+static void cb_slot_delete_yes(void *ctx)
+{
+    (void)ctx;
+    if (!s_slots || s_slots->pick < 0 || s_slots->pick >= s_slots->n) return;
+    node_hub_forget_slot_row(&s_slots->rows[s_slots->pick]);
+    slots_fill();
+}
+
+static void cb_slot_delete(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (!s_slots || i < 0 || i >= s_slots->n) return;
+    s_slots->pick = i;
+    slot_row_text(&s_slots->rows[i], s_slots->row, sizeof(s_slots->row));
+    snprintf(s_slots->text, sizeof(s_slots->text), ui_str(STR_MSG_FORGET_CONFIRM_FMT), s_slots->row);
+    show_confirm_popup(s_slots->text, MODAL_KIND_WARNING, cb_slot_delete_yes, NULL);
+}
+
+static void cb_slots_close(lv_event_t *e)
+{
+    (void)e;
+    if (s_slots_popup) lv_obj_delete(s_slots_popup);
+    s_slots_popup = NULL;
+    s_slots_list = NULL;
+}
+
+static void cb_option_slots_btn_tap(lv_event_t *e)
+{
+    (void)e;
+    if (s_slots_popup) return;
+    if (!s_slots) s_slots = heap_caps_calloc(1, sizeof(*s_slots), MALLOC_CAP_SPIRAM);
+    if (!s_slots) return;
+    s_slots_popup = create_page_popup();
+    add_page_popup_header(s_slots_popup, ui_str(STR_TITLE_SLOTS), cb_slots_close, NULL);
+    s_slots_list = lv_obj_create(s_slots_popup);
+    lv_obj_set_width(s_slots_list, LV_PCT(100));
+    lv_obj_set_flex_grow(s_slots_list, 1);
+    lv_obj_set_flex_flow(s_slots_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_border_width(s_slots_list, 0, 0);
+    lv_obj_set_style_pad_row(s_slots_list, 4, 0);
+    slots_fill();
+}
+
 static void cb_option_log_btn_tap(lv_event_t *e)
 {
     (void)e;

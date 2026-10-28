@@ -104,6 +104,8 @@ bool photo_storage_delete(const uint8_t mac[6], uint8_t kind, uint32_t seq);
 
 /* 이 카메라 폴더의 모든 사진 삭제(폴더 자체는 남김) — 실제로 지운 개수 반환 */
 uint32_t photo_storage_delete_all(const uint8_t mac[6]);
+/* 2026-10-28(고정 자리) — 저장 키(캠 자리의 key_mac)로 바로(보드 주소 → 키 변환 없이) — 완전히 지우기용 */
+uint32_t photo_storage_delete_all_key(const uint8_t key[6]);
 
 /* 2026-09-22(사용자 지시 — 카메라 미연결 상태에서도 팝업에서 과거 촬영 이력을 볼 수 있어야
  * 함) — /sdcard/photos/ 밑에 폴더가 존재하는 카메라 MAC 전부(=사진을 한 번이라도 저장한
