@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>SenseThru 기술 소개서</title><link rel="stylesheet" href="common.css"></head><body data-foot="FlexFarm · SenseThru 기술 소개서 · 대외비(NDA) · 초안">
+
+<section class="s cover">
+  <div class="co">FlexFarm</div>
+  <div class="nm">SenseThru</div>
+  <div class="tg">기술 소개서</div>
+  <div class="ds">차폐 환경을 위한 무선 센서 플랫폼의 구조, 통신, 측정, 제어, 복구 기술을 설명합니다.</div>
+  <div class="draft">대외비 · 비밀유지계약(NDA) 체결 후 제공 · 초안 · 2026년 11월</div>
+</section>
+
+<section class="s">
+  <h1>범용 IoT 장비로 유연한 구성을 만드는 네 가지 설계 원칙</h1>
+  <div class="sub">전용 하드웨어 대신 구조와 소프트웨어로 현장의 까다로운 조건을 해결합니다.</div>
+  <div class="grid g2">
+    <div class="card"><h3><span class="num">1</span>판단은 컨트롤러 한 곳에서</h3><p>기록, 그래프, 알림, 제어 판단을 컨트롤러가 맡습니다. 노드는 측정과 통신에 집중하므로 작고 단순하게 유지됩니다.</p></div>
+    <div class="card"><h3><span class="num">2</span>통신과 응용을 계층으로 분리</h3><p>무선 구간의 재전송은 브리지에서 끝냅니다. 컨트롤러는 Wi-Fi와 CAN만 다루고 응용 메시지에 집중합니다.</p></div>
+    <div class="card"><h3><span class="num">3</span>보드가 아니라 측정값 중심</h3><p>사람이 보는 단위는 ‘무엇을 재는 값인가’입니다. 보드와 센서가 바뀌어도 기록과 설정은 측정값의 자리에 남습니다.</p></div>
+    <div class="card"><h3><span class="num">4</span>고장을 전제로 설계</h3><p>일시적 실패는 재시도로 복구하고, 멈춤은 다른 장치가 감지합니다. 복구하지 못하면 원인을 코드와 경과로 남깁니다.</p></div>
+  </div>
+</section>
+
+<section class="s">
+  <h1>전체 구성: 측정부터 제어와 원격 확인까지</h1>
+  <div class="sub">벽을 넘는 것은 안테나 선뿐이고, 브리지와 컨트롤러는 CAN으로 연결합니다(재배사 설치 예).</div>
+  <svg viewBox="0 0 1160 490" width="1160" height="490" font-family="Malgun Gothic, Noto Sans KR, sans-serif">
+    <defs><pattern id="h" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="10" height="10" fill="#7f8f89"/><line x1="0" y1="0" x2="0" y2="10" stroke="#55655f" stroke-width="4"/></pattern>
+    <g id="ant"><line x1="0" y1="0" x2="0" y2="-22" stroke="#17302a" stroke-width="3"/><path d="M-9 -30 L9 -30 L0 -18 Z" fill="#17302a"/></g></defs>
+    <rect x="0" y="0" width="312" height="290" rx="8" fill="#eef4f1"/><rect x="0" y="306" width="312" height="184" rx="8" fill="#eef4f1"/>
+    <rect x="312" y="0" width="22" height="290" fill="url(#h)"/><rect x="312" y="306" width="22" height="184" fill="url(#h)"/>
+    <rect x="334" y="0" width="460" height="490" rx="8" fill="#f6f7f7"/>
+    <text x="16" y="28" font-size="18" font-weight="700" fill="#17302a">차폐 공간 A</text><text x="16" y="334" font-size="18" font-weight="700" fill="#17302a">차폐 공간 B</text>
+    <text x="350" y="28" font-size="18" font-weight="700" fill="#17302a">바깥</text><text x="876" y="28" font-size="18" font-weight="700" fill="#17302a" text-anchor="middle">WAN</text><text x="1055" y="28" font-size="18" font-weight="700" fill="#17302a" text-anchor="middle">원격</text>
+    <g font-size="16" fill="#17302a" text-anchor="middle">
+      <rect x="16" y="44" width="176" height="52" rx="7" fill="#fff" stroke="#0f6b57" stroke-width="1.5"/><text x="104" y="66" font-weight="700">공기 센서 노드</text><text x="104" y="86" font-size="13.5">온습도·CO2</text>
+      <rect x="16" y="104" width="176" height="52" rx="7" fill="#fff" stroke="#0f6b57" stroke-width="1.5"/><text x="104" y="126" font-weight="700">가스 센서 노드</text><text x="104" y="146" font-size="13.5">암모니아</text>
+      <rect x="16" y="164" width="176" height="52" rx="7" fill="#fff" stroke="#0f6b57" stroke-width="1.5"/><text x="104" y="186" font-weight="700">배지 온도 노드</text><text x="104" y="206" font-size="13.5">접촉 온도</text>
+      <rect x="16" y="224" width="176" height="52" rx="7" fill="#fff" stroke="#0f6b57" stroke-width="1.5"/><text x="104" y="246" font-weight="700">카메라 노드</text><text x="104" y="266" font-size="13.5">사진 촬영</text>
+      <rect x="16" y="360" width="176" height="96" rx="7" fill="#fff" stroke="#0f6b57" stroke-width="1.5"/><text x="104" y="398" font-weight="700">원격 제어기</text><text x="104" y="420" font-size="13.5">보일러 등 설비</text>
+      <rect x="392" y="120" width="150" height="80" rx="7" fill="#0f6b57"/><text x="467" y="153" fill="#fff" font-weight="700">브리지</text><text x="467" y="176" fill="#fff" font-size="13.5">노드 무선 전담</text>
+      <rect x="392" y="380" width="150" height="80" rx="7" fill="#0f6b57"/><text x="467" y="413" fill="#fff" font-weight="700">브리지</text><text x="467" y="436" fill="#fff" font-size="13.5">바깥 무선 전담</text>
+      <rect x="612" y="110" width="166" height="100" rx="7" fill="#0a4a3d"/><text x="695" y="146" fill="#fff" font-weight="700">컨트롤러</text><text x="695" y="170" fill="#fff" font-size="13.5">화면·판단·기록</text><text x="695" y="190" fill="#fff" font-size="13.5">Wi-Fi</text>
+      <rect x="612" y="290" width="166" height="96" rx="7" fill="#fff" stroke="#0f6b57" stroke-width="1.5"/><text x="695" y="322" font-weight="700">전력 제어(릴레이)</text><text x="695" y="346" font-size="13.5">팬, 가습기,</text><text x="695" y="366" font-size="13.5">건조기 등</text>
+      <path d="M822 190 C798 190 798 150 826 150 C826 118 874 110 888 134 C912 118 942 138 930 158 C956 162 952 192 926 192 Z" fill="#fff" stroke="#6f7f79" stroke-width="2"/><text x="876" y="166" font-weight="700">인터넷</text>
+      <rect x="980" y="70" width="166" height="70" rx="7" fill="#fff" stroke="#6f7f79" stroke-width="1.5"/><text x="1063" y="112" font-weight="700">휴대폰</text>
+      <rect x="980" y="170" width="166" height="70" rx="7" fill="#fff" stroke="#6f7f79" stroke-width="1.5"/><text x="1063" y="200" font-weight="700">원격 PC</text><text x="1063" y="222" font-size="14">관제센터</text>
+    </g>
+    <use href="#ant" x="262" y="164"/>
+    <g fill="none" stroke="#0f6b57" stroke-width="2" stroke-dasharray="6 5"><path d="M192 70 C225 70 240 110 255 136"/><path d="M192 130 L253 138"/><path d="M192 190 L253 146"/><path d="M192 250 C225 250 240 180 258 150"/><path d="M361 420 L392 420" /></g>
+    <g fill="none" stroke="#17302a" stroke-width="3.5"><path d="M262 164 L262 180 L392 180"/><path d="M192 420 L340 420"/></g>
+    <use href="#ant" x="346" y="420"/>
+    <use href="#ant" x="372" y="420"/>
+    <g fill="none" stroke="#c8622a" stroke-width="5"><path d="M542 160 L612 160"/><path d="M577 160 L577 420 L542 420"/></g>
+    <path d="M695 210 L695 290" stroke="#6f7f79" stroke-width="2.5"/>
+    <path d="M778 160 L802 160" stroke="#6f7f79" stroke-width="2.4" stroke-dasharray="6 5"/>
+    <g stroke="#6f7f79" stroke-width="2.4" fill="none"><path d="M942 150 L980 110"/><path d="M942 170 L980 205"/></g>
+    <g font-size="14.5" fill="#33433f">
+      <rect x="812" y="326" width="24" height="5" fill="#c8622a"/><text x="844" y="334">CAN 유선</text>
+      <line x1="812" y1="360" x2="836" y2="360" stroke="#17302a" stroke-width="3.5"/><text x="844" y="365">안테나 선(벽 통과)</text>
+      <line x1="812" y1="392" x2="836" y2="392" stroke="#0f6b57" stroke-width="2" stroke-dasharray="6 5"/><text x="844" y="397">노드 무선(ESP-NOW)</text>
+      <line x1="812" y1="424" x2="836" y2="424" stroke="#6f7f79" stroke-width="2.4" stroke-dasharray="6 5"/><text x="844" y="429">Wi-Fi</text>
+      <line x1="812" y1="456" x2="836" y2="456" stroke="#6f7f79" stroke-width="2.5"/><text x="844" y="461">유선 출력·인터넷 접속</text>
+    </g>
+  </svg>
+</section>
+
+<section class="s">
+  <h1>전파를 벽 너머로 보내지 않고, 안테나 선 하나로 벽을 넘습니다</h1>
+  <div class="sub">무선 구간은 항상 벽의 한쪽에서 끝나므로, 차폐 정도와 상관없이 통신 경로를 확보할 수 있습니다.</div>
+  <div class="grid g2">
+    <div class="card t"><h3>방식 A: 브리지 안테나가 벽 안으로</h3><p>브리지 본체는 바깥에 둡니다. 안테나 선만 벽 안으로 넣어 안쪽의 센서와 카메라 노드를 담당합니다.</p><p class="note" style="margin-top:9px">재배사처럼 고습한 공간에 맞는 설치입니다. 다른 현장에서는 브리지 본체가 벽 안에 있어도 됩니다.</p></div>
+    <div class="card t"><h3>방식 B: 장치 안테나가 벽 밖으로</h3><p>원격 제어기는 설비 옆, 차폐 공간 안에 둡니다. 외장 안테나 선을 벽 밖으로 빼서 바깥 브리지와 통신합니다.</p><p class="note" style="margin-top:9px">보일러처럼 공간을 옮겨 다니는 설비에 맞습니다.</p></div>
+  </div>
+  <table style="margin-top:22px">
+    <thead><tr><th style="width:270px">항목</th><th>설계 내용</th></tr></thead>
+    <tbody>
+    <tr><th>가혹 환경 대응</th><td>컨트롤러와 브리지는 바깥에 두고 안쪽에는 무선 노드만 둡니다. 고온을 견디는 장치는 별도 설계로 제작하여 공급합니다.</td></tr>
+    <tr><th>채널 분리</th><td>컨트롤러가 공유기 채널을 기준으로 바깥 브리지는 먼 채널, 안쪽 브리지는 바깥 브리지에서 먼 채널을 계산합니다.</td></tr>
+    <tr><th>장치 배정</th><td>센서와 카메라는 안쪽 담당 브리지로, 원격 제어기는 바깥 담당 브리지로 응답해 약한 신호로 잘못 붙는 일을 막습니다.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="s">
+  <h1>구성 장비는 구하기 쉬운 범용 IoT 장비입니다</h1>
+  <div class="sub">전용 칩이나 전용 무선 모듈 없이, 역할에 맞는 ESP32 계열 보드를 조합합니다.</div>
+  <table>
+    <thead><tr><th style="width:170px">구성</th><th style="width:380px">하드웨어</th><th>역할</th></tr></thead>
+    <tbody>
+    <tr><th>컨트롤러</th><td>ESP32-S3, 4.3인치 터치 LCD, SD 카드, 릴레이 출력</td><td>화면, 판단, 기록, 전력 제어, 웹 서버, Wi-Fi 접속</td></tr>
+    <tr><th>브리지</th><td>ESP32-S3, CAN 인터페이스, 외장 안테나</td><td>노드 무선 전담, 신뢰 전송 대행, 사진 수신과 순서 정렬</td></tr>
+    <tr><th>센서 노드</th><td>ESP32-C 계열, 충전 배터리 또는 AC/USB 전원. 고온용 노드는 충전이 필요 없는 교체형 전지</td><td>측정, 딥슬립, 센서 전원 관리</td></tr>
+    <tr><th>카메라 노드</th><td>ESP32-S3, OV5640 또는 OV3660</td><td>주기 촬영, 수동 촬영, 사진 전송</td></tr>
+    <tr><th>원격 제어기</th><td>ESP32-C6, 외장 안테나, 릴레이 모듈, 상시 전원</td><td>차폐 공간 설비의 켜기와 끄기, 통신 두절 시 안전 동작</td></tr>
+    <tr><th>지원 센서</th><td colspan="2">SCD41(CO2), SHT45·SHT40·DHT22(온습도), SC05·MQ137(암모니아), PT100·DS18B20(접촉 온도)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="s">
+  <h1>구간마다 성격에 맞는 통신을 씁니다</h1>
+  <div class="sub">저전력 무선, 신뢰성 높은 유선, 범용 인터넷 접속을 역할별로 나눕니다.</div>
+  <div class="grid g3">
+    <div class="card"><h3>노드 ↔ 브리지</h3><div class="big" style="font-size:29px">ESP-NOW</div><p style="margin-top:9px">2.4GHz 무선입니다. 접속 절차가 가벼워 짧게 깨어나는 노드에 적합합니다.</p></div>
+    <div class="card"><h3>브리지 ↔ 컨트롤러</h3><div class="big" style="font-size:29px">CAN 1 Mbps</div><p style="margin-top:9px">ISO-TP(ISO 15765-2)로 긴 메시지를 나눠 전송합니다. 데이지 체인으로 브리지를 연결합니다.</p></div>
+    <div class="card"><h3>컨트롤러 ↔ 원격</h3><div class="big" style="font-size:29px">Wi-Fi · WAN</div><p style="margin-top:9px">웹 화면과 실시간 갱신, 휴대폰 알림에 사용합니다.</p></div>
+  </div>
+  <div class="grid g2" style="margin-top:18px">
+    <div class="card t"><h3>제어와 데이터를 분리</h3><p>브리지마다 제어용과 데이터용 CAN ID를 따로 둡니다. 제어 ID가 낮아 사진을 전송하는 중에도 명령이 먼저 지나갑니다.</p></div>
+    <div class="card t"><h3>컨트롤러의 무선 부담 제거</h3><p>컨트롤러는 Wi-Fi만 쓰고, 노드 무선은 브리지가 전담합니다. 화면과 기록에 쓸 메모리를 확보하기 위한 설계입니다.</p></div>
+  </div>
+</section>
+
+<section class="s">
+  <h1>한 노드의 지연이 다른 노드를 막지 않습니다</h1>
+  <div class="sub">재전송은 무선 구간을 가장 잘 아는 브리지가 대신 처리합니다.</div>
+  <div class="steps" style="grid-template-columns:repeat(4,1fr)">
+    <div class="step"><b>1. 요청</b><span>컨트롤러가 노드별 순서를 지켜 요청을 CAN 제어 채널로 보냅니다.</span></div>
+    <div class="step"><b>2. 대행</b><span>브리지가 슬롯을 잡고 바로 다음 요청을 받습니다. 기다리며 막지 않습니다.</span></div>
+    <div class="step"><b>3. 재시도</b><span>브리지가 노드 응답을 대조하고, 없으면 정해진 횟수만큼 다시 보냅니다.</span></div>
+    <div class="step"><b>4. 결과</b><span>성공이나 실패 결과만 CAN으로 컨트롤러에 알립니다.</span></div>
+  </div>
+  <div class="grid g3" style="margin-top:28px">
+    <div class="card"><h3>노드별 독립 처리</h3><p>노드당 요청은 한 번에 하나이고, 서로 다른 노드의 요청은 동시에 진행합니다.</p></div>
+    <div class="card"><h3>막히지 않는 수신</h3><p>수신 콜백과 처리 태스크는 복사와 분류만 하며, 상대 응답을 기다리지 않습니다.</p></div>
+    <div class="card"><h3>모든 대기에 상한</h3><p>기다림마다 시간 한도를 두고, 바깥 대기가 안쪽 대기보다 길도록 맞춥니다.</p></div>
+  </div>
+  <p class="note" style="margin-top:18px">페어링, 설정, 상태 보고처럼 상태가 중요한 메시지는 응답 확인과 재전송을 기본으로 합니다.</p>
+</section>
+
+<section class="s">
+  <h1>사진은 빠진 조각만 다시 받고, 끝에서 무결성을 확인합니다</h1>
+  <div class="sub">작은 메모리로 큰 사진을 받기 위해, 전체를 모으지 않고 받는 대로 저장합니다.</div>
+  <div class="steps" style="grid-template-columns:repeat(4,1fr)">
+    <div class="step"><b>1. 선택 재전송</b><span>1,200바이트 조각을 16개 창 단위로 보내고, 빠진 조각만 다시 보냅니다.</span></div>
+    <div class="step"><b>2. 순서 정렬</b><span>브리지는 순서만 맞춰 전달합니다. 사진 전체를 들고 있지 않습니다.</span></div>
+    <div class="step"><b>3. 흐름 제어</b><span>CAN 전송이 밀리면 브리지가 응답을 늦춰 카메라 속도를 맞춥니다.</span></div>
+    <div class="step"><b>4. 무결성 확인</b><span>컨트롤러가 SD에 순차 저장하고, CRC가 맞을 때만 파일을 확정합니다.</span></div>
+  </div>
+  <div class="grid g2" style="margin-top:28px">
+    <div class="card t"><h3>실패 시 자동 재촬영</h3><p>주기 촬영이 실패하면 다음 접속 때 다시 찍습니다. 처음 촬영을 포함해 최대 3회 시도하고, 그래도 실패하면 E4005로 알립니다.</p></div>
+    <div class="card t"><h3>자체 시험 결과</h3><p>카메라 2대, 약 520KB 사진으로 90초 시험에서 동시 전송을 포함해 4장을 모두 받았고, 약 16.5만 프레임 동안 브리지 버스 에러는 0이었습니다.</p></div>
+  </div>
+  <p class="note" style="margin-top:16px">자체 시험은 2026년 9월 26일 실기 기록이며, 한 차례 측정값입니다.</p>
+</section>
+
+<section class="s">
+  <h1>응답 주기와 측정 주기를 나눠 반응성과 전력을 함께 잡습니다</h1>
+  <div class="sub">노드는 응답할 때 약 1초만 깨어납니다. 센서는 측정할 때만 켜집니다.</div>
+  <div class="steps" style="grid-template-columns:repeat(6,1fr)">
+    <div class="step"><b>1. 깨어남</b><span>응답 주기로 깨어납니다.</span></div>
+    <div class="step"><b>2. 센서 시작</b><span>측정할 때면 센서를 먼저 깨웁니다.</span></div>
+    <div class="step"><b>3. 통신</b><span>설정과 명령을 받고, 지난 값을 보냅니다.</span></div>
+    <div class="step sl"><b>4. 딥슬립</b><span>센서가 안정될 때까지 잠듭니다.</span></div>
+    <div class="step"><b>5. 값 읽기</b><span>무선 없이 깨어 값을 읽고 저장합니다.</span></div>
+    <div class="step sl"><b>6. 딥슬립</b><span>다음 응답 주기까지 잠듭니다.</span></div>
+  </div>
+  <div class="grid g3" style="margin-top:26px">
+    <div class="card"><div class="big">수 초 ~ 10분</div><p style="margin-top:8px">응답 주기입니다. 짧을수록 반응이 빠르고, 길수록 배터리가 오래갑니다.</p></div>
+    <div class="card"><div class="big">1분 ~ 1시간</div><p style="margin-top:8px">측정 주기입니다. 센서별로 컨트롤러에서 정해 보냅니다.</p></div>
+    <div class="card"><div class="big">컨트롤러가 결정</div><p style="margin-top:8px">두 주기 중 짧은 쪽을 잠잘 시간으로 보내고, 노드는 측정 주기가 지났을 때만 잽니다.</p></div>
+  </div>
+  <p class="note" style="margin-top:16px">끊김 판단도 측정 주기가 아니라 응답 주기를 기준으로 합니다. 장치와 설정에 따라 충전이나 교체 없이 최대 3개월 이상 사용할 수 있습니다(2000mAh, 응답 주기 10분, 측정 1시간 기준 계산값, 실측 전).</p>
+</section>
+
+<section class="s">
+  <h1>측정 방식은 실험 데이터로 정했습니다: CO2 센서의 예</h1>
+  <div class="sub">단발 측정보다 깨운 뒤 연속 측정이 정확했고, 8번째 값에서 충분히 안정됐습니다.</div>
+  <div class="grid g2" style="grid-template-columns:1.15fr 1fr;gap:24px">
+    <div><table>
+      <thead><tr><th style="width:190px">깨운 뒤 측정 순서</th><th>최종값에서 벗어난 최대 폭</th></tr></thead>
+      <tbody>
+      <tr><th>1번째</th><td>360 ppm</td></tr><tr><th>3번째</th><td>95 ppm</td></tr><tr><th>5번째</th><td>36 ppm</td></tr><tr><th>6번째</th><td>25 ppm</td></tr>
+      <tr><th style="color:var(--brand)">8번째(채택)</th><td style="font-weight:700;color:var(--brand)">7 ppm</td></tr><tr><th>10번째</th><td>2 ppm</td></tr>
+      </tbody></table>
+      <p class="note" style="margin-top:12px">같은 자리에 보드 2대를 두고 10분마다 깨워 13번씩 측정했습니다(2026년 10월 27일, 6시간 교차 실험).</p></div>
+    <div class="grid" style="align-content:start">
+      <div class="card t"><h3>연속 측정으로 8번째 값 사용</h3><p>8번 측정 기준 흔들림은 연속 ±7 ppm, 단발 ±35 ppm(95%)입니다.</p></div>
+      <div class="card"><h3>기다리는 동안 노드는 잠듦</h3><p>약 40초 대기의 소비 에너지는 딥슬립이 약 0.1J, 무선을 끄고 깨어 있을 때 약 3.3J, 켜고 깨어 있을 때 약 12J입니다.</p><p class="note" style="margin-top:6px">깨어 있을 때의 값은 전류 가정치(25mA, 90mA)로 계산했습니다.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="s">
+  <h1>보드, 센서, 측정값을 나눠 교체와 확장에 대비합니다</h1>
+  <div class="sub">기록과 설정은 보드가 아니라 측정값의 자리에 속합니다.</div>
+  <div class="grid g3">
+    <div class="card"><h3>보드</h3><p>통신과 센서 읽기를 맡습니다. 어느 포트에 어떤 센서가 붙었는지를 관리합니다.</p></div>
+    <div class="card"><h3>센서</h3><p>보드에 붙는 부품이자 관리 단위입니다. 컨트롤러가 번호를 붙여 줍니다.</p></div>
+    <div class="card"><h3>측정값(센싱)</h3><p>무엇을, 어디서, 얼마나 정밀하게 재는지로 구분합니다. 기록, 그래프, 이름의 기준입니다.</p></div>
+  </div>
+  <table style="margin-top:20px">
+    <thead><tr><th style="width:230px">상황</th><th>시스템 동작</th></tr></thead>
+    <tbody>
+    <tr><th>원래 보드 재접속</th><td>자기 자리로 돌아갑니다. 사용자에게 묻지 않습니다.</td></tr>
+    <tr><th>자리가 하나인 종류에 새 보드</th><td>기존 보드가 끊겨 있으면 자동으로 이어받고, 연결돼 있으면 사용자에게 대치 여부를 묻습니다.</td></tr>
+    <tr><th>자리가 여럿인 종류에 새 보드</th><td>대치할지 신규로 넣을지 묻습니다. 신규는 다음 빈 자리로 들어갑니다.</td></tr>
+    <tr><th>제거</th><td>끊기는 자리와 기록을 남기고, 완전히 지우기는 자리와 기록, 설정을 모두 지웁니다.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="s">
+  <h1>측정값으로 설비를 직접 제어합니다</h1>
+  <div class="sub">컨트롤러의 주 기능입니다. 직접 연결한 릴레이와 원격 제어기를 같은 방식으로 판단합니다.</div>
+  <div class="grid g4" style="gap:12px">
+    <div class="card" style="padding:14px 17px"><h3>강제</h3><ul><li>켬과 끔을 직접 지정</li><li>자동 해제 시간</li><li>재시작해도 유지</li></ul></div>
+    <div class="card" style="padding:14px 17px"><h3>타이머</h3><ul><li>켜기와 끄기 반복</li><li>낮과 밤을 구분</li></ul></div>
+    <div class="card" style="padding:14px 17px"><h3>센서 AI</h3><ul><li>켜는 값과 끄는 값만 지정</li><li>정밀 센서 우선, 평균, 추세 판단을 자동 적용</li></ul></div>
+    <div class="card" style="padding:14px 17px"><h3>센서 수동</h3><ul><li>그룹 통계나 개별 값 선택</li><li>회귀로 측정 폭만큼 예측</li><li>최소 유지 시간</li></ul></div>
+  </div>
+  <div class="card t" style="margin-top:12px;padding:14px 20px"><h3>통신 단절 시 대책</h3><ul>
+    <li>원격 제어기: 마지막 상태를 유지하다가 설정 시간(10분, 30분, 1시간) 뒤 스스로 끄고, 재연결 때 상태를 맞추고 알립니다.</li>
+    <li>기준 센서: 짧은 끊김은 무시하고 5분을 넘으면 끕니다. 강제 방식은 사람의 명령을 따릅니다.</li>
+    <li>인터넷: 판단은 컨트롤러가 하므로 자동 제어와 현장 화면은 계속됩니다.</li>
+    <li>알림과 기록: 연결, CAN, SD 문제를 에러코드와 휴대폰 알림으로 남깁니다.</li>
+  </ul></div>
+</section>
+
+<section class="s">
+  <h1>기록은 이중으로 저장하고, 쓰기를 검증합니다</h1>
+  <div class="sub">긴 기간의 데이터를 작은 메모리에서 빠르게 보여 주고, SD 카드 오류에 대비합니다.</div>
+  <div class="grid g2">
+    <div class="card"><h3>그래프와 집계</h3><ul><li>1시간, 12시간, 1일, 3일, 1주를 각각 60칸으로 미리 집계</li><li>측정값이 없는 구간은 점선으로 구분</li><li>측정량별 최소 Y축 폭으로 작은 흔들림의 과장 방지</li><li>측정 번호로 재시작 뒤 중복 기록 방지</li></ul></div>
+    <div class="card"><h3>저장 위치</h3><ul><li>내부 플래시에 최근 약 7일 보관</li><li>SD 카드에 장기 보관, 사진과 측정값 예산 9 : 1</li><li>사용량 90%가 되면 80%까지 오래된 것부터 정리</li><li>웹으로 백업과 복원</li></ul></div>
+    <div class="card t"><h3>SD 쓰기 보호</h3><p>쓴 내용과 주변 섹터를 다시 읽어 비교하고, 달라졌으면 맞는 내용으로 다시 씁니다. 결과는 날짜별로 집계합니다.</p></div>
+    <div class="card t"><h3>듀얼 파티션 이중화</h3><p>같은 크기의 파티션 두 개에 함께 기록합니다. 한쪽이 손상되면 정상인 쪽으로 메우고 사용자에게 알립니다.</p></div>
+  </div>
+</section>
+
+<section class="s">
+  <h1>스스로 복구하고, 복구하지 못하면 코드로 알려 줍니다</h1>
+  <div class="sub">실패, 멈춤, 재부팅을 구분해 각각 다른 방법으로 대응합니다.</div>
+  <div class="grid" style="grid-template-columns:1fr 1.15fr;gap:20px">
+    <div class="card"><h3>복구 동작</h3><ol><li>통신 실패: 응답 확인과 재전송</li><li>사진 실패: 조각 재전송, 재촬영</li><li>브리지 멈춤: 무응답 감지 후 리셋 명령</li><li>브리지 재부팅: 노드 상태 초기화, 노드 자동 재접속</li><li>CAN 버스 오프: 즉시 복구 시도</li><li>재전송된 측정값: 번호로 중복 제거</li></ol></div>
+    <div><table>
+      <thead><tr><th style="width:96px">코드</th><th>분류와 예</th></tr></thead>
+      <tbody>
+      <tr><th>E1xxx</th><td>초기 메모리 할당</td></tr>
+      <tr><th>E2xxx</th><td>요청과 연결: 미연결(E2007), 전송 큐 가득 참(E2009)</td></tr>
+      <tr><th>E3xxx</th><td>사진 수신: 조각 누락(E3002), CRC 불일치(E3003)</td></tr>
+      <tr><th>E4xxx</th><td>촬영: 카메라 실패(E4003), 재촬영 포기(E4005)</td></tr>
+      <tr><th>E5xxx</th><td>시스템: SD(E5008·5009), 브리지(E5011), CAN(E5012)</td></tr>
+      <tr><th>W6xxx</th><td>경고: SD 이상 항목, 백업 기한 도래</td></tr>
+      </tbody></table>
+      <p class="note" style="margin-top:10px">센서별 실패 원인과 연속 실패 횟수, 사진 실패 경과도 로그와 알림에 남깁니다.</p></div>
+  </div>
+</section>
+
+<section class="s">
+  <h1>현장 화면과 웹, 휴대폰으로 확인하고 조치합니다</h1>
+  <div class="sub">값과 사진을 멀리서 보고, 설비를 켜고 끄고, 사건 기록을 확인합니다.</div>
+  <div class="grid g3">
+    <div class="card"><h3>컨트롤러 화면</h3><ul><li>4.3인치 터치 조작</li><li>한국어와 영어</li><li>연결, 측정, 제어, 그래프, 사진</li></ul></div>
+    <div class="card"><h3>SPA 웹앱</h3><ul><li>iOS, Android 모두 지원</li><li>로그인과 세션 관리, 실패 5회면 해당 주소 5분 차단</li><li>값, 사진, 릴레이 제어, 설정, 백업</li></ul></div>
+    <div class="card"><h3>휴대폰 알림</h3><ul><li>웹 세션이 있으면 웹앱으로 전달</li><li>없으면 푸시 서비스(ntfy)로 전달</li><li>최근 500건을 SD에 기록</li></ul></div>
+  </div>
+  <div class="card t" style="margin-top:18px"><h3>알림 종류</h3><p>에러, 경고, 릴레이, 연결 끊김, SD, 배터리, CAN으로 나누고, 종류별로 끄고 켭니다. 꺼 둔 종류도 기록에는 남습니다.</p></div>
+  <p class="note" style="margin-top:14px">원격 확인과 푸시 알림에는 인터넷 연결이 필요합니다.</p>
+</section>
+
+<section class="s">
+  <h1>iOS, Android 모두 지원하는 SPA 웹앱입니다</h1>
+  <div class="sub">컨트롤러가 앱을 직접 제공하므로 별도 서버와 앱 설치가 필요 없습니다.</div>
+  <div style="display:grid;grid-template-columns:282px 282px 1fr;gap:22px;align-items:start">
+    <img src="phone_main.png" alt="휴대폰 첫 화면" style="width:282px;border:1px solid var(--line);border-radius:10px;display:block">
+    <img src="phone_graph.png" alt="휴대폰 그래프 화면" style="width:282px;border:1px solid var(--line);border-radius:10px;display:block">
+    <div class="grid" style="gap:12px">
+      <div class="card t" style="padding:14px 20px"><h3>SPA 구조</h3><p>프레임워크 없는 순수 JS입니다. 그래프는 canvas로 직접 그립니다.</p></div>
+      <div class="card" style="padding:14px 20px"><h3>홈 화면 앱</h3><p>홈 화면에 추가하면 브라우저 막대 없이 열립니다.</p></div>
+      <div class="card" style="padding:14px 20px"><h3>실시간 갱신</h3><p>WebSocket으로 바뀐 값만 받고, 끊기면 주기 조회로 넘어갑니다.</p></div>
+      <div class="card" style="padding:14px 20px"><h3>언어와 백업</h3><p>한국어와 영어를 기기별로 고르고, 백업은 웹앱 저장소에 보관합니다.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="s">
+  <h1>새로운 센서와 활용을 더하는 방법</h1>
+  <div class="sub">센서 드라이버를 공용 구성 요소로 두어, 같은 구조 위에 새로운 측정값을 더합니다.</div>
+  <div class="steps" style="grid-template-columns:repeat(4,1fr)">
+    <div class="step"><b>1. 드라이버</b><span>센서 읽기 구성 요소를 더합니다.</span></div>
+    <div class="step"><b>2. 측정값 정의</b><span>값의 종류와 위치, 정밀도를 정합니다.</span></div>
+    <div class="step"><b>3. 보드 보고</b><span>페어링 때 센서 목록을 보내고, 값을 함께 보냅니다.</span></div>
+    <div class="step"><b>4. 자동 반영</b><span>기록, 그래프, 제어 조건에 연결합니다.</span></div>
+  </div>
+  <div class="grid g3" style="margin-top:26px">
+    <div class="card"><h3>모션 감지</h3><p>움직임이 있을 때만 깨어나 보고합니다. 출입과 작업자 유무 확인에 쓸 수 있습니다.</p></div>
+    <div class="card"><h3>라이다 거리 측정</h3><p>거리와 유무 결과만 보내 잔량 측정과 물체 감지에 활용합니다.</p></div>
+    <div class="card"><h3>쓰러진 작업자 위치</h3><p>라이다 처리 장치가 판단한 위치만 전송합니다. 처리 장치와 상시 전원을 함께 설계합니다.</p></div>
+  </div>
+  <p class="note" style="margin-top:16px">세 가지는 구조상 적용 방안이며, 아직 시험하지 않았습니다.</p>
+</section>
+
+<script src="foot.js"></script>
+</body></html>

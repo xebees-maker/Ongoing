@@ -1,0 +1,11 @@
+<!-- 기술 소개서에서 2026-11-05 뺀 쪽(필요하면 tech.html 끝에 다시 넣음) -->
+<section class="s">
+  <h1>현재 설계 한도와 개선 과제</h1>
+  <div class="sub">아래 한도는 코드와 메모리 설계에서 정한 값으로, 하드웨어의 한계가 아닙니다.</div>
+  <div class="grid g2">
+    <div class="card"><h3>현재 설계 값</h3><ul><li>브리지 2대</li><li>보드 8, 센서 12, 측정값 16</li><li>배지 온도 3, 카메라 2, 나머지 종류 각 1</li><li>보드당 센서 4, 채널 5</li></ul></div>
+    <div class="card"><h3>보안</h3><ul><li>웹은 로그인과 시도 제한을 적용</li><li>노드 무선 구간은 현재 암호화하지 않음</li><li>푸시 알림은 암호화 없는 HTTP로 전송</li></ul></div>
+    <div class="card"><h3>확인과 측정 과제</h3><ul><li>배터리 사용 시간 실측</li><li>CO2 외 종류의 교체 시나리오 시험</li><li>SD 쓰기 보호와 이중화의 장기 효과 확인</li></ul></div>
+    <div class="card"><h3>제품화 과제</h3><ul><li>개발용 시험 API 제거</li><li>방폭 등 위험 구역 인증 검토</li><li>3대 이상 브리지와 측정값 확대</li></ul></div>
+  </div>
+</section>
