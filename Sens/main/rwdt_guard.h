@@ -19,3 +19,6 @@
  *         건드림 — RTC 슬로우클럭 기준이라 딥슬립 중에도 계속 카운트되다가, 다음 부팅 때 이
  *         함수가 다시 불리며 자연히 재무장된다. */
 void rwdt_guard_arm(uint32_t total_budget_sec);
+
+/** @brief 2026-11-13 — RWDT 끔. 전원 스위치로 끈 딥슬립(깰 시각 없음) 바로 앞에서만 — 켜 두면 예산이 지나 리셋되며 켜져 버림 */
+void rwdt_guard_disarm(void);

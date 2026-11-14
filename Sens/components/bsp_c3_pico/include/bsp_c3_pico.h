@@ -86,6 +86,12 @@ extern "C" {
 #define BSP_C3_DS18B20_PIN_A    GPIO_NUM_4
 #define BSP_C3_DS18B20_PIN_B    GPIO_NUM_5
 
+/* 2026-11-13(사용자 지시) — 전원 푸시 스위치(GPIO1 ↔ GND, J2 헤더 IO1). 딥슬립에서 깨울 수 있는 핀은 GPIO0~5뿐인데,
+ * 0 = MQ137 AO, 2 = 스트래핑, 3 = 배터리 ADC, 4 = MQ137 DO·PT100 CS·DS18B20 1, 5 = DS18B20 2 — 모든 센스 보드에서 빈 것은 1뿐.
+ * 이 보드에는 32kHz 수정이 없어 GPIO1(XTAL_32K_N)이 비어 있음(sch_c3_pico_v1.0.0). 레거시 상시 동작 빌드(sensor_node.c)는
+ * GPIO1을 VIN 분압 ADC로 쓰지만 그 빌드에는 이 스위치가 없음. Sens/main/power_button.h */
+#define BSP_C3_POWER_BUTTON_PIN GPIO_NUM_1
+
 /* ════════════════════════════════════════════════════════════
  * 배터리 ADC — 보드 내장 분압(R7/R10 100k+100k, JP1 "BAT_AD" 점퍼로 GPIO3에 연결)
  * ════════════════════════════════════════════════════════════ */

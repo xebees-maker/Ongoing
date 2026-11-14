@@ -120,6 +120,8 @@ void esp_now_node_note_scan_restarted(void);
 /* 2026-10-13 — 센서 보정 초기화(SENS_CALIB_RESET). 수신 콜백(esp_now_node_cask.c)이 부르고, 실행은 sens_deep_sleep_node.c가
  * 별도 태스크로(약 2.5초 — 수신 콜백을 막지 않게). 끝나면 esp_now_node_send_calib_ack()로 결과 응답 */
 void sens_node_calib_reset_request(uint16_t seq);
+/* 2026-11-13 — 빠른 측정(SENS_FAST_MEASURE). 수신 콜백이 부름 — 남은 횟수만 늘림(sens_deep_sleep_node.c) */
+void sens_node_fast_measure_request(uint8_t count);
 void esp_now_node_send_calib_ack(uint16_t seq, uint8_t result, uint8_t asc_after);
 
 #else /* DHT22/SHT45/SHT40 헤드리스, 레거시 C6 콤보 — 예전 설계(esp_now_node.c) 그대로 */

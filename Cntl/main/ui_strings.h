@@ -423,7 +423,9 @@ typedef enum {
     STR_FMT_RELAY_SUMMARY,
     /* 2026-10-09 — 릴레이 타이머(할 일 AG) */
     STR_LABEL_RELAY_MODE,             /* 2026-10-09(사용자 설계) — 강제가 꺼졌을 때의 방식 */
-    STR_OPT_RELAY_MODE_LIST,          /* 타이머 / 센서 AI / 센서 수동 */
+    STR_OPT_RELAY_MODE_LIST,          /* 미설정 / 타이머 / 센서 AI / 센서 수동(2026-11-12 — 강제를 뺌) */
+    STR_OPT_OVERRIDE_LIST,            /* 2026-11-12 — 강제 칸: 해제 / 켬 / 끔 */
+    STR_RELAY_CHOOSE_CHAN,            /* 2026-11-12 — 센서 조건을 처음 정할 때 채널 칸 안내("선택") */
     STR_LABEL_TIMER_ON,
     STR_LABEL_TIMER_OFF,
     STR_LABEL_DAY_NIGHT,
@@ -465,6 +467,22 @@ typedef enum {
     STR_TITLE_SLOT,              /* 대치 팝업 제목 */
     STR_MSG_SLOT_REPLACE_FMT,    /* %s=새 기기, %s=기존 자리 */
     STR_MSG_SLOT_ASK_FMT,        /* %s=새 기기 */
+    STR_MSG_SLOT_ASK_ONLY_FMT,   /* 2026-11-14 — 빈 자리가 없을 때(신규 없음), %s=새 기기 */
+    STR_MSG_UNIT_ASK_FMT,        /* 2026-11-14 — 배지보드(기기 단위), %s=새 기기 */
+    STR_MSG_UNIT_ASK_ONLY_FMT,   /* 2026-11-14 — 배지보드, 빈 위치가 없을 때 */
+    STR_GRAPH_CAT_TH,            /* 2026-11-14(사용자 설계 — 그래프 보기) — 1단 묶음 단추 */
+    STR_GRAPH_KIND,              /* 종류별 */
+    STR_GRAPH_DEVICE,            /* 기기별 */
+    STR_GRAPH_AIRT,              /* 공기 온도(단추·선 이름) — 2026-11-14 사용자 결정 "T" */
+    STR_GRAPH_AIRH,              /* 공기 습도 */
+    STR_GRAPH_AGART,             /* 배지 온도(단추) */
+    STR_GRAPH_AGAR,              /* 배지(평균선 이름) */
+    STR_GRAPH_AGAR_FMT,          /* 배지 온도 번호(보드 안) */
+    STR_GRAPH_AVG_FMT,           /* 평균선 이름 */
+    STR_HINT_ALIAS_LEN,          /* 2026-11-14(사용자 결정) — 콘 별명 입력 안내 */
+    STR_HINT_ALIAS_LEN_WEB,      /* 웹 별명 입력 안내(한글 입력 가능) */
+    STR_LABEL_ALIAS_PREVIEW,     /* 웹 — 콘 화면에 보일 글자 미리보기 */
+    STR_MSG_ALIAS_TOO_LONG,      /* 별명 길이 넘침 */
     STR_MSG_SLOT_REPLACE_LIVE_FMT, /* %s=연결된 기존 자리 */
     STR_BTN_REPLACE,
     STR_BTN_NEW,

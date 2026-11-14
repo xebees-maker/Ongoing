@@ -206,7 +206,9 @@
   .grp button.on { background:var(--blue); border-color:var(--blue); color:#fff; }
   .slots { display:flex; flex-wrap:wrap; gap:4px 14px; padding:6px 14px; font-size:14px; }
   .slot { display:inline-flex; align-items:center; gap:6px; }
-  .slot i { display:inline-block; width:18px; height:18px; border:2px solid; border-radius:4px; cursor:pointer; }
+  .slot i { display:inline-block; width:12px; height:12px; border-radius:2px; }   /* 2026-11-14 — legend(누르지 않음), 콘과 같음 */
+  .gseg { display:inline-flex; gap:4px; margin-right:16px; }                      /* 2026-11-14 — 그래프 1단 단계 덩어리(콘과 같음) */
+  .gseg button { border-radius:0; min-width:44px; }
   .mmrow { display:flex; flex-wrap:wrap; gap:2px 12px; padding:0 14px; min-height:18px; font-size:12px; font-variant-numeric:tabular-nums; }
   .chartwrap { position:relative; margin:2px 14px; }
   #stChart { display:block; width:100%; height:240px; touch-action:pan-y; }
@@ -334,6 +336,21 @@
   function S(k) { var v = STR[k]; return v ? v[li()] : k; }
   function Wt(k) { var v = W[k]; return v ? v[li()] : k; }
   function fmt(s) { var a = arguments, i = 1; return s.replace(/%d|%s|%u/g, function () { return a[i++]; }); }
+  /* 2026-11-14 — 콘 romanize_hangul과 같은 로마자(콘 화면 별명 미리보기), 콘 device_config_alias_fits와 같은 길이 규칙(한글 1자 = 영문 2.5자, 합 8 이하) */
+  var ROM_I = ['g', 'kk', 'n', 'd', 'tt', 'r', 'm', 'b', 'pp', 's', 'ss', '', 'j', 'jj', 'ch', 'k', 't', 'p', 'h'];
+  var ROM_M = ['a', 'ae', 'ya', 'yae', 'eo', 'e', 'yeo', 'ye', 'o', 'wa', 'wae', 'oe', 'yo', 'u', 'wo', 'we', 'wi', 'yu', 'eu', 'ui', 'i'];
+  var ROM_F = ['', 'k', 'k', 'k', 'n', 'n', 'n', 't', 'l', 'k', 'm', 'l', 'l', 'l', 'p', 'l', 'm', 'p', 'p', 't', 't', 'ng', 't', 't', 'k', 't', 'p', 't'];
+  function romanize(t) {
+    var o = '';
+    for (var ch of t) {
+      var c = ch.codePointAt(0);
+      if (c < 0x80) o += ch;
+      else if (c >= 0xAC00 && c <= 0xD7A3) { var x = c - 0xAC00; o += ROM_I[Math.floor(x / 588)] + ROM_M[Math.floor((x % 588) / 28)] + ROM_F[x % 28]; }
+      else o += '?';
+    }
+    return o;
+  }
+  function aliasFits(t) { var h = 0; for (var ch of t) h += ch.codePointAt(0) < 0x80 ? 2 : 5; return h <= 16; }
 
   var timer = null, view = '', last = null;
   function $(id) { return document.getElementById(id); }
@@ -437,7 +454,12 @@
 
   function relaySummary(r) {
     /* refresh_power_control_panel과 같은 문장 — 언어별 어순 틀(STR_FMT_RELAY_SUMMARY, 콘 fill_relay_summary와 같은 규칙) */
-    if (r.override) return S(r.override_on ? 'STR_MSG_OVERRIDE_ON_SUMMARY' : 'STR_MSG_OVERRIDE_OFF_SUMMARY');
+    if (r.override) {   /* 11-12(사용자 결정) — 남은 시간(분 올림)과 강제가 풀리면 돌아갈 방식: "강제 켬, 25분 -> 센서 AI"(콘과 같음) */
+      var o = S(r.override_on ? 'STR_MSG_OVERRIDE_ON_SUMMARY' : 'STR_MSG_OVERRIDE_OFF_SUMMARY');
+      if (r.rem != null) o += ', ' + fmtDur(Math.ceil(r.rem / 60) * 60);
+      return o + ' ' + S('STR_SENTENCE_ARROW') + ' ' + (S('STR_OPT_RELAY_MODE_LIST').split('\n')[r.ret || 0] || '');
+    }
+    if (!r.active) return S('STR_RELAY_NOT_CONFIGURED');   /* 11-12 — 미설정 */
     if (r.timer) return timerSummary(r.timer);   /* 10-09 — 동작 = 타이머(콘 fill_timer_summary와 같은 틀) */
     if (!r.configured) return S('STR_RELAY_NOT_CONFIGURED');
     var num = r.center === null ? '-' : (r.chan === CHAN_CO2 ? String(Math.round(r.center)) : Number(r.center).toFixed(1));
@@ -914,6 +936,8 @@
     h += '<div class="field"><label for="dAlias">' + esc(S('STR_LABEL_ALIAS')) + '</label>' +
          '<input type="text" id="dAlias" maxlength="' + d.alias_max + '" value="' + esc(d.alias) + '">' +
          '<button id="dAliasApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
+    /* 2026-11-14(사용자 결정) — 별명 길이 안내 + 콘 화면에 보일 글자(로마자) 미리보기 */
+    h += '<div class="field"><span class="sub" id="dAliasHint"></span></div>';
     if (cam) {
       h += '<div class="field"><label>' + esc(S('STR_LABEL_CAPTURE_INTERVAL')) + '</label><select id="dCapture">' +
            optionsHtml('STR_OPT_CAPTURE_INTERVAL_LIST', d.opt_capture, d.capture_s) + '</select></div>';
@@ -943,8 +967,15 @@
         .then(function () { toast(S('STR_BTN_APPLY') + ' \u2713'); })
         .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
     }
-    var alias = $('dAlias'), apply = $('dAliasApply');
-    alias.addEventListener('input', function () { apply.disabled = (alias.value === d.alias); });
+    var alias = $('dAlias'), apply = $('dAliasApply'), hint = $('dAliasHint');
+    function aliasCheck() {
+      var ok = aliasFits(alias.value);
+      hint.textContent = S(ok ? 'STR_HINT_ALIAS_LEN_WEB' : 'STR_MSG_ALIAS_TOO_LONG') + ' · ' + S('STR_LABEL_ALIAS_PREVIEW') + ': ' + (romanize(alias.value) || d.name);
+      hint.style.color = ok ? '' : 'var(--red, #e53935)';
+      apply.disabled = alias.value === d.alias || !ok;
+    }
+    aliasCheck();
+    alias.addEventListener('input', aliasCheck);
     apply.addEventListener('click', function () {
       post('api/device/set?mac=' + d.mac + '&key=alias', alias.value)
         .then(function () { d.alias = alias.value; apply.disabled = true; toast(S('STR_BTN_APPLY') + ' \u2713'); })
@@ -987,17 +1018,25 @@
   }
 
   var RELEASE_VALUES = [0, 600, 1800, 3600, 10800];   /* 10-09 — 콘 s_manual_release_values와 같음(STR_OPT_MANUAL_RELEASE_LIST 순서) */
-  /* ── 릴레이 팝업(콘 build_relay_popup과 같은 항목·규칙) — 10-09(사용자 설계): 방식(강제/타이머/센서 AI/센서 수동)과 값은
-   *    전부 맨 위 줄의 Apply로만 반영(바뀐 게 있을 때만 켜짐, 강제도 경고 창 없이), 별명은 따로 Apply ── */
+  /* ── 릴레이 팝업(콘 build_relay_popup과 같은 항목·규칙) — 10-09(사용자 설계): 값은 전부 Apply로만 반영(바뀐 게 있을 때만 켜짐),
+   *    별명은 따로 Apply. 11-12(사용자 설계) — 맨 위 강제(해제/켬/끔 + 자동 해제)는 방식과 따로(상태 위에 얹힘), 방식 = 미설정 / 타이머 /
+   *    센서 AI / 센서 수동(강제가 풀리면 돌아갈 상태). 미설정·타이머일 때 숨은 칸 값은 연 시점 값으로 보냄(바뀐 것으로 안 침) ── */
   var rl = null, rlSnap = null;
+  function rlMode(f) { return !f.act ? 0 : (f.tm ? 1 : (f.ai ? 2 : 3)); }
   function rlForm() {   /* 화면 선택값 → 서버로 보낼 본문 */
-    var f = rl.form;
-    return ['chan=' + f.chan, 'y=' + (f.y ? 1 : 0), 'z=' + (f.z ? 1 : 0), 'center=' + f.center, 'margin=' + f.margin,
+    var f = rl.form, m = rlMode(f), sn = (m >= 2) ? f : rl.sb, t = (m === 1) ? f.t : rl.tb;
+    return ['act=' + (f.act ? 1 : 0), 'chan=' + sn.chan, 'y=' + (sn.y ? 1 : 0), 'z=' + (sn.z ? 1 : 0), 'center=' + sn.center, 'margin=' + sn.margin,
             'ai=' + (f.ai ? 1 : 0), 'manual=' + (f.manual ? 1 : 0),
-            'mon=' + (f.manual ? (f.mon ? 1 : 0) : (rl.base.mon ? 1 : 0)), 'rel=' + (f.manual ? f.rel : rl.base.rel), 'src=' + f.src, 'gc=' + f.gc, 'dev=' + (f.dev || ''),
-            'stat=' + f.stat, 'trend=' + (f.trend ? 1 : 0), 'ts=' + f.ts, 'hold=' + f.hold,
-            'tm=' + (f.tm ? 1 : 0), 'ton=' + f.t.on, 'toff=' + f.t.off, 'tdn=' + (f.t.dn ? 1 : 0), 'tds=' + f.t.ds, 'tns=' + f.t.ns,
-            'tnon=' + f.t.non, 'tnoff=' + f.t.noff].join('&');
+            'mon=' + (f.manual ? (f.mon ? 1 : 0) : (rl.base.mon ? 1 : 0)), 'rel=' + (f.manual ? f.rel : rl.base.rel), 'src=' + sn.src, 'gc=' + sn.gc, 'dev=' + (sn.dev || ''),
+            'stat=' + sn.stat, 'trend=' + (sn.trend ? 1 : 0), 'ts=' + sn.ts, 'hold=' + sn.hold,
+            'tm=' + (f.tm ? 1 : 0), 'ton=' + t.on, 'toff=' + t.off, 'tdn=' + (t.dn ? 1 : 0), 'tds=' + t.ds, 'tns=' + t.ns,
+            'tnon=' + t.non, 'tnoff=' + t.noff].join('&');
+  }
+  function rlKeepBase() {   /* 연 시점(또는 적용한) 센서·타이머 칸 값 — 숨은 칸은 이 값으로 보냄 */
+    var f = rl.form;
+    rl.sb = JSON.parse(JSON.stringify({ chan: f.chan, y: f.y, z: f.z, center: f.center, margin: f.margin, src: f.src, gc: f.gc, dev: f.dev,
+                                        stat: f.stat, trend: f.trend, ts: f.ts, hold: f.hold }));
+    rl.tb = JSON.parse(JSON.stringify(f.t));
   }
   function rlChan(type) { return rl.data.chans.filter(function (c) { return c.type === type; })[0] || rl.data.chans[0]; }
   function rlSpec() {   /* 값 범위 — 온도 그룹이면 기본/정밀 선택대로, 장치면 정밀(서버가 실제 센서 사양으로 다시 자름) */
@@ -1013,8 +1052,10 @@
                               stat: d.stat, trend: d.trend, ts: d.ts, hold: d.hold,
                               tm: d.timer.mode, t: { on: d.timer.on, off: d.timer.off, dn: d.timer.dn, ds: d.timer.ds, ns: d.timer.ns,
                                                      non: d.timer.non, noff: d.timer.noff },
-                              mon: d.manual ? d.manual_on : false, rel: d.manual ? (d.rel || 0) : 0 }, alias: d.alias };
-      rl.base = { tm: rl.form.tm, ai: rl.form.ai, mon: rl.form.mon, rel: rl.form.rel };   /* 적용된 값 — 강제를 고르면 그 밑 방식은 이대로 둠(콘과 같음) */
+                              mon: d.manual ? d.manual_on : false, rel: d.manual ? (d.rel || 0) : 0,
+                              act: d.active, chosen: d.configured }, alias: d.alias };   /* 11-12 — 설정됨 / 센서 조건 입력한 적 있음(2-2) */
+      rl.base = { tm: rl.form.tm, ai: rl.form.ai, mon: rl.form.mon, rel: rl.form.rel };   /* 적용된 값 — 미설정을 고르면 마지막 방식은 이대로 둠(콘과 같음) */
+      rlKeepBase();
       rlSnap = rlForm();
       openSheet(renderRelay);
     }).catch(function () {});
@@ -1035,21 +1076,21 @@
          '" value="' + esc(rl.alias) + '" placeholder="' + esc(name) + '"><button id="rAliasApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
     /* 10-18(보릴 6단계) — 원격릴레이만: 통신이 끊기면 보릴이 이 시간 뒤 끔(고르면 바로 저장 — 콘 팝업과 같음) */
     if (d.remote) h += '<div class="field"><label>' + esc(S('STR_LABEL_REMOTE_FAILSAFE')) + '</label>' + sel('rFs', 'STR_OPT_REMOTE_FAILSAFE_LIST', [1, 10, 30, 60], d.fs) + '</div>';
-    /* 10-09(사용자 설계) — 맨 위 줄: 방식(강제 / 타이머 / 센서 AI / 센서 수동) + 적용(바뀐 게 있을 때만 켜짐) */
-    var mode = f.manual ? 0 : (f.tm ? 1 : (f.ai ? 2 : 3));
+    /* 11-12(사용자 설계) — 맨 위: 강제(해제 / 켬 / 끔) + 자동 해제(강제일 때만). 그 아래: 방식(미설정 / 타이머 / 센서 AI / 센서 수동) + 적용 */
+    h += '<div class="field"><label>' + esc(S('STR_LABEL_MANUAL_MODE')) + '</label>' + sel('rOvr', 'STR_OPT_OVERRIDE_LIST', [0, 1, 2], !f.manual ? 0 : (f.mon ? 1 : 2)) +
+         '<label style="text-align:right">' + esc(S('STR_LABEL_MANUAL_RELEASE')) + '</label>' +
+         sel('rRel', 'STR_OPT_MANUAL_RELEASE_LIST', RELEASE_VALUES, f.manual ? f.rel : rl.base.rel, f.manual ? '' : ' disabled') + '</div>';
+    var mode = rlMode(f);
     h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_MODE')) + '</label>' +
          sel('rMode', 'STR_OPT_RELAY_MODE_LIST', [0, 1, 2, 3], mode) +
          '<button id="rApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
-    h += '<div class="grayp">';
-    if (f.manual) {   /* 방식 = 강제: 켬/끔, 자동 해제(콘 relay_build_override_box와 같은 배치) */
-      h += '<div class="field"><label>' + esc(S('STR_LABEL_MANUAL_MODE')) + '</label>' + sel('rMon', 'STR_OPT_TURN_ACTION_LIST', [1, 0], f.mon ? 1 : 0) +
-           '<label style="text-align:right">' + esc(S('STR_LABEL_MANUAL_RELEASE')) + '</label>' +
-           sel('rRel', 'STR_OPT_MANUAL_RELEASE_LIST', RELEASE_VALUES, f.rel) + '</div></div>';
+    if (mode === 0) {   /* 미설정 — 조건·타이머 칸 없음 */
       $('sheetBody').innerHTML = h;
       bindRelay();
       rlDirty();
       return;
     }
+    h += '<div class="grayp">';
     /* 입력 칸은 언어와 상관없이 같은 배치(사용자 결정): 동작 / 항목 / 조건 */
     if (f.tm) {   /* 10-09(할 일 AG) — 방식 = 타이머: 동작·항목·조건·고급 대신 타이머 칸(콘 relay_build_timer_box와 같은 배치) */
       var t = f.t;
@@ -1070,11 +1111,13 @@
       return;
     }
     h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ACTION')) + '</label>' + sel('rZ', 'STR_OPT_TURN_ACTION_LIST', [1, 0], f.z ? 1 : 0) + '</div>';
-    h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ITEM')) + '</label>' +
-         sel('rChan', 'STR_OPT_CHAN_TYPE_LIST', d.chans.map(function (c) { return c.type; }), f.chan) + '</div>';
+    /* 11-12(2-2) — 센서 조건을 입력한 적 없으면 채널부터 고름("선택"), 그 전엔 값 칸 비움·적용 안 됨(콘과 같음) */
+    var chanSel = sel('rChan', 'STR_OPT_CHAN_TYPE_LIST', d.chans.map(function (c) { return c.type; }), f.chosen ? f.chan : null);
+    if (!f.chosen) chanSel = chanSel.replace('>', '><option value="" selected disabled>' + esc(S('STR_RELAY_CHOOSE_CHAN')) + '</option>');
+    h += '<div class="field"><label>' + esc(S('STR_LABEL_RELAY_ITEM')) + '</label>' + chanSel + '</div>';
     h += '<div class="sent"><span class="grow">' + esc(S('STR_LABEL_RELAY_CONDITION')) + '</span>' + sel('rY', 'STR_OPT_RISE_FALL_LIST', [1, 0], f.y ? 1 : 0) +
-         '<button class="vbtn" data-roll="center">' + Number(f.center).toFixed(dec) + '</button>' + esc(S('STR_SENTENCE_PLUSMINUS')) +
-         '<button class="vbtn" data-roll="margin">' + Number(f.margin).toFixed(dec) + '</button>' + esc(unit) + '</div>';
+         '<button class="vbtn" data-roll="center"' + (f.chosen ? '' : ' disabled') + '>' + (f.chosen ? Number(f.center).toFixed(dec) : '-') + '</button>' + esc(S('STR_SENTENCE_PLUSMINUS')) +
+         '<button class="vbtn" data-roll="margin"' + (f.chosen ? '' : ' disabled') + '>' + (f.chosen ? Number(f.margin).toFixed(dec) : '-') + '</button>' + (f.chosen ? esc(unit) : '') + '</div>';
     if (!f.ai) {
       var devs = rlChanDevices(d, f.chan);
       h += '<div class="field"><label>' + esc(S('STR_LABEL_BASED_ON')) + '</label>' + sel('rSrc', 'STR_OPT_BASEDON_LIST', [0, 1], f.src);
@@ -1227,7 +1270,10 @@
     };
   }
 
-  function rlDirty() { var b = $('rApply'); if (b) b.disabled = (rlForm() === rlSnap); }
+  function rlDirty() {
+    var b = $('rApply'), f = rl.form;
+    if (b) b.disabled = (rlForm() === rlSnap) || (rlMode(f) >= 2 && !f.chosen);   /* 11-12(2-2) — 채널을 고르기 전엔 적용 안 됨 */
+  }
   function bindRelay() {
     var f = rl.form, d = rl.data;
     function on(id, ev, fn) { var el = $(id); if (el) el.addEventListener(ev, fn); }
@@ -1242,15 +1288,21 @@
       post('api/relay/alias?idx=' + d.idx, v).then(function () { rl.alias = v; $('rAliasApply').disabled = true; toast(S('STR_BTN_APPLY') + ' \u2713'); })
         .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
     });
-    on('rMode', 'change', function () {   /* 10-09 — 0 강제 / 1 타이머 / 2 센서 AI / 3 센서 수동 */
+    on('rMode', 'change', function () {   /* 11-12 — 0 미설정 / 1 타이머 / 2 센서 AI / 3 센서 수동 */
       var v = +this.value;
-      f.manual = (v === 0);
-      if (v === 0) { f.tm = rl.base.tm; f.ai = rl.base.ai; }   /* 강제 밑의 방식은 적용된 그대로 */
+      f.act = (v !== 0);
+      if (v === 0) { f.tm = rl.base.tm; f.ai = rl.base.ai; }   /* 미설정이면 마지막 방식은 적용된 그대로 */
       else { f.tm = (v === 1); if (v !== 1) f.ai = (v === 2); }
       renderRelay();
     });
-    on('rMon', 'change', function () { f.mon = this.value === '1'; rlDirty(); });
-    on('rRel', 'change', function () { f.rel = +this.value; rlDirty(); });
+    on('rOvr', 'change', function () {   /* 11-12 — 강제: 0 해제 / 1 켬 / 2 끔 */
+      var v = +this.value;
+      f.manual = (v !== 0);
+      f.mon = f.manual ? (v === 1) : rl.base.mon;
+      if (f.manual && !rl.form.relSet) f.rel = rl.base.rel;
+      renderRelay();
+    });
+    on('rRel', 'change', function () { f.rel = +this.value; f.relSet = true; rlDirty(); });
     on('rZ', 'change', function () { f.z = this.value === '1'; rlDirty(); });
     on('rDn', 'change', function () { f.t.dn = this.checked; renderRelay(); });
     [].forEach.call(document.querySelectorAll('[data-troll]'), function (btn) {
@@ -1259,6 +1311,7 @@
     on('rY', 'change', function () { f.y = this.value === '1'; rlDirty(); });
     on('rChan', 'change', function () {
       f.chan = +this.value;
+      f.chosen = true;   /* 11-12(2-2) */
       var def = rlChan(f.chan).def; f.center = def[0]; f.margin = def[1];   /* 채널을 바꾸면 그 채널 기본값(콘과 같음) */
       var devs = rlChanDevices(d, f.chan); f.dev = devs[0] ? devs[0].mac : '';
       renderRelay();
@@ -1279,7 +1332,11 @@
     on('rHold', 'change', function () { f.hold = +this.value; rlDirty(); });
     on('rApply', 'click', function () {
       post('api/relay/apply?idx=' + d.idx, rlForm()).then(function () {
-        if (f.manual) { rl.base.mon = f.mon; rl.base.rel = f.rel; } else { rl.base.tm = f.tm; rl.base.ai = f.ai; }
+        /* 11-12 \u2014 \uac15\uc81c\uc640 \ubc29\uc2dd\uc744 \ub530\ub85c \uae30\uc5b5(\uac15\uc81c \uce78\u00b7\ubc29\uc2dd \uce78\uc774 \ub530\ub85c \uc788\uc73c\ubbc0\ub85c) */
+        if (f.manual) { rl.base.mon = f.mon; rl.base.rel = f.rel; }
+        if (f.act) { rl.base.tm = f.tm; rl.base.ai = f.ai; }
+        if (rlMode(f) >= 2) f.chosen = true;
+        rlKeepBase();
         rlSnap = rlForm(); rlDirty(); toast(S('STR_BTN_APPLY') + ' \u2713'); poll();
       })
         .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
@@ -1854,25 +1911,30 @@
     apiText('api/logs?kind=dev').then(function (t) { putLog('logDev', t, force); }).catch(function () {});
   }
 
-  /* ── 통계 팝업(콘 build_stats_tab과 같은 기능): 개괄(기간, 공기 T/H 정밀·간이 탭 전환, Agar 혼합→슬롯 순환), 그래프(그룹, 슬롯
-   *    표시·숨김, 공기 슬롯 글자 탭 = 정밀·간이, << >> 또는 좌우 밀기 = 이전·다음 창, 탭 = 그 칸의 실측값), 기록 팝업(28개씩, 전체 삭제).
+  /* ── 통계 팝업(콘 build_stats_tab과 같은 기능): 개괄(기간, 공기 T/H 정밀·간이 탭 전환, Agar 혼합→슬롯 순환), 그래프(2026-11-14 — 콘과
+   *    같은 보기: 1단 묶음·종류별/기기별·페이지, 2단 legend, 평균선, << >> 또는 좌우 밀기 = 이전·다음 창, 탭 = 그 칸의 값), 기록 팝업(28개씩, 전체 삭제).
    *    칸 값·추세·저신뢰·개괄 계산은 전부 콘(/api/stats, 콘 화면과 같은 함수) — 여기는 정규화(0~100)와 그리기만 ── */
   var SCALE_SEC = [3600, 43200, 86400, 259200, 604800];
   var XSTEP_SEC = [600, 3600, 7200, 43200, 86400];     /* 콘 s_stats_xaxis_interval_sec */
-  var GAP_REF = [70, 60, 50, 40];                       /* 콘 s_stats_gap_ref_height — 창에 실측이 없을 때의 점선 높이 */
+  var GAP_REF = [70, 60, 50, 40, 30, 20];                     /* 콘 s_stats_gap_ref_height — 창에 실측이 없을 때의 점선 높이 */
   var CHAN_STR = { 1: ['STR_CHAN_LABEL_TEMP_C', 'STR_CHAN_UNIT_TEMP_C'], 2: ['STR_CHAN_LABEL_HUMI_PCT', 'STR_CHAN_UNIT_HUMI_PCT'],
                    3: ['STR_CHAN_LABEL_CO2_PPM', 'STR_CHAN_UNIT_CO2_PPM'], 4: ['STR_CHAN_LABEL_NH3_PPM', 'STR_CHAN_UNIT_NH3_PPM'] };
-  var GROUP_KEYS = ['STR_VIEW_GROUP_TEMP', 'STR_VIEW_GROUP_GAS'];   /* 2026-10-23(사용자 설계) — 온도 묶음(공기 온습도 + 배지), 가스 묶음 */
+  /* 2026-11-14(사용자 설계 — 콘과 같은 보기) — 1단: 묶음(T/H, Gas, Basic) > 보기(종류별, 기기별) > 페이지(T, H, Agar 또는 보드). 고른 색은 단계마다 */
+  var CAT_KEYS = ['STR_GRAPH_CAT_TH', 'STR_VIEW_GROUP_GAS', 'STR_PRECISION_BASIC'], MODE_KEYS = ['STR_GRAPH_KIND', 'STR_GRAPH_DEVICE'];
+  var KIND_KEYS = ['STR_GRAPH_AIRT', 'STR_GRAPH_AIRH', 'STR_GRAPH_AGART'], LEVEL_COL = ['#2196f3', '#ef6c00', '#9c27b0'];
   var st = null, statsTimer = null, stSeq = 0;
-  function slotColor(i) { return i === 2 ? getComputedStyle(document.body).color : ['#f44336', '#2196f3', '', '#fbc02d'][i]; }  /* 콘: 빨강·파랑·검정·짙은 노랑 */
+  function slotColor(i) {   /* 2026-11-14 — 색은 콘이 정함(col, 슬롯의 종류·번호). 검정은 글자색(어두운 화면) */
+    var sl = st && st.data && st.data.slots[i], c = sl && sl.col;
+    return (!c || c === '#000000') ? getComputedStyle(document.body).color : c;
+  }
   function prec(p) { return S(p ? 'STR_PRECISION_PRECISE' : 'STR_PRECISION_BASIC'); }
   function f2(v) { return Number(v).toFixed(2); }
   function statsBlockedSd(e) { return e && e.message === 'HTTP 503'; }
 
   function openStats() {
     if (last && last.sd && last.sd.state === 'io_error') { alert(S('STR_MSG_STATS_BLOCKED_SD_FAIL')); return; }   /* 콘 cb_stats_btn_tap과 같음 */
-    st = st || { scale: 0, group: 0, tp: true, hp: true, ovT: true, ovH: true, agar: 0, show: [true, true, true, true] };
-    st.tp = st.hp = st.ovT = st.ovH = true;   /* 2026-10-23(사용자 설계) — 열 때마다 정밀(기본), 간이는 탭해서 교대 */
+    st = st || { scale: 0, cat: 0, mode: 0, kind: 0, dev: 0, ovT: true, ovH: true };
+    st.ovT = st.ovH = true;   /* 2026-10-23(사용자 설계) — 열 때마다 개괄은 정밀(기본), 간이는 탭해서 교대 */
     st.offset = 0;
     st.data = null;
     openSheet(renderStats);
@@ -1887,11 +1949,12 @@
   function loadStats(withBusy) {
     var seq = ++stSeq;
     if (withBusy) busyStart('LOADING');
-    api('api/stats?scale=' + st.scale + '&offset=' + st.offset + '&group=' + st.group + '&tp=' + (st.tp ? 1 : 0) + '&hp=' + (st.hp ? 1 : 0))
+    api('api/stats?scale=' + st.scale + '&offset=' + st.offset + '&cat=' + st.cat + '&mode=' + st.mode + '&kind=' + st.kind + '&dev=' + st.dev)
       .then(function (d) {
         if (seq !== stSeq) return;
         busyEnd();
         st.data = d;
+        st.cat = d.view.cat; st.mode = d.view.mode; st.kind = d.view.kind; st.dev = d.view.dev;   /* 없는 묶음·보드는 콘이 바꿈 */
         if (sheetRender === renderStats) renderStats();
       })
       .catch(function (e) {
@@ -1918,7 +1981,15 @@
     var cs = CHAN_STR[it.chan];
     return cs ? S(cs[0]) : '#' + it.chan;
   }
-  function slotLabel(sl) { return sensLabel(sl); }
+  /* 2026-11-14(사용자 결정) — 선 이름: "별명 T"·"별명 Agar1"(종류별), "T"·"Agar1"(기기별), 평균선 "평균 T". kn이 없으면 옛 이름 */
+  function slotLabel(sl) {
+    if (!sl.kn) return sensLabel(sl);
+    if (sl.avg) return fmt(S('STR_GRAPH_AVG_FMT'), sl.kn);
+    return sl.al !== undefined ? L(sl, 'al') + ' ' + sl.kn : sl.kn;
+  }
+  function gbtn(lv, on, attr, text) {
+    return '<button class="small" ' + attr + (on ? ' style="background:' + LEVEL_COL[lv] + ';border-color:' + LEVEL_COL[lv] + ';color:#fff"' : '') + '>' + esc(text) + '</button>';
+  }
 
   function renderStats() {
     var h = '<div class="shead"><h3 class="grow">' + esc(S('STR_TAB_STATISTICS')) + '</h3><button class="small" id="stRec">' + esc(S('STR_BTN_RECORD')) +
@@ -1929,33 +2000,39 @@
          '</select></span></div>';
     var d = st.data;
     if (!d) { $('sheetBody').innerHTML = h; bindStats(); return; }
-    var ov = d.ov, agarN = ov.agar.filter(function (a) { return a.on; }).length, ai = st.agar % (agarN + 1), agarLabel, agarVal;
-    if (ai === 0) { agarLabel = S('STR_OVERVIEW_AGAR_TEMP'); agarVal = ov.agar_all; }
-    else { agarLabel = fmt(S('STR_AGAR_SLOT_FMT'), ov.agar[ai - 1].ord || ai) + ' ' + S('STR_CHAN_LABEL_TEMP_C'); agarVal = ov.agar[ai - 1].v; }
-    /* 콘 줄 순서(왼쪽 T·CO2·Agar, 오른쪽 H·NH3)를 줄 단위로: 넓으면 2열, 세로 휴대폰은 1열 */
+    /* 2026-11-14(사용자 설계 — 개요, 콘과 같음) — 순서 Air T, Air H, Agar T, 그다음 CO2·암모니아. 공기 = 정밀 평균(d.tp/d.hp = 창에 정밀
+     * 기록이 있음, 없으면 간이), 탭하면 정밀 <-> 간이. Agar = 배지 평균만(탭 없음). 기기가 없으면 줄을 숨김 */
+    var ov = d.ov, has = ov.has;
     h += '<div class="ovgrid">' +
-         /* 2026-10-23(사용자 설계) — 정밀이 기본(d.tp/d.hp = 정밀 센싱이 있음), 간이는 탭해서 교대 */
-         ovRow('t', S('STR_OVERVIEW_AIR_TEMP') + '(' + prec(d.tp && st.ovT) + ')', 'STR_CHAN_UNIT_TEMP_C', ov.air_t[d.tp && st.ovT ? 1 : 0]) +
-         ovRow('h', S('STR_OVERVIEW_AIR_HUMI') + '(' + prec(d.hp && st.ovH) + ')', 'STR_CHAN_UNIT_HUMI_PCT', ov.air_h[d.hp && st.ovH ? 1 : 0]) +
-         ovRow('', S('STR_CHAN_LABEL_CO2_PPM'), 'STR_CHAN_UNIT_CO2_PPM', ov.co2) +
-         ovRow('', S('STR_CHAN_LABEL_NH3_PPM'), 'STR_CHAN_UNIT_NH3_PPM', ov.nh3) +
-         ovRow('a', agarLabel, 'STR_CHAN_UNIT_TEMP_C', agarVal) + '</div>';
+         (has.air ? ovRow('t', S('STR_OVERVIEW_AIR_TEMP') + '(' + prec(d.tp && st.ovT) + ')', 'STR_CHAN_UNIT_TEMP_C', ov.air_t[d.tp && st.ovT ? 1 : 0]) +
+                    ovRow('h', S('STR_OVERVIEW_AIR_HUMI') + '(' + prec(d.hp && st.ovH) + ')', 'STR_CHAN_UNIT_HUMI_PCT', ov.air_h[d.hp && st.ovH ? 1 : 0]) : '') +
+         (has.agar ? ovRow('', S('STR_OVERVIEW_AGAR_TEMP'), 'STR_CHAN_UNIT_TEMP_C', ov.agar) + '<div></div>' : '') +
+         (has.co2 ? ovRow('', S('STR_CHAN_LABEL_CO2_PPM'), 'STR_CHAN_UNIT_CO2_PPM', ov.co2) : '') +
+         (has.nh3 ? ovRow('', S('STR_CHAN_LABEL_NH3_PPM'), 'STR_CHAN_UNIT_NH3_PPM', ov.nh3) : '') + '</div>';
     /* 그래프 */
-    h += '<div class="grp">' + GROUP_KEYS.map(function (k, g) {
-      return '<button class="small' + (g === st.group ? ' on' : '') + '" data-grp="' + g + '">' + esc(S(k)) + '</button>';
-    }).join('') + '<span class="grow"></span><button class="small" data-pan="1">&lt;&lt;</button><button class="small" data-pan="-1"' +
+    var v = d.view, th = v.cat === 0 && d.has[0];
+    h += '<div class="grp"><span class="gseg">' + CAT_KEYS.map(function (k, c) { return d.has[c] ? gbtn(0, c === v.cat, 'data-cat="' + c + '"', S(k)) : ''; }).join('') + '</span>';
+    if (th) {
+      h += '<span class="gseg">' + MODE_KEYS.map(function (k, m) { return gbtn(1, m === v.mode, 'data-mode="' + m + '"', S(k)); }).join('') + '</span>';
+      h += '<span class="gseg">' + (v.mode === 0
+        ? KIND_KEYS.map(function (k, i) { return gbtn(2, i === v.kind, 'data-kind="' + i + '"', S(k)); })
+        : d.devs.map(function (dv, i) { return gbtn(2, i === v.dev, 'data-dev="' + i + '"', L(dv, 'al')); })).join('') + '</span>';
+    }
+    h += '<span class="grow"></span><button class="small" data-pan="1">&lt;&lt;</button><button class="small" data-pan="-1"' +
          (st.offset === 0 ? ' disabled' : '') + '>&gt;&gt;</button></div>';
     var mx = '', mn = '';
     h += '<div class="slots">' + d.slots.map(function (sl, i) {
-      var c = slotColor(i), on = st.show[i];
-      if (on && sl.min !== undefined) {
+      var c = slotColor(i);
+      /* 2026-11-14 — 같은 단위는 축이 하나(콘이 합침) — 최대·최소는 그 단위의 첫 선에만, 선이 여럿이면 회색 */
+      var same = d.slots.filter(function (o) { return o.chan === sl.chan; }), lead = d.slots.findIndex(function (o) { return o.chan === sl.chan; }) === i;
+      var lc = same.length > 1 ? '#616161' : c;
+      if (lead && sl.min !== undefined) {
         var u = S(CHAN_STR[sl.chan][1]);
         /* 10-28 — min/max = 축 아래·위(콘이 최소 폭까지 넓힌 값), 자릿수 = 값의 최소 단위(dec) */
-        mx += '<span style="color:' + c + '">' + esc(Number(sl.max).toFixed(sl.dec) + u) + '</span>';
-        mn += '<span style="color:' + c + '">' + esc(Number(sl.min).toFixed(sl.dec) + u) + '</span>';
+        mx += '<span style="color:' + lc + '">' + esc(Number(sl.max).toFixed(sl.dec) + u) + '</span>';
+        mn += '<span style="color:' + lc + '">' + esc(Number(sl.min).toFixed(sl.dec) + u) + '</span>';
       }
-      return '<span class="slot"><i data-sbox="' + i + '" style="border-color:' + c + ';background:' + (on ? c : 'transparent') + '"></i><span class="tap" data-slab="' + i + '">' +
-             esc(slotLabel(sl)) + '</span></span>';
+      return '<span class="slot"><i style="background:' + c + '"></i><span>' + esc(slotLabel(sl)) + '</span></span>';
     }).join('') + '</div>';
     h += '<div class="mmrow">' + mx + '</div><div class="chartwrap"><canvas id="stChart"></canvas><div id="stTip" class="tip hidden"></div></div>' +
          '<div class="mmrow">' + mn + '</div><div class="xax" id="stXax"></div>';
@@ -1995,14 +2072,13 @@
     }
     st.data.slots.forEach(function (sl, s) {
       st.pts[s] = null;
-      if (!st.show[s]) return;
       var span = (sl.min !== undefined && sl.max > sl.min) ? sl.max - sl.min : 0;
       var norm = sl.tr.map(function (t) {
         if (t === null) return null;
         var n = span > 0 ? Math.floor((t - sl.min) / span * 100 + 0.5) : 50;
         return Math.max(0, Math.min(100, n));
       });
-      function lo(i) { return sl.lo.charAt(i) === '1'; }
+      function lo(i) { return sl.lo.charAt(i) === '1' || (sl.pt && sl.pt.charAt(i) === '1'); }   /* 11-14 — 평균선의 빠진 칸도 점선 */
       var solid = [], dashed = [];
       for (var i = 0; i < N; i++) {
         if (norm[i] === null) { solid[i] = null; dashed[i] = GAP_REF[s]; continue; }
@@ -2074,33 +2150,18 @@
     body.querySelectorAll('[data-ov]').forEach(function (el) {
       el.addEventListener('click', function () {
         var k = el.getAttribute('data-ov');
-        if (k === 't') st.ovT = !st.ovT; else if (k === 'h') st.ovH = !st.ovH; else st.agar++;
+        if (k === 't') st.ovT = !st.ovT; else if (k === 'h') st.ovH = !st.ovH;
         renderStats();
       });
     });
-    body.querySelectorAll('[data-grp]').forEach(function (el) {
-      el.addEventListener('click', function () {
-        st.group = +el.getAttribute('data-grp');
-        st.show = [true, true, true, true];   /* 콘: 새 그룹은 전부 보이는 채로 시작 */
-        loadStats(true);
+    /* 2026-11-14 — 1단 단추: 묶음·보기·페이지(T/H/Agar 또는 보드) */
+    [['data-cat', 'cat'], ['data-mode', 'mode'], ['data-kind', 'kind'], ['data-dev', 'dev']].forEach(function (p) {
+      body.querySelectorAll('[' + p[0] + ']').forEach(function (el) {
+        el.addEventListener('click', function () { st[p[1]] = +el.getAttribute(p[0]); loadStats(true); });
       });
     });
     body.querySelectorAll('[data-pan]').forEach(function (el) {
       el.addEventListener('click', function () { statsPan(el.getAttribute('data-pan') === '1'); });
-    });
-    body.querySelectorAll('[data-sbox]').forEach(function (el) {
-      el.addEventListener('click', function () { var i = +el.getAttribute('data-sbox'); st.show[i] = !st.show[i]; renderStats(); });
-    });
-    /* 콘: 공기 슬롯은 글자를 누르면 정밀<->간이, 다른 그룹은 표시·숨김 */
-    body.querySelectorAll('[data-slab]').forEach(function (el) {
-      el.addEventListener('click', function () {
-        var i = +el.getAttribute('data-slab');
-        var sl = st.data && st.data.slots[i];
-        if (sl && st.data.group === 0 && !sl.sub && (sl.chan === 1 || sl.chan === 2)) {   /* 2026-10-23 — 공기 슬롯 글씨 = 정밀 <-> 간이 */
-          if (sl.chan === 1) st.tp = !st.tp; else st.hp = !st.hp;
-          loadStats(true);
-        } else { st.show[i] = !st.show[i]; renderStats(); }
-      });
     });
     var cv = $('stChart');
     if (!cv) return;

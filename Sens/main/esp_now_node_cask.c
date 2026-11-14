@@ -361,6 +361,14 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         return;
     }
 
+    if (msg_type == ESP_NOW_MSG_SENS_FAST_MEASURE) {   /* 2026-11-13 — 빠른 측정 요청(같은 요청 재시도면 횟수가 같아 그대로) */
+        if (s_conn_state != SENS_CONN_PAIRED || len < (int)sizeof(esp_now_sens_fast_measure_t)) return;
+        sens_node_fast_measure_request(((const esp_now_sens_fast_measure_t *)data)->count);
+        esp_now_sens_fast_measure_ack_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SENS_FAST_MEASURE_ACK };
+        send_reply(info->src_addr, &ack, sizeof(ack));
+        return;
+    }
+
     if (msg_type == ESP_NOW_MSG_SENS_CALIB_RESET) {
         if (s_conn_state != SENS_CONN_PAIRED || len < (int)sizeof(esp_now_sens_calib_reset_t)) return;
         const esp_now_sens_calib_reset_t *msg = (const esp_now_sens_calib_reset_t *)data;

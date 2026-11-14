@@ -13,11 +13,6 @@ extern "C" {
 
 void ui_init(void);
 
-/* 2026-09-16 — SR(Power Control) 판정 루프(power_relay.c)가 매 주기 호출. cfg가 가리키는
- * 소스(그룹 통계 또는 개별 장치)의 현재 값을 ui_main.c의 기존 분류/집계 로직(stats_classify,
- * stats_collect_group_macs, stats_blend_macs)으로 구해 돌려줌 — 그 로직 자체는 static이라
- * power_relay.c가 직접 못 쓰므로 이 함수 하나로만 연결 */
-bool ui_main_query_power_source_value(const power_relay_config_t *cfg, float *out_value);
 
 /* 2026-08-29 — WIFI_EVENT_SCAN_DONE 핸들러 등록. 기본 이벤트루프가 생긴 뒤(node_hub_init()
  * 호출 이후)에 app_main()에서 불러야 함 — ui_init()보다 먼저는 절대 안 됨 */
@@ -88,6 +83,7 @@ typedef struct {
     uint32_t trend_samples;    /* 선택지 값(3/5/10) */
     uint32_t min_hold_sec;     /* 선택지 값(30/60/180/300) */
     bool     timer_mode;       /* 2026-10-09 — 동작 = 타이머(할 일 AG) */
+    bool     active;           /* 2026-11-12 — 방식이 미설정이 아님(설정됨). false면 타이머·센서 값은 그대로 두고 미설정으로 */
     power_relay_timer_t timer; /* 타이머 칸 값(자동 해제 필드는 무시) */
 } ui_web_relay_choices_t;
 
@@ -117,13 +113,14 @@ int ui_main_relay_chan_list(uint8_t *out, int cap);
 /* 통계(웹) — 콘 통계 팝업과 같은 계산(창 읽기, 슬롯 = 기기 사슬, 국소 추세·저신뢰, 개괄 블렌딩)을 그대로 받음.
  * 웹 요청 태스크에서 부름(창 버퍼는 콘 화면과 따로). false = SD 자체 오류 */
 #define UI_STATS_POINTS    STATS_AGG_POINTS_PER_SCALE
-#define UI_STATS_MAX_SLOTS 4
+#define UI_STATS_MAX_SLOTS 6   /* 2026-11-14 — 그래프 선 최대 6(배지보드 2대) */
 typedef struct {
     bool  has[UI_STATS_POINTS];        /* 실측 칸(값 = vals) */
     float vals[UI_STATS_POINTS];
     bool  trend_has[UI_STATS_POINTS];  /* 그리는 선 = 국소 추세값 */
     float trend[UI_STATS_POINTS];
     bool  low[UI_STATS_POINTS];        /* 저신뢰(점선) */
+    bool  part[UI_STATS_POINTS];       /* 2026-11-14 — 평균선: 일부 센싱이 빠진 칸(점선) */
     bool  have_range;                  /* 창 안 실측 최소·최대 */
     float mn, mx;                      /* 2026-10-28 — 그래프 축의 아래·위(실측 최소·최대를 최소 폭까지 넓힌 것) */
     uint8_t dec;                       /* 2026-10-28 — 축 값 소수 자릿수(측정량마다) */
@@ -133,27 +130,36 @@ typedef struct {
     uint8_t attr;                      /* 2026-10-23 — STATS_ATTR_*(어디·정밀도) — 웹이 언어에 맞춰 이름을 만듦 */
     uint8_t ord;                       /* 같은 종류 센싱 안의 번호(배지 온도 N) */
     char    name[40];                  /* (옛 기기 이름 — 2026-10-23부터 비움) */
+    uint32_t rgb;                      /* 2026-11-14 — 선 색(0xRRGGBB, 콘 화면과 같음) */
+    bool    avg;                       /* 2026-11-14 — 평균선 */
+    char    kn[12];                    /* 종류 이름(T, H, Agar1 / 평균선은 T·H·Agar). 비면 옛 이름(attr·ord로) */
+    bool    use_alias;                 /* 이름 = 별명(name, 원래 글자) + kn */
     ui_stats_series_t d;
 } ui_stats_slot_t;
+/* 2026-11-14(사용자 설계 — 그래프 보기, 콘 화면과 같음) — cat: 0 T/H, 1 Gas, 2 Basic. mode: 0 종류별, 1 기기별. kind: 0 T, 1 H, 2 Agar.
+ * dev: 기기별 보드 번호(dev_mac 순서) */
+#define UI_STATS_DEV_MAX 4
+typedef struct { uint8_t cat, mode, kind, dev; } ui_stats_view_t;
 typedef struct {
     uint32_t window_end;               /* 창 오른쪽 끝(콘 시각) */
+    ui_stats_view_t view;              /* 실제로 그린 보기(없는 묶음·보드는 콘이 바꿈) */
+    bool     cat_has[3];               /* 묶음 단추를 보일지 */
+    int      dev_count;
+    uint8_t  dev_mac[UI_STATS_DEV_MAX][6];
     int      slot_count;
     ui_stats_slot_t slot[UI_STATS_MAX_SLOTS];
 } ui_stats_graph_t;
 typedef struct { bool have; float mn, mx, avg; } ui_stats_mma_t;
+/* 2026-11-14(사용자 설계 — 개요) — 창 통계(최대·최소·평균). 공기 정밀 = 정밀 센싱 전부의 블렌딩, 배지 = 배지 센싱 전부의 블렌딩.
+ * has_* = 그 종류 기기가 붙어 있음(없으면 줄을 숨김, 있는데 기록이 없으면 "값 없음") */
 typedef struct {
     ui_stats_mma_t air_t[2], air_h[2]; /* [0] 간이, [1] 정밀 */
-    ui_stats_mma_t agar_all, agar[3];  /* 혼합, Agar 슬롯 1..3 */
-    char           agar_name[3][40];   /* (2026-10-23부터 비움) */
-    uint8_t        agar_ord[3];        /* 2026-10-23 — 배지 온도 번호(0 = 슬롯 없음) */
-    int            agar_count;         /* 있는 배지 온도 슬롯 수 */
-    bool           air_t_prec, air_h_prec;   /* 2026-10-23 — 정밀이 있으면 정밀(자동) */
+    ui_stats_mma_t agar;
     ui_stats_mma_t co2, nh3;
+    bool           has_air, has_agar, has_co2, has_nh3;
 } ui_stats_overview_t;
-/* group: 0 온도 묶음(공기 온습도 + 배지), 1 가스 묶음(2026-10-23). temp/humi_precise는 쓰지 않음(정밀이 있으면 정밀, 자동).
- * offset: 0 = 지금 창, 1 = 한 창 앞 ... */
-bool ui_main_stats_graph(uint8_t scale, uint32_t offset, uint8_t group, bool temp_precise, bool humi_precise,
-                         ui_stats_graph_t *out);
+/* view = 웹에서 고른 보기(콘 화면과 같은 계산 — stats_graph_build_page). offset: 0 = 지금 창, 1 = 한 창 앞 ... */
+bool ui_main_stats_graph(uint8_t scale, uint32_t offset, const ui_stats_view_t *view, ui_stats_graph_t *out);
 bool ui_main_stats_overview(uint8_t scale, ui_stats_overview_t *out);
 /* 에러·경고 목록(콘 상태 아이콘 팝업과 같은 이력). 반환: 개수 */
 int ui_main_get_error_codes(int *out, int cap);

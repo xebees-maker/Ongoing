@@ -86,6 +86,7 @@ static SemaphoreHandle_t s_mutex = NULL;
 static portMUX_TYPE s_mutex_init_lock = portMUX_INITIALIZER_UNLOCKED;
 static week_info_t *s_weeks = NULL;          /* PSRAM, week 오름차순 */
 static uint32_t s_week_count = 0;
+static volatile bool s_index_ready = false;   /* 2026-11-12 — 부팅 뒤 첫 rescan이 끝남(그 전엔 SD 기록이 색인에 없음) */
 static uint64_t s_total_raw = 0;
 static stats_record_t *s_scratch = NULL;     /* PSRAM, 순차 읽기 버퍼(스택에 큰 배열 안 둠) */
 static stats_bucket_t *s_bscratch = NULL;    /* PSRAM, 집계 순차 읽기 버퍼 */
@@ -2004,6 +2005,8 @@ static uint64_t align_file_size(const char *path, uint64_t size, size_t rec_size
     return aligned;
 }
 
+bool stats_store_index_ready(void) { return s_index_ready; }
+
 void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
 {
     uint32_t bad = 0;
@@ -2080,6 +2083,7 @@ void stats_store_rescan(uint64_t sd_total, uint32_t *out_bad_entries)
     }
     s_sync_requested = true;   /* 마운트·재연결·포맷 뒤 — 다음 분에 옮김 */
     bool restore_now = s_restore_pending;
+    s_index_ready = true;
     unlock();
     /* 2026-10-22 — 복원은 다음 분을 기다리지 않고 바로(잠금 화면이 떠 있는 시간을 옮기는 시간만으로) */
     if (restore_now) stats_store_request_sync();

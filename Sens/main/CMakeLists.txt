@@ -21,6 +21,7 @@ if(CONFIG_SENS_BUILD_HEADLESS)
             "esp_now_node_cask.c"
             "rwdt_guard.c"
             "rgb_status.c"   # 2026-10-23 — 내장 RGB 상태 표시(외부 LED 보드 제거)
+            "power_button.c" # 2026-11-13 — 전원 푸시 스위치(길게 끔, 짧게 켬)
         )
     else()
         set(sens_srcs

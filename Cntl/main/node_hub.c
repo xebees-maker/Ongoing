@@ -1,5 +1,6 @@
 #include "node_hub.h"
 #include "sensor_registry.h"
+#include "sensing_state.h"
 #include "memdiag.h"
 #include <stdlib.h>
 #include "photo_rx.h"
@@ -1267,6 +1268,15 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         n->sensor_fault       = hello->sensor_fault;
         n->sensor_fail_streak = hello->sensor_fail_streak;
 
+        /* 2026-11-12(기준 측정기 상태) — 매 응답마다 채널 값을 센싱 상태에 넘김(같은 측정의 재전송도 — 콘 재시작 뒤 첫 응답이 재전송이어도
+         * 바로 "사용 가능"이 되게). 값은 센스가 실어 보낸 마지막 측정값 */
+        for (uint8_t ci = 0; ci < n->chan_count && ci < ESP_NOW_MAX_CHANNELS; ci++) {
+            sreg_sensing_t sg;
+            if (!sreg_sensing_for(n->mac, ci, &sg)) continue;
+            sensing_state_note(sg.id, sg.what, hello->chan_ok[ci] != 0, hello->chan_val[ci]);
+        }
+        power_relay_kick();
+
         /* 새로 쓰는 부분 — 센서 채널값 저장. 2026-09-05(사용자 지시로 정정) — sensor_kind/
          * chan_count/chan_type은 더 이상 여기 안 옴(페어링 때 PAIR_ACK로 이미 받아둔 n->
          * chan_count/chan_type을 그대로 씀). 센스는 콘 개입 없이 자기 주기대로 측정해서
@@ -1460,6 +1470,21 @@ uint32_t node_hub_node_timeout_ms(const node_hub_node_t *n)
     return n ? timeout_ms_for(n->kind, n->mac) : timeout_ms_for(HUB_NODE_KIND_UNKNOWN, NULL);
 }
 
+node_link_t node_hub_board_link(const uint8_t *mac)
+{
+    if (!mac) return NODE_LINK_NONE;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    node_link_t r;
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    const node_hub_node_t *n = find_node(mac);
+    if (n && (n->user_unpaired || n->slot_kicked)) r = NODE_LINK_NONE;
+    else if (n && node_live_locked(n, now_ms)) r = NODE_LINK_LIVE;
+    else if ((!n || !n->ever_paired) && now_ms <= timeout_ms_for(n ? n->kind : HUB_NODE_KIND_SENS, mac)) r = NODE_LINK_UNKNOWN;   /* live_locked의 재시작 유예와 같은 기준 */
+    else r = NODE_LINK_LOST;
+    xSemaphoreGive(s_nodes_mutex);
+    return r;
+}
+
 int node_hub_get_nodes(hub_node_kind_t kind, node_hub_node_t *out, int max)
 {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
@@ -1601,6 +1626,14 @@ void node_hub_apply_cam_capture_interval_sec(const uint8_t *mac, uint32_t sec)
 {
     /* 2026-09-26(사용자 설계) — 저장만. 캠이 깨어날 때 CASK CONFIG로 전달됨(push_cam_config_to 주석) */
     device_config_set_cam_capture_interval_sec(mac, sec);
+}
+
+void node_hub_sens_fast_measure(const uint8_t *mac, uint8_t count)
+{
+    esp_now_sens_fast_measure_t msg = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_SENS_FAST_MEASURE, .count = count };
+    static const uint8_t s_fast_ack_types[] = { ESP_NOW_MSG_SENS_FAST_MEASURE_ACK };
+    node_hub_queue_action(mac, &msg, sizeof(msg), s_fast_ack_types, 1, 500, 3, "Fast measure");
+    ESP_LOGI(TAG, "Fast measure x%u queued for " MACSTR, (unsigned)count, MAC2STR(mac));
 }
 
 void node_hub_sens_calib_reset(const uint8_t *mac)

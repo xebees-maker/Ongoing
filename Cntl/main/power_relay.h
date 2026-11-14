@@ -109,6 +109,11 @@ typedef struct {
      * 회귀를 돌림. 예측폭(미래를 얼마나 내다볼지)은 그 N개가 실제로 걸린 시간 폭을 그대로
      * 씀(2026-09-16 원칙 "본 만큼만 내다본다" 유지, 초 고정값 대신 관측된 시간폭으로 적응) */
     uint32_t trend_sample_count;
+
+    /* 2026-11-12(사용자 설계 — 상태 = 설정됨/미설정) — 동작 방식(타이머·센서 AI·센서 수동)을 Apply했으면 true, 미설정으로 Apply했거나
+     * 한 번도 안 했으면 false. 미설정 자체가 꺼짐(강제가 아니면 판정 태스크가 늘 꺼짐으로 맞춤). configured는 "센서 조건 값을 입력한
+     * 적 있음"(다시 고를 때 값 채우기)으로만 남음. 반드시 구조체 맨 끝(파일 v3 → v4 옮기기가 앞부분을 그대로 씀) */
+    bool     active;
 } power_relay_config_t;
 
 /* app_main()에서 fs_init() 이후 한 번 호출 — 저장된 설정 복원(없으면 미설정 기본값) */
@@ -131,8 +136,25 @@ const power_relay_timer_t *power_relay_get_timer(int idx);
 void power_relay_set_timer(int idx, const power_relay_timer_t *t);
 /* 수동 강제를 시작할 때 자동 해제 시간(초, 0 = 끝없음)을 정함 — power_relay_set_config()로 강제를 켜기 전에 부름 */
 void power_relay_set_manual_release(int idx, uint32_t sec);
+/* 2026-11-12 — 강제 자동 해제까지 남은 초(요약 표시용). 강제가 아니거나 자동 해제가 없으면 false */
+bool power_relay_manual_remaining_sec(int idx, uint32_t *out_sec);
 /* 지금 시계 기준 타이머 상태(켜짐?)와 다음 전환까지 남은 초 — 화면 표시용 */
 bool power_relay_timer_state(const power_relay_timer_t *t, uint32_t *out_next_sec);
+/* 2026-11-12(기준 측정기 상태 — Docs/한일_2026-09-28.txt 11-12절 6번 표 2) — 센서 방식 릴레이의 기준 상태. 판정 태스크가 정하고 나머지는 읽기만 */
+typedef enum {
+    POWER_REF_NONE = 0,                /* 센서 방식이 아님(미설정·타이머) */
+    POWER_REF_CHECKING,                /* 확인 중 — 출력 유지(부팅 때는 꺼짐) */
+    POWER_REF_MAIN,                    /* 정밀 사용(센서 AI) 또는 고른 측정기 사용 */
+    POWER_REF_BASIC,                   /* 간이 사용(정밀 미등록) */
+    POWER_REF_BASIC_MAIN_CHECKING,     /* 간이 사용(정밀 확인 중) */
+    POWER_REF_SUB_LOST,                /* 간이 대신(정밀 끊김) */
+    POWER_REF_SUB_FAULT,               /* 간이 대신(정밀 고장) */
+    POWER_REF_WAIT,                    /* 판단 대기(출력 유지, 5분까지) */
+    POWER_REF_WAIT_OFF,                /* 판단 대기(5분 지나 꺼짐) */
+    POWER_REF_FAIL_FAULT,              /* 판단 불가(고장) — 바로 끔 */
+    POWER_REF_FAIL_NONE,               /* 판단 불가(측정기 없음) — 바로 끔 */
+} power_relay_ref_t;
+power_relay_ref_t power_relay_get_ref(int idx);
 /* 설정이 바뀌었을 때 판정 태스크를 바로 깨움 */
 void power_relay_kick(void);
 

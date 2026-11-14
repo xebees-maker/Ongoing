@@ -9,12 +9,17 @@
 #include "rtc_sync.h"
 
 #include <string.h>
+#include <stddef.h>
 #include <math.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "ch422g.h"
 #include "node_hub.h"
+#include "sensing_state.h"
+#include "sensor_registry.h"
+#include "stats_store.h"
+#include "sd_storage.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -33,7 +38,13 @@ static const uint8_t s_relay_do_bit[POWER_RELAY_LOCAL_COUNT] = { CH422G_OD_DO0, 
  * 불일치로 안 걸러지고, 그 구버전 byte들이(예: 예전 ai_mode 값) 새 필드 자리로 그대로
  * 재해석돼 엉뚱한 값(Override=true)이 됐음. 구조체를 바꿀 때마다(오늘 이미 y_rises/
  * z_turns_on도 안 올렸었음) 반드시 버전을 올려서 이 클래스의 버그를 원천 차단 */
-#define POWER_RELAY_FILE_VERSION 3   /* 2026-10-18 — 릴레이 3개(원격릴레이) + 끊김 시간. 버전 2(릴레이 2개)는 앞 두 칸으로 옮김 */
+#define POWER_RELAY_FILE_VERSION 4   /* 2026-11-12 — 설정 구조체 끝에 active(설정됨). 버전 3(10-18, 릴레이 3개 + 끊김 시간)·2(릴레이 2개)는 옮김 */
+/* 버전 3까지의 설정 구조체 크기 = active 앞까지(active가 맨 끝, trend_sample_count(uint32) 바로 뒤라 옛 크기와 같음) */
+#define POWER_RELAY_CFG_V3_SIZE  offsetof(power_relay_config_t, active)
+_Static_assert(offsetof(power_relay_config_t, active) == offsetof(power_relay_config_t, trend_sample_count) + sizeof(uint32_t),
+               "active must directly follow trend_sample_count (v3 migration)");
+#define POWER_RELAY_FILE_V3_SIZE (sizeof(uint32_t) + POWER_RELAY_CFG_V3_SIZE * POWER_RELAY_COUNT + sizeof(uint16_t))
+#define POWER_RELAY_FILE_V2_SIZE (sizeof(uint32_t) + POWER_RELAY_CFG_V3_SIZE * POWER_RELAY_LOCAL_COUNT)
 #define POWER_REMOTE_FAILSAFE_DEFAULT_MIN 10
 
 /* 판정 주기(ms) — 응답성 설정과 무관한 이 모듈만의 독립 주기. 짧을수록 반응이 빠르지만
@@ -41,9 +52,8 @@ static const uint8_t s_relay_do_bit[POWER_RELAY_LOCAL_COUNT] = { CH422G_OD_DO0, 
  * 읽는 것뿐이라 15초로 정함(그래프 갱신주기 재조정과 같은 논리, 2026-09-15) */
 #define POWER_RELAY_EVAL_INTERVAL_MS 15000
 
-/* 소스 값이 이 시간(ms) 이상 안 들어오면 정지(Off) — "짧은 끊김은 무시, 길면 멈춤"
- * (2026-09-15 사용자 설계). 릴레이별 실제 동작주기에 맞춰 나중에 조정 가능하도록 남겨둠 */
-#define POWER_RELAY_STALE_TIMEOUT_MS (5 * 60 * 1000)
+/* 2026-09-15(사용자 설계 "짧은 끊김은 무시, 길면 멈춤") — 2026-11-12부터 기준 상태의 판단 대기: 이 시간까지 출력 유지, 지나면 끔 */
+#define POWER_RELAY_WAIT_HOLD_MS (5 * 60 * 1000)
 
 /* 추세(기울기) 계산용 최근 샘플 링버퍼 — 판정 주기(15초)로 채워짐. 2026-09-16(사용자 설계
  * 재정리 — "판단기간" 사용자 입력값) 용량은 넉넉히(40개=최대 10분 창) 잡아두고, 실제
@@ -62,11 +72,6 @@ typedef struct __attribute__((packed)) {
     power_relay_config_t relays[POWER_RELAY_COUNT];
     uint16_t remote_failsafe_min;
 } power_relay_file_t;
-/* 버전 2(10-17까지) — 옮기기용 */
-typedef struct __attribute__((packed)) {
-    uint32_t version;
-    power_relay_config_t relays[POWER_RELAY_LOCAL_COUNT];
-} power_relay_file_v2_t;
 static uint16_t s_remote_failsafe_min = POWER_REMOTE_FAILSAFE_DEFAULT_MIN;
 
 static power_relay_config_t s_relay_cfg[POWER_RELAY_COUNT];
@@ -206,6 +211,17 @@ void power_relay_set_manual_release(int idx, uint32_t sec)
     timer_save();
 }
 
+bool power_relay_manual_remaining_sec(int idx, uint32_t *out_sec)
+{
+    if (idx < 0 || idx >= POWER_RELAY_COUNT || !s_relay_cfg[idx].manual_override) return false;
+    uint32_t u = s_timer[idx].manual_until, now = 0;
+    if (u == 0) return false;
+    if (u & UPTIME_UNTIL_FLAG) now = (uint32_t)(esp_timer_get_time() / 1000000), u &= ~UPTIME_UNTIL_FLAG;
+    else if (!clock_valid(&now)) return false;
+    if (out_sec) *out_sec = (u > now) ? u - now : 0;
+    return true;
+}
+
 /* 수동 강제의 자동 해제 시각이 지났나 */
 static bool manual_release_due(int idx)
 {
@@ -227,7 +243,12 @@ static void relay_alias_disp_refresh(int i)
 }
 static bool     s_commanded_on[POWER_RELAY_COUNT];
 static uint32_t s_last_transition_ms[POWER_RELAY_COUNT];
-static uint32_t s_last_data_ms[POWER_RELAY_COUNT];
+/* 2026-11-12(기준 측정기 상태) — 릴레이마다 기준 상태, 판단 대기 시작 시각, 기준값을 낸 쪽(0 없음, 1 주, 2 대신), 추세를 기록으로 다시 채울지 */
+static power_relay_ref_t s_ref[POWER_RELAY_COUNT];
+static uint32_t s_wait_since_ms[POWER_RELAY_COUNT];
+static uint8_t  s_ref_side[POWER_RELAY_COUNT];
+static uint32_t s_ref_ids_sig[POWER_RELAY_COUNT];   /* 2026-11-13 — 기준 쪽 센싱 목록 요약(바뀌면 이력 끊김) */
+static bool     s_trend_refill[POWER_RELAY_COUNT] = { true, true, true };   /* 부팅 때 한 번 */
 static power_trend_buf_t s_trend[POWER_RELAY_COUNT];
 
 /* 2026-09-18(사용자 설계 — "부팅 때에는... 설정이 되있더라도 오프로 시작... 설정에 의해
@@ -283,17 +304,25 @@ void power_relay_load(void)
     if (!s) { fclose(f); return; }
     size_t got = fread(s, 1, sizeof(*s), f);
     fclose(f);
+    uint16_t fs_min = 0;
     if (got == sizeof(*s) && s->version == POWER_RELAY_FILE_VERSION) {
         memcpy(s_relay_cfg, s->relays, sizeof(s_relay_cfg));
-        if (s->remote_failsafe_min == 1 || s->remote_failsafe_min == 10 || s->remote_failsafe_min == 30 || s->remote_failsafe_min == 60) {
-            s_remote_failsafe_min = s->remote_failsafe_min;
-        }
-    } else if (got == sizeof(power_relay_file_v2_t) && s->version == 2) {
-        /* 2026-10-18 — 릴레이 2개 시절 파일: 앞 두 칸은 그대로, 원격릴레이는 기본값 */
-        memcpy(s_relay_cfg, s->relays, sizeof(power_relay_config_t) * POWER_RELAY_LOCAL_COUNT);
-        ESP_LOGI(TAG, "Config file v2 (2 relays) migrated");
+        fs_min = s->remote_failsafe_min;
+    } else if ((got == POWER_RELAY_FILE_V3_SIZE && s->version == 3) || (got == POWER_RELAY_FILE_V2_SIZE && s->version == 2)) {
+        /* 2026-11-12 — 옛 파일(설정 구조체에 active 없음): 칸마다 앞부분을 그대로 옮기고, 설정됨 = 센서 조건 적용 또는 타이머
+         * (타이머는 위 timer_load()에서 이미 읽음). 버전 2(릴레이 2개, 10-17까지)는 원격릴레이 칸이 기본값 */
+        int n = (s->version == 3) ? POWER_RELAY_COUNT : POWER_RELAY_LOCAL_COUNT;
+        const uint8_t *p = (const uint8_t *)s + sizeof(uint32_t);
+        for (int i = 0; i < n; i++) memcpy(&s_relay_cfg[i], p + (size_t)i * POWER_RELAY_CFG_V3_SIZE, POWER_RELAY_CFG_V3_SIZE);
+        for (int i = 0; i < POWER_RELAY_COUNT; i++) s_relay_cfg[i].active = s_relay_cfg[i].configured || s_timer[i].timer_mode;
+        if (s->version == 3) memcpy(&fs_min, p + (size_t)POWER_RELAY_COUNT * POWER_RELAY_CFG_V3_SIZE, sizeof(fs_min));
+        ESP_LOGI(TAG, "Config file v%u migrated to v%d", (unsigned)s->version, POWER_RELAY_FILE_VERSION);
+        if (fs_min == 1 || fs_min == 10 || fs_min == 30 || fs_min == 60) s_remote_failsafe_min = fs_min;
         heap_caps_free(s);
-        for (int i = 0; i < POWER_RELAY_COUNT; i++) relay_alias_disp_refresh(i);
+        for (int i = 0; i < POWER_RELAY_COUNT; i++) {
+            s_relay_cfg[i].alias[sizeof(s_relay_cfg[i].alias) - 1] = '\0';
+            relay_alias_disp_refresh(i);
+        }
         power_relay_save();
         return;
     } else {
@@ -302,12 +331,13 @@ void power_relay_load(void)
         return;
     }
     heap_caps_free(s);
+    if (fs_min == 1 || fs_min == 10 || fs_min == 30 || fs_min == 60) s_remote_failsafe_min = fs_min;
     for (int i = 0; i < POWER_RELAY_COUNT; i++) {
         s_relay_cfg[i].alias[sizeof(s_relay_cfg[i].alias) - 1] = '\0';
         relay_alias_disp_refresh(i);
     }
-    ESP_LOGI(TAG, "Config restored (configured: %d %d remote %d, remote failsafe %u min)", (int)s_relay_cfg[0].configured,
-             (int)s_relay_cfg[1].configured, (int)s_relay_cfg[POWER_RELAY_REMOTE_IDX].configured, (unsigned)s_remote_failsafe_min);
+    ESP_LOGI(TAG, "Config restored (active: %d %d remote %d, remote failsafe %u min)", (int)s_relay_cfg[0].active,
+             (int)s_relay_cfg[1].active, (int)s_relay_cfg[POWER_RELAY_REMOTE_IDX].active, (unsigned)s_remote_failsafe_min);
 }
 
 const char *power_relay_get_alias_display(int idx)
@@ -347,6 +377,7 @@ void power_relay_set_config(int idx, const power_relay_config_t *cfg)
      * 다시 판단해야지, 이전 소스 기준으로 쌓인 샘플을 섞어 쓰면 안 됨 */
     memset(&s_trend[idx], 0, sizeof(s_trend[idx]));
     s_trend_has_last_value[idx] = false;
+    s_trend_refill[idx] = true;   /* 2026-11-12 — 비우기만 하지 않고 다음 판정 때 기록으로 다시 채움 */
     s_last_transition_ms[idx] = 0;
     power_relay_save();
     /* 2026-09-18(Manual Override, 사용자 설계) — Override를 켠 순간(팝업 OK) 다음 15초
@@ -512,6 +543,228 @@ static void trend_push(power_trend_buf_t *buf, uint32_t now_ms, float value)
     if (buf->count < POWER_TREND_SAMPLES) buf->count++;
 }
 
+/* ════════════════════════════════════════════════════════════
+ * 2026-11-12(사용자와 대화로 확정 — Docs/한일_2026-09-28.txt 11-12절 6·7번) — 기준 측정기 상태
+ *  - 센서 AI(공기 온습도): 정밀이 "사용 가능"이면 정밀, 아니면 간이 — Apply 때 고정하지 않고 판정할 때마다 정함.
+ *  - 센서 수동·그 밖의 값 종류: 고른 쪽만(대신하지 않음).
+ *  - 기준값 = 쓰는 쪽의 사용 가능한 측정기들의 마지막 측정값(평균/최대/최소). 예전의 최근 5분 통계 창은 쓰지 않음.
+ * ════════════════════════════════════════════════════════════ */
+typedef struct {
+    sensing_st_t st;                      /* 쪽 전체의 상태(사용 가능 > 확인 중 > 끊김 > 고장 > 미등록) */
+    int      n;                           /* 속한 센싱 수 */
+    uint16_t ids[SREG_MAX_SENSINGS];
+    int      n_usable;
+    float    v_sum, v_min, v_max;
+} ref_side_t;
+
+static sreg_sensing_t *s_ref_list = NULL;   /* 판정 태스크 전용 작업 칸(PSRAM) */
+
+static bool ref_member(const power_relay_config_t *cfg, const sreg_sensing_t *g, bool precise)
+{
+    if (g->what != (uint8_t)cfg->chan_type || g->what == SREG_WHAT_CAMERA) return false;
+    if (cfg->source_kind == POWER_SRC_SINGLE_DEVICE) {
+        uint8_t mac[6];
+        return sreg_sensing_board(g->id, mac) && memcmp(mac, cfg->device_mac, 6) == 0;
+    }
+    switch (cfg->group) {
+        case POWER_GROUP_AIR:  return g->where == SENSING_WHERE_AIR && (g->precise != 0) == precise;
+        case POWER_GROUP_AGAR: return g->where == SENSING_WHERE_SUBSTRATE;
+        default:               return g->where == SENSING_WHERE_AIR;
+    }
+}
+
+static int st_rank(sensing_st_t st)
+{
+    switch (st) {
+        case SENSING_ST_USABLE:   return 4;
+        case SENSING_ST_CHECKING: return 3;
+        case SENSING_ST_LOST:     return 2;
+        case SENSING_ST_FAULT:    return 1;
+        default:                  return 0;
+    }
+}
+
+static void ref_side_eval(const power_relay_config_t *cfg, const sreg_sensing_t *list, int nl, bool precise, ref_side_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->st = SENSING_ST_UNREG;
+    for (int i = 0; i < nl; i++) {
+        if (!ref_member(cfg, &list[i], precise)) continue;
+        out->ids[out->n++] = list[i].id;
+        float v = 0.0f;
+        sensing_st_t st = sensing_state_get(list[i].id, &v);
+        if (st_rank(st) > st_rank(out->st)) out->st = st;
+        if (st != SENSING_ST_USABLE) continue;
+        if (out->n_usable == 0) { out->v_min = out->v_max = v; }
+        else { if (v < out->v_min) out->v_min = v; if (v > out->v_max) out->v_max = v; }
+        out->v_sum += v;
+        out->n_usable++;
+    }
+}
+
+static float ref_side_value(const ref_side_t *sd, power_source_stat_t stat)
+{
+    switch (stat) {
+        case POWER_STAT_MAX: return sd->v_max;
+        case POWER_STAT_MIN: return sd->v_min;
+        default:             return sd->v_sum / (float)sd->n_usable;
+    }
+}
+
+/* 표 2 — 주 쪽(정밀, 또는 고른 쪽) 상태 × 대신 쪽(간이, 없으면 미등록) 상태 → 기준 상태. *out_side = 값을 낼 쪽(0 없음, 1 주, 2 대신) */
+static power_relay_ref_t ref_from_sides(sensing_st_t p, sensing_st_t b, uint8_t *out_side)
+{
+    bool bu = (b == SENSING_ST_USABLE);
+    *out_side = 0;
+    switch (p) {
+        case SENSING_ST_USABLE:
+            *out_side = 1;
+            return POWER_REF_MAIN;
+        case SENSING_ST_CHECKING:
+            if (bu) { *out_side = 2; return POWER_REF_BASIC_MAIN_CHECKING; }
+            return POWER_REF_CHECKING;
+        case SENSING_ST_LOST:
+            if (bu) { *out_side = 2; return POWER_REF_SUB_LOST; }
+            return POWER_REF_WAIT;
+        case SENSING_ST_FAULT:
+            if (bu) { *out_side = 2; return POWER_REF_SUB_FAULT; }
+            return (b == SENSING_ST_CHECKING || b == SENSING_ST_LOST) ? POWER_REF_WAIT : POWER_REF_FAIL_FAULT;
+        default:
+            switch (b) {
+                case SENSING_ST_USABLE:   *out_side = 2; return POWER_REF_BASIC;
+                case SENSING_ST_CHECKING: return POWER_REF_CHECKING;
+                case SENSING_ST_LOST:     return POWER_REF_WAIT;
+                case SENSING_ST_FAULT:    return POWER_REF_FAIL_FAULT;
+                default:                  return POWER_REF_FAIL_NONE;
+            }
+    }
+}
+
+/* 릴레이 하나의 기준 상태와 기준값. 값을 낼 쪽이 있으면 out_value·out_side(1·2)·out_ids/out_n(그 쪽의 센싱) 채움 */
+static power_relay_ref_t ref_compute(const power_relay_config_t *cfg, float *out_value, uint8_t *out_side,
+                                     uint16_t *out_ids, int *out_n)
+{
+    *out_side = 0;
+    if (!s_ref_list) s_ref_list = heap_caps_malloc(sizeof(sreg_sensing_t) * SREG_MAX_SENSINGS, MALLOC_CAP_SPIRAM);
+    if (!s_ref_list) return POWER_REF_CHECKING;
+    int nl = sreg_list_sensings(s_ref_list, SREG_MAX_SENSINGS);
+    static ref_side_t s_p, s_b;   /* 판정 태스크에서만 — 스택에 안 둠 */
+    bool fallback = cfg->ai_mode && cfg->source_kind == POWER_SRC_GROUP_STAT && cfg->group == POWER_GROUP_AIR;
+    bool main_precise = fallback ? true : cfg->precise;
+    ref_side_eval(cfg, s_ref_list, nl, main_precise, &s_p);
+    if (fallback) ref_side_eval(cfg, s_ref_list, nl, false, &s_b);
+    else { memset(&s_b, 0, sizeof(s_b)); s_b.st = SENSING_ST_UNREG; }
+    power_relay_ref_t r = ref_from_sides(s_p.st, s_b.st, out_side);
+    const ref_side_t *use = (*out_side == 1) ? &s_p : (*out_side == 2) ? &s_b : NULL;
+    if (use && use->n_usable > 0) {
+        *out_value = ref_side_value(use, cfg->stat);
+        memcpy(out_ids, use->ids, sizeof(uint16_t) * use->n);
+        *out_n = use->n;
+    } else {
+        *out_side = 0;
+    }
+    return r;
+}
+
+/* 2026-11-12(7번) — 추세를 통계 기록(최근 30분)으로 다시 채움. 같은 쪽 센싱들의 기록을 시간순으로 훑으며, 기록마다 그때까지의
+ * 센싱별 마지막 값으로 기준값(평균/최대/최소)을 만들어 값이 바뀔 때만 넣음(판정 때와 같은 규칙) */
+#define POWER_TREND_REFILL_SEC   (30 * 60)
+#define POWER_TREND_REFILL_CAP   512
+static stats_record_t *s_refill_buf = NULL;
+
+/* 돌려주는 값 = 최근 30분 안의 기준 측정기 기록 수(빠른 재측정 판단). 시계가 안 맞으면 0(기록을 못 봄) */
+static int trend_refill(int idx, const power_relay_config_t *cfg, const uint16_t *ids, int n, uint32_t now_ms)
+{
+    memset(&s_trend[idx], 0, sizeof(s_trend[idx]));
+    s_trend_has_last_value[idx] = false;
+    uint32_t now_unix = rtc_sync_get_unix_time();
+    if (now_unix < 1700000000u || n <= 0) return 0;   /* 시계가 안 맞음 — 기록 시각을 견줄 수 없음 */
+    if (!s_refill_buf) s_refill_buf = heap_caps_malloc(sizeof(stats_record_t) * POWER_TREND_REFILL_CAP, MALLOC_CAP_SPIRAM);
+    if (!s_refill_buf) return 0;
+    uint32_t got = stats_store_read_since(now_unix - POWER_TREND_REFILL_SEC, (uint8_t)cfg->chan_type, s_refill_buf, POWER_TREND_REFILL_CAP);
+    static float s_last_v[SREG_MAX_SENSINGS];
+    static bool  s_has_v[SREG_MAX_SENSINGS];
+    memset(s_has_v, 0, sizeof(s_has_v));
+    int pushed = 0, matched = 0;
+    for (uint32_t k = 0; k < got; k++) {
+        const stats_record_t *rec = &s_refill_buf[k];
+        int m = -1;
+        for (int j = 0; j < n; j++) if (ids[j] == rec->sensing) { m = j; break; }
+        if (m < 0 || rec->unix_time > now_unix) continue;
+        matched++;
+        s_last_v[m] = rec->value;
+        s_has_v[m] = true;
+        float sum = 0.0f, mn = 0.0f, mx = 0.0f;
+        int c = 0;
+        for (int j = 0; j < n; j++) {
+            if (!s_has_v[j]) continue;
+            float v = s_last_v[j];
+            if (c == 0) { mn = mx = v; } else { if (v < mn) mn = v; if (v > mx) mx = v; }
+            sum += v;
+            c++;
+        }
+        float v = (cfg->stat == POWER_STAT_MAX) ? mx : (cfg->stat == POWER_STAT_MIN) ? mn : sum / (float)c;
+        if (s_trend_has_last_value[idx] && v == s_trend_last_value[idx]) continue;
+        trend_push(&s_trend[idx], now_ms - (now_unix - rec->unix_time) * 1000u, v);
+        s_trend_last_value[idx] = v;
+        s_trend_has_last_value[idx] = true;
+        pushed++;
+    }
+    ESP_LOGI(TAG, "Relay%d trend refilled from records: %d samples (%d of %u records, 30 min)", idx, pushed, matched, (unsigned)got);
+    return matched;
+}
+
+/* 2026-11-13(사용자 결정 11-12 — 빠른 재측정, Docs/한일_2026-09-28.txt 11-12절 7번) — 이력이 끊긴 사건(Apply, 기준 쪽·구성 바뀜, 끊김에서
+ * 복구, 재부팅)으로 추세를 다시 채운 뒤, 최근 30분 기준 기록이 3개 미만이면 기준 측정기 보드마다 빠른 측정을 요청.
+ * 횟수 = 이 릴레이의 추세 표본 수(최소 3)에서 이미 있는 기록 수를 뺀 만큼 */
+#define POWER_FAST_MIN_RECORDS 3
+static void fast_measure_if_short(int idx, const power_relay_config_t *cfg, const uint16_t *ids, int n, int have)
+{
+    if (have >= POWER_FAST_MIN_RECORDS || n <= 0) return;
+    int need = (int)cfg->trend_sample_count;
+    if (need < POWER_FAST_MIN_RECORDS) need = POWER_FAST_MIN_RECORDS;
+    if (need > POWER_TREND_SAMPLES) need = POWER_TREND_SAMPLES;
+    need -= have;
+    static uint8_t s_boards[SREG_MAX_SENSINGS][6];   /* 판정 태스크에서만 — 스택에 안 둠 */
+    int nb = 0;
+    for (int i = 0; i < n; i++) {
+        uint8_t mac[6];
+        if (!sreg_sensing_board(ids[i], mac)) continue;
+        bool dup = false;
+        for (int b = 0; b < nb && !dup; b++) dup = memcmp(s_boards[b], mac, 6) == 0;
+        if (dup) continue;
+        memcpy(s_boards[nb++], mac, 6);
+        node_hub_sens_fast_measure(mac, (uint8_t)need);
+    }
+    ESP_LOGI(TAG, "Relay%d(%s) only %d reference records in 30 min - fast measure x%d on %d board(s)", idx, cfg->alias, have, need, nb);
+}
+
+static const char *ref_name(power_relay_ref_t r)
+{
+    static const char *const names[] = { "none", "checking", "main", "basic", "basic (main checking)", "basic instead (main lost)",
+                                         "basic instead (main fault)", "waiting", "waiting (off)", "cannot judge (fault)",
+                                         "cannot judge (no sensor)" };
+    return (unsigned)r < sizeof(names) / sizeof(names[0]) ? names[r] : "?";
+}
+
+static void ref_set(int idx, power_relay_ref_t r, uint32_t now_ms)
+{
+    if (r == POWER_REF_WAIT) {
+        if (s_ref[idx] != POWER_REF_WAIT && s_ref[idx] != POWER_REF_WAIT_OFF) s_wait_since_ms[idx] = now_ms;
+        if (now_ms - s_wait_since_ms[idx] >= POWER_RELAY_WAIT_HOLD_MS) r = POWER_REF_WAIT_OFF;
+    }
+    if (r != s_ref[idx]) {
+        ESP_LOGI(TAG, "Relay%d(%s) reference: %s -> %s", idx, s_relay_cfg[idx].alias, ref_name(s_ref[idx]), ref_name(r));
+        s_ref[idx] = r;
+    }
+}
+
+power_relay_ref_t power_relay_get_ref(int idx)
+{
+    if (idx < 0 || idx >= POWER_RELAY_COUNT) return POWER_REF_NONE;
+    return s_ref[idx];
+}
+
 /* 2026-09-16(사용자 설계 대화 정리) — 히스테리시스+최소유지시간+추세("Puzzy") 판정.
  *
  * 추세 규칙: raw=지금 값, predicted=raw+기울기*lookahead.
@@ -557,8 +810,19 @@ static void evaluate_relay(int idx, uint32_t now_ms)
         }
     }
 
+    /* 2026-11-12(사용자 설계) — 출력은 상태가 정함: 강제 값 → 설정(타이머/센서) 값 → 미설정이면 꺼짐. 해제 경로(자동·손)마다
+     * 따로 끄지 않고, 매 판정마다 이 규칙으로 맞춤. 미설정 = active가 아님. 센서 방식인데 조건이 없거나(configured 아님) 채널이
+     * 없으면(예전 Alias만 저장된 파일, 2026-09-16 가드) 판정할 수 없으니 미설정처럼 꺼짐 */
+    bool use_timer = cfg->active && s_timer[idx].timer_mode;
+    bool use_sensor = cfg->active && !s_timer[idx].timer_mode && cfg->configured && cfg->chan_type != SENSOR_CHAN_NONE;
+    if (!use_sensor) ref_set(idx, POWER_REF_NONE, now_ms);
+    if (!use_timer && !use_sensor) {
+        if (!cfg->manual_override && s_commanded_on[idx]) power_relay_command(idx, false, now_ms);
+        return;
+    }
+
     /* 2026-10-09(할 일 AG) — 동작 = 타이머: 센서 조건 대신 시계로. 수동 강제 중이면 위에서 이미 처리 */
-    if (s_timer[idx].timer_mode) {
+    if (use_timer) {
         if (cfg->manual_override) return;
         bool want_on = power_relay_timer_state(&s_timer[idx], NULL);
         if (want_on == s_commanded_on[idx]) return;
@@ -568,25 +832,38 @@ static void evaluate_relay(int idx, uint32_t now_ms)
         return;
     }
 
-    if (!cfg->configured) return;
-    /* 방어적 가드(2026-09-16) — Alias만 저장된 채 configured가 잘못 true였던 예전 상태가
-     * 저장 파일에 이미 남아있을 수 있음(재부팅해도 그대로 불러와짐). chan_type이 NONE이면
-     * 실제로 한 번도 본 설정을 Apply한 적 없는 상태이므로 평가 자체를 건너뜀 */
-    if (cfg->chan_type == SENSOR_CHAN_NONE) return;
-
-    float value;
-    bool have = ui_main_query_power_source_value(cfg, &value);
-    if (!have) {
-        /* Override 중엔 이 안전장치(기준 센서 오래 끊김 -> 정지)도 억제 — 수동 명령이
-         * 우선이어야 하는데, 안 그러면 방금 위에서 켠 Override를 이 블록이 바로 꺼버림 */
-        if (!cfg->manual_override && s_last_data_ms[idx] != 0 &&
-            (now_ms - s_last_data_ms[idx]) > POWER_RELAY_STALE_TIMEOUT_MS) {
-            /* 2026-09-15(사용자 설계) — 기준 센서가 오래 끊기면 기본은 정지 */
+    /* 여기부터 센서 방식(use_sensor) — configured·chan_type 가드는 위 출력 규칙에 합침(2026-11-12) */
+    /* 2026-11-12(기준 측정기 상태 표 3) — 기준 상태가 동작을 정함: 확인 중·판단 대기(5분 안)는 출력 유지, 판단 대기 5분 지남·판단 불가는
+     * 끔, 나머지(정밀 사용·간이 사용·간이 대신)는 그 쪽 값으로 판정. 강제 중이면 명령은 위 강제 블록이 함(아래 effective_want_on) */
+    float value = 0.0f;
+    uint8_t side = 0;
+    static uint16_t s_ids[SREG_MAX_SENSINGS];   /* 판정 태스크에서만 */
+    int n_ids = 0;
+    power_relay_ref_t ref = ref_compute(cfg, &value, &side, s_ids, &n_ids);
+    ref_set(idx, ref, now_ms);
+    ref = s_ref[idx];
+    if (side == 0) {
+        s_ref_side[idx] = 0;   /* 2026-11-13 — 다시 값을 낼 때(끊김에서 복구 등) 이력이 끊긴 것으로 봄 */
+        if (!cfg->manual_override && s_commanded_on[idx] &&
+            (ref == POWER_REF_WAIT_OFF || ref == POWER_REF_FAIL_FAULT || ref == POWER_REF_FAIL_NONE)) {
             power_relay_command(idx, false, now_ms);
         }
-        return;  /* 짧은 끊김은 이번 주기 판정만 건너뜀(무시) */
+        return;
     }
-    s_last_data_ms[idx] = now_ms;
+    /* 2026-11-13 — 기준 측정기 구성(쪽에 속한 센싱 목록)이 바뀌어도(새로 등록·해제) 이력이 끊긴 것으로 봄 */
+    uint32_t ids_sig = 2166136261u ^ (uint32_t)n_ids;
+    for (int i = 0; i < n_ids; i++) ids_sig = (ids_sig ^ s_ids[i]) * 16777619u;
+    if (side != s_ref_side[idx] || ids_sig != s_ref_ids_sig[idx]) {   /* 기준값을 내는 쪽이 바뀜(정밀 <-> 간이·복구) — 추세는 새 쪽의 기록으로 */
+        s_ref_side[idx] = side;
+        s_ref_ids_sig[idx] = ids_sig;
+        s_trend_refill[idx] = true;
+    }
+    if (s_trend_refill[idx] && (stats_store_index_ready() || !sd_storage_is_mounted())) {   /* 부팅 직후 SD 색인 전이면 다음 판정으로 미룸(그동안은 받은 값으로). SD가 없으면 플래시 기록만 */
+        s_trend_refill[idx] = false;
+        ESP_LOGI(TAG, "Relay%d(%s) history refill - reference %s, %s side, %d sensing(s)", idx, cfg->alias, ref_name(s_ref[idx]),
+                 side == 1 ? "main" : "substitute", n_ids);
+        fast_measure_if_short(idx, cfg, s_ids, n_ids, trend_refill(idx, cfg, s_ids, n_ids, now_ms));
+    }
     /* 2026-09-17 — 값이 실제로 바뀐 경우만 "새 측정값"으로 인정해서 추세 샘플에 넣음(같은
      * 값이 반복 수신되는 건 센서가 그냥 안 자고 있을 뿐 새 정보가 아니므로 카운트 안 함) */
     if (!s_trend_has_last_value[idx] || value != s_trend_last_value[idx]) {
@@ -663,7 +940,7 @@ static void power_relay_task(void *arg)
          * power_relay_kick()이 바로 깨움 */
         uint32_t wait_ms = POWER_RELAY_EVAL_INTERVAL_MS;
         for (int i = 0; i < POWER_RELAY_COUNT; i++) {
-            if (!s_timer[i].timer_mode || s_relay_cfg[i].manual_override) continue;
+            if (!s_relay_cfg[i].active || !s_timer[i].timer_mode || s_relay_cfg[i].manual_override) continue;
             uint32_t next = UINT32_MAX;
             power_relay_timer_state(&s_timer[i], &next);
             if (next != UINT32_MAX && next * 1000u + 200u < wait_ms) wait_ms = next * 1000u + 200u;

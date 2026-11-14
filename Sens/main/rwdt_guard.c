@@ -29,3 +29,12 @@ void rwdt_guard_arm(uint32_t total_budget_sec)
 
     ESP_LOGI(TAG, "RWDT armed: %us budget (slow_clk=%uHz)", (unsigned)total_budget_sec, (unsigned)slow_clk_hz);
 }
+
+void rwdt_guard_disarm(void)
+{
+    wdt_hal_context_t rwdt = RWDT_HAL_CONTEXT_DEFAULT();
+    wdt_hal_write_protect_disable(&rwdt);
+    wdt_hal_disable(&rwdt);
+    wdt_hal_write_protect_enable(&rwdt);
+    ESP_LOGI(TAG, "RWDT disarmed");
+}

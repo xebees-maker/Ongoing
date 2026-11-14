@@ -75,11 +75,13 @@ static void kind_attrs(uint8_t kind, uint8_t *where, uint8_t *precise)
     }
 }
 
-/* 2026-10-28(사용자 결정) — 종류별 자리 수: 배지 온도 3, 캠 2, 나머지 1 */
-static int slot_limit(uint8_t what, uint8_t where)
+/* 2026-10-28(사용자 결정) — 종류별 자리 수: 배지 온도 3, 캠 2, 나머지 1
+ * 2026-11-14(사용자 결정 — 고온 보드(SHT45 + DS 2개)를 콘당 2대) — 배지 온도 4, 정밀 공기 온습도 2. 간이 공기(SCD41)·가스는 1 */
+static int slot_limit(uint8_t what, uint8_t where, uint8_t precise)
 {
     if (what == SREG_WHAT_CAMERA) return 2;
     if (where == SENSING_WHERE_SUBSTRATE) return SREG_MAX_SLOTS;
+    if (where == SENSING_WHERE_AIR && precise) return 2;
     return 1;
 }
 
@@ -257,7 +259,7 @@ static void plan_item(const uint8_t mac[6], const sreg_board_t *b, const esp_now
     bool any = false, can_new = true, single = true;
     for (uint8_t c = 0; c < d->chan_n; c++) {
         uint8_t what = b->chan_type[d->chan_first + c];
-        int lim = slot_limit(what, where), cnt = 0;
+        int lim = slot_limit(what, where, precise), cnt = 0;
         if (lim > 1) single = false;
         for (int i = 0; i < SREG_MAX_SENSINGS; i++) cnt += in_group(&s_r->sensings[i], what, where, precise);
         if (cnt) any = true;
@@ -309,19 +311,202 @@ static void plan_item(const uint8_t mac[6], const sreg_board_t *b, const esp_now
     it->state = SREG_ITEM_ASK;
 }
 
+/* ── 2026-11-14(사용자 결정) — 배지보드(배지 센서가 있는 보드)는 기기 단위로 등록·대치 ──────────────────────────────
+ * 위치 = 배지보드 하나(공기 정밀 자리 + 배지 자리). 대치·신규의 판단은 자리가 여럿인 종류와 같음: 같은 종류(배지보드)가 이미 있으면
+ * "대치(어느 보드) / 신규"를 묻고, 고른 보드가 연결돼 있으면 끊을지 확인. 대치는 보드의 센서마다 같은 모델의 옛 센서 칸을 이어받음 */
+static bool board_is_unit(const sreg_board_t *b)
+{
+    if (b->sensor_count == 0) return false;
+    for (int k = 0; k < board_desc_count(b); k++) {
+        esp_now_sensor_desc_t d;
+        uint8_t where, precise;
+        if (!board_desc(b, k, &d)) continue;
+        kind_attrs(d.kind, &where, &precise);
+        if (where == SENSING_WHERE_SUBSTRATE) return true;
+    }
+    return false;
+}
+
+/* 센싱이 이 보드의 값 종류(무엇·어디·정밀도) 중 하나에 속하는지 */
+static bool unit_group_of(const sreg_board_t *b, const sreg_sensing_t *g)
+{
+    for (int k = 0; k < board_desc_count(b); k++) {
+        esp_now_sensor_desc_t d;
+        uint8_t where, precise;
+        if (!board_desc(b, k, &d)) continue;
+        kind_attrs(d.kind, &where, &precise);
+        for (uint8_t c = 0; c < d.chan_n; c++) if (in_group(g, b->chan_type[d.chan_first + c], where, precise)) return true;
+    }
+    return false;
+}
+
+/* 이 보드의 모든 값이 새 자리를 받을 수 있는지(이 보드 자신의 센서가 가진 자리는 세지 않음) */
+static bool unit_can_new(const uint8_t mac[6], const sreg_board_t *b)
+{
+    for (int k = 0; k < board_desc_count(b); k++) {
+        esp_now_sensor_desc_t d;
+        uint8_t where, precise;
+        if (!board_desc(b, k, &d)) continue;
+        kind_attrs(d.kind, &where, &precise);
+        for (uint8_t c = 0; c < d.chan_n; c++) {
+            uint8_t what = b->chan_type[d.chan_first + c];
+            int need = 0, cnt = 0;
+            for (int k2 = 0; k2 < board_desc_count(b); k2++) {   /* 이 보드에서 같은 종류 값의 수 */
+                esp_now_sensor_desc_t d2;
+                uint8_t w2, p2;
+                if (!board_desc(b, k2, &d2)) continue;
+                kind_attrs(d2.kind, &w2, &p2);
+                for (uint8_t c2 = 0; c2 < d2.chan_n; c2++) need += b->chan_type[d2.chan_first + c2] == what && w2 == where && p2 == precise;
+            }
+            for (int i = 0; i < SREG_MAX_SENSINGS; i++) {
+                const sreg_sensing_t *g = &s_r->sensings[i];
+                if (!in_group(g, what, where, precise)) continue;
+                const sreg_sensor_t *o = sensor_by_id(g->sensor_id);
+                if (o && memcmp(o->board_mac, mac, 6) == 0) continue;
+                cnt++;
+            }
+            if (cnt + need > slot_limit(what, where, precise)) return false;
+        }
+    }
+    return true;
+}
+
+/* 위치 L에서 모델 kind의 옛 센서 — 아직 안 쓴 것 중 자리 번호가 가장 작은 것 */
+static uint16_t unit_old_sensor(const uint8_t loc[6], uint8_t kind, const uint16_t *used, int nused)
+{
+    uint16_t best = 0;
+    int best_ord = 1000;
+    for (int i = 0; i < SREG_MAX_SENSORS; i++) {
+        const sreg_sensor_t *o = &s_r->sensors[i];
+        if (!o->id || o->kind != kind || memcmp(o->board_mac, loc, 6) != 0 || !sensor_owns(o->id)) continue;
+        bool u = false;
+        for (int k = 0; k < nused && !u; k++) u = used[k] == o->id;
+        if (u) continue;
+        int ord = 1000;
+        for (int g = 0; g < SREG_MAX_SENSINGS; g++) {
+            const sreg_sensing_t *sg = &s_r->sensings[g];
+            if (sg->id && sg->sensor_id == o->id && sg->ordinal < ord) ord = sg->ordinal;
+        }
+        if (ord < best_ord) { best_ord = ord; best = o->id; }
+    }
+    return best;
+}
+
+static void unit_plan(const uint8_t mac[6], const sreg_board_t *b, const sreg_decision_t *dec, const sreg_live_t *live,
+                      sreg_plan_item_t *items, int *n_items)
+{
+    static esp_now_sensor_desc_t s_d[ESP_NOW_MAX_SENSORS];   /* 잠금 안에서만 */
+    int n = 0;
+    bool any_bound = false;
+    for (int k = 0; k < board_desc_count(b) && n < ESP_NOW_MAX_SENSORS; k++) {
+        if (!board_desc(b, k, &s_d[n])) continue;
+        sreg_sensor_t *sen = find_sensor_for(mac, &s_d[n]);
+        if (sen && sensor_owns(sen->id)) any_bound = true;
+        n++;
+    }
+    *n_items = n;
+    if (any_bound) {   /* 이미 등록된 보드 — 센서마다(새 채널 등) */
+        for (int k = 0; k < n; k++) { plan_item(mac, b, &s_d[k], dec, live, &items[k]); items[k].unit = false; items[k].loc = -1; }
+        return;
+    }
+
+    /* 위치 후보 = 같은 종류 자리를 가진 다른 보드 */
+    static sreg_cand_t cand[SREG_MAX_SLOTS];   /* 잠금 안에서만 */
+    int ncand = 0;
+    for (int i = 0; i < SREG_MAX_SENSINGS; i++) {
+        const sreg_sensing_t *g = &s_r->sensings[i];
+        if (!g->id || !unit_group_of(b, g)) continue;
+        const sreg_sensor_t *o = sensor_by_id(g->sensor_id);
+        if (!o || memcmp(o->board_mac, mac, 6) == 0) continue;
+        int k = 0;
+        while (k < ncand && memcmp(cand[k].board, o->board_mac, 6) != 0) k++;
+        if (k < ncand) {   /* 대표 = 자리 번호가 가장 작은 공기 값, 없으면 가장 작은 번호 */
+            if (g->where == SENSING_WHERE_AIR && (cand[k].ordinal > g->ordinal || cand[k].sensor == 0)) { cand[k].sensor = o->id; cand[k].sensing = g->id; cand[k].ordinal = g->ordinal; }
+            continue;
+        }
+        if (ncand >= SREG_MAX_SLOTS) continue;
+        sreg_cand_t *c = &cand[ncand++];
+        c->sensor = o->id;
+        c->sensing = g->id;
+        c->ordinal = g->ordinal;
+        memcpy(c->board, o->board_mac, 6);
+        c->live = o->attached && board_live(live, o->board_mac);
+    }
+    bool can_new = unit_can_new(mac, b);
+
+    /* 사용자가 고른 것 — 이 보드의 어느 포트든 같은 값 */
+    bool decided = false;
+    uint16_t want = 0;
+    for (int k = 0; dec && k < dec->n && !decided; k++)
+        for (int j = 0; j < n && !decided; j++)
+            if (dec->c[k].port == s_d[j].port) { decided = true; want = dec->c[k].target; }
+    int loc = -1;
+    if (decided && want) {
+        const sreg_sensor_t *ws = sensor_by_id(want);
+        for (int k = 0; ws && k < ncand && loc < 0; k++) if (memcmp(cand[k].board, ws->board_mac, 6) == 0) loc = k;
+        if (loc < 0) decided = false;   /* 고른 보드가 없어짐 — 다시 물음 */
+    }
+    uint8_t st;
+    if (decided && !want) st = can_new ? SREG_ITEM_NEW : SREG_ITEM_ASK;
+    else if (loc >= 0) st = cand[loc].live ? SREG_ITEM_BLOCKED : SREG_ITEM_REPLACE;
+    else if (ncand == 0) st = can_new ? SREG_ITEM_NEW : SREG_ITEM_ASK;
+    else st = SREG_ITEM_ASK;
+
+    static uint16_t used[ESP_NOW_MAX_SENSORS];   /* 잠금 안에서만 */
+    int nused = 0;
+    for (int k = 0; k < n; k++) {
+        sreg_plan_item_t *it = &items[k];
+        memset(it, 0, sizeof(*it));
+        it->port = s_d[k].port;
+        it->kind = s_d[k].kind;
+        it->state = st;
+        it->can_new = can_new;
+        it->unit = true;
+        it->loc = (int8_t)loc;
+        it->ncand = (uint8_t)ncand;
+        memcpy(it->cand, cand, sizeof(cand[0]) * ncand);
+        if (loc >= 0) {
+            it->target = unit_old_sensor(cand[loc].board, s_d[k].kind, used, nused);
+            if (it->target) used[nused++] = it->target;
+        }
+    }
+}
+
+/* 보드 전체 판정(잠금 잡은 상태) — items[k]는 desc[k]와 같은 순서 */
+static int plan_board(const uint8_t mac[6], const sreg_board_t *b, const sreg_decision_t *dec, const sreg_live_t *live,
+                      sreg_plan_item_t *items, esp_now_sensor_desc_t *descs)
+{
+    int n = 0;
+    if (board_is_unit(b)) {
+        unit_plan(mac, b, dec, live, items, &n);
+        int j = 0;
+        for (int k = 0; k < board_desc_count(b) && j < n; k++) if (board_desc(b, k, &descs[j])) j++;
+        return n;
+    }
+    for (int k = 0; k < board_desc_count(b) && n < ESP_NOW_MAX_SENSORS; k++) {
+        if (!board_desc(b, k, &descs[n])) continue;
+        plan_item(mac, b, &descs[n], dec, live, &items[n]);
+        items[n].unit = false;
+        items[n].loc = -1;
+        n++;
+    }
+    return n;
+}
+
+static sreg_plan_item_t      s_plan_items[ESP_NOW_MAX_SENSORS];   /* 잠금 안에서만(통신 태스크 스택에 두지 않음) */
+static esp_now_sensor_desc_t s_plan_descs[ESP_NOW_MAX_SENSORS];
+
 bool sreg_plan(const uint8_t mac[6], const sreg_board_t *b, const sreg_decision_t *dec, const sreg_live_t *live, sreg_plan_t *out)
 {
     if (out) out->n = 0;
     if (!s_r) return true;
     bool ok = true;
     lock();
-    for (int k = 0; k < board_desc_count(b); k++) {
-        esp_now_sensor_desc_t d;
-        if (!board_desc(b, k, &d)) continue;
-        sreg_plan_item_t it;
-        plan_item(mac, b, &d, dec, live, &it);
-        if (it.state == SREG_ITEM_ASK || it.state == SREG_ITEM_BLOCKED) ok = false;
-        if (out && out->n < ESP_NOW_MAX_SENSORS) out->it[out->n++] = it;
+    int n = plan_board(mac, b, dec, live, s_plan_items, s_plan_descs);
+    for (int k = 0; k < n; k++) {
+        const sreg_plan_item_t *it = &s_plan_items[k];
+        if (it->state == SREG_ITEM_ASK || it->state == SREG_ITEM_BLOCKED) ok = false;
+        if (out && out->n < ESP_NOW_MAX_SENSORS) out->it[out->n++] = *it;
     }
     unlock();
     return ok;
@@ -330,7 +515,7 @@ bool sreg_plan(const uint8_t mac[6], const sreg_board_t *b, const sreg_decision_
 /* 그 종류의 빈 자리 번호(1..상한), 없으면 0 */
 static uint8_t free_ordinal(uint8_t what, uint8_t where, uint8_t precise)
 {
-    int lim = slot_limit(what, where);
+    int lim = slot_limit(what, where, precise);
     for (int o = 1; o <= lim; o++) {
         bool used = false;
         for (int i = 0; i < SREG_MAX_SENSINGS && !used; i++) used = in_group(&s_r->sensings[i], what, where, precise) && s_r->sensings[i].ordinal == o;
@@ -400,31 +585,31 @@ bool sreg_on_pair(const uint8_t mac[6], const sreg_board_t *b, const sreg_decisi
     bool changed = false;
     int nassign = 0;
     lock();
-    for (int k = 0; k < board_desc_count(b); k++) {
-        esp_now_sensor_desc_t d;
-        if (!board_desc(b, k, &d)) continue;
-        sreg_plan_item_t it;
-        plan_item(mac, b, &d, dec, live, &it);
+    /* 2026-11-14 — 판정은 먼저 보드 전체로(배지보드는 기기 단위), 반영은 센서마다 */
+    int nplan = plan_board(mac, b, dec, live, s_plan_items, s_plan_descs);
+    for (int k = 0; k < nplan; k++) {
+        const esp_now_sensor_desc_t *dp = &s_plan_descs[k];
+        const sreg_plan_item_t *itp = &s_plan_items[k];
         uint8_t where, precise;
-        kind_attrs(d.kind, &where, &precise);
-        sreg_sensor_t *sen = find_sensor_for(mac, &d);
+        kind_attrs(dp->kind, &where, &precise);
+        sreg_sensor_t *sen = find_sensor_for(mac, dp);
 
-        if (it.state == SREG_ITEM_BOUND) {
-            set_sensor_fields(sen, mac, &d, now, &changed);
-            for (uint8_t c = 0; c < d.chan_n; c++) {   /* 채널이 늘었으면 새 자리 */
+        if (itp->state == SREG_ITEM_BOUND) {
+            set_sensor_fields(sen, mac, dp, now, &changed);
+            for (uint8_t c = 0; c < dp->chan_n; c++) {   /* 채널이 늘었으면 새 자리 */
                 bool has = false;
                 for (int i = 0; i < SREG_MAX_SENSINGS && !has; i++) has = s_r->sensings[i].id && s_r->sensings[i].sensor_id == sen->id && s_r->sensings[i].sensor_chan == c;
-                if (!has && new_sensing(sen, c, b->chan_type[d.chan_first + c])) changed = true;
+                if (!has && new_sensing(sen, c, b->chan_type[dp->chan_first + c])) changed = true;
             }
-        } else if (it.state == SREG_ITEM_NEW) {
-            if (!sen) sen = sensor_new(d.sensor_id);
+        } else if (itp->state == SREG_ITEM_NEW) {
+            if (!sen) sen = sensor_new(dp->sensor_id);
             if (!sen) continue;
-            set_sensor_fields(sen, mac, &d, now, &changed);
-            for (uint8_t c = 0; c < d.chan_n; c++) new_sensing(sen, c, b->chan_type[d.chan_first + c]);
+            set_sensor_fields(sen, mac, dp, now, &changed);
+            for (uint8_t c = 0; c < dp->chan_n; c++) new_sensing(sen, c, b->chan_type[dp->chan_first + c]);
             changed = true;
-        } else if (it.state == SREG_ITEM_REPLACE) {
+        } else if (itp->state == SREG_ITEM_REPLACE) {
             /* 대치 — 옛 센서 칸을 새 센서가 덮어씀(내부 번호만 새로). 이 보드에 이미 있던 자리 없는 칸은 지움 */
-            sreg_sensor_t *old = sensor_by_id(it.target);
+            sreg_sensor_t *old = sensor_by_id(itp->target);
             if (sen && sen != old) memset(sen, 0, sizeof(*sen));
             uint16_t old_id = old ? old->id : 0;
             if (old) {
@@ -436,9 +621,9 @@ bool sreg_on_pair(const uint8_t mac[6], const sreg_board_t *b, const sreg_decisi
                 if (!sen) continue;
             }
             sen->attached = 0;   /* set_sensor_fields가 모든 칸을 다시 씀 */
-            set_sensor_fields(sen, mac, &d, now, &changed);
-            for (uint8_t c = 0; c < d.chan_n; c++) {
-                uint8_t what = b->chan_type[d.chan_first + c];
+            set_sensor_fields(sen, mac, dp, now, &changed);
+            for (uint8_t c = 0; c < dp->chan_n; c++) {
+                uint8_t what = b->chan_type[dp->chan_first + c];
                 sreg_sensing_t *take = NULL;
                 for (int i = 0; i < SREG_MAX_SENSINGS && !take; i++) {
                     sreg_sensing_t *g = &s_r->sensings[i];
@@ -446,7 +631,7 @@ bool sreg_on_pair(const uint8_t mac[6], const sreg_board_t *b, const sreg_decisi
                 }
                 for (int i = 0; i < SREG_MAX_SENSINGS && !take; i++) {   /* 자리가 1개인 종류 — 그 자리 */
                     sreg_sensing_t *g = &s_r->sensings[i];
-                    if (in_group(g, what, where, precise) && slot_limit(what, where) == 1) take = g;
+                    if (in_group(g, what, where, precise) && slot_limit(what, where, precise) == 1) take = g;
                 }
                 if (take) {
                     take->sensor_id = sen->id;
@@ -458,21 +643,21 @@ bool sreg_on_pair(const uint8_t mac[6], const sreg_board_t *b, const sreg_decisi
             for (int i = 0; i < SREG_MAX_SENSINGS && old_id; i++) {   /* 새 센서에 없는 값의 자리는 센서 없음으로 */
                 if (s_r->sensings[i].id && s_r->sensings[i].sensor_id == old_id) s_r->sensings[i].sensor_id = 0;
             }
-            ESP_LOGW(TAG, "Sensor %u (kind %u) replaced by sensor %u on " MACSTR " port %u", (unsigned)old_id, (unsigned)d.kind,
-                     (unsigned)sen->id, MAC2STR(mac), (unsigned)d.port);
+            ESP_LOGW(TAG, "Sensor %u (kind %u) replaced by sensor %u on " MACSTR " port %u", (unsigned)old_id, (unsigned)dp->kind,
+                     (unsigned)sen->id, MAC2STR(mac), (unsigned)dp->port);
             changed = true;
         } else {
-            ESP_LOGW(TAG, "Sensor kind %u on " MACSTR " port %u not placed (%s)", (unsigned)d.kind, MAC2STR(mac), (unsigned)d.port,
-                     it.state == SREG_ITEM_ASK ? "replace or new not chosen" : "slot taken by a connected sensor");
+            ESP_LOGW(TAG, "Sensor kind %u on " MACSTR " port %u not placed (%s)", (unsigned)dp->kind, MAC2STR(mac), (unsigned)dp->port,
+                     itp->state == SREG_ITEM_ASK ? "replace or new not chosen" : "slot taken by a connected sensor");
             continue;
         }
         /* 같은 보드·포트에 붙어 있던 다른 센서는 떨어진 것으로 */
         for (int i = 0; i < SREG_MAX_SENSORS; i++) {
             sreg_sensor_t *o = &s_r->sensors[i];
-            if (o != sen && o->id && o->attached && o->port == d.port && memcmp(o->board_mac, mac, 6) == 0) { o->attached = 0; changed = true; }
+            if (o != sen && o->id && o->attached && o->port == dp->port && memcmp(o->board_mac, mac, 6) == 0) { o->attached = 0; changed = true; }
         }
-        if (!is_legacy && sen->id != d.sensor_id && out_assign && nassign < ESP_NOW_MAX_SENSORS) {
-            out_assign->ids[nassign].port = d.port;
+        if (!is_legacy && sen->id != dp->sensor_id && out_assign && nassign < ESP_NOW_MAX_SENSORS) {
+            out_assign->ids[nassign].port = dp->port;
             out_assign->ids[nassign].sensor_id = sen->id;
             nassign++;
         }
@@ -540,6 +725,26 @@ bool sreg_sensing_board(uint16_t sensing_id, uint8_t out_mac[6])
         if (s_r->sensings[g].id != sensing_id) continue;
         const sreg_sensor_t *s = sensor_by_id(s_r->sensings[g].sensor_id);
         if (s && s->attached) { memcpy(out_mac, s->board_mac, 6); ok = true; }
+        break;
+    }
+    unlock();
+    return ok;
+}
+
+/* 2026-11-12(기준 측정기 상태) — 센싱의 센서가 붙은 보드와 그 센서의 연속 실패 수(센스 상태 메시지, RAM) */
+bool sreg_sensing_link(uint16_t sensing_id, uint8_t out_mac[6], uint16_t *out_streak)
+{
+    if (!s_r || !sensing_id) return false;
+    bool ok = false;
+    lock();
+    for (int g = 0; g < SREG_MAX_SENSINGS; g++) {
+        if (s_r->sensings[g].id != sensing_id) continue;
+        const sreg_sensor_t *s = sensor_by_id(s_r->sensings[g].sensor_id);
+        if (s && s->attached) {
+            memcpy(out_mac, s->board_mac, 6);
+            if (out_streak) *out_streak = s_st[s - s_r->sensors].streak;
+            ok = true;
+        }
         break;
     }
     unlock();

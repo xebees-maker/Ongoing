@@ -24,7 +24,7 @@
 
 #define SREG_MAX_SENSORS   12
 #define SREG_MAX_SENSINGS  16
-#define SREG_MAX_SLOTS     3     /* 한 종류의 자리 수 최대(배지 온도) */
+#define SREG_MAX_SLOTS     4     /* 한 종류의 자리 수 최대(배지 온도 — 2026-11-14 고온 보드 2대 x DS 2개) */
 
 /* 콘 안에서만 쓰는 값(통신 규약 아님) — 캠 보드 하나 = 센서 하나, 자리 하나 */
 #define SREG_KIND_CAM      0xC0
@@ -73,6 +73,10 @@ typedef struct {
     uint16_t    target;     /* REPLACE/BLOCKED: 대상 센서 */
     uint8_t     ncand;      /* ASK/BLOCKED: 대치 후보(같은 종류 자리) */
     sreg_cand_t cand[SREG_MAX_SLOTS];
+    /* 2026-11-14(사용자 결정 — 배지보드는 기기 단위로 등록·대치) — 배지 센서가 있는 보드는 보드 전체를 한 번에 판정. 후보 = 기존
+     * 배지보드(위치), cand[].sensor = 그 보드의 대표 센서. 고른 것은 보드의 모든 포트에 같은 target으로 저장(sreg_decision_t) */
+    bool        unit;
+    int8_t      loc;        /* unit의 REPLACE/BLOCKED: 대상 위치(cand 번호), 없으면 -1 */
 } sreg_plan_item_t;
 
 typedef struct {
@@ -121,6 +125,9 @@ int sreg_list_sensings(sreg_sensing_t *out, int max);
 
 /* 센싱의 센서가 지금 어느 보드에 붙어 있는지(그래프 "기기 없는 계열은 그리지 않음" 등) */
 bool sreg_sensing_board(uint16_t sensing_id, uint8_t out_mac[6]);
+
+/* 2026-11-12 — 센싱의 센서가 붙은 보드와 그 센서의 연속 실패 수(센스가 보낸 값). 센서가 없거나 붙어 있지 않으면 false */
+bool sreg_sensing_link(uint16_t sensing_id, uint8_t out_mac[6], uint16_t *out_streak);
 
 /* 캠 보드 주소 → 그 캠 자리의 저장 키(사진 폴더·설정). 자리가 없으면 mac 그대로 */
 void sreg_cam_storage_mac(const uint8_t mac[6], uint8_t out[6]);

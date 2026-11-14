@@ -113,6 +113,10 @@ const char *device_config_get_alias(const uint8_t *mac);
 /* 2026-10-05(사용자 결정) — 콘 화면 표시용: 별명의 한글을 로마자로(romanize.h). 저장은 입력한 그대로. 별명이 없으면 "" */
 #define DEVICE_CONFIG_ALIAS_DISP_LEN 80
 const char *device_config_get_alias_display(const uint8_t *mac);
+/* 2026-11-14(사용자 결정 — 별명 길이: 한글 3자, 영문 8자 이내) — 콘 화면은 별명을 로마자로 보여 주고 그래프 legend 폭이 빠듯해서. 한글(영문
+ * 아닌 글자) 1자 = 영문 2.5자로 쳐서 합이 8 이하이면 true. 웹 app.html의 aliasFits와 같은 규칙 */
+#define DEVICE_CONFIG_ALIAS_FIT_LETTERS 8
+bool device_config_alias_fits(const char *alias);
 void        device_config_set_alias(const uint8_t *mac, const char *alias);
 bool        device_config_is_known_device(const uint8_t *mac);
 /* 페어링 성공 시 node_hub가 호출 — 슬롯이 없으면 alias 빈 문자열로 새로 만듦(이미 있으면

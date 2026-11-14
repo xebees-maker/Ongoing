@@ -146,6 +146,8 @@ void stats_store_delete_all(void);
  * 그래프는 어차피 다운샘플하므로 앞부분 유실은 허용) */
 uint32_t stats_store_read_since(uint32_t cutoff_unix_time, uint8_t chan_type,
                                  stats_record_t *out, uint32_t out_cap);
+/* 2026-11-12 — 부팅 뒤 첫 색인(rescan, 약 40초)이 끝났는지. 그 전의 stats_store_read_since는 아직 SD로 안 옮긴 기록만 봄 */
+bool stats_store_index_ready(void);
 
 /* 2026-09-10(사용자 설계 — "Storage[%(Remain MB)]... Measure zz(kk)") — 측정값이 쓰는 바이트.
  * 2026-09-26부터 원시+집계 파일 합(RAM 색인 값, SD I/O 없음) */

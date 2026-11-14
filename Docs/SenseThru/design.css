@@ -84,3 +84,9 @@ p,li{font-size:17px;line-height:1.6}
 .tl h3{margin-top:4px}
 
 img.shot{width:100%;border-radius:10px;border:1px solid var(--line);display:block}
+.price{width:100%;border-collapse:collapse}
+.price th{text-align:left;font-size:14px;font-weight:600;color:var(--mute);padding:0 12px 10px 0;border-bottom:2px solid var(--ink)}
+.price td{padding:9px 12px 9px 0;border-bottom:1px solid var(--line);font-size:16px;line-height:1.45;color:var(--ink);vertical-align:middle}
+.price tr.b td{background:var(--g0)}
+.price td.won{text-align:right;font-weight:600;white-space:nowrap}
+.price td.big{font-size:22px;color:var(--g8)}

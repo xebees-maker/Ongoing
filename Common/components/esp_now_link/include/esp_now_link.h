@@ -197,6 +197,10 @@ typedef enum {
      * 센스는 포트별로 저장하고 다음 페어링부터 그 ID를 실어 보냄(esp_now_pair_ack_t.sensors) */
     ESP_NOW_MSG_SENSOR_ID_ASSIGN = 69,       /* Cntl -> Sens: esp_now_sensor_id_assign_t, 신뢰 전송 */
     ESP_NOW_MSG_SENSOR_ID_ASSIGN_ACK = 70,   /* Sens -> Cntl: esp_now_sensor_id_assign_ack_t */
+    /* 2026-11-13(사용자 결정 11-12 — Docs/한일_2026-09-28.txt 11-12절 7번 빠른 재측정) — 릴레이 기준값의 최근 기록이 모자랄 때
+     * 콘이 측정기에 "다음 count번은 센서가 정확도를 지키는 가장 빠른 간격으로" 잼을 요청. 옛 펌웨어 센스는 모르는 메시지라 무시 */
+    ESP_NOW_MSG_SENS_FAST_MEASURE = 71,      /* Cntl -> Sens: esp_now_sens_fast_measure_t, 신뢰 전송 */
+    ESP_NOW_MSG_SENS_FAST_MEASURE_ACK = 72,  /* Sens -> Cntl: esp_now_sens_fast_measure_ack_t */
 } esp_now_msg_type_t;
 
 /* 2026-10-22 — 주기 촬영 실패 이유 */
@@ -371,6 +375,18 @@ typedef struct __attribute__((packed)) {
     uint8_t version;
     uint8_t msg_type;
 } esp_now_sensor_id_assign_ack_t;
+
+/* ESP_NOW_MSG_SENS_FAST_MEASURE(2026-11-13) — 빠른 측정 횟수. 센스는 이미 남은 횟수보다 클 때만 늘림(여러 릴레이가 요청해도 큰 쪽) */
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+    uint8_t count;
+} esp_now_sens_fast_measure_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t msg_type;
+} esp_now_sens_fast_measure_ack_t;
 
 /* esp_now_channel_ping_t/esp_now_channel_pong_t(2026-08-04/05) — 2026-08-25 CASK 재설계로
  * 완전 제거. project_cam_cntl_ping_pong_redesign_proposal 메모리 참고 */

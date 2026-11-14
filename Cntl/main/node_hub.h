@@ -304,6 +304,10 @@ void node_hub_apply_sens_sample_interval_sec(const uint8_t *mac, uint32_t sec);
 /* 2026-10-13(사용자 지시) — 센서 보정 초기화(SCD41 공장 초기화 + ASC 끔)를 CASK 할일 큐에 넣음. 센스가 깨어나면 실행하고,
  * 결과(SENS_CALIB_RESET_ACK)는 알림 목록에 기록(푸시 없음) */
 void node_hub_sens_calib_reset(const uint8_t *mac);
+
+/* 2026-11-13(사용자 결정 11-12 — 빠른 재측정) — 측정기 보드에 "다음 count번은 가장 빠른 간격으로 잼"(다음 깨어남 때 신뢰 전송).
+ * power_relay가 기준값의 최근 기록이 모자랄 때 부름. 옛 펌웨어 센스는 무시함 */
+void node_hub_sens_fast_measure(const uint8_t *mac, uint8_t count);
 /* 반환값(2026-08-10) — 지금 라디오레벨로 살아있는(paired==true) CAM이 하나라도 있어서 실제로
  * push_cam_config_to()를 시도했으면 true. false면 대상이 하나도 없어 아무 것도 안 보냈다는
  * 뜻 — 호출부(ui_main.c)가 이 경우 응답 대기 팝업을 띄우지 않고 "저장만 됨" 안내로 대체함
@@ -335,6 +339,15 @@ void node_hub_on_bridge_reset(uint8_t bridge);
  * 계산(캠 전용 응답성 설정으로 재면 정상 수면 중에도 무응답 오판이 남) — n=NULL이면 기존
  * 전역 응답성 설정 기준(호환용) */
 uint32_t node_hub_node_timeout_ms(const node_hub_node_t *n);
+/* 2026-11-12(기준 측정기 상태, sensing_state.h) — 보드 연결 상태. 이번 부팅에 사용자가 끊었거나 자리를 잃은 보드 = NONE(해제).
+ * 재시작 뒤 아직 소식이 없고 끊김 판정 시간 안 = UNKNOWN(확인 중). 응답이 살아 있음 = LIVE. 그 밖 = LOST(끊김) */
+typedef enum {
+    NODE_LINK_NONE = 0,
+    NODE_LINK_UNKNOWN,
+    NODE_LINK_LIVE,
+    NODE_LINK_LOST,
+} node_link_t;
+node_link_t node_hub_board_link(const uint8_t *mac);
 
 /* 2026-10-18(5단계) — 보릴 릴레이 켜기·끄기(신뢰 전송, 보릴의 SET_ACK까지 기다림 — 최대 약 2초). 보릴이 알려 준 결과가 요청과 같으면
  * ESP_OK. 끊김 시간(분)도 함께 보냄 */

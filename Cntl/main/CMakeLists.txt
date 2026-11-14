@@ -17,6 +17,7 @@ idf_component_register(
         "sd_health.c"
         "sd_guard.c"
         "sensor_registry.c"
+        "sensing_state.c"
         "flash_usage.c"
         "lv_mem_route.c"
         "web_access_log.c"

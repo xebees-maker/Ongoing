@@ -111,6 +111,7 @@ static const uint16_t s_man_awb_default[3] = { 0x5E0, 0x410, 0x540 };
  * 다른 값!) 오늘 지적받은 문제의 원인 — 이 #define은 딱 한 번, 아래 s_sens_sample_interval_
  * default_sec 초기화에만 쓰이고, 그 외 모든 코드는 이 변수(또는 getter)만 읽음 */
 #define SENS_SAMPLE_INTERVAL_SEC_DEFAULT 15
+#define SENS_SAMPLE_INTERVAL_SEC_MAX     600   /* 2026-11-12 — ui_main.c s_sens_measure_interval_values의 마지막 값과 같게 */
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;
@@ -290,12 +291,24 @@ void device_config_load(void)
     }
     memcpy(s_sta_credentials, s.sta_credentials, sizeof(s.sta_credentials));
     memcpy(s_sens_intervals, s.sens_intervals, sizeof(s.sens_intervals));
+    /* 2026-11-12(사용자 결정) — 측정기 주기는 최대 10분(릴레이 판단에 30분 안 값 여러 개 필요). 예전 30분·1시간 저장값은 10분으로 옮김 */
+    bool interval_clamped = false;
+    for (int i = 0; i < SENS_INTERVAL_SLOTS; i++) {
+        if (s_sens_intervals[i].in_use && s_sens_intervals[i].sample_interval_sec > SENS_SAMPLE_INTERVAL_SEC_MAX) {
+            s_sens_intervals[i].sample_interval_sec = SENS_SAMPLE_INTERVAL_SEC_MAX;
+            interval_clamped = true;
+        }
+    }
     memcpy(s_aliases, s.aliases, sizeof(s.aliases));
     for (int i = 0; i < ALIAS_SLOTS; i++) alias_disp_refresh(i);
     memcpy(s_cam_settings, s.cam_settings, sizeof(s.cam_settings));
     ESP_LOGI(TAG, "Config restored: response=%us adaptive=%us WiFi=%s SSID=%s (per-camera settings restored per mac)",
              (unsigned)s_response_interval_sec, (unsigned)s_adaptive_response_sec,
              s_wifi_ap_mode ? "AP" : "STA", s_sta_credentials[0].ssid);
+    if (interval_clamped) {
+        ESP_LOGI(TAG, "Sens measure interval over %us moved to %us", (unsigned)SENS_SAMPLE_INTERVAL_SEC_MAX, (unsigned)SENS_SAMPLE_INTERVAL_SEC_MAX);
+        device_config_save();
+    }
 }
 
 /* 2026-09-18(사용자 지시 — "개별 캠마다 설정") — sens_intervals와 동일한 mac 키 슬롯 탐색
@@ -581,6 +594,16 @@ const char *device_config_get_alias(const uint8_t *mac)
 {
     alias_entry_t *e = find_alias_slot(mac);
     return e ? e->alias : "";
+}
+
+bool device_config_alias_fits(const char *alias)
+{
+    int half = 0;   /* 영문 1자 = 2, 그 밖의 글자 1자 = 5(반 글자 단위) */
+    for (const uint8_t *p = (const uint8_t *)(alias ? alias : ""); *p; p++) {
+        if (*p < 0x80) half += 2;
+        else if ((*p & 0xC0) != 0x80) half += 5;   /* UTF-8 글자의 첫 바이트만 셈 */
+    }
+    return half <= DEVICE_CONFIG_ALIAS_FIT_LETTERS * 2;
 }
 
 const char *device_config_get_alias_display(const uint8_t *mac)

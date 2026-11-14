@@ -46,6 +46,7 @@
 #include "esp_now_channelsync.h"
 #include "rwdt_guard.h"
 #include "rgb_status.h"
+#include "power_button.h"   /* 2026-11-13 — 전원 푸시 스위치 */
 #include "sensor_wait.h"   /* 2026-10-23 — 센서 타이밍 대기는 모두 sensor_wait_ms */
 #include "esp_mac.h"       /* 2026-10-27 — 교차 실험의 보드 구분(esp_efuse_mac_get_default) */
 #include "esp_rtc_time.h"  /* 2026-10-27 — 딥슬립을 넘는 시각(esp_rtc_get_time_us) — SCD41 측정 시작 시각 */
@@ -184,6 +185,32 @@ static uint8_t s_attempt_fault = 0;
 static RTC_DATA_ATTR uint8_t  s_sen_fault[ESP_NOW_MAX_SENSORS];
 static RTC_DATA_ATTR uint16_t s_sen_streak[ESP_NOW_MAX_SENSORS];
 static uint8_t s_attempt_sen_fault[ESP_NOW_MAX_SENSORS];   /* 이번 시도의 센서별 실패 원인 */
+
+/* 2026-11-13(사용자 결정 11-12 — 빠른 재측정, Docs/한일_2026-09-28.txt 11-12절 7번) — 콘이 릴레이 기준값의 최근 기록이 모자라면
+ * ESP_NOW_MSG_SENS_FAST_MEASURE로 횟수를 보냄. 남은 횟수가 있는 동안 측정 주기를 0으로 봄 = 센서가 정확도를 지키는 가장 빠른 간격:
+ * 순간 측정 센서(SHT45·DS18B20·암모니아)는 깨어날 때마다, SCD41은 읽자마자 다음 측정 시작(깨운 뒤 8번째 값, 약 41초).
+ * 횟수는 측정이 끝날 때마다(성공·실패 모두) 하나씩 줄어 실패가 이어져도 끝남 */
+static RTC_DATA_ATTR uint8_t s_fast_left = 0;
+
+void sens_node_fast_measure_request(uint8_t count)
+{
+    if (count <= s_fast_left) return;   /* 여러 릴레이가 요청해도 큰 쪽 */
+    s_fast_left = count;
+    ESP_LOGI(TAG, "Fast measure requested: %u", (unsigned)count);
+}
+
+static void fast_note_done(void)
+{
+    if (s_fast_left == 0) return;
+    s_fast_left--;
+    if (s_fast_left == 0) ESP_LOGI(TAG, "Fast measure done");
+}
+
+/* 측정을 할 때인지 가르는 주기 — 빠른 측정 중이면 0 */
+static uint32_t measure_period_sec(void)
+{
+    return s_fast_left ? 0 : esp_now_node_get_sample_interval_sec();
+}
 
 /* 2026-09-05 — CAM의 cam_node.c 이벤트기반 대기 루프 이식(s_wake_recheck_sem/s_sweep_completed/
  * s_sleep_now_requested). esp_now_node_cask.c(연결 상태 전담, esp_now_cam.c와 대칭)가
@@ -580,6 +607,7 @@ static void scd_finish(void)
     if (s_measurement_id % 40 == 0) scd41_log_calibration("periodic");   /* 멈춘 뒤에만 읽을 수 있음 */
     bool pd = scd41_power_down();
     s_scd_pending = false;
+    fast_note_done();
     if (rd) {
         v[0] = (float)co2; v[1] = t; v[2] = h;
         for (int i = 0; i < SENSOR_CHAN_COUNT; i++) ok[i] = 1;
@@ -612,25 +640,26 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
     (void)measurement_elapsed_ms;
     if (s_scd_pending) {
         if (scd_settle_left_us() <= 0) scd_finish();
-        return;
+        if (s_scd_pending || !s_fast_left) return;   /* 2026-11-13 — 빠른 측정이면 읽은 바로 다음 측정 시작 */
     }
-    if (s_measurement_id == 0 || s_seconds_since_last_measurement >= esp_now_node_get_sample_interval_sec()) {
+    if (s_measurement_id == 0 || s_seconds_since_last_measurement >= measure_period_sec()) {
         scd_start();
     } else {
         ESP_LOGI(TAG, "Measurement period (%us) not reached (elapsed %us) - skipped (measID=%u)",
-                 (unsigned)esp_now_node_get_sample_interval_sec(), (unsigned)s_seconds_since_last_measurement,
+                 (unsigned)measure_period_sec(), (unsigned)s_seconds_since_last_measurement,
                  (unsigned)s_measurement_id);
     }
     return;
 #endif
-    uint32_t measure_period_sec = esp_now_node_get_sample_interval_sec();
+    uint32_t period_sec = measure_period_sec();   /* 2026-11-13 — 빠른 측정 중이면 0 */
     bool due_for_measurement = (s_measurement_id == 0) ||
-                               (s_seconds_since_last_measurement >= measure_period_sec);
+                               (s_seconds_since_last_measurement >= period_sec);
     if (due_for_measurement) {
         bool is_first_ever = (s_measurement_id == 0);
         float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
         uint8_t fresh_chok[SENSOR_CHAN_COUNT] = { 0 };
         bool fresh_ok = attempt_one_measurement(fresh_vals, fresh_chok, measurement_elapsed_ms);
+        fast_note_done();
 
 #if CONFIG_SENS_SENSOR_SCD41
         if (fresh_ok && is_first_ever) {
@@ -701,12 +730,12 @@ static void do_gated_measurement_once(uint32_t *measurement_elapsed_ms)
         }
     } else {
         ESP_LOGI(TAG, "Measurement period (%us) not reached (elapsed %us) - skipped, reusing cached value (measID=%u)",
-                 (unsigned)measure_period_sec, (unsigned)s_seconds_since_last_measurement,
+                 (unsigned)period_sec, (unsigned)s_seconds_since_last_measurement,
                  (unsigned)s_measurement_id);
     }
     ESP_LOGW(TAG, "MEASCHK due=%d id=%u elapsed=%us period=%us reset_reason=%d",
              (int)due_for_measurement, (unsigned)s_measurement_id,
-             (unsigned)s_seconds_since_last_measurement, (unsigned)measure_period_sec,
+             (unsigned)s_seconds_since_last_measurement, (unsigned)period_sec,
              (int)esp_reset_reason());
 }
 
@@ -715,6 +744,8 @@ void app_main(void)
     /* 최우선 — WiFi/센서 초기화보다 먼저(cam_node.c의 capture_wake_reason() 호출 순서와
      * 동일 이유, esp_now_node_cask.c 참고) */
     esp_now_node_capture_wake_info();
+    /* 2026-11-13 — 전원 스위치로 깨어났으면 여기서 처리(짧게 = 다시 잠, 길게 = 끔, 꺼져 있었으면 = 켬). RWDT 다시 무장보다 먼저 */
+    power_button_boot();
 
     /* 초기 보수적 예산(첫 부팅엔 아직 CNTL의 실제 샘플주기를 모름) — SENS_CONFIG_SET 수신
      * 시 esp_now_node_cask.c가 실제 값으로 재무장함(cam_node_set_response_interval_sec()과
@@ -777,9 +808,19 @@ void app_main(void)
         if (s_scd_pending) scd_finish();
         int64_t to_us = (int64_t)s_scd_resp_due_rtc_us - (int64_t)esp_rtc_get_time_us();
         if (to_us < 1000000) to_us = 1000000;
+        /* 2026-11-13 — 빠른 측정이면 무선 없이 바로 다음 측정 시작, 읽을 때가 응답 깨어남보다 먼저면 다시 읽기 전용으로 깸 */
+        if (s_fast_left && !s_scd_pending && scd_start()) {
+            int64_t left_us = scd_settle_left_us();
+            if (left_us < to_us) {
+                s_scd_readwake = true;
+                to_us = left_us > 100000 ? left_us : 100000;
+            }
+        }
         rgb_status_flush(1500);
-        ESP_LOGI(TAG, "SCD41 read wake done - sleep %llds until response wake", (long long)(to_us / 1000000));
+        ESP_LOGI(TAG, "SCD41 read wake done - sleep %llds (%s)", (long long)(to_us / 1000000), s_scd_readwake ? "read wake" : "response wake");
+        rwdt_guard_arm((uint32_t)(to_us / 1000000) + CONFIG_SENS_DEEPSLEEP_AWAKE_MARGIN_SEC);   /* 2026-11-13 — 이번 잠 길이로(부팅 때 예산은 45초) */
         esp_sleep_enable_timer_wakeup((uint64_t)to_us);
+        power_button_prepare_sleep((uint64_t)to_us);
         esp_deep_sleep_start();
     }
 #endif
@@ -1007,6 +1048,8 @@ void app_main(void)
         ESP_LOGW(TAG, "MAX31865 init failed - check wiring (retry next cycle)");
     }
 #endif
+    /* 2026-11-13 — 전원 스위치로 끄는 중이면 여기서 잠(전원 켤 때의 센서 초기화 — SCD41 power_down 등 — 를 마친 뒤) */
+    power_button_off_if_requested();
     /* 2026-09-12(MQ137 추가) — AO 채널 설정에 공유 ADC 유닛 핸들이 필요한데, 그 핸들은
      * battery_init() 이후에나 생기므로 여기서는 못 함(아래 battery_init()+VIN 채널 설정
      * 직후로 미룸) — SCD41(I2C)은 그런 의존성이 없어서 그대로 여기(초기)에 둠 */
@@ -1169,7 +1212,7 @@ void app_main(void)
          * 자체는 그대로 두고(다음에 진짜 잘 때를 위해), 여기서는 로컬 변수로만 따짐 */
         uint32_t live_now_ms = (uint32_t)(esp_timer_get_time() / 1000);
         uint32_t live_awake_elapsed_sec = (live_now_ms - live_awake_baseline_ms) / 1000;
-        uint32_t live_measure_period_sec = esp_now_node_get_sample_interval_sec();
+        uint32_t live_measure_period_sec = measure_period_sec();   /* 2026-11-13 — 빠른 측정 중이면 0 */
 #if CONFIG_SENS_SENSOR_SCD41
         /* 2026-10-27 — SCD41: 시작만 하고 안정되면 읽음(위 흐름과 같음) */
         if (s_scd_pending) {
@@ -1190,6 +1233,7 @@ void app_main(void)
             float fresh_vals[SENSOR_CHAN_COUNT] = { 0 };
             uint8_t fresh_chok[SENSOR_CHAN_COUNT] = { 0 };
             bool all_ok = attempt_one_measurement(fresh_vals, fresh_chok, &measurement_elapsed_ms);
+            fast_note_done();
             bool any_ok = false;
             for (int i = 0; i < SENSOR_CHAN_COUNT; i++) any_ok |= fresh_chok[i];
             if (any_ok) {   /* 2026-10-23 — 센서가 여럿이면 성공한 채널만(보통 경로와 같음) */
@@ -1251,6 +1295,7 @@ void app_main(void)
     }
 #endif
     esp_sleep_enable_timer_wakeup(sleep_us);
+    power_button_prepare_sleep(sleep_us);   /* 2026-11-13 — 자는 동안에도 스위치로 깸 */
     esp_now_node_wait_replies_sent(100);  /* 2026-10-08 — SLEEP_NOW 응답이 나가기 전에 잠들지 않게 */
     esp_deep_sleep_start();
 }

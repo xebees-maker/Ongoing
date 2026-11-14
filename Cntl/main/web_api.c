@@ -203,6 +203,14 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
                       c->manual_override_on ? "true" : "false", c->z_turns_on ? "true" : "false",
                       c->y_rises ? "true" : "false", (unsigned)c->chan_type);
             jb_float(&b, (c->on_threshold + c->off_threshold) / 2.0f);
+            /* 2026-11-12 — active(설정됨), 강제 자동 해제까지 남은 초(rem, 있을 때만), 돌아갈 방식 ret(0 미설정/1 타이머/2 센서 AI/3 센서 수동) */
+            {
+                const power_relay_timer_t *tt = power_relay_get_timer(i);
+                int ret = !c->active ? 0 : (tt && tt->timer_mode) ? 1 : (c->ai_mode ? 2 : 3);
+                jb_printf(&b, ",\"active\":%s,\"ret\":%d", c->active ? "true" : "false", ret);
+                uint32_t rem;
+                if (power_relay_manual_remaining_sec(i, &rem)) jb_printf(&b, ",\"rem\":%lu", (unsigned long)rem);
+            }
             const power_relay_timer_t *t = power_relay_get_timer(i);   /* 2026-10-09 — 타이머(행 요약용) */
             if (t && t->timer_mode) {
                 jb_printf(&b, ",\"timer\":{\"on\":%lu,\"off\":%lu,\"dn\":%s,\"non\":%lu,\"noff\":%lu}",
@@ -522,7 +530,7 @@ static esp_err_t api_device_get_handler(httpd_req_t *req)
     jb_str(&b, nd->name);
     jb_printf(&b, ",\"alias\":");
     jb_str(&b, device_config_get_alias(nd->mac));
-    jb_printf(&b, ",\"alias_max\":%d,\"status\":\"%s\"", DEVICE_CONFIG_ALIAS_MAX_LEN - 1, conn_code(node_hub_get_conn_state(nd->mac)));
+    jb_printf(&b, ",\"alias_max\":%d,\"status\":\"%s\"", DEVICE_CONFIG_ALIAS_FIT_LETTERS, conn_code(node_hub_get_conn_state(nd->mac)));   /* 11-14 — 영문 8자(한글은 aliasFits) */
     if (cam) {
         jb_printf(&b, ",\"capture_s\":%lu,\"agc\":%s,\"aec\":%s,\"xclk\":%u,\"opt_capture\":",
                   (unsigned long)device_config_get_cam_capture_interval_sec(nd->mac),
@@ -578,6 +586,8 @@ static esp_err_t api_device_set_post_handler(httpd_req_t *req)
         }
         s_w->body[got] = '\0';
         memcpy(op->text, s_w->body, (size_t)got + 1);  /* got <= ALIAS_MAX_LEN-1 < sizeof(op->text) */
+        /* 2026-11-14(사용자 결정) — 별명은 한글 3자, 영문 8자 이내 */
+        if (op->type == UI_WEB_OP_ALIAS && !device_config_alias_fits(op->text)) return send_simple(req, "400 Bad Request", "{\"ok\":false,\"error\":\"alias_len\"}");
     } else {
         op->value = (uint32_t)strtoul(s_w->val, NULL, 10);
     }
@@ -716,7 +726,7 @@ static esp_err_t api_relay_get_handler(httpd_req_t *req)
         ui_main_relay_defaults((uint8_t)c->chan_type, &center, &margin);
     }
     int gc = (c->group == POWER_GROUP_AGAR) ? 2 : (c->precise ? 1 : 0);
-    jb_printf(&b, "{\"idx\":%d,\"alias\":", idx);
+    jb_printf(&b, "{\"idx\":%d,\"active\":%s,\"alias\":", idx, c->active ? "true" : "false");   /* 2026-11-12 */
     jb_str(&b, c->alias);
     if (power_relay_is_remote(idx)) jb_printf(&b, ",\"remote\":true,\"fs\":%u", (unsigned)power_relay_get_remote_failsafe_min());   /* 10-18 */
     jb_printf(&b, ",\"alias_max\":%d,\"configured\":%s,\"ai\":%s,\"manual\":%s,\"manual_on\":%s,\"chan\":%u,"
@@ -819,6 +829,7 @@ static esp_err_t api_relay_apply_post_handler(httpd_req_t *req)
     c->min_hold_sec = (uint32_t)query_int(body, "hold", 0);
     /* 2026-10-09(할 일 AG) — 타이머: tm=1이면 ton/toff(초), tdn, tds/tns(분), tnon/tnoff(초) */
     c->timer_mode = query_int(body, "tm", 0) != 0;
+    c->active = query_int(body, "act", 1) != 0;                           /* 2026-11-12 — 방식 = 미설정이면 0 */
     c->timer.on_sec = (uint32_t)query_int(body, "ton", 900);
     c->timer.off_sec = (uint32_t)query_int(body, "toff", 2700);
     c->timer.day_night = query_int(body, "tdn", 0) != 0;
@@ -1028,7 +1039,8 @@ static void jb_mma(jbuf_t *b, const ui_stats_mma_t *m)
     jb_printf(b, "]");
 }
 
-/* GET /api/stats?scale=0..4&offset=N&group=0..2&tp=0|1&hp=0|1 — 개괄(지금까지 scale) + 그래프 한 창.
+/* GET /api/stats?scale=0..4&offset=N&cat=0..2&mode=0..1&kind=0..2&dev=0..3 — 개괄(지금까지 scale) + 그래프 한 창(2026-11-14 — 콘 화면과
+ * 같은 보기: cat 0 T/H·1 Gas·2 Basic, mode 0 종류별·1 기기별, kind 0 T·1 H·2 Agar, dev = 기기별 보드 번호).
  * 개괄 줄 = [max,min,avg] 또는 null. 슬롯: v = 실측 칸(없으면 null), tr = 추세값(선), lo = 저신뢰 칸 "0/1" 문자열 */
 static esp_err_t api_stats_get_handler(httpd_req_t *req)
 {
@@ -1037,12 +1049,13 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
     if (stats_sd_blocked(req)) return ESP_OK;
     int scale = query_int(s_w->query, "scale", 0);
     int offset = query_int(s_w->query, "offset", 0);
-    int group = query_int(s_w->query, "group", 0);
-    if (scale < 0 || scale >= STATS_SCALE_COUNT || offset < 0 || offset > 100000 || group < 0 || group > 1) {   /* 2026-10-23 — 0 온도, 1 가스 */
+    int cat = query_int(s_w->query, "cat", 0), mode = query_int(s_w->query, "mode", 0);
+    int kind = query_int(s_w->query, "kind", 0), dev = query_int(s_w->query, "dev", 0);
+    if (scale < 0 || scale >= STATS_SCALE_COUNT || offset < 0 || offset > 100000 || cat < 0 || cat > 2 || mode < 0 || mode > 1 ||
+        kind < 0 || kind > 2 || dev < 0 || dev >= UI_STATS_DEV_MAX) {
         return send_simple(req, "400 Bad Request", "{\"error\":\"arg\"}");
     }
-    bool tp = query_int(s_w->query, "tp", 1) != 0;
-    bool hp = query_int(s_w->query, "hp", 1) != 0;
+    ui_stats_view_t view = { .cat = (uint8_t)cat, .mode = (uint8_t)mode, .kind = (uint8_t)kind, .dev = (uint8_t)dev };
 
     ui_stats_graph_t *g = heap_caps_malloc(sizeof(*g), MALLOC_CAP_SPIRAM);
     ui_stats_overview_t *ov = heap_caps_malloc(sizeof(*ov), MALLOC_CAP_SPIRAM);
@@ -1050,27 +1063,37 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
     jbuf_t b = { .p = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM), .cap = cap };
     if (!g || !ov || !b.p) { heap_caps_free(g); heap_caps_free(ov); heap_caps_free(b.p); httpd_resp_send_500(req); return ESP_FAIL; }
     if (!ui_main_stats_overview((uint8_t)scale, ov) ||
-        !ui_main_stats_graph((uint8_t)scale, (uint32_t)offset, (uint8_t)group, tp, hp, g)) {
+        !ui_main_stats_graph((uint8_t)scale, (uint32_t)offset, &view, g)) {
         heap_caps_free(g); heap_caps_free(ov); heap_caps_free(b.p);
         return send_simple(req, "503 Service Unavailable", "{\"error\":\"sd\"}");
     }
 
     /* 2026-10-23 — tp/hp = 정밀이 있는지(자동, 웹은 이것으로 공기 줄을 고름) */
-    jb_printf(&b, "{\"scale\":%d,\"offset\":%d,\"group\":%d,\"tp\":%d,\"hp\":%d,\"end\":%lu,\"ov\":{\"air_t\":[",
-              scale, offset, group, ov->air_t_prec ? 1 : 0, ov->air_h_prec ? 1 : 0, (unsigned long)g->window_end);
-    (void)tp; (void)hp;
+    jb_printf(&b, "{\"scale\":%d,\"offset\":%d,\"tp\":%d,\"hp\":%d,\"end\":%lu", scale, offset,
+              ov->air_t[1].have ? 1 : 0, ov->air_h[1].have ? 1 : 0, (unsigned long)g->window_end);   /* 11-14 — tp/hp = 창에 정밀 기록이 있음 */
+    /* 2026-11-14 — 실제로 그린 보기, 보일 묶음 단추, 기기별 보드(별명 — 웹 언어에 맞게 al/al_en) */
+    jb_printf(&b, ",\"view\":{\"cat\":%u,\"mode\":%u,\"kind\":%u,\"dev\":%u},\"has\":[%d,%d,%d],\"devs\":[",
+              (unsigned)g->view.cat, (unsigned)g->view.mode, (unsigned)g->view.kind, (unsigned)g->view.dev,
+              g->cat_has[0] ? 1 : 0, g->cat_has[1] ? 1 : 0, g->cat_has[2] ? 1 : 0);
+    for (int d = 0; d < g->dev_count; d++) {
+        const char *al = device_config_get_alias(g->dev_mac[d]);
+        char hex[8];
+        snprintf(hex, sizeof(hex), "%02X%02X%02X", g->dev_mac[d][3], g->dev_mac[d][4], g->dev_mac[d][5]);
+        jb_printf(&b, "%s{\"al\":", d ? "," : "");
+        jb_str(&b, al[0] ? al : hex);
+        jb_en(&b, "al", al[0] ? al : hex);
+        jb_printf(&b, "}");
+    }
+    jb_printf(&b, "],\"ov\":{\"air_t\":[");
     jb_mma(&b, &ov->air_t[0]); jb_printf(&b, ","); jb_mma(&b, &ov->air_t[1]);
     jb_printf(&b, "],\"air_h\":[");
     jb_mma(&b, &ov->air_h[0]); jb_printf(&b, ","); jb_mma(&b, &ov->air_h[1]);
-    jb_printf(&b, "],\"agar_all\":");
-    jb_mma(&b, &ov->agar_all);
-    jb_printf(&b, ",\"agar\":[");
-    for (int i = 0; i < 3; i++) {
-        jb_printf(&b, "%s{\"ord\":%u,\"on\":%d,\"v\":", i ? "," : "", (unsigned)ov->agar_ord[i], i < ov->agar_count ? 1 : 0);
-        jb_mma(&b, &ov->agar[i]);
-        jb_printf(&b, "}");
-    }
-    jb_printf(&b, "],\"co2\":");
+    jb_printf(&b, "],\"agar\":");   /* 2026-11-14 — 배지 평균만 */
+    jb_mma(&b, &ov->agar);
+    jb_printf(&b, ",\"has\":{\"air\":%d,\"agar\":%d,\"co2\":%d,\"nh3\":%d", ov->has_air ? 1 : 0, ov->has_agar ? 1 : 0,
+              ov->has_co2 ? 1 : 0, ov->has_nh3 ? 1 : 0);
+    jb_printf(&b, "}");
+    jb_printf(&b, ",\"co2\":");
     jb_mma(&b, &ov->co2);
     jb_printf(&b, ",\"nh3\":");
     jb_mma(&b, &ov->nh3);
@@ -1080,6 +1103,9 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
         const ui_stats_series_t *d = &sl->d;
         jb_printf(&b, "%s{\"chan\":%u,\"sub\":%d,\"prec\":%d,\"ord\":%u", sidx ? "," : "", (unsigned)sl->chan_type,
                   (sl->attr & STATS_ATTR_SUBSTRATE) ? 1 : 0, (sl->attr & STATS_ATTR_PRECISE) ? 1 : 0, (unsigned)sl->ord);
+        jb_printf(&b, ",\"col\":\"#%06lx\",\"avg\":%d", (unsigned long)sl->rgb, sl->avg ? 1 : 0);   /* 2026-11-14 — 콘과 같은 선 색 */
+        if (sl->kn[0]) { jb_printf(&b, ",\"kn\":"); jb_str(&b, sl->kn); }   /* 이름 = 별명(al) + kn, 평균선 = 평균 + kn */
+        if (sl->use_alias) { jb_printf(&b, ",\"al\":"); jb_str(&b, sl->name); jb_en(&b, "al", sl->name); }
         if (d->have_range) {
             jb_printf(&b, ",\"min\":");
             jb_float(&b, d->mn);
@@ -1099,6 +1125,8 @@ static esp_err_t api_stats_get_handler(httpd_req_t *req)
         }
         jb_printf(&b, "],\"lo\":\"");
         for (int i = 0; i < UI_STATS_POINTS; i++) jb_printf(&b, "%c", d->low[i] ? '1' : '0');
+        jb_printf(&b, "\",\"pt\":\"");   /* 2026-11-14 — 평균선: 일부 센싱이 빠진 칸(점선) */
+        for (int i = 0; i < UI_STATS_POINTS; i++) jb_printf(&b, "%c", d->part[i] ? '1' : '0');
         jb_printf(&b, "\"}");
     }
     jb_printf(&b, "]}");
@@ -1492,6 +1520,34 @@ static esp_err_t api_sensing_merge_post_handler(httpd_req_t *req)
     return send_simple(req, NULL, "{\"ok\":true}");
 }
 
+/* 2026-11-14(임시 — 출시 전 제거, 메모리 project_cntl_test_apis_remove_later) — POST /api/sensor/forget?sensor=N 또는 ?board=<12자리 hex>
+ * 기기 단위 등록(배지보드) 전에 엇갈려 남은 자리 지우기 — 콘 설정의 자리 목록 "삭제"(node_hub_forget_slot_row)·기기 완전히 지우기
+ * (node_hub_forget_board)와 같음. 그 자리의 기록도 지워짐 */
+static esp_err_t api_sensor_forget_post_handler(httpd_req_t *req)
+{
+    if (!web_auth_check(req)) return web_auth_reject(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    uint8_t mac[6];
+    if (httpd_query_key_value(s_w->query, "board", s_w->tmp, sizeof(s_w->tmp)) == ESP_OK) {
+        if (!hex_to_mac(s_w->tmp, mac)) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+        node_hub_forget_board(mac);
+        return send_simple(req, NULL, "{\"ok\":true}");
+    }
+    int sensor = query_int(s_w->query, "sensor", 0);
+    if (sensor <= 0) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    sreg_slot_row_t *rows = heap_caps_calloc(SREG_MAX_SENSORS + SREG_MAX_SENSINGS, sizeof(*rows), MALLOC_CAP_SPIRAM);
+    if (!rows) return send_simple(req, "500 Internal Server Error", "{\"ok\":false}");
+    int n = sreg_list_slots(rows, SREG_MAX_SENSORS + SREG_MAX_SENSINGS);
+    bool ok = false;
+    for (int i = 0; i < n && !ok; i++) {
+        if (rows[i].sensor != (uint16_t)sensor) continue;
+        node_hub_forget_slot_row(&rows[i]);
+        ok = true;
+    }
+    heap_caps_free(rows);
+    return send_simple(req, ok ? NULL : "404 Not Found", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
 /* POST /api/stats/delete_all — 콘 Record 팝업 Delete All 확인 Yes와 같음 */
 static esp_err_t api_stats_delete_all_post_handler(httpd_req_t *req)
 {
@@ -1565,9 +1621,11 @@ void web_api_register_handlers(httpd_handle_t server)
     static const httpd_uri_t alarms_uri = { .uri = "/api/alarms", .method = HTTP_GET, .handler = api_alarms_get_handler };
     static const httpd_uri_t alarm_sim_uri = { .uri = "/api/alarm_sim", .method = HTTP_POST, .handler = api_alarm_sim_post_handler };
     static const httpd_uri_t sensing_merge_uri = { .uri = "/api/sensing/merge", .method = HTTP_POST, .handler = api_sensing_merge_post_handler };   /* 10-28 임시 */
+    static const httpd_uri_t sensor_forget_uri = { .uri = "/api/sensor/forget", .method = HTTP_POST, .handler = api_sensor_forget_post_handler };   /* 11-14 임시 */
     httpd_register_uri_handler(server, &alarms_uri);
     httpd_register_uri_handler(server, &alarm_sim_uri);
     httpd_register_uri_handler(server, &sensing_merge_uri);
+    httpd_register_uri_handler(server, &sensor_forget_uri);   /* 11-14 임시 */
     static const httpd_uri_t cam_list_uri = { .uri = "/api/cam/list", .method = HTTP_GET, .handler = api_cam_list_get_handler };
     static const httpd_uri_t cam_photos_uri = { .uri = "/api/cam/photos", .method = HTTP_GET, .handler = api_cam_photos_get_handler };
     static const httpd_uri_t cam_photo_uri = { .uri = "/api/cam/photo", .method = HTTP_GET, .handler = api_cam_photo_get_handler };
