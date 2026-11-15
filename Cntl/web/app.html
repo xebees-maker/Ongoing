@@ -2113,7 +2113,13 @@
     var gm = st.geom, d = st.data;
     if (!gm || !d) return;
     var r = $('stChart').getBoundingClientRect(), x = ev.clientX - r.left, y = ev.clientY - r.top;
-    var i = Math.max(0, Math.min(59, Math.round((x - SP) / (gm.w - 2 * SP) * 59)));
+    /* 11-15 — 실측값이 있는 칸 중 가장 가까운 칸(CO2처럼 측정 간격이 칸보다 길면 실측 칸이 드묾). 칸 5개보다 멀면 표시 안 함(콘 STATS_TAP_MAX_DX) */
+    var fx = (x - SP) / (gm.w - 2 * SP) * 59, i = -1, bx = 1e9;
+    for (var k = 0; k < 60; k++) {
+      var ok = d.slots.some(function (sl, s) { return st.pts[s] && sl.v[k] !== null && st.pts[s][k] !== null; });
+      if (ok && Math.abs(k - fx) < bx) { bx = Math.abs(k - fx); i = k; }
+    }
+    if (i < 0 || bx > 5) { $('stTip').classList.add('hidden'); return; }
     var best = -1, bd = 1e9;
     d.slots.forEach(function (sl, s) {
       if (!st.pts[s] || sl.v[i] === null || st.pts[s][i] === null) return;

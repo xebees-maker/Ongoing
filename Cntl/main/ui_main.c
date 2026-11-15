@@ -595,6 +595,7 @@ static lv_obj_t *s_stats_delete_lbl  = NULL;
  * 달라서(온도 vs CO2 등) 화면엔 각 계열을 자기 자신의 기간 내 최소~최대 기준으로 0~100
  * 정규화해서 그리고, 탭하면 정규화 전 실제 값을 보여줌(s_stats_chart_real_values에 원본 보관) */
 #define STATS_GRAPH_POINT_COUNT   STATS_AGG_POINTS_PER_SCALE  /* stats_store.h가 정본(60) */
+#define STATS_TAP_MAX_DX          60   /* 탭 x와 실측 칸의 최대 거리(px) — 넘으면 표시 안 함(CO2 10분 간격 1시간 창 = 칸 10개 약 120 px의 절반) */
 #define STATS_GRAPH_SERIES_COUNT  6   /* 2026-11-14(사용자 설계 — 배지보드 2대) — 공기 T·H + 배지 4, 다음 단계 보기도 최대 6 */
 /* 2026-09-15(사용자 설계 — 그래프 결측/추세선 대화) — 국소 회귀에 쓸 최근접 실측 버킷
  * 개수. 실기 실측(회귀 계산은 전체~400ms 사이클 중 계열당 ~2ms, 약 2% 수준으로 무시할
@@ -5469,15 +5470,21 @@ static void cb_stats_chart_tap(lv_event_t *e)
     lv_area_t chart_coords;
     lv_obj_get_coords(s_stats_chart, &chart_coords);
 
+    /* 2026-11-15(사용자 지적 — CO2만 탭이 안 됨) — 측정 간격이 칸보다 길면(CO2 10분, 1시간 창 1분 칸) 실측 칸이 드묾.
+     * 가장 가까운 칸이 아니라 실측값이 있는 칸 중 가장 가까운 칸을 고름(너무 멀면 표시 안 함) */
     uint32_t nearest_idx = 0;
     int32_t best_dist = INT32_MAX;
     for (uint32_t i = 0; i < point_count; i++) {
+        bool any = false;
+        for (int s = 0; s < s_stats_slot_count && !any; s++) any = s_stats_chart_has_value[s][i];
+        if (!any) continue;
         lv_point_t pp;
         lv_chart_get_point_pos_by_id(s_stats_chart, s_stats_chart_series[ref_series], i, &pp);
         int32_t px = chart_coords.x1 + pp.x;
         int32_t dist = (p.x > px) ? (p.x - px) : (px - p.x);
         if (dist < best_dist) { best_dist = dist; nearest_idx = i; }
     }
+    if (best_dist > STATS_TAP_MAX_DX) return;
 
     int chosen_series = -1;
     int32_t best_y_dist = INT32_MAX;
