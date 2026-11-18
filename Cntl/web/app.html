@@ -269,7 +269,7 @@
     <section>
       <h2 data-s="STR_PANEL_SUMMARY"></h2>
       <div id="sumMem" class="val"></div>
-      <div id="sumBridge" class="val" style="display:flex;gap:12px"><span id="sumBr0" style="flex:1"></span><span id="sumBr1" style="flex:1"></span></div>
+      <div id="sumBridge" class="val" style="display:flex;gap:12px"><span id="sumBr0" class="tap" style="flex:1"></span><span id="sumBr1" class="tap" style="flex:1"></span></div>
       <div id="sumSd" class="val"></div>
       <div id="sumFlash" class="val"></div>
       <input type="file" id="restoreFile" accept=".bin,application/octet-stream" style="display:none">
@@ -483,12 +483,18 @@
     return S(t.dn ? 'STR_FMT_RELAY_TIMER_DN_SUMMARY' : 'STR_FMT_RELAY_TIMER_SUMMARY').replace(/\{(noff|non|off|on)\}/g, function (m, k) { return p[k]; });
   }
 
-  function relayName(r) { return L(r, 'alias') || (r.remote ? S('STR_RELAY_REMOTE_NAME') : fmt(S('STR_RELAY_DEFAULT_NAME_FMT'), r.idx + 1)); }
+  /* 11-18 — 원격은 여러 대(콘 relay_default_name과 같음: 자리 번호 = idx - 로컬 2개 + 1) */
+  function relayName(r) { return L(r, 'alias') || (r.remote ? fmt(S('STR_RELAY_REMOTE_NAME_FMT'), r.idx - 1) : fmt(S('STR_RELAY_DEFAULT_NAME_FMT'), r.idx + 1)); }
   function renderRelays(list) {
     /* 10-18(보릴 6단계) — 원격릴레이를 맨 위에, 전원 아이콘 옆에 신호 세기(보드 릴레이는 같은 폭 빈칸 — 이름 시작 맞춤).
      * 원격릴레이는 보릴이 확인한 실제 상태만: 확인 전 "확인 중", 끊기면 "연결 끊김"(콘 refresh_power_control_panel과 같음) */
-    list = list.filter(function (r) { return r.remote; }).concat(list.filter(function (r) { return !r.remote; }));
-    $('relays').innerHTML = list.map(function (r) {
+    /* 11-18(사용자 결정) — 로컬(콘 출력 2개) 다음 원격(연결된 자리만, 서버가 거름). 소제목으로 나눔(콘과 같음) */
+    var sub = function (sid) { return '<div class="muted" style="font-size:12px;margin:6px 0 2px">' + esc(S(sid)) + '</div>'; };
+    var loc = list.filter(function (r) { return !r.remote; }), rem = list.filter(function (r) { return r.remote; });
+    $('relays').innerHTML = sub('STR_POWER_LOCAL') + loc.map(relayRow).join('') + (rem.length ? sub('STR_POWER_REMOTE') + rem.map(relayRow).join('') : '');
+  }
+  function relayRow(r) {
+    {
       var on = r.remote ? (r.rst !== 0 && r.act) : r.on;
       var sig = r.remote ? signalHtml({ rssi: r.rssi, near_orphan: r.rst === 0 || r.near, status: 'paired' })
                          : '<span class="sig" style="visibility:hidden"><i></i><i></i><i></i><i></i><i></i></span>';
@@ -498,7 +504,7 @@
         ';padding:4px 8px 4px 2px;margin-left:-8px">&#x23FB;</span>' +
         '<span>' + esc(relayName(r)) + '</span><span class="grow val" style="text-align:right">' + esc(val) + '</span>' +
         '<span class="chev">&gt;</span></div>';
-    }).join('');
+    }
   }
 
   function sensorValues(n) {
@@ -743,9 +749,62 @@
     syncCamStatus(d.nodes);   /* 10-05 — 카메라 팝업이 열려 있으면 지금 촬영 버튼도 바로 */
     renderHeader(d);
     renderSummary(d);
+    checkBridgeAsk(d.brq);   /* 11-18 — 모르는 브릿지(콘 팝업과 같음) */
     renderRelays(d.relays || []);
     renderSensors(d.nodes || []);
     renderCams(d.nodes || []);
+  }
+
+  /* 2026-11-18(사용자 결정) — 브릿지 번호를 콘이 정함. 모르는 브릿지는 콘과 웹 모두 묻고, 먼저 고른 쪽이 정함(다른 쪽 팝업은 닫힘).
+   * 그 브릿지는 초록 LED가 빠르게 깜빡임. 제안 번호(sug) 단추만 파랑. 닫기 없음(골라야 그 브릿지가 동작함) */
+  var brAskMac = null;
+  function macColon(m) { return m.replace(/(..)(?!$)/g, '$1:'); }
+  function checkBridgeAsk(q) {
+    if (!q) {
+      if (brAskMac) { brAskMac = null; $('modal').classList.add('hidden'); $('modal').onclick = null; }
+      return;
+    }
+    if (brAskMac === q.mac) return;
+    if (!brAskMac && !$('modal').classList.contains('hidden')) return;   /* 다른 확인창이 떠 있으면 다음 갱신에 */
+    brAskMac = q.mac;
+    var btn = function (i, sid) {
+      return '<button data-bi="' + i + '"' + (q.sug === i ? ' class="primary"' : '') + '>' + esc(S(sid)) + '</button>';
+    };
+    $('modalBox').innerHTML = '<div class="mtitle" style="background:var(--blue);color:#fff">' + esc(S('STR_TITLE_BRIDGE_NEW')) + '</div>' +
+      '<div style="padding:14px;white-space:pre-line">' + esc(fmt(S('STR_MSG_BRIDGE_ASK_FMT'), macColon(q.mac))) + '</div>' +
+      '<div class="sfoot" style="flex-wrap:wrap">' + btn(0, 'STR_BTN_BRIDGE_1') + btn(1, 'STR_BTN_BRIDGE_2') + '</div>';
+    $('modal').classList.remove('hidden');
+    $('modal').onclick = function (ev) {
+      var m = ev.target.closest('[data-bi]');
+      if (!m) return;
+      var mac = brAskMac;
+      brAskMac = null;
+      $('modal').classList.add('hidden');
+      $('modal').onclick = null;
+      post('api/bridge/assign?mac=' + mac + '&idx=' + m.getAttribute('data-bi')).catch(function () { toast('Error'); });
+    };
+  }
+
+  /* 브릿지 줄을 누름 — 번호·안테나·MAC·상태, 다시 정하기(콘 cb_bridge_row_tap과 같음) */
+  function openBridgeInfo(i) {
+    if (!last || !last.bridges || !last.bridges[i] || brAskMac) return;
+    var b = last.bridges[i];
+    var bst = ['STR_BRIDGE_STATE_OK', 'STR_BRIDGE_STATE_SETTING', 'STR_BRIDGE_STATE_NORESP', 'STR_BRIDGE_STATE_ABSENT'];
+    var st = S(last.canerr ? 'STR_BRIDGE_STATE_CANERR' : bst[b.st]);
+    var txt = fmt(S('STR_MSG_BRIDGE_INFO_FMT'), i + 1, S(i === 0 ? 'STR_BRIDGE_ANT_IN' : 'STR_BRIDGE_ANT_OUT'), b.mac ? macColon(b.mac) : '-', st);
+    $('modalBox').innerHTML = '<div class="mtitle" style="background:var(--blue);color:#fff">' + esc(S('STR_TITLE_BRIDGE')) + '</div>' +
+      '<div style="padding:14px;white-space:pre-line">' + esc(txt) + '</div>' +
+      '<div class="sfoot"><button data-m="no">' + esc(S('STR_BTN_CLOSE')) + '</button>' +
+      (b.mac ? '<button data-m="re">' + esc(S('STR_BTN_BRIDGE_REASSIGN')) + '</button>' : '') + '</div>';
+    $('modal').classList.remove('hidden');
+    $('modal').onclick = function (ev) {
+      var m = ev.target.closest('[data-m]');
+      if (!m) return;
+      $('modal').classList.add('hidden');
+      $('modal').onclick = null;
+      if (m.getAttribute('data-m') !== 're' || !confirm(S('STR_MSG_BRIDGE_REASSIGN_CONFIRM'))) return;
+      post('api/bridge/release?idx=' + i).catch(function () { toast('Error'); });
+    };
   }
 
   function onDash(d) {
@@ -848,7 +907,8 @@
 
   $('setBtn').addEventListener('click', function () { if (view === 'main') openSettings(); });
   $('alarmBtn').addEventListener('click', function () { if (view === 'main') openAlarms(); });
-  $('sicon').addEventListener('click', function () { if (view === 'main') openErrors(); });   /* 콘: 상태 아이콘 → 에러·경고 목록 */
+  $('sicon').addEventListener('click', function () { if (view === 'main') openErrors(); });
+  [0, 1].forEach(function (i) { $('sumBr' + i).addEventListener('click', function () { if (view === 'main') openBridgeInfo(i); }); });   /* 11-18 */   /* 콘: 상태 아이콘 → 에러·경고 목록 */
 
   function setLang(l) {
     lang = l;
@@ -1070,12 +1130,13 @@
   function renderRelay() {
     var d = rl.data, f = rl.form, sp = rlSpec(), dec = sp[3];
     var unit = S(f.chan === 3 ? 'STR_UNIT_CO2' : 'STR_UNIT_TEMP');
-    var name = d.alias || (d.remote ? S('STR_RELAY_REMOTE_NAME') : fmt(S('STR_RELAY_DEFAULT_NAME_FMT'), d.idx + 1));
+    var name = d.alias || (d.remote ? fmt(S('STR_RELAY_REMOTE_NAME_FMT'), d.idx - 1) : fmt(S('STR_RELAY_DEFAULT_NAME_FMT'), d.idx + 1));
     var h = sheetHead('STR_PANEL_POWER_CONTROL');
     h += '<div class="field"><label for="rAlias">' + esc(S('STR_LABEL_ALIAS')) + '</label><input type="text" id="rAlias" maxlength="' + d.alias_max +
          '" value="' + esc(rl.alias) + '" placeholder="' + esc(name) + '"><button id="rAliasApply" class="primary" disabled>' + esc(S('STR_BTN_APPLY')) + '</button></div>';
     /* 10-18(보릴 6단계) — 원격릴레이만: 통신이 끊기면 보릴이 이 시간 뒤 끔(고르면 바로 저장 — 콘 팝업과 같음) */
-    if (d.remote) h += '<div class="field"><label>' + esc(S('STR_LABEL_REMOTE_FAILSAFE')) + '</label>' + sel('rFs', 'STR_OPT_REMOTE_FAILSAFE_LIST', [1, 10, 30, 60], d.fs) + '</div>';
+    if (d.remote) h += '<div class="field"><label>' + esc(S('STR_LABEL_REMOTE_FAILSAFE')) + '</label>' + sel('rFs', 'STR_OPT_REMOTE_FAILSAFE_LIST', [1, 10, 30, 60], d.fs) + '</div>' +
+      '<div class="field"><button id="rUnpair">' + esc(S('STR_BTN_DISCONNECT')) + '</button></div>';   /* 11-18 — 원격 기기 연결 끊기(콘과 같음) */
     /* 11-12(사용자 설계) — 맨 위: 강제(해제 / 켬 / 끔) + 자동 해제(강제일 때만). 그 아래: 방식(미설정 / 타이머 / 센서 AI / 센서 수동) + 적용 */
     h += '<div class="field"><label>' + esc(S('STR_LABEL_MANUAL_MODE')) + '</label>' + sel('rOvr', 'STR_OPT_OVERRIDE_LIST', [0, 1, 2], !f.manual ? 0 : (f.mon ? 1 : 2)) +
          '<label style="text-align:right">' + esc(S('STR_LABEL_MANUAL_RELEASE')) + '</label>' +
@@ -1280,8 +1341,13 @@
     on('rAlias', 'input', function () { $('rAliasApply').disabled = (this.value === rl.alias); });
     on('rFs', 'change', function () {
       var v = +this.value;
-      post('api/relay/failsafe?min=' + v, '').then(function () { d.fs = v; toast(S('STR_BTN_APPLY') + ' \u2713'); })
+      post('api/relay/failsafe?idx=' + d.idx + '&min=' + v, '').then(function () { d.fs = v; toast(S('STR_BTN_APPLY') + ' \u2713'); })
         .catch(function (e) { if (!(e && e.handled)) toast('Error'); });
+    });
+    on('rUnpair', 'click', function () {   /* 11-18 — 자리는 숨고 설정은 남음 */
+      var r = last && last.relays && last.relays.filter(function (x) { return x.idx === d.idx; })[0];
+      if (!r || !r.mac || !confirm(relayName(r) + ' (' + r.mac.slice(6) + ')' + String.fromCharCode(10) + S('STR_MSG_UNPAIR_CONFIRM'))) return;
+      post('api/device/unpair?mac=' + r.mac).then(closeSheet).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
     });
     on('rAliasApply', 'click', function () {
       var v = $('rAlias').value;

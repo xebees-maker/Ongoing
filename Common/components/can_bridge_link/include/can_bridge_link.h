@@ -47,6 +47,26 @@
 #define CAN_BRIDGE_ID_CNTL_TO_BRIDGE_DATA(n)      (0x200u + (uint32_t)(n) * CAN_BRIDGE_ID_STEP)
 #define CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA(n)      (0x201u + (uint32_t)(n) * CAN_BRIDGE_ID_STEP)
 
+/* ---- 2026-11-18(사용자 결정 — 브릿지 번호를 콘이 정함) ----
+ * 재브·보브는 하드웨어가 같고 안테나 설치만 다름 → 펌웨어 하나, 번호는 콘이 브릿지 MAC별로 저장해 알려 줌(브릿지는 저장 안 함).
+ * 번호 없는 브릿지는 위 번호별 ID를 못 쓰므로, 자기 MAC에서 만든 HELLO ID로 1초쯤마다 알림(두 대가 동시에 켜져도 ID가 달라 충돌 없음).
+ * 콘은 ROLE_CMD(모든 브릿지가 받는 ID 하나, 보내는 쪽은 콘뿐)로 MAC을 지정해 명령. 둘 다 ISO-TP 없이 8바이트 단일 프레임.
+ *  HELLO    (브→콘) data = mac[6], 0xFF(번호 없음), 0
+ *  ROLE_CMD (콘→브) data = mac[6], cmd, arg */
+#define CAN_BRIDGE_ID_ROLE_CMD     0x0F0u
+#define CAN_BRIDGE_ID_HELLO_BASE   0x400u
+#define CAN_BRIDGE_ID_HELLO_MASK   0x1FFu    /* 0x400~0x5FF */
+#define CAN_BRIDGE_ROLE_ASSIGN     1         /* arg = 번호(0 재브, 1 보브). 다른 번호로 이미 동작 중이면 다시 시작해 HELLO부터 */
+#define CAN_BRIDGE_ROLE_IDENTIFY   2         /* arg = 1: 초록 LED 빠르게(콘이 묻는 동안 2초마다 보냄, 5초 안 오면 멈춤) */
+#define CAN_BRIDGE_ROLE_RELEASE    3         /* 번호 없앰 — 다시 시작해 HELLO부터 */
+
+static inline uint32_t can_bridge_hello_id(const uint8_t mac[6])
+{
+    uint32_t h = 0;
+    for (int i = 0; i < 6; i++) h = h * 31u + mac[i];
+    return CAN_BRIDGE_ID_HELLO_BASE + (h & CAN_BRIDGE_ID_HELLO_MASK);
+}
+
 typedef enum {
     CAN_BRIDGE_ROLE_CNTL = 0,   /* 콘: CNTL_TO_BRIDGE로 송신, BRIDGE_TO_CNTL로 수신 */
     CAN_BRIDGE_ROLE_BRIDGE = 1, /* 브릿지: 반대 방향 */
@@ -133,6 +153,7 @@ typedef struct __attribute__((packed)) {
     uint32_t boot_id;
     uint8_t  channel;
     uint8_t  channel_set;   /* 2026-10-18 — 1 = 콘이 이번 부팅에 채널을 정해 줌. 0이면 브가 노드 광고를 안 넘김(채널이 바뀌어 끊기지 않게) */
+    uint8_t  mac[6];        /* 2026-11-18 — 브릿지 자기 MAC(콘이 저장한 번호 주인과 맞는지 확인) */
 } can_bridge_ctrl_pong_t;
 
 /* DATA 카테고리 — 브릿지는 이 안의 CASK(esp_now_link.h) 내용을 해석하지 않는 투명 릴레이.

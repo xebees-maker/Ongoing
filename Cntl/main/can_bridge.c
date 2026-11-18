@@ -4,6 +4,7 @@
 #include "photo_rx.h"
 #include "ui_log.h"
 #include "esp_now_link.h"   /* ESP_NOW_MSG_ADVERTISE — 광고만 기기 종류로 브릿지를 가림 */
+#include "fs.h"
 
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
@@ -18,6 +19,7 @@
 #include "freertos/semphr.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 /**
  * 2026-09-23 — 콘 쪽 CAN 링크. 브의 can_link.c와 방향만 반대(콘: CNTL_TO_BRIDGE로 송신,
@@ -168,6 +170,8 @@ typedef struct {
 } raw_frame_t;
 static QueueHandle_t s_raw_frame_q;
 static void note_bridge_alive(uint8_t b, const uint8_t *body, size_t body_len);  /* 2026-09-26(설계 6단계) — 아래 정의 */
+static void note_hello(const uint8_t *mac);                                        /* 2026-11-18 — 아래 정의 */
+static void role_check_owner(uint8_t bi, const uint8_t *mac);
 static esp_err_t send_app_msg(uint8_t b, const uint8_t *msg, size_t len);
 static volatile uint32_t s_raw_drop = 0;  /* ISR 원시 프레임 큐가 차서 버린 수 */
 /* 2026-09-26(버스 에러 조사) — 에러를 트래픽 양으로 나눠 비교하려고 셈 */
@@ -233,6 +237,11 @@ static void can_rx_task(void *arg)
 
         /* 2026-09-26 — ID로 경로 선택. 받는 쪽 FC는 자기 경로의 송신 ID로(현행 원칙).
          * 2026-10-18 — ID로 브릿지도 가림(브릿지별 ID) */
+        /* 2026-11-18 — 번호 없는 브릿지의 HELLO(단일 프레임, 브릿지 MAC) — 판단은 bridge_ping_task(role_tick)가 */
+        if (rf.id >= CAN_BRIDGE_ID_HELLO_BASE && rf.id <= CAN_BRIDGE_ID_HELLO_BASE + CAN_BRIDGE_ID_HELLO_MASK) {
+            if (rf.len >= 7 && rf.data[6] == 0xFF) note_hello(rf.data);
+            continue;
+        }
         int b = -1, path = 0;
         for (int i = 0; i < NB && b < 0; i++) {
             if (rf.id == CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL(i)) { b = i; path = P_CTRL; }
@@ -416,10 +425,11 @@ static void note_bridge_alive(uint8_t bi, const uint8_t *body, size_t body_len)
     can_bridge_ctrl_boot_t b;
     memcpy(&b, body, sizeof(b));
     br->last_pong_us = esp_timer_get_time();
-    if (body_len >= sizeof(can_bridge_ctrl_pong_t)) {
+    if (body_len >= offsetof(can_bridge_ctrl_pong_t, mac)) {
         br->channel = body[offsetof(can_bridge_ctrl_pong_t, channel)];
         br->channel_set = body[offsetof(can_bridge_ctrl_pong_t, channel_set)] != 0;
     }
+    if (body_len >= sizeof(can_bridge_ctrl_pong_t)) role_check_owner(bi, body + offsetof(can_bridge_ctrl_pong_t, mac));
     if (!br->seen) {
         br->seen = true;
         ESP_LOGI(TAG, "Bridge %u present (boot ID %08x)", (unsigned)bi + 1, (unsigned)b.boot_id);
@@ -437,6 +447,289 @@ static void note_bridge_alive(uint8_t bi, const uint8_t *body, size_t body_len)
         return;
     }
     br->boot_id = b.boot_id;
+}
+
+/* ---- 2026-11-18(사용자 결정) — 브릿지 번호를 콘이 정함(can_bridge_link.h ROLE_CMD 주석) ----
+ * 저장: 번호별 주인 MAC(LittleFS bridges.bin). 브릿지는 저장하지 않음 — 켤 때마다 HELLO, 콘이 아는 MAC이면 바로 번호를 줌.
+ * 모르는 브릿지(사용자 결정 11-18):
+ *  - 저장된 브릿지가 하나도 없고 모르는 브릿지가 한 대뿐이면(5초 기다려 봄) 묻지 않고 재브(0).
+ *  - 비어 있는 번호가 하나뿐이고 다른 번호의 주인이 지금 연결돼 있으면, 모르는 한 대는 그 빈 번호(새로 하나 더 붙인 것).
+ *  - 그 밖은 사용자에게 물음(콘 팝업·웹) — 묻는 동안 그 브릿지의 초록 LED를 빠르게(IDENTIFY). 고른 번호에 주인이 있으면 바꿈
+ *    (옛 주인은 번호를 잃고 다시 HELLO → 연결돼 있었다면 다시 물음). 제안 번호 = 주인 없는 번호, 없으면 주인이 연결 안 된 번호.
+ * PONG의 MAC이 그 번호의 주인과 다르면(저장이 바뀜) 그 브릿지에 RELEASE.
+ * 명령 전송은 bridge_ping_task(코어 1)만 함 — UI·웹은 큐에 넣고 깨움 */
+#define BRIDGE_ROLE_PATH   FS_MOUNT_POINT "/bridges.bin"
+#define BRIDGE_ROLE_MAGIC  0x42524731u   /* "BRG1" */
+typedef struct {
+    uint32_t magic;
+    uint8_t  valid[NB];
+    uint8_t  mac[NB][6];
+} bridge_role_file_t;
+static bridge_role_file_t s_role;
+static portMUX_TYPE s_role_lock = portMUX_INITIALIZER_UNLOCKED;   /* s_role·s_hello·s_cmd·s_ask */
+
+#define HELLO_SLOTS        4
+#define HELLO_FORGET_US    (10LL * 1000 * 1000)   /* 이만큼 HELLO가 없으면 표에서 뺌(번호를 받았거나 꺼짐) */
+#define HELLO_SETTLE_US    (5LL * 1000 * 1000)    /* 처음 본 뒤 이만큼은 자동 규칙만(두 대가 거의 같이 켜지는 경우를 기다림) */
+typedef struct { uint8_t used; uint8_t mac[6]; int64_t first_us, last_us; } hello_t;
+static hello_t s_hello[HELLO_SLOTS];
+
+#define ROLE_CMD_SLOTS 6
+typedef struct { uint8_t used, cmd, arg; uint8_t mac[6]; } role_cmd_t;
+static role_cmd_t s_role_cmd[ROLE_CMD_SLOTS];
+
+static bool s_ask_valid;
+static uint8_t s_ask_mac[6], s_ask_sug;
+static int64_t s_assigned_us[NB];        /* 번호를 막 정함 — 그 브릿지가 첫 PONG을 보내기 전에도 "연결됨"으로 봄(10초) */
+static uint8_t s_reask_mac[NB][6];       /* 사용자가 [다시 정하기]로 비운 브릿지 — 자동 규칙을 건너뛰고 꼭 물음 */
+static bool    s_reask_valid[NB];
+static int64_t s_release_us[NB];
+static TaskHandle_t s_ping_task_handle;
+
+static void role_load(void)
+{
+    memset(&s_role, 0, sizeof(s_role));
+    FILE *f = fopen(BRIDGE_ROLE_PATH, "rb");
+    if (!f) { ESP_LOGI(TAG, "No bridge numbers saved yet"); return; }
+    bridge_role_file_t r;
+    size_t n = fread(&r, 1, sizeof(r), f);
+    fclose(f);
+    if (n != sizeof(r) || r.magic != BRIDGE_ROLE_MAGIC) { ESP_LOGW(TAG, "bridges.bin invalid - ignored"); return; }
+    s_role = r;
+    for (int b = 0; b < NB; b++) {
+        if (s_role.valid[b]) ESP_LOGI(TAG, "Bridge %d = %02X%02X%02X%02X%02X%02X", b + 1, s_role.mac[b][0], s_role.mac[b][1],
+                                      s_role.mac[b][2], s_role.mac[b][3], s_role.mac[b][4], s_role.mac[b][5]);
+    }
+}
+
+static void role_save(void)
+{
+    bridge_role_file_t r;
+    taskENTER_CRITICAL(&s_role_lock);
+    r = s_role;
+    taskEXIT_CRITICAL(&s_role_lock);
+    r.magic = BRIDGE_ROLE_MAGIC;
+    FILE *f = fopen(BRIDGE_ROLE_PATH, "wb");
+    if (!f) { ESP_LOGE(TAG, "Save failed (fopen): %s", BRIDGE_ROLE_PATH); return; }
+    if (fwrite(&r, 1, sizeof(r), f) != sizeof(r)) ESP_LOGE(TAG, "Save failed (fwrite): %s", BRIDGE_ROLE_PATH);
+    fclose(f);
+}
+
+static void role_queue_cmd(const uint8_t *mac, uint8_t cmd, uint8_t arg)
+{
+    taskENTER_CRITICAL(&s_role_lock);
+    int slot = -1;
+    for (int i = 0; i < ROLE_CMD_SLOTS; i++) {
+        if (s_role_cmd[i].used && s_role_cmd[i].cmd == cmd && memcmp(s_role_cmd[i].mac, mac, 6) == 0) { slot = i; break; }
+        if (!s_role_cmd[i].used && slot < 0) slot = i;
+    }
+    if (slot >= 0) {
+        s_role_cmd[slot].used = 1;
+        s_role_cmd[slot].cmd = cmd;
+        s_role_cmd[slot].arg = arg;
+        memcpy(s_role_cmd[slot].mac, mac, 6);
+    }
+    taskEXIT_CRITICAL(&s_role_lock);
+    if (slot < 0) ESP_LOGW(TAG, "Bridge role command queue full - cmd %u dropped (resent on next HELLO/PONG)", (unsigned)cmd);
+    if (s_ping_task_handle) xTaskNotifyGive(s_ping_task_handle);
+}
+
+/* 코어 1(bridge_ping_task)에서만 */
+static void role_send(const uint8_t *mac, uint8_t cmd, uint8_t arg)
+{
+    uint8_t d[8];
+    memcpy(d, mac, 6);
+    d[6] = cmd;
+    d[7] = arg;
+    esp_err_t err = can_bridge_tx_frame(s_node, CAN_BRIDGE_ID_ROLE_CMD, d, 8, 100);
+    if (err != ESP_OK) LOG_W_RL(TAG, "Bridge role command %u send failed: %s", (unsigned)cmd, esp_err_to_name(err));
+}
+
+/* can_rx 태스크 — 표에만 적음 */
+static void note_hello(const uint8_t *mac)
+{
+    int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_role_lock);
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < HELLO_SLOTS; i++) {
+        if (s_hello[i].used && memcmp(s_hello[i].mac, mac, 6) == 0) { slot = i; break; }
+        if (!s_hello[i].used || s_hello[i].last_us < s_hello[oldest].last_us) oldest = i;
+    }
+    if (slot < 0) {
+        slot = oldest;
+        s_hello[slot].used = 1;
+        memcpy(s_hello[slot].mac, mac, 6);
+        s_hello[slot].first_us = now;
+    }
+    s_hello[slot].last_us = now;
+    taskEXIT_CRITICAL(&s_role_lock);
+}
+
+static int role_index_of(const uint8_t *mac)   /* 잠금 안에서 */
+{
+    for (int b = 0; b < NB; b++) if (s_role.valid[b] && memcmp(s_role.mac[b], mac, 6) == 0) return b;
+    return -1;
+}
+
+static bool bridge_online(int b)
+{
+    return (s_br[b].seen && !s_br[b].silent) || (s_assigned_us[b] && esp_timer_get_time() - s_assigned_us[b] < HELLO_FORGET_US);
+}
+
+static bool reask_pending(const uint8_t *mac)   /* 잠금 안에서 */
+{
+    for (int b = 0; b < NB; b++) if (s_reask_valid[b] && memcmp(s_reask_mac[b], mac, 6) == 0) return true;
+    return false;
+}
+
+void can_bridge_role_assign(const uint8_t *mac, uint8_t idx)
+{
+    if (idx >= NB) return;
+    uint8_t old[6];
+    bool had_old;
+    taskENTER_CRITICAL(&s_role_lock);
+    had_old = s_role.valid[idx] && memcmp(s_role.mac[idx], mac, 6) != 0;
+    if (had_old) memcpy(old, s_role.mac[idx], 6);
+    for (int b = 0; b < NB; b++) if (b != idx && s_role.valid[b] && memcmp(s_role.mac[b], mac, 6) == 0) s_role.valid[b] = 0;
+    s_role.valid[idx] = 1;
+    memcpy(s_role.mac[idx], mac, 6);
+    if (s_ask_valid && memcmp(s_ask_mac, mac, 6) == 0) s_ask_valid = false;
+    for (int b = 0; b < NB; b++) if (s_reask_valid[b] && memcmp(s_reask_mac[b], mac, 6) == 0) s_reask_valid[b] = false;
+    s_assigned_us[idx] = esp_timer_get_time();
+    taskEXIT_CRITICAL(&s_role_lock);
+    role_save();
+    ESP_LOGW(TAG, "Bridge %u = %02X%02X%02X%02X%02X%02X%s", (unsigned)idx + 1, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+             had_old ? " (replaces previous)" : "");
+    role_queue_cmd(mac, CAN_BRIDGE_ROLE_IDENTIFY, 0);
+    role_queue_cmd(mac, CAN_BRIDGE_ROLE_ASSIGN, idx);
+    if (had_old) role_queue_cmd(old, CAN_BRIDGE_ROLE_RELEASE, 0);
+}
+
+void can_bridge_role_release(uint8_t idx)
+{
+    if (idx >= NB) return;
+    uint8_t mac[6];
+    bool had;
+    taskENTER_CRITICAL(&s_role_lock);
+    had = s_role.valid[idx];
+    if (had) {
+        memcpy(mac, s_role.mac[idx], 6);
+        memcpy(s_reask_mac[idx], mac, 6);
+        s_reask_valid[idx] = true;
+    }
+    s_role.valid[idx] = 0;
+    s_assigned_us[idx] = 0;
+    taskEXIT_CRITICAL(&s_role_lock);
+    if (!had) return;
+    role_save();
+    ESP_LOGW(TAG, "Bridge %u number released (%02X%02X%02X%02X%02X%02X) - it restarts and asks again", (unsigned)idx + 1,
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    role_queue_cmd(mac, CAN_BRIDGE_ROLE_RELEASE, 0);
+}
+
+bool can_bridge_role_mac(uint8_t idx, uint8_t mac_out[6])
+{
+    if (idx >= NB) return false;
+    taskENTER_CRITICAL(&s_role_lock);
+    bool v = s_role.valid[idx];
+    if (v) memcpy(mac_out, s_role.mac[idx], 6);
+    taskEXIT_CRITICAL(&s_role_lock);
+    return v;
+}
+
+bool can_bridge_role_ask(uint8_t mac_out[6], uint8_t *suggest_out)
+{
+    taskENTER_CRITICAL(&s_role_lock);
+    bool v = s_ask_valid;
+    if (v) { memcpy(mac_out, s_ask_mac, 6); if (suggest_out) *suggest_out = s_ask_sug; }
+    taskEXIT_CRITICAL(&s_role_lock);
+    return v;
+}
+
+/* PONG(ctrl_consume) — 그 번호의 주인이 아니면 RELEASE(10초에 한 번) */
+static void role_check_owner(uint8_t bi, const uint8_t *mac)
+{
+    taskENTER_CRITICAL(&s_role_lock);
+    bool ok = s_role.valid[bi] && memcmp(s_role.mac[bi], mac, 6) == 0;
+    taskEXIT_CRITICAL(&s_role_lock);
+    if (ok) return;
+    int64_t now = esp_timer_get_time();
+    if (s_release_us[bi] && now - s_release_us[bi] < HELLO_FORGET_US) return;
+    s_release_us[bi] = now;
+    ESP_LOGW(TAG, "Bridge %u is %02X%02X%02X%02X%02X%02X, not its saved owner - releasing it", (unsigned)bi + 1,
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    role_queue_cmd(mac, CAN_BRIDGE_ROLE_RELEASE, 0);
+}
+
+/* bridge_ping_task(코어 1) — 명령 보내기, HELLO 판단, 물을 브릿지 정하기 */
+static void role_tick(void)
+{
+    role_cmd_t cmds[ROLE_CMD_SLOTS];
+    hello_t hello[HELLO_SLOTS];
+    bridge_role_file_t role;
+    bool reask[HELLO_SLOTS] = { false };
+    int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&s_role_lock);
+    for (int i = 0; i < HELLO_SLOTS; i++) reask[i] = s_hello[i].used && reask_pending(s_hello[i].mac);
+    memcpy(cmds, s_role_cmd, sizeof(cmds));
+    memset(s_role_cmd, 0, sizeof(s_role_cmd));
+    for (int i = 0; i < HELLO_SLOTS; i++) if (s_hello[i].used && now - s_hello[i].last_us > HELLO_FORGET_US) s_hello[i].used = 0;
+    memcpy(hello, s_hello, sizeof(hello));
+    role = s_role;
+    taskEXIT_CRITICAL(&s_role_lock);
+
+    for (int i = 0; i < ROLE_CMD_SLOTS; i++) if (cmds[i].used) role_send(cmds[i].mac, cmds[i].cmd, cmds[i].arg);
+
+    int unknown[HELLO_SLOTS], n_unknown = 0, n_saved = 0;
+    for (int b = 0; b < NB; b++) n_saved += role.valid[b] ? 1 : 0;
+    for (int i = 0; i < HELLO_SLOTS; i++) {
+        if (!hello[i].used) continue;
+        int idx = -1;
+        for (int b = 0; b < NB; b++) if (role.valid[b] && memcmp(role.mac[b], hello[i].mac, 6) == 0) idx = b;
+        if (idx >= 0) role_send(hello[i].mac, CAN_BRIDGE_ROLE_ASSIGN, (uint8_t)idx);   /* 아는 브릿지 — 바로 번호 */
+        else unknown[n_unknown++] = i;
+    }
+
+    bool ask = false;
+    uint8_t ask_mac[6] = { 0 }, sug = 0;
+    if (n_unknown == 1 && !reask[unknown[0]]) {
+        const hello_t *h = &hello[unknown[0]];
+        int free_idx = -1, n_free = 0;
+        for (int b = 0; b < NB; b++) if (!role.valid[b]) { n_free++; if (free_idx < 0) free_idx = b; }
+        if (n_saved == 0 && now - h->first_us >= HELLO_SETTLE_US) {
+            ESP_LOGI(TAG, "Only one bridge and none saved - it is Bridge 1");
+            can_bridge_role_assign(h->mac, 0);
+            return;
+        }
+        if (n_free == 1 && NB == 2 && role.valid[1 - free_idx] && bridge_online(1 - free_idx)) {
+            ESP_LOGI(TAG, "New bridge while Bridge %d is connected - it is Bridge %d", 2 - free_idx, free_idx + 1);
+            can_bridge_role_assign(h->mac, (uint8_t)free_idx);
+            return;
+        }
+    }
+    for (int k = 0; k < n_unknown && !ask; k++) {
+        const hello_t *h = &hello[unknown[k]];
+        if (now - h->first_us < HELLO_SETTLE_US) continue;
+        ask = true;
+        memcpy(ask_mac, h->mac, 6);
+    }
+    if (ask) {
+        int s = -1;
+        for (int b = 0; b < NB && s < 0; b++) if (!role.valid[b]) s = b;
+        for (int b = 0; b < NB && s < 0; b++) if (!bridge_online(b)) s = b;
+        sug = (uint8_t)(s < 0 ? 0 : s);
+        role_send(ask_mac, CAN_BRIDGE_ROLE_IDENTIFY, 1);
+    }
+    taskENTER_CRITICAL(&s_role_lock);
+    bool changed = ask != s_ask_valid || (ask && memcmp(ask_mac, s_ask_mac, 6) != 0);
+    s_ask_valid = ask;
+    memcpy(s_ask_mac, ask_mac, 6);
+    s_ask_sug = sug;
+    taskEXIT_CRITICAL(&s_role_lock);
+    if (changed && ask) {
+        ESP_LOGW(TAG, "Unknown bridge %02X%02X%02X%02X%02X%02X - asking the user (suggest Bridge %u)", ask_mac[0], ask_mac[1],
+                 ask_mac[2], ask_mac[3], ask_mac[4], ask_mac[5], (unsigned)sug + 1);
+    }
 }
 
 static void send_ctrl_to_bridge(uint8_t bi, uint8_t type, const void *body, size_t len)
@@ -572,10 +865,19 @@ static void bridge_ping_task(void *arg)
     uint32_t seq = 0;
     int64_t last_reset_us[NB] = { 0 };
     for (int b = 0; b < NB; b++) s_br[b].last_pong_us = esp_timer_get_time();   /* 부팅 직후 유예 */
+    int64_t last_ping_us = 0;
     for (;;) {
+        /* 2026-11-18 — 브릿지 번호 명령(UI·웹이 깨움)은 바로, PING 주기(2초)는 그대로 */
+        role_tick();
+        if (last_ping_us != 0 && esp_timer_get_time() - last_ping_us < BRIDGE_PING_INTERVAL_MS * 1000LL) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(BRIDGE_PING_INTERVAL_MS - (esp_timer_get_time() - last_ping_us) / 1000));
+            continue;
+        }
+        bool first = last_ping_us == 0;
+        last_ping_us = esp_timer_get_time();
         seq++;
         for (uint8_t b = 0; b < NB; b++) send_ctrl_to_bridge(b, CAN_CTRL_PING, &seq, sizeof(seq));
-        vTaskDelay(pdMS_TO_TICKS(BRIDGE_PING_INTERVAL_MS));
+        if (first) continue;   /* 아래 판단은 PING 한 주기 뒤부터(예전 순서: PING → 2초 → 판단) */
         update_channels();
         int64_t now = esp_timer_get_time();
         for (uint8_t b = 0; b < NB; b++) {
@@ -884,8 +1186,9 @@ void can_bridge_init(can_bridge_recv_cb_t recv_cb)
     /* 2026-10-01(사용자 지시 — 메모리 검토 N) — 다른 CAN 태스크처럼 스택을 PSRAM에(예전엔 이것만 내부 RAM 3KB).
      * XiP from PSRAM이라 플래시 쓰기 중에도 캐시가 꺼지지 않아 PSRAM 스택 제약 없음(ESP-IDF 외부 RAM 문서) */
     static StaticTask_t s_bridge_ping_tcb;
-    StackType_t *bridge_ping_stack = (StackType_t *)heap_caps_malloc(3072, MALLOC_CAP_SPIRAM);
-    xTaskCreateStaticPinnedToCore(bridge_ping_task, "bridge_ping", 3072 / sizeof(StackType_t), NULL, 5, bridge_ping_stack, &s_bridge_ping_tcb, 1);
+    StackType_t *bridge_ping_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);   /* 11-18 — role_tick 지역 표 때문에 3072→4096 */
+    role_load();   /* 2026-11-18 — 브릿지 번호(bridges.bin) */
+    s_ping_task_handle = xTaskCreateStaticPinnedToCore(bridge_ping_task, "bridge_ping", 4096 / sizeof(StackType_t), NULL, 5, bridge_ping_stack, &s_bridge_ping_tcb, 1);
 
     static StaticTask_t s_can_rx_tcb, s_can_consume_tcb, s_ctrl_consume_tcb, s_can_status_tcb;
     StackType_t *can_rx_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);

@@ -503,6 +503,21 @@ typedef enum {
     STR_MSG_CALIB_RESET_CONFIRM, /* 2026-10-13 — 위 확인 문구 */
     STR_MSG_CALIB_RESET_QUEUED,  /* 2026-10-13 — 요청을 넣은 뒤 안내 */
     STR_LABEL_LIGHT_TEST,        /* 2026-09-29 — 카메라 팝업 조명 시험 스위치: "조명 테스트" / "Light Test" */
+    /* 2026-11-18(사용자 결정) — 브릿지 번호를 콘이 정함 */
+    STR_TITLE_BRIDGE_NEW,        /* 모르는 브릿지 팝업 제목 */
+    STR_MSG_BRIDGE_ASK_FMT,      /* %s = MAC */
+    STR_BTN_BRIDGE_1,            /* 브릿지1 = 실내 안테나(재브) */
+    STR_BTN_BRIDGE_2,            /* 브릿지2 = 실외 안테나(보브) */
+    STR_TITLE_BRIDGE,            /* 브릿지 줄을 누른 팝업 제목 */
+    STR_MSG_BRIDGE_INFO_FMT,     /* %u 번호, %s 안테나, %s MAC, %s 상태 */
+    STR_BRIDGE_ANT_IN,
+    STR_BRIDGE_ANT_OUT,
+    STR_BTN_BRIDGE_REASSIGN,
+    STR_MSG_BRIDGE_REASSIGN_CONFIRM,
+    /* 2026-11-18(사용자 결정) — 전력 제어 = 로컬 + 원격(여러 대) */
+    STR_RELAY_REMOTE_NAME_FMT,   /* 원격 자리 기본 이름, %d = 자리 번호 */
+    STR_POWER_LOCAL,
+    STR_POWER_REMOTE,
 
     STR_COUNT,
 } ui_str_id_t;

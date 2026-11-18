@@ -353,7 +353,7 @@ node_link_t node_hub_board_link(const uint8_t *mac);
  * ESP_OK. 끊김 시간(분)도 함께 보냄 */
 esp_err_t node_hub_boril_set(const uint8_t *mac, bool on);
 /* 2026-10-18(6단계) — 보릴(한 대 전제) 노드 정보를 out에 복사. PAIRED이고 살아 있으면 true */
-bool node_hub_get_boril(node_hub_node_t *out);
+bool node_hub_get_boril(const uint8_t *mac, node_hub_node_t *out);   /* 2026-11-18 — 그 기기(원격 자리 주인)가 연결돼 있으면 */
 
 /* 2026-10-20(사용자 결정 — 조명 테스트 스위치를 캠 실제 상태에 맞춤) — 캠별 조명 상태. 켜기를 보낼 때 set(true), 캠이 CAM_LIGHT_ACK로
  * 켜짐/꺼짐을 알려 오면(요청 응답이든, 잠들기 직전·촬영 뒤 스스로 끈 알림이든) 그 값으로 바뀜 */

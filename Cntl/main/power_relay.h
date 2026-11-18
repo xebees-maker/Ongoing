@@ -24,9 +24,13 @@ extern "C" {
 
 /* 2026-10-18(Docs/설계_보브_보릴_2026-10-18.md 6단계) — 릴레이 3개: 0·1 = 콘 보드 출력(DOUT0/1), 2 = 원격릴레이(보릴 — 보일러,
  * 무선). 판정(자동 규칙·수동·타이머)은 셋이 같고 출력만 다름. 화면에서는 원격릴레이가 맨 위 */
-#define POWER_RELAY_COUNT           3
+/* 2026-11-18(사용자 결정) — 원격은 여러 대: 전력 제어 = 로컬(콘 출력 2개, 늘 있음) + 원격(센스처럼 연결·대기·끊기). 원격 자리 4개(번호 2..5),
+ * 자리마다 주인 기기 MAC과 "사용자가 연결함"을 따로 저장(power_remote.bin). 연결된 자리만 화면에 나옴(통신이 끊겨도 남음 — "연결 끊김").
+ * 사용자가 끊으면 자리는 숨고 설정은 남음(같은 기기를 다시 연결하면 이어짐). 주인이 없거나 끊긴 자리는 새 기기가 씀(설정 초기화) */
 #define POWER_RELAY_LOCAL_COUNT     2
-#define POWER_RELAY_REMOTE_IDX      2
+#define POWER_RELAY_REMOTE_MAX      4
+#define POWER_RELAY_REMOTE_FIRST    POWER_RELAY_LOCAL_COUNT
+#define POWER_RELAY_COUNT           (POWER_RELAY_LOCAL_COUNT + POWER_RELAY_REMOTE_MAX)
 #define POWER_RELAY_ALIAS_MAX_LEN   32
 
 /* 기준값 소스 종류 — 어제/오늘 대화로 확정: 그룹 계열 통계, 또는 특정 개별 장치 실측값 */
@@ -186,12 +190,23 @@ typedef struct {
     int8_t  rssi;
     bool    near_orphan;    /* 응답이 끊기기 직전(센스·캠 신호 아이콘과 같은 빨강 규칙) */
 } power_remote_status_t;
-void power_relay_get_remote_status(power_remote_status_t *out);
-/* 통신이 끊기면 보릴이 릴레이를 그대로 두다가 이만큼(분) 지나면 끔 — 기본 10, 선택 1/10/30/60(사용자 결정, 1은 시험용 10-18). 설정 파일에 저장 */
-uint16_t power_relay_get_remote_failsafe_min(void);
-void power_relay_set_remote_failsafe_min(uint16_t min);
+void power_relay_get_remote_status(int idx, power_remote_status_t *out);
+/* 통신이 끊기면 보릴이 릴레이를 그대로 두다가 이만큼(분) 지나면 끔 — 기본 10, 선택 1/10/30/60(사용자 결정, 1은 시험용 10-18). 자리마다 저장 */
+uint16_t power_relay_get_remote_failsafe_min(int idx);
+void power_relay_set_remote_failsafe_min(int idx, uint16_t min);
+uint16_t power_relay_remote_failsafe_for_mac(const uint8_t *mac);   /* 그 기기의 자리 값(자리가 없으면 기본) */
 /* 기본 이름(별명 없을 때) — "릴레이 %d"가 아니라 원격릴레이 */
 bool power_relay_is_remote(int idx);
+/* 화면·웹에 보일 자리인가 — 로컬은 늘, 원격은 사용자가 연결한 자리만 */
+bool power_relay_is_shown(int idx);
+/* 원격 자리 — 주인 기기(MAC). idx는 POWER_RELAY_REMOTE_FIRST.. */
+bool power_relay_remote_mac(int idx, uint8_t mac_out[6]);
+int  power_relay_remote_of(const uint8_t *mac);          /* 그 기기가 주인인 자리(연결 여부 무관), 없으면 -1 */
+bool power_relay_remote_linked(const uint8_t *mac);      /* 그 기기가 연결된 자리의 주인인가(콘 재부팅 뒤 다시 붙일지) */
+bool power_relay_remote_can_take(const uint8_t *mac);    /* 그 기기에 줄 자리가 있나(이미 주인이거나 빈 자리) */
+/* node_hub — 연결 성사·사용자가 끊음. 메모리만 바꾸고 저장은 판정 태스크가(통신 태스크 스택이 작음) */
+void power_relay_remote_link(const uint8_t *mac);
+void power_relay_remote_unlink(const uint8_t *mac);
 
 #ifdef __cplusplus
 }

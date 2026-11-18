@@ -16,3 +16,9 @@ can_bridge_ctx_t *can_link_get_data_ctx(void);
 
 /* 2026-09-26 — app 메시지(app_header+body)를 경로 분류에 따라 Control/Data로 콘에 보냄 */
 esp_err_t can_link_send(const uint8_t *msg, size_t len);
+
+/* 2026-11-18 — 콘이 정해 준 번호(0 재브, 1 보브, -1 아직 없음 — can_link_init이 정해질 때까지 기다림) */
+int can_link_bridge_index(void);
+/* 콘이 이 브릿지를 사용자에게 묻는 중(초록 LED 빠르게) */
+#include <stdbool.h>
+bool can_link_identify_active(void);

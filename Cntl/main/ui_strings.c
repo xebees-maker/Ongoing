@@ -503,6 +503,21 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_MSG_CALIB_RESET_QUEUED]  = { "센스가 깨어나면 실행합니다. 결과는 알림 목록에 남습니다.",
                                       "Runs when the sensor wakes. The result goes to the alarm list." },
     [STR_LABEL_LIGHT_TEST]        = { "조명 테스트",   "Light Test" },
+    [STR_TITLE_BRIDGE_NEW]        = { "새 브릿지",     "New bridge" },
+    [STR_MSG_BRIDGE_ASK_FMT]      = { "초록 LED가 빠르게 깜빡이는 브릿지는 어느 것인가요?\nMAC %s",
+                                      "Which bridge is the one with the fast-blinking green LED?\nMAC %s" },
+    [STR_BTN_BRIDGE_1]            = { "브릿지1 (실내 안테나)", "Bridge1 (indoor antenna)" },
+    [STR_BTN_BRIDGE_2]            = { "브릿지2 (실외 안테나)", "Bridge2 (outdoor antenna)" },
+    [STR_TITLE_BRIDGE]            = { "브릿지",        "Bridge" },
+    [STR_MSG_BRIDGE_INFO_FMT]     = { "브릿지%u (%s)\nMAC: %s\n상태: %s", "Bridge%u (%s)\nMAC: %s\nState: %s" },
+    [STR_BRIDGE_ANT_IN]           = { "실내 안테나",   "indoor antenna" },
+    [STR_BRIDGE_ANT_OUT]          = { "실외 안테나",   "outdoor antenna" },
+    [STR_BTN_BRIDGE_REASSIGN]     = { "다시 정하기",   "Reassign" },
+    [STR_RELAY_REMOTE_NAME_FMT]   = { "원격릴레이%d", "Remote relay %d" },
+    [STR_POWER_LOCAL]             = { "로컬",          "Local" },
+    [STR_POWER_REMOTE]            = { "원격",          "Remote" },
+    [STR_MSG_BRIDGE_REASSIGN_CONFIRM] = { "이 브릿지의 번호를 비우고 다시 시작시킵니다. 다시 붙으면 어느 브릿지인지 묻습니다.",
+                                      "Clear this bridge's number and restart it? When it comes back you will be asked which bridge it is." },
 };
 
 void ui_lang_load(void)

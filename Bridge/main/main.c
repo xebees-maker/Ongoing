@@ -1,4 +1,7 @@
+#include "driver/gpio.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs_flash.h"
 
 #include "bridge_esp_now.h"
@@ -18,6 +21,45 @@
  */
 
 static const char *TAG = "SYS";
+
+/* 2026-11-18(사용자 결정) — 보드만 보고 재브·보브 구분: RS485 LED의 초록(LED2, 공통 양극 3V3, 캐소드가 TXD1=IO17 — LOW면 켜짐).
+ * 브는 RS485를 안 써서 IO17을 그냥 출력으로 씀. 파랑(RXD1)은 RS485 칩 출력이라 못 씀.
+ *  - 번호 있음: 5초마다 재브 1번, 보브 2번(200 ms 켜고 200 ms 끔)
+ *  - 번호 없음(콘이 정해 주기 전): 계속 켜짐
+ *  - 콘이 사용자에게 이 브릿지를 묻는 중: 빠르게(100 ms) 깜빡임 */
+#define ID_LED_GPIO      GPIO_NUM_17
+#define ID_LED_STEP_MS   100
+#define ID_LED_BLINK_MS  400    /* 한 번 = 켬 200 + 끔 200 */
+#define ID_LED_PERIOD_MS 5000
+
+static void id_led_task(void *arg)
+{
+    (void)arg;
+    uint32_t t = 0;
+    for (;;) {
+        int br = can_link_bridge_index();
+        bool on;
+        if (can_link_identify_active()) {
+            on = ((t / ID_LED_STEP_MS) & 1) == 0;
+        } else if (br < 0) {
+            on = true;
+        } else {
+            uint32_t ph = t % ID_LED_PERIOD_MS;
+            on = ph < (uint32_t)(br + 1) * ID_LED_BLINK_MS && (ph % ID_LED_BLINK_MS) < ID_LED_BLINK_MS / 2;
+        }
+        gpio_set_level(ID_LED_GPIO, on ? 0 : 1);
+        vTaskDelay(pdMS_TO_TICKS(ID_LED_STEP_MS));
+        t += ID_LED_STEP_MS;
+    }
+}
+
+static void id_led_start(void)
+{
+    gpio_config_t c = { .pin_bit_mask = 1ULL << ID_LED_GPIO, .mode = GPIO_MODE_OUTPUT };
+    gpio_config(&c);
+    gpio_set_level(ID_LED_GPIO, 1);
+    xTaskCreate(id_led_task, "id_led", 2048, NULL, 1, NULL);
+}
 
 void app_main(void)
 {
@@ -40,7 +82,8 @@ void app_main(void)
      * 역참조) — bridge_esp_now_init()이 만드는 relay_task가 can_link_get_data_ctx()를
      * 태스크 시작 시점에 한 번 캡처하는데, 그때 can_link_init()이 아직 안 불려서 ctx가
      * NULL이었음. CAN 링크를 먼저 세운 뒤 ESP-NOW를 켜야 함 */
-    can_link_init();
+    id_led_start();      /* 2026-11-18 — can_link_init이 콘의 번호를 기다리는 동안에도 LED가 돌게 먼저 */
+    can_link_init();     /* 콘이 번호를 정해 줄 때까지 기다림 */
     bridge_esp_now_init();
 
     ESP_LOGI(TAG, "Bridge started (standalone init)");

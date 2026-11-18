@@ -183,16 +183,20 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
 
     /* Power Control — 요약 문구는 SPA가 조각 문구(Turn/if/…)로 만듦(콘 refresh_power_control_panel과 같은 규칙) */
     jb_printf(&b, ",\"relays\":[");
+    int nrel = 0;
     for (int i = 0; i < POWER_RELAY_COUNT; i++) {
+        if (!power_relay_is_shown(i)) continue;   /* 2026-11-18 — 원격은 연결된 자리만(콘 화면과 같음) */
         const power_relay_config_t *c = power_relay_get_config(i);
-        jb_printf(&b, "%s{\"idx\":%d,\"alias\":", i ? "," : "", i);
+        jb_printf(&b, "%s{\"idx\":%d,\"alias\":", nrel++ ? "," : "", i);
         jb_str(&b, c ? c->alias : "");
         jb_en(&b, "alias", c ? c->alias : "");
         jb_printf(&b, ",\"on\":%s", power_relay_get_commanded_on(i) ? "true" : "false");
         if (power_relay_is_remote(i)) {
             /* 2026-10-18(보릴 6단계) — 원격릴레이: rst 0 끊김 / 1 확인 중 / 2 정상, act = 보릴이 확인한 출력(화면은 이것만 보여 줌) */
             power_remote_status_t rs;
-            power_relay_get_remote_status(&rs);
+            power_relay_get_remote_status(i, &rs);
+            uint8_t rm[6];
+            if (power_relay_remote_mac(i, rm)) jb_printf(&b, ",\"mac\":\"%02X%02X%02X%02X%02X%02X\"", rm[0], rm[1], rm[2], rm[3], rm[4], rm[5]);
             jb_printf(&b, ",\"remote\":true,\"rst\":%d,\"act\":%s,\"near\":%s", (int)rs.state, rs.actual_on ? "true" : "false",
                       rs.near_orphan ? "true" : "false");
             if (rs.state != POWER_REMOTE_DISCONNECTED && rs.has_rssi) jb_printf(&b, ",\"rssi\":%d", (int)rs.rssi);
@@ -225,11 +229,19 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
     /* 2026-10-18(보릴 6단계) — 요약의 브릿지 줄: st 0 정상 / 1 채널 설정 중 / 2 응답 없음 / 3 연결 안 됨, ch 0 = 모름, canerr = CAN 버스 문제 */
     jb_printf(&b, ",\"canerr\":%s,\"bridges\":[", can_bridge_bus_error() ? "true" : "false");
     for (uint8_t bi = 0; bi < CAN_BRIDGE_MAX_BRIDGES; bi++) {
-        uint8_t ch = 0;
+        uint8_t ch = 0, bm[6];
         can_bridge_state_t st = can_bridge_bridge_state(bi, &ch);
-        jb_printf(&b, "%s{\"st\":%d,\"ch\":%u}", bi ? "," : "", (int)st, (unsigned)ch);
+        jb_printf(&b, "%s{\"st\":%d,\"ch\":%u", bi ? "," : "", (int)st, (unsigned)ch);
+        if (can_bridge_role_mac(bi, bm)) jb_printf(&b, ",\"mac\":\"%02X%02X%02X%02X%02X%02X\"", bm[0], bm[1], bm[2], bm[3], bm[4], bm[5]);
+        jb_printf(&b, "}");
     }
     jb_printf(&b, "]");
+    {   /* 2026-11-18 — 사용자에게 물을 브릿지(콘 팝업과 같음): mac, sug = 제안 번호(0부터) */
+        uint8_t am[6], sug = 0;
+        if (can_bridge_role_ask(am, &sug)) {
+            jb_printf(&b, ",\"brq\":{\"mac\":\"%02X%02X%02X%02X%02X%02X\",\"sug\":%u}", am[0], am[1], am[2], am[3], am[4], am[5], (unsigned)sug);
+        }
+    }
 
     /* Sensor·Camera — 콘 주화면처럼 연결 대기(waiting) 노드도 보내되 SPA가 거름 */
     int n = node_hub_get_nodes(HUB_NODE_KIND_UNKNOWN, nodes, NODE_HUB_MAX_NODES);
@@ -241,7 +253,8 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
         bool cam = (nd->kind == HUB_NODE_KIND_CAM);
         jb_printf(&b, "%s{\"mac\":", i ? "," : "");
         jb_mac(&b, nd->mac);
-        jb_printf(&b, ",\"kind\":\"%s\",\"name\":", cam ? "cam" : (nd->kind == HUB_NODE_KIND_SENS) ? "sens" : "unknown");
+        jb_printf(&b, ",\"kind\":\"%s\",\"name\":", cam ? "cam" : (nd->kind == HUB_NODE_KIND_SENS) ? "sens"
+                                                       : (nd->kind == HUB_NODE_KIND_BORIL) ? "remote" : "unknown");   /* 11-18 — 원격 기기 */
         jb_str(&b, nd->name);
         jb_printf(&b, ",\"alias\":");
         jb_str(&b, device_config_get_alias(nd->mac));
@@ -728,7 +741,7 @@ static esp_err_t api_relay_get_handler(httpd_req_t *req)
     int gc = (c->group == POWER_GROUP_AGAR) ? 2 : (c->precise ? 1 : 0);
     jb_printf(&b, "{\"idx\":%d,\"active\":%s,\"alias\":", idx, c->active ? "true" : "false");   /* 2026-11-12 */
     jb_str(&b, c->alias);
-    if (power_relay_is_remote(idx)) jb_printf(&b, ",\"remote\":true,\"fs\":%u", (unsigned)power_relay_get_remote_failsafe_min());   /* 10-18 */
+    if (power_relay_is_remote(idx)) jb_printf(&b, ",\"remote\":true,\"fs\":%u", (unsigned)power_relay_get_remote_failsafe_min(idx));   /* 10-18 */
     jb_printf(&b, ",\"alias_max\":%d,\"configured\":%s,\"ai\":%s,\"manual\":%s,\"manual_on\":%s,\"chan\":%u,"
                   "\"y\":%s,\"z\":%s,\"center\":", POWER_RELAY_ALIAS_MAX_LEN - 1,
               c->configured ? "true" : "false", c->ai_mode ? "true" : "false", c->manual_override ? "true" : "false",
@@ -863,8 +876,9 @@ static esp_err_t api_relay_failsafe_post_handler(httpd_req_t *req)
     WEB_SCREEN_API_BEGIN(req);
     if (!work_ready(req)) return ESP_FAIL;
     int min = query_int(s_w->query, "min", 0);
-    if (min != 1 && min != 10 && min != 30 && min != 60) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
-    power_relay_set_remote_failsafe_min((uint16_t)min);
+    int idx = query_int(s_w->query, "idx", -1);   /* 2026-11-18 — 원격 자리마다 */
+    if ((min != 1 && min != 10 && min != 30 && min != 60) || !power_relay_is_remote(idx)) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    power_relay_set_remote_failsafe_min(idx, (uint16_t)min);
     return send_simple(req, NULL, "{\"ok\":true}");
 }
 
@@ -1548,6 +1562,28 @@ static esp_err_t api_sensor_forget_post_handler(httpd_req_t *req)
     return send_simple(req, ok ? NULL : "404 Not Found", ok ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 
+/* 2026-11-18 — 브릿지 번호(콘 팝업과 같음). POST /api/bridge/assign?mac=<12자리 hex>&idx=0|1, POST /api/bridge/release?idx=0|1 */
+static esp_err_t api_bridge_assign_post_handler(httpd_req_t *req)
+{
+    if (!web_auth_check(req)) return web_auth_reject(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    uint8_t mac[6];
+    int idx = query_int(s_w->query, "idx", -1);
+    if (!hex_to_mac(s_w->mac_hex, mac) || idx < 0 || idx >= CAN_BRIDGE_MAX_BRIDGES) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    can_bridge_role_assign(mac, (uint8_t)idx);
+    return send_simple(req, NULL, "{\"ok\":true}");
+}
+
+static esp_err_t api_bridge_release_post_handler(httpd_req_t *req)
+{
+    if (!web_auth_check(req)) return web_auth_reject(req);
+    if (!work_ready(req)) return ESP_FAIL;
+    int idx = query_int(s_w->query, "idx", -1);
+    if (idx < 0 || idx >= CAN_BRIDGE_MAX_BRIDGES) return send_simple(req, "400 Bad Request", "{\"ok\":false}");
+    can_bridge_role_release((uint8_t)idx);
+    return send_simple(req, NULL, "{\"ok\":true}");
+}
+
 /* POST /api/stats/delete_all — 콘 Record 팝업 Delete All 확인 Yes와 같음 */
 static esp_err_t api_stats_delete_all_post_handler(httpd_req_t *req)
 {
@@ -1626,6 +1662,10 @@ void web_api_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &alarm_sim_uri);
     httpd_register_uri_handler(server, &sensing_merge_uri);
     httpd_register_uri_handler(server, &sensor_forget_uri);   /* 11-14 임시 */
+    static const httpd_uri_t bridge_assign_uri = { .uri = "/api/bridge/assign", .method = HTTP_POST, .handler = api_bridge_assign_post_handler };
+    static const httpd_uri_t bridge_release_uri = { .uri = "/api/bridge/release", .method = HTTP_POST, .handler = api_bridge_release_post_handler };
+    httpd_register_uri_handler(server, &bridge_assign_uri);
+    httpd_register_uri_handler(server, &bridge_release_uri);
     static const httpd_uri_t cam_list_uri = { .uri = "/api/cam/list", .method = HTTP_GET, .handler = api_cam_list_get_handler };
     static const httpd_uri_t cam_photos_uri = { .uri = "/api/cam/photos", .method = HTTP_GET, .handler = api_cam_photos_get_handler };
     static const httpd_uri_t cam_photo_uri = { .uri = "/api/cam/photo", .method = HTTP_GET, .handler = api_cam_photo_get_handler };

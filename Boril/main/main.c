@@ -270,7 +270,10 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
     } else if (type == ESP_NOW_MSG_UNPAIR && s_paired) {
         esp_now_unpair_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_UNPAIR_ACK };
         esp_now_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
-        ESP_LOGI(TAG, "Unpaired by Cntl - advertising again (relay kept %s)", s_relay_on ? "ON" : "OFF");
+        /* 2026-11-18(사용자 결정) — 콘이 연결을 끊었으면(사용자가 해제) 릴레이를 끔. 콘이 끄라고 보내지 않고 보릴이 해제를 알아채 끔.
+         * 통신이 끊긴 경우(콘 응답 없음)는 예전대로 끊김 시간(failsafe) 뒤에 끔 */
+        set_relay(false, "unpaired by Cntl");
+        ESP_LOGI(TAG, "Unpaired by Cntl - relay OFF, advertising again");
         enter_advertising();
     }
 }

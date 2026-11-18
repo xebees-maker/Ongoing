@@ -155,8 +155,13 @@ static const char *alarm_name(const node_hub_node_t *n)
 {
     /* 2026-10-18(사용자 — 알림에 "B9D99FC"가 나오면 무슨 기기인지 모름) — 보릴은 원격릴레이 이름(별명이 있으면 그것) */
     if (n->kind == HUB_NODE_KIND_BORIL) {
-        const power_relay_config_t *rc = power_relay_get_config(POWER_RELAY_REMOTE_IDX);
-        return (rc && rc->alias[0]) ? rc->alias : "Remote relay";
+        /* 2026-11-18 — 원격 자리가 여럿: 그 기기 자리의 별명, 없으면 "Remote relay N"(자리 번호) */
+        static char s_rr_name[24];
+        int r = power_relay_remote_of(n->mac);
+        const power_relay_config_t *rc = r >= 0 ? power_relay_get_config(r) : NULL;
+        if (rc && rc->alias[0]) return rc->alias;
+        if (r >= 0) { snprintf(s_rr_name, sizeof(s_rr_name), "Remote relay %d", r - POWER_RELAY_REMOTE_FIRST + 1); return s_rr_name; }
+        return "Remote relay";
     }
     const char *alias = device_config_get_alias(n->mac);
     return alias[0] ? alias : n->name;
@@ -206,7 +211,7 @@ static void liveness_sweep_cb(void *arg)
 #define BORIL_NODE_TIMEOUT_MS 35000U
 /* 보릴 끊김 시간(분) — 통신이 끊기면 보릴이 릴레이를 그대로 두다가 이만큼 지나면 끔(사용자 결정: 기본 10, 선택 10/30/60).
  * 값은 원격릴레이 팝업에서 정하고 power_relay 설정 파일에 저장 */
-static uint16_t boril_failsafe_min(void) { return power_relay_get_remote_failsafe_min(); }   /* 6단계 — 전력 제어 설정(파일) */
+static uint16_t boril_failsafe_min(const uint8_t *mac) { return power_relay_remote_failsafe_for_mac(mac); }   /* 6단계 — 전력 제어 설정(파일). 11-18 — 자리마다 */
 
 static hub_node_kind_t classify_name(const char *name)
 {
@@ -415,6 +420,8 @@ static sreg_live_t live_locked(const node_hub_node_t *self)
 /* s_nodes_mutex를 쥔 상태. plan이 NULL이면 작업 칸에 */
 static node_slot_gate_t slot_gate_locked(const node_hub_node_t *n, sreg_plan_t *plan)
 {
+    /* 2026-11-18 — 원격 제어 기기(보릴): 원격 자리(power_relay)가 있어야 연결. 다 연결돼 있으면 막음 */
+    if (n->kind == HUB_NODE_KIND_BORIL) return power_relay_remote_can_take(n->mac) ? NODE_GATE_OK : NODE_GATE_BLOCKED;
     sreg_board_t b;
     if (!s_slot || !node_board_locked(n, &b)) return NODE_GATE_OK;
     if (!plan) plan = &s_slot->plan;
@@ -796,7 +803,9 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         bool auto_connect_wanted = !was_user_unpaired &&
             (device_config_get_auto_connect_new() ||
              (device_config_get_auto_connect_known() && device_config_is_known_device(mac_copy)));
-        bool pair_wanted = was_paired || (ever_paired && !was_user_unpaired) || user_pair_wanted || auto_connect_wanted;
+        /* 2026-11-18 — 원격 제어 기기는 사용자가 연결한 자리의 주인이면 늘 다시 붙음(콘 재부팅 뒤 보일러 제어가 끊기지 않게) */
+        bool remote_linked = !was_user_unpaired && power_relay_remote_linked(mac_copy);   /* 원격 자리에는 원격 기기 MAC만 있음 */
+        bool pair_wanted = was_paired || (ever_paired && !was_user_unpaired) || user_pair_wanted || auto_connect_wanted || remote_linked;
         if (pair_wanted && gate != NODE_GATE_OK) {
             /* 수동 연결은 팝업(UI 쪽 콜백), 자동 연결은 팝업 없이 Dev Log에만 기기마다 부팅 후 한 번(사용자 결정) */
             if (user_pair_wanted) {
@@ -847,12 +856,12 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         bn->boril_relay_on = st.relay_on != 0;
         bn->boril_failsafe_min = st.failsafe_min;
         bn->boril_uptime_s = st.uptime_s;
-        repair = bn->conn_state != NODE_CONN_PAIRED && !bn->user_unpaired;
+        repair = bn->conn_state != NODE_CONN_PAIRED && !bn->user_unpaired && power_relay_remote_linked(info->src_addr);   /* 11-18 — 사용자가 연결한 기기만 */
         snprintf(nm, sizeof(nm), "%s", alarm_name(bn));
         xSemaphoreGive(s_nodes_mutex);
 
         esp_now_boril_set_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_BORIL_STATUS_ACK,
-                                    .relay = BORIL_RELAY_KEEP, .failsafe_min = boril_failsafe_min() };
+                                    .relay = BORIL_RELAY_KEEP, .failsafe_min = boril_failsafe_min(info->src_addr) };
         can_bridge_relay_send(info->src_addr, (const uint8_t *)&ack, sizeof(ack));
         if (changed) ESP_LOGI(TAG, "%s turned %s", nm, st.relay_on ? "ON" : "OFF");
         if (rebooted) {
@@ -1022,6 +1031,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
                 ESP_LOGW(TAG, "Settings move not queued " MACSTR " -> " MACSTR, MAC2STR(replaced_mac), MAC2STR(info->src_addr));
             }
         }
+        if (became_paired && kind_copy == HUB_NODE_KIND_BORIL) power_relay_remote_link(info->src_addr);   /* 2026-11-18 — 원격 자리 */
         if (slot_assign && kind_copy == HUB_NODE_KIND_SENS) {
             /* 2026-10-23(센서 중심 구조) — 새 센서면 ID를 붙여 알려 줌(다음 체크인 때 신뢰 전송). asg는 이 태스크만 씀 */
             static const uint8_t s_sid_ack[] = { ESP_NOW_MSG_SENSOR_ID_ASSIGN_ACK };
@@ -1719,13 +1729,16 @@ void node_hub_unpair(const uint8_t *mac)
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     node_hub_node_t *n = find_node(mac);
     char name_copy[ESP_NOW_LINK_NAME_LEN] = { 0 };
+    bool boril = false;
     if (n) {
         strncpy(name_copy, n->name, sizeof(name_copy) - 1);
+        boril = n->kind == HUB_NODE_KIND_BORIL;
         n->conn_state = NODE_CONN_ORPHAN;
         n->user_unpaired = true;  /* CAM/SENS의 keepalive(PAIR_ACK 재전송)로 조용히 재연결되는 것 방지 */
     }
     xSemaphoreGive(s_nodes_mutex);
     if (!n) return;
+    if (boril) power_relay_remote_unlink(mac);   /* 2026-11-18 — 원격 자리 숨김(설정은 남음) */
     fire_connect_event();  /* 2026-09-04 — 끊기 절차의 로컬 완료 시점(사용자 설계: "끊기 절차가
                                완료되는 마지막 단계에서 발생") — CAM 응답은 안 기다림(기존 설계) */
 
@@ -1769,7 +1782,7 @@ bool node_hub_wait_paired(const uint8_t *mac, uint32_t timeout_ms)
 esp_err_t node_hub_boril_set(const uint8_t *mac, bool on)
 {
     esp_now_boril_set_t req = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_BORIL_SET,
-                                .relay = on ? BORIL_RELAY_ON : BORIL_RELAY_OFF, .failsafe_min = boril_failsafe_min() };
+                                .relay = on ? BORIL_RELAY_ON : BORIL_RELAY_OFF, .failsafe_min = boril_failsafe_min(mac) };
     static const uint8_t accept[] = { ESP_NOW_MSG_BORIL_SET_ACK };
     esp_now_boril_status_t reply;
     size_t reply_len = 0;
@@ -1794,14 +1807,14 @@ esp_err_t node_hub_boril_set(const uint8_t *mac, bool on)
     return (reply.relay_on != 0) == on ? ESP_OK : ESP_FAIL;
 }
 
-bool node_hub_get_boril(node_hub_node_t *out)
+bool node_hub_get_boril(const uint8_t *mac, node_hub_node_t *out)
 {
     bool found = false;
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     for (int i = 0; i < s_node_count; i++) {
         node_hub_node_t *n = &s_nodes[i];
-        if (n->kind != HUB_NODE_KIND_BORIL) continue;
+        if (n->kind != HUB_NODE_KIND_BORIL || memcmp(n->mac, mac, 6) != 0) continue;
         if (n->conn_state != NODE_CONN_PAIRED || elapsed_ms(now_ms, n->last_seen_ms) > node_hub_node_timeout_ms(n)) continue;
         *out = *n;
         found = true;

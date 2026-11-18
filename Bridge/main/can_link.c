@@ -7,6 +7,7 @@
 #include "esp_now_reliable.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -39,8 +40,17 @@ static const char *TAG = "CAN";
 
 #define CAN_LINK_TX_GPIO GPIO_NUM_15
 #define CAN_LINK_RX_GPIO GPIO_NUM_16
-/* 2026-10-18 — 브릿지 번호(Kconfig BRIDGE_INDEX, can_bridge_link.h ID 배정) */
-#define BR CONFIG_BRIDGE_INDEX
+/* 2026-10-18 — 브릿지 번호(can_bridge_link.h ID 배정).
+ * 2026-11-18(사용자 결정) — 빌드 변형(Kconfig BRIDGE_INDEX)을 없애고 콘이 정해 줌(can_bridge_link.h ROLE_CMD 주석). -1 = 아직 없음 */
+static volatile int s_br = -1;
+#define BR s_br
+static uint8_t s_mac[6];                       /* 자기 MAC(ESP-NOW = Wi-Fi STA) — HELLO·PONG에 실음 */
+static SemaphoreHandle_t s_assigned_sem;       /* 콘이 번호를 정해 주면 줌 */
+static volatile int s_assign_req = -1;         /* can_rx가 받은 번호 → hello 태스크가 반영 */
+static volatile int64_t s_identify_until_us;   /* 이 시각까지 초록 LED 빠르게(콘이 묻는 중) */
+
+int can_link_bridge_index(void) { return s_br; }
+bool can_link_identify_active(void) { return esp_timer_get_time() < s_identify_until_us; }
 
 #define CAN_LINK_BITRATE 1000000  /* 2026-09-26(사진 전송 CAN 개선 2단계) — 500k -> 1M, 콘과 반드시 같은 값 */
 
@@ -141,6 +151,28 @@ static void can_rx_task(void *arg)
         can_bridge_reassembly_t *reasm;
         can_bridge_queue_t *complete_q;
         uint32_t fc_id;
+        /* 2026-11-18 — 콘의 번호 명령(모든 브릿지가 받음, MAC이 자기인 것만) */
+        if (rf.id == CAN_BRIDGE_ID_ROLE_CMD) {
+            if (rf.len < 8 || memcmp(rf.data, s_mac, 6) != 0) continue;
+            uint8_t cmd = rf.data[6], arg = rf.data[7];
+            if (cmd == CAN_BRIDGE_ROLE_ASSIGN && arg < CAN_BRIDGE_MAX_BRIDGES) {
+                if (s_br < 0) {
+                    if (s_assign_req < 0) { s_assign_req = arg; xSemaphoreGive(s_assigned_sem); }
+                } else if (s_br != arg) {
+                    ESP_LOGW(TAG, "Cntl assigns Bridge %u (now %d) - restarting", (unsigned)arg + 1, s_br + 1);
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    esp_restart();
+                }
+            } else if (cmd == CAN_BRIDGE_ROLE_IDENTIFY) {
+                s_identify_until_us = arg ? esp_timer_get_time() + 5000000LL : 0;
+            } else if (cmd == CAN_BRIDGE_ROLE_RELEASE) {
+                ESP_LOGW(TAG, "Cntl released this bridge's number - restarting");
+                vTaskDelay(pdMS_TO_TICKS(100));
+                esp_restart();
+            }
+            continue;
+        }
+        if (s_br < 0) continue;   /* 번호 전 — 번호별 ID 없음 */
         if (rf.id == CAN_BRIDGE_ID_CNTL_TO_BRIDGE_CONTROL(BR)) {
             ctx = s_ctrl_ctx; reasm = &s_ctrl_reasm; complete_q = &s_ctrl_complete_q;
             fc_id = CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL(BR);
@@ -281,6 +313,7 @@ static void can_consume_task(void *arg)
                     /* 2026-09-26(설계 6단계) — 생존 확인 응답(부팅 ID 포함). 2026-10-18 — 지금 채널도 */
                     can_bridge_ctrl_pong_t pong = { .boot_id = s_boot_id, .channel = bridge_esp_now_channel(),
                                                     .channel_set = bridge_esp_now_channel_set_by_cntl() ? 1 : 0 };
+                    memcpy(pong.mac, s_mac, 6);
                     send_ctrl_to_cntl(CAN_CTRL_PONG, &pong, sizeof(pong));
                 } else if (hdr.msg_type == CAN_CTRL_SET_CHANNEL) {
                     /* 2026-10-18(설계_보브_보릴 §4.3) — 채널은 콘이 정함(AP 채널에서 계산) */
@@ -301,8 +334,8 @@ static void can_consume_task(void *arg)
 /* 콘으로 CTRL 메시지(본문 len바이트) — 이 파일의 CAN 태스크(코어 1)에서만 부름. 버스 오프 등으로 실패하면 잠깐씩 재시도 */
 static void send_ctrl_to_cntl(uint8_t type, const void *body, size_t len)
 {
-    uint8_t msg[CAN_BRIDGE_APP_HEADER_LEN + 8];
-    if (len > 8) return;
+    uint8_t msg[CAN_BRIDGE_APP_HEADER_LEN + 16];
+    if (len > 16) return;
     can_bridge_app_header_t hdr = { .msg_type = type, .flags = 0 };
     memset(hdr.mac, 0, sizeof(hdr.mac));
     memcpy(msg, &hdr, CAN_BRIDGE_APP_HEADER_LEN);
@@ -320,6 +353,7 @@ static void can_status_task(void *arg)
     (void)arg;
     /* 2026-09-26(설계 6단계) — 부팅 알림 1회(콘이 아직 안 떴으면 못 받지만, 다음 PONG에 같은 부팅 ID가 실림) */
     can_bridge_ctrl_pong_t boot = { .boot_id = s_boot_id, .channel = bridge_esp_now_channel(), .channel_set = 0 };
+    memcpy(boot.mac, s_mac, 6);
     send_ctrl_to_cntl(CAN_CTRL_BRIDGE_BOOT, &boot, sizeof(boot));
     for (;;) {
         twai_node_status_t status;
@@ -353,10 +387,33 @@ static void can_status_task(void *arg)
     }
 }
 
+/* 2026-11-18 — 번호가 정해질 때까지 HELLO(코어 1 — CAN 송신은 코어 1에서). 1초 + 0~0.5초 흔들기(두 대가 늘 같은 때 보내지 않게) */
+static void hello_task(void *arg)
+{
+    (void)arg;
+    uint8_t d[8];
+    memcpy(d, s_mac, 6);
+    d[6] = 0xFF;
+    d[7] = 0;
+    uint32_t id = can_bridge_hello_id(s_mac);
+    ESP_LOGI(TAG, "No bridge number yet - HELLO to Cntl (ID 0x%03x) until it assigns one", (unsigned)id);
+    while (s_assign_req < 0) {
+        can_bridge_tx_frame(s_node, id, d, 8, 100);
+        xSemaphoreTake(s_assigned_sem, pdMS_TO_TICKS(1000 + (esp_random() % 500)));
+    }
+    /* ctx를 먼저 만들고 번호를 씀 — can_rx는 번호를 본 뒤 ctx를 씀 */
+    s_data_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA(s_assign_req));
+    s_ctrl_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL(s_assign_req));
+    s_br = s_assign_req;
+    xSemaphoreGive(s_assigned_sem);   /* can_link_init이 기다림 */
+    vTaskDelete(NULL);
+}
 
 void can_link_init(void)
 {
     s_boot_id = esp_random() | 1u;  /* 0은 "아직 모름"으로 쓰므로 피함 */
+    esp_read_mac(s_mac, ESP_MAC_WIFI_STA);
+    s_assigned_sem = xSemaphoreCreateBinary();
     {
         static StaticQueue_t s_raw_frame_q_struct;
         /* 2026-09-26 — 16칸은 두 경로가 동시에 흐를 때 모자라서 대량으로 버려짐(실기: 콘 2901개/90초 → CF 순번
@@ -408,8 +465,6 @@ void can_link_init(void)
         return;
     }
 
-    s_data_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_DATA(BR));
-    s_ctrl_ctx = can_bridge_ctx_create(s_node, CAN_BRIDGE_ID_BRIDGE_TO_CNTL_CONTROL(BR));
 
     static StaticTask_t s_can_rx_tcb, s_can_consume_tcb, s_ctrl_consume_tcb, s_can_status_tcb;
     StackType_t *can_rx_stack = (StackType_t *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
@@ -426,6 +481,13 @@ void can_link_init(void)
     TaskHandle_t consume_task = xTaskCreateStaticPinnedToCore(can_consume_task, "data_consume", 4096 / sizeof(StackType_t), &s_data_complete_q, 15, can_consume_stack, &s_can_consume_tcb, 1);
     can_bridge_queue_set_notify_task(&s_data_complete_q, consume_task);
     xTaskCreateStaticPinnedToCore(can_rx_task, "can_rx", 4096 / sizeof(StackType_t), NULL, 17, can_rx_stack, &s_can_rx_tcb, 1);
+
+    /* 2026-11-18 — 콘이 번호를 정해 줄 때까지 여기서 기다림(그 뒤에 ESP-NOW를 켬 — main.c 순서). 콘이 없으면 계속 기다림 */
+    xTaskCreatePinnedToCore(hello_task, "hello", 3072, NULL, 5, NULL, 1);
+    while (s_br < 0) xSemaphoreTake(s_assigned_sem, portMAX_DELAY);
+    ESP_LOGI(TAG, "Cntl assigned Bridge %d (MAC %02X%02X%02X%02X%02X%02X)", s_br + 1,
+             s_mac[0], s_mac[1], s_mac[2], s_mac[3], s_mac[4], s_mac[5]);
+
     s_status_task = xTaskCreateStaticPinnedToCore(can_status_task, "can_status", 3072 / sizeof(StackType_t), NULL, 5, can_status_stack, &s_can_status_tcb, 1);
 
     ESP_LOGI(TAG, "Bridge %d CAN link started (TX=%d RX=%d %dbps, CONTROL+DATA, IDs 0x%03x/0x%03x/0x%03x/0x%03x)", BR + 1,

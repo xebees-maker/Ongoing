@@ -47,6 +47,14 @@ typedef enum {
     CAN_BRIDGE_ST_ABSENT,      /* 콘이 켜진 뒤 한 번도 응답 안 함(브릿지 2만 — 1은 처음부터 감시해서 NORESP) */
 } can_bridge_state_t;
 can_bridge_state_t can_bridge_bridge_state(uint8_t bridge, uint8_t *channel_out);   /* channel_out: 0 = 모름 */
+/* 2026-11-18(사용자 결정) — 브릿지 번호(0 재브 = 실내 안테나, 1 보브 = 실외 안테나)는 콘이 브릿지 MAC별로 저장해 알려 줌(can_bridge.c 주석).
+ * ask: 사용자에게 물을 브릿지가 있으면 true(그 브릿지는 초록 LED가 빠르게 깜빡임), suggest = 제안 번호.
+ * assign: 그 번호로 저장(주인이 있으면 바꿈). release: 그 번호를 비우고 브릿지를 다시 시작시킴(다시 물음). 어느 태스크에서나 */
+bool can_bridge_role_ask(uint8_t mac_out[6], uint8_t *suggest_out);
+void can_bridge_role_assign(const uint8_t *mac, uint8_t idx);
+void can_bridge_role_release(uint8_t idx);
+bool can_bridge_role_mac(uint8_t idx, uint8_t mac_out[6]);
+
 /* CAN 버스 문제(버스 오프 또는 송신에 ACK 없음) 중이면 true — 브릿지별이 아니라 버스 전체 */
 bool can_bridge_bus_error(void);
 
