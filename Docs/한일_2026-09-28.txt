@@ -3,7 +3,7 @@
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
 - 2026-11-18 밤: 이 PC에서 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
-  메모리 변경 없음(zip 갱신 안 함). sdkconfig 변경 없음(브리지는 새 빌드 폴더 C:\Projectsuild_bridgeridge — defaults에서 만듦).
+  메모리 변경 없음(zip 갱신 안 함). sdkconfig 변경 없음(브리지는 새 빌드 폴더 C:\Projects\build_bridge\bridge — defaults에서 만듦).
   git 밖: 새 콘(COM10, 192.168.0.17) LittleFS app.html.gz·bridges.bin·power_remote.bin·Wi-Fi 설정. 새 브리지 2대·보릴 펌웨어. 옛 장비는 꺼 둠.
 - 2026-11-15 오전: 이 PC에서 마무리(그래프 탭 수정 추가, 콘 10:41 플래시·웹 올림). 앞서 새벽에도 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리 변경 없음(같은 PC라 zip 갱신 안 함). sdkconfig 변경 없음(defaults 안 바꿈).
