@@ -1316,7 +1316,9 @@ static esp_err_t api_settings_get_handler(httpd_req_t *req)
     jb_str(&b, ns->topic);
     jb_printf(&b, ",\"click\":");
     jb_str(&b, ns->click);
-    jb_printf(&b, ",\"types\":%lu,\"count\":%d}}", (unsigned long)ns->types, NOTIFY_TYPE_COUNT);
+    /* 2026-11-22 — "pw": 웹 비밀번호가 정해져 있는지(없으면 웹앱이 "지금 비밀번호" 칸을 숨기고 새 비밀번호만 보냄) */
+    jb_printf(&b, ",\"types\":%lu,\"count\":%d},\"pw\":%s}", (unsigned long)ns->types, NOTIFY_TYPE_COUNT,
+              web_auth_enabled() ? "true" : "false");
     heap_caps_free(ns);
     esp_err_t ret = send_jbuf(req, &b);
     heap_caps_free(b.p);

@@ -8,6 +8,8 @@
 #include "device_config.h"
 #include "stats_store.h"
 #include "sd_storage.h"
+#include "sd_guard.h"
+#include "web_auth.h"
 #include "photo_storage.h"
 #include "storage_mgr.h"
 #include "sens_kind_store.h"
@@ -354,6 +356,10 @@ static lv_obj_t *s_adaptive_response_label = NULL;
 static lv_obj_t *s_adaptive_help_label     = NULL;
 
 static lv_obj_t *s_restart_label     = NULL;
+static lv_obj_t *s_webpw_label       = NULL;   /* 2026-11-22 — 설정 CNTL 그룹 웹 비밀번호 행(정의부는 cb_webpw_btn 근처) */
+static lv_obj_t *s_webpw_state       = NULL;
+static lv_obj_t *s_webpw_btn_lbl     = NULL;
+static void webpw_refresh_state(void);
 static lv_obj_t *s_restart_btn_lbl   = NULL;
 
 /* 수동 시각설정 행(2026-08-09, RTC 부팅 시딩 버그 수정에 이어지는 작업) — [라벨][현재
@@ -1354,6 +1360,9 @@ static void refresh_lang_texts(void)
         lv_label_set_text(s_screen_off_label, ui_str(STR_LABEL_SCREEN_OFF));
         lv_label_set_text(s_restart_label, ui_str(STR_LABEL_RESTART_DEVICE));
         lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
+        lv_label_set_text(s_webpw_label, ui_str(STR_LABEL_WEB_PASSWORD));
+        lv_label_set_text(s_webpw_btn_lbl, ui_str(STR_BTN_SET_TIME));
+        webpw_refresh_state();
         lv_label_set_text(s_time_label, ui_str(STR_LABEL_TIME));
         lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
         lv_label_set_text(s_network_label, ui_str(STR_LABEL_NETWORK));
@@ -1970,6 +1979,18 @@ static void clear_sd_io_fail(void)
     sync_error_warn_active_from_history();
 }
 
+/* 2026-11-22(사용자 승인) — 포맷이 A·B를 새로 만들므로, 포맷·검증 성공 뒤 듀얼로 인식되고 두 볼륨을 다 쓰면 SD 볼륨
+ * 경고 6004(한 벌)·6005(메꿈)·6006(한 쪽 못 씀)도 더 이상 사실이 아님 — 예전엔 5008/5009만 지워서 듀얼이 된 뒤에도
+ * 6004가 남았음(새 콘 첫 포맷 때 발견) */
+static void clear_sd_vol_warns_if_dual(void)
+{
+    if (!sd_guard_vol_usable(0) || !sd_guard_vol_usable(1)) return;
+    ui_log_clear_one_warn(UI_WARN_SD_NOT_DUAL);
+    ui_log_clear_one_warn(UI_WARN_SD_VOL_REPAIRED);
+    ui_log_clear_one_warn(UI_WARN_SD_VOL_FAILED);
+    sync_error_warn_active_from_history();
+}
+
 /* 2026-09-11(사용자 지시 — "SD: 뒤에 붙는 정상일 때 문구/에러일 때 써지는 문구들이 다
  * 하나의 함수에서 파라메터에 의해 검정/빨강으로 표시되게 만들어야 잘하는 거야") — 이전엔
  * 이 "SD: <내용>" 조합을 여러 곳에 따로 하드코딩해서 제목도 "Storage"/"SD:"로 갈렸었음.
@@ -2203,6 +2224,7 @@ static void cb_sd_format_confirmed(void *ctx)
     sd_resolve_set_busy(resolve_overlay, false);
     if (err == ESP_OK && sd_verify_healthy()) {
         clear_sd_io_fail();
+        clear_sd_vol_warns_if_dual();
         if (resolve_overlay) {
             lv_obj_delete(resolve_overlay);
             resume_bg_timers();
@@ -11675,6 +11697,9 @@ static void teardown_option_tab(void)
     s_screen_off_label = NULL;
     s_screen_off_dd = NULL;
     s_restart_label = NULL;
+    s_webpw_label = NULL;
+    s_webpw_state = NULL;
+    s_webpw_btn_lbl = NULL;
     s_restart_btn_lbl = NULL;
     s_time_label = NULL;
     s_time_value_label = NULL;
@@ -11689,6 +11714,118 @@ static void teardown_option_tab(void)
     s_auto_connect_new_switch = NULL;
     s_auto_connect_new_label = NULL;
     s_slots_label = NULL;
+}
+
+/* ════════════════════════════════════════════════════════════
+ * 2026-11-22(사용자 지시 — "웹 비번을 콘에서 직접 변경하거나, 지금 웹앱에서 할 수 있어야지") — 설정 CNTL 그룹의 웹 비밀번호 행.
+ * 콘 앞에 있는 사람 = 주인이라 지금 비밀번호를 묻지 않음(잊었을 때 되살리는 길). 텍스트 입력이라 적용 버튼(전체화면 팝업 규칙).
+ * 키보드·입력창 구조는 Wi-Fi 비밀번호 팝업과 같음(눈 단추는 입력창의 형제 — 그 팝업 주석 참고)
+ * ════════════════════════════════════════════════════════════ */
+static lv_obj_t *s_webpw_box      = NULL;
+static lv_obj_t *s_webpw_ta       = NULL;
+static lv_obj_t *s_webpw_keyboard = NULL;
+
+static void webpw_refresh_state(void)
+{
+    if (s_webpw_state) lv_label_set_text(s_webpw_state, ui_str(web_auth_enabled() ? STR_WEB_PW_SET : STR_WEB_PW_NONE));
+}
+
+static void webpw_close(void)
+{
+    if (s_webpw_keyboard) { lv_obj_delete(s_webpw_keyboard); s_webpw_keyboard = NULL; }
+    s_webpw_ta = NULL;
+    if (s_webpw_box) { lv_obj_delete(lv_obj_get_parent(s_webpw_box)); s_webpw_box = NULL; }   /* box -> overlay */
+    resume_bg_timers();
+}
+
+static void cb_webpw_cancel(lv_event_t *e) { (void)e; webpw_close(); }
+
+static void cb_webpw_apply(lv_event_t *e)
+{
+    (void)e;
+    if (!s_webpw_ta) return;
+    const char *pw = lv_textarea_get_text(s_webpw_ta);
+    size_t n = strlen(pw);
+    if (n < 4 || n > 32) { show_alert_popup(ui_str(STR_MSG_WEB_PW_BAD_LEN), MODAL_KIND_WARNING); return; }
+    bool ok = web_auth_set_password_local(pw);
+    lv_textarea_set_text(s_webpw_ta, "");
+    webpw_close();
+    webpw_refresh_state();
+    show_alert_popup(ui_str(ok ? STR_MSG_WEB_PW_CHANGED : STR_MSG_WEB_PW_BAD_LEN), ok ? MODAL_KIND_NORMAL : MODAL_KIND_WARNING);
+}
+
+static void webpw_remove_confirmed(void *ctx)
+{
+    (void)ctx;
+    bool ok = web_auth_clear_password_local();
+    webpw_refresh_state();
+    if (ok) show_alert_popup(ui_str(STR_MSG_WEB_PW_REMOVED), MODAL_KIND_NORMAL);
+}
+
+static void cb_webpw_remove(lv_event_t *e)
+{
+    (void)e;
+    webpw_close();
+    show_confirm_popup(ui_str(STR_MSG_WEB_PW_REMOVE_CONFIRM), MODAL_KIND_WARNING, webpw_remove_confirmed, NULL);
+}
+
+static void cb_webpw_toggle_visibility(lv_event_t *e)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    bool was_masked = lv_textarea_get_password_mode(s_webpw_ta);
+    lv_textarea_set_password_mode(s_webpw_ta, !was_masked);
+    lv_label_set_text(lv_obj_get_child(btn, 0), was_masked ? LV_SYMBOL_EYE_OPEN : LV_SYMBOL_EYE_CLOSE);
+}
+
+static void cb_webpw_keyboard_hide(lv_event_t *e)
+{
+    (void)e;
+    if (s_webpw_keyboard) lv_obj_add_flag(s_webpw_keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void cb_webpw_btn(lv_event_t *e)
+{
+    (void)e;
+    if (s_webpw_box) return;
+    lv_obj_t *box = create_modal();
+    s_webpw_box = box;
+    lv_obj_set_width(box, LV_PCT(66));
+    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 20);   /* 아래쪽 키보드와 안 겹치게(Wi-Fi 비밀번호 팝업과 같음) */
+    create_modal_title(box, STR_LABEL_WEB_PASSWORD, MODAL_KIND_NORMAL);
+
+    lv_obj_t *wrap = lv_obj_create(box);
+    lv_obj_remove_style_all(wrap);
+    lv_obj_set_width(wrap, LV_PCT(100));
+    lv_obj_set_height(wrap, LV_SIZE_CONTENT);
+
+    s_webpw_ta = lv_textarea_create(wrap);
+    lv_textarea_set_one_line(s_webpw_ta, true);
+    lv_textarea_set_password_mode(s_webpw_ta, true);
+    lv_textarea_set_max_length(s_webpw_ta, 32);
+    lv_textarea_set_placeholder_text(s_webpw_ta, ui_str(STR_WEB_PW_PLACEHOLDER));
+    lv_obj_set_width(s_webpw_ta, LV_PCT(100));
+    lv_obj_set_style_text_font(s_webpw_ta, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_pad_right(s_webpw_ta, 36, 0);
+
+    lv_obj_t *eye = lv_button_create(wrap);
+    lv_obj_remove_style_all(eye);
+    lv_obj_set_size(eye, 28, 28);
+    lv_obj_align(eye, LV_ALIGN_RIGHT_MID, -4, 0);
+    lv_obj_add_flag(eye, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(eye, cb_webpw_toggle_visibility, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *eye_lbl = lv_label_create(eye);
+    lv_label_set_text(eye_lbl, LV_SYMBOL_EYE_CLOSE);
+    lv_obj_center(eye_lbl);
+
+    lv_obj_t *btn_row = create_modal_btn_row(box);
+    if (web_auth_enabled()) add_modal_button(btn_row, STR_BTN_WEB_PW_REMOVE, cb_webpw_remove, NULL);
+    add_modal_button(btn_row, STR_BTN_CANCEL, cb_webpw_cancel, NULL);
+    add_modal_button(btn_row, STR_BTN_APPLY, cb_webpw_apply, NULL);
+
+    s_webpw_keyboard = lv_keyboard_create(lv_screen_active());
+    lv_obj_add_event_cb(s_webpw_keyboard, cb_webpw_keyboard_hide, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(s_webpw_keyboard, cb_webpw_keyboard_hide, LV_EVENT_CANCEL, NULL);
+    lv_keyboard_set_textarea(s_webpw_keyboard, s_webpw_ta);
 }
 
 /* 2026-09-08(재설계) — s_option_content(설정 팝업의 헤더 아래 콘텐츠 영역) 안에 설정
@@ -11831,6 +11968,28 @@ static void build_option_tab(void)
     s_restart_btn_lbl = lv_label_create(restart_btn);
     lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
     lv_obj_set_style_text_font(s_restart_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 2026-11-22(사용자 지시) — 웹 비밀번호 행: [라벨][상태(설정됨/없음)][설정] */
+    lv_obj_t *webpw_row = lv_obj_create(cntl_box);
+    lv_obj_set_size(webpw_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(webpw_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(webpw_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(webpw_row, 0, 0);
+    lv_obj_set_style_pad_hor(webpw_row, 12, 0);
+    lv_obj_set_style_pad_ver(webpw_row, 0, 0);
+    s_webpw_label = lv_label_create(webpw_row);
+    lv_label_set_text(s_webpw_label, ui_str(STR_LABEL_WEB_PASSWORD));
+    lv_obj_set_style_text_font(s_webpw_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_t *webpw_right = create_row_right_cluster(webpw_row);
+    s_webpw_state = lv_label_create(webpw_right);
+    lv_obj_add_style(s_webpw_state, &style_text_muted, 0);
+    lv_obj_set_style_text_font(s_webpw_state, ui_font_get(UI_FONT_SIZE_18), 0);
+    webpw_refresh_state();
+    lv_obj_t *webpw_btn = lv_button_create(webpw_right);
+    lv_obj_add_event_cb(webpw_btn, cb_webpw_btn, LV_EVENT_CLICKED, NULL);
+    s_webpw_btn_lbl = lv_label_create(webpw_btn);
+    lv_label_set_text(s_webpw_btn_lbl, ui_str(STR_BTN_SET_TIME));
+    lv_obj_set_style_text_font(s_webpw_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 네트워크 행(2026-08-29 설계, 2026-09-07 재정렬 — 사용자 지시: "레이블-공백-우정렬
      * 값/드랍다운 버튼 형식으로 통일") — [라벨:좌][공백][독립/종속 드롭다운 + IP/SSID/찾기
@@ -12074,7 +12233,7 @@ static void build_option_tab(void)
      * 버튼도 같은 이유로 개별설정 팝업(카메라)으로 옮겨가면서 여기선 항상 NULL이 됨. 위와
      * 동일하게 배열에서 제거 — 두 버튼도 이제 개별설정 팝업 안에서 자연폭으로 그려짐 */
     lv_obj_t *option_action_buttons[] = {
-        restart_btn, time_set_btn, log_view_btn,
+        restart_btn, time_set_btn, log_view_btn, webpw_btn,
     };
     lv_obj_update_layout(lv_screen_active());
     for (size_t i = 0; i < sizeof(option_action_buttons) / sizeof(option_action_buttons[0]); i++) {
@@ -12635,7 +12794,7 @@ static bool web_op_execute(const ui_web_op_t *op)
         }
         case UI_WEB_OP_SD_FORMAT: {       /* cb_sd_format_confirmed(확인은 웹에서) */
             bool ok = (sd_storage_format() == ESP_OK) && sd_verify_healthy();
-            if (ok) clear_sd_io_fail();
+            if (ok) { clear_sd_io_fail(); clear_sd_vol_warns_if_dual(); }
             refresh_storage_status_label();
             return ok;
         }

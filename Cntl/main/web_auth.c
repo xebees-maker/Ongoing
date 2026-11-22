@@ -256,6 +256,47 @@ static esp_err_t api_login_post_handler(httpd_req_t *req)
 
 /* POST /api/password — 처음(비밀번호 없음): 본문 = 새 비밀번호, 바로 로그인 토큰도 줌.
  * 이미 있으면: 인증 필요 + 본문 = "기존\n새것" */
+bool web_auth_set_password_local(const char *pw)
+{
+    if (!s_auth || !pw) return false;
+    size_t len = strlen(pw);
+    if (len < WEB_AUTH_PW_MIN || len > WEB_AUTH_PW_MAX) return false;
+    lock();
+    uint8_t *salt = s_work->salt;
+    esp_fill_random(salt, 16);
+    bool ok = hash_password_locked(salt, pw, len);
+    if (ok) {
+        s_auth->magic = WEB_AUTH_MAGIC;
+        s_auth->version = WEB_AUTH_VERSION;
+        memcpy(s_auth->salt, salt, 16);
+        memcpy(s_auth->hash, s_work->digest, 32);
+        memset(s_auth->tokens, 0, sizeof(s_auth->tokens));
+        s_auth->next_slot = 0;
+        s_auth->has_password = 1;
+        ok = save_locked();
+    }
+    unlock();
+    if (ok) ESP_LOGI(TAG, "Web password set (CNTL screen)");
+    return ok;
+}
+
+bool web_auth_clear_password_local(void)
+{
+    if (!s_auth) return false;
+    lock();
+    s_auth->magic = WEB_AUTH_MAGIC;
+    s_auth->version = WEB_AUTH_VERSION;
+    memset(s_auth->salt, 0, sizeof(s_auth->salt));
+    memset(s_auth->hash, 0, sizeof(s_auth->hash));
+    memset(s_auth->tokens, 0, sizeof(s_auth->tokens));
+    s_auth->next_slot = 0;
+    s_auth->has_password = 0;
+    bool ok = save_locked();
+    unlock();
+    if (ok) ESP_LOGI(TAG, "Web password removed (CNTL screen)");
+    return ok;
+}
+
 static esp_err_t api_password_post_handler(httpd_req_t *req)
 {
     if (!s_auth) return send_json(req, "500 Internal Server Error", "{\"ok\":false}");
@@ -263,6 +304,12 @@ static esp_err_t api_password_post_handler(httpd_req_t *req)
     lock();
     bool ok = read_body_locked(req);
     const char *new_pw = s_work->body;
+    /* 2026-11-22 버그수정 — 비밀번호가 없을 때 웹앱이 "지금 비밀번호(빈 칸) + 줄바꿈 + 새 비밀번호"로 보내면 줄바꿈까지
+     * 비밀번호로 저장돼 로그인이 안 됐음(웹앱은 아예 빈 "지금" 칸이면 보내지도 않았음). 없을 때는 줄바꿈 뒤만 새 비밀번호로 봄 */
+    if (ok && !s_auth->has_password) {
+        char *nl = strchr(s_work->body, '\n');
+        if (nl) new_pw = nl + 1;
+    }
     if (ok && s_auth->has_password) {
         char *nl = strchr(s_work->body, '\n');
         ok = nl != NULL;

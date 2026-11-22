@@ -37,5 +37,11 @@ bool web_restore_gate(httpd_req_t *req);
         if (!web_restore_gate(req)) return ESP_OK; \
     } while (0)
 
+/* 2026-11-22(사용자 지시 — 웹 비밀번호를 콘에서 직접) — 콘 화면(LVGL 태스크)에서. 콘 앞에 있는 사람 = 주인이라 지금
+ * 비밀번호를 묻지 않음(잊었을 때 되살리는 길). 바꾸거나 없애면 로그인 토큰을 모두 지움(모든 기기 다시 로그인).
+ * set: 길이(4-32자)가 맞지 않거나 저장 실패면 false */
+bool web_auth_set_password_local(const char *pw);
+bool web_auth_clear_password_local(void);
+
 /* 핸들러 등록 — POST /api/login, POST /api/password, POST /api/logout_all, GET /api/restore_state(2026-10-22) */
 void web_auth_register_handlers(httpd_handle_t server);

@@ -129,8 +129,8 @@ void        device_config_forget_device(const uint8_t *mac);
 
 /* 자동연결(2026-09-08, 사용자 설계) — 대기중 장치를 수동 확인 없이 즉시 페어링.
  * auto_connect_new가 켜지면 처음 보는 장치까지 포함하므로 auto_connect_known을 사실상
- * 포함하는 관계 — UI에서 이 종속관계를 표현할 것. 둘 다 기본값 false(기존 수동 확인 동작과
- * 동일하게 유지) */
+ * 포함하는 관계 — UI에서 이 종속관계를 표현할 것. 기본값 auto_new=false(수동 확인),
+ * auto_known=true(2026-11-22 사용자 지시) */
 bool device_config_get_auto_connect_known(void);
 void device_config_set_auto_connect_known(bool enable);
 bool device_config_get_auto_connect_new(void);

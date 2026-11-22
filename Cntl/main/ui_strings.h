@@ -518,6 +518,16 @@ typedef enum {
     STR_RELAY_REMOTE_NAME_FMT,   /* 원격 자리 기본 이름, %d = 자리 번호 */
     STR_POWER_LOCAL,
     STR_POWER_REMOTE,
+    /* 2026-11-22(사용자 지시 — 웹 비밀번호를 콘에서 직접) */
+    STR_LABEL_WEB_PASSWORD,
+    STR_WEB_PW_SET,              /* 행 오른쪽 상태 — 정해짐 */
+    STR_WEB_PW_NONE,             /* 행 오른쪽 상태 — 없음 */
+    STR_WEB_PW_PLACEHOLDER,
+    STR_BTN_WEB_PW_REMOVE,
+    STR_MSG_WEB_PW_CHANGED,
+    STR_MSG_WEB_PW_REMOVED,
+    STR_MSG_WEB_PW_BAD_LEN,
+    STR_MSG_WEB_PW_REMOVE_CONFIRM,
 
     STR_COUNT,
 } ui_str_id_t;

@@ -30,6 +30,7 @@
 #include "power_relay.h"
 #include "sens_kind_store.h"
 #include "notify.h"
+#include "cloud_link.h"
 #include "alarm.h"
 #include "sd_health.h"
 #include "sd_guard.h"
@@ -265,6 +266,24 @@ static esp_err_t api_connect_sensor_get_handler(httpd_req_t *req)
  * 기다리지 않고 "합성 자체가 성공했는지"만 반환 — 야간 자동 테스트 스크립트가 그 다음
  * 단계(재연결 등) 전에 device_config 값이 실제로 바뀌었는지는 별도로 확인하면 됨 */
 /* 2026-09-27(3002 조사 — 사용자 지시) — 수동 촬영 합성. 결과는 합성 성공 여부만(촬영/수신 결과는 로그로 봄) */
+/* 2026-11-22(시험 API — 최악 상황 메모리 시험, 출시 전에 지움) — ?reset=1: 지금부터 내부 RAM 최저치 감시 시작.
+ * 그냥 부르면 감시 시작 뒤(없으면 부팅 뒤) 최저치와 지금 값 */
+static esp_err_t api_memmin_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE(req);
+    char q[16] = "", v[4] = "";
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK && httpd_query_key_value(q, "reset", v, sizeof(v)) == ESP_OK &&
+        v[0] == '1') {
+        heap_caps_monitor_local_minimum_free_size_stop();
+        heap_caps_monitor_local_minimum_free_size_start();
+    }
+    char out[80];
+    snprintf(out, sizeof(out), "{\"min\":%u,\"now\":%u}", (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, out);
+}
+
 static esp_err_t api_capture_now_get_handler(httpd_req_t *req)
 {
     WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
@@ -1080,6 +1099,8 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_capture_now_uri = { .uri = "/api/capture_now", .method = HTTP_GET,
                                                      .handler = api_capture_now_get_handler };
     httpd_register_uri_handler(server, &api_capture_now_uri);
+    static const httpd_uri_t api_memmin_uri = { .uri = "/api/memmin", .method = HTTP_GET, .handler = api_memmin_get_handler };   /* 11-22 시험 API */
+    httpd_register_uri_handler(server, &api_memmin_uri);
     static const httpd_uri_t api_devlog_uri = { .uri = "/api/devlog", .method = HTTP_GET,
                                                 .handler = api_devlog_get_handler };
     httpd_register_uri_handler(server, &api_devlog_uri);
@@ -1173,6 +1194,7 @@ void app_main(void)
      * (/assets/settings.bin)과 RTC 시드값(/assets/time_sync.txt) 둘 다 이 안에 있음 */
     ESP_ERROR_CHECK(fs_init());
     notify_init();  /* 2026-10-03(할 일 AD) — 휴대폰 알림 보내기 태스크(설정 notify.cfg는 LittleFS) */
+    cloud_link_init();   /* 2026-11-22(사용자 결정) — 셀룰러 원격 접속용 MQTT 연결 태스크(설정 cloud.cfg는 LittleFS) */
     alarm_init();   /* 2026-10-05(할 일 AD 5단계) — 알림 기록 큐(사건은 여기서부터 쌓이고 처리는 alarm_start 뒤) */
     sd_health_init();   /* 2026-10-14(SD 개선 1단계) — LittleFS 뒤, SD 마운트 전(마운트 때 카드 CID를 받음) */
     sd_guard_init();    /* 2026-10-22 — SD 쓰기 보호 집계(마운트 때 붙음) */
@@ -1340,6 +1362,7 @@ void app_main(void)
     wifi_sta_init();  /* 내부에서 esp_netif_init()+esp_event_loop_create_default() 호출 —
                              아래 이벤트 등록은 반드시 그 다음이어야 함 */
     notify_network_ready();   /* 2026-10-14 — 이제부터 푸시 알림 전송 가능(그 전 알림은 큐에서 대기) */
+    cloud_link_network_ready();   /* 2026-11-22 — 바깥 MQTT 브로커 연결(cloud.cfg에 uri가 있을 때만) */
 
     /* SR(Power Control) 판정 루프 시작(2026-09-16) — GPIO 초기화 + 15초 주기 태스크.
      * ui_main_query_power_source_value()가 node_hub 노드 테이블/SD 집계를 읽으므로 그

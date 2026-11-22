@@ -518,6 +518,18 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_POWER_REMOTE]            = { "원격",          "Remote" },
     [STR_MSG_BRIDGE_REASSIGN_CONFIRM] = { "이 브릿지의 번호를 비우고 다시 시작시킵니다. 다시 붙으면 어느 브릿지인지 묻습니다.",
                                       "Clear this bridge's number and restart it? When it comes back you will be asked which bridge it is." },
+    [STR_LABEL_WEB_PASSWORD]      = { "웹 비밀번호",   "Web password" },
+    [STR_WEB_PW_SET]              = { "설정됨",        "Set" },
+    [STR_WEB_PW_NONE]             = { "없음",          "None" },
+    [STR_WEB_PW_PLACEHOLDER]      = { "새 비밀번호(4-32자)", "New password (4-32 chars)" },
+    [STR_BTN_WEB_PW_REMOVE]       = { "없애기",        "Remove" },
+    [STR_MSG_WEB_PW_CHANGED]      = { "웹 비밀번호를 바꿨습니다. 모든 기기가 다시 로그인해야 합니다.",
+                                      "Web password changed. All devices must log in again." },
+    [STR_MSG_WEB_PW_REMOVED]      = { "웹 비밀번호를 없앴습니다. 원격 접속은 볼 수만 있습니다.",
+                                      "Web password removed. Remote access is view-only." },
+    [STR_MSG_WEB_PW_BAD_LEN]      = { "비밀번호는 4-32자여야 합니다.", "The password must be 4-32 characters." },
+    [STR_MSG_WEB_PW_REMOVE_CONFIRM] = { "웹 비밀번호를 없애면 같은 네트워크의 누구나 웹으로 콘을 조작할 수 있습니다. 없앨까요?",
+                                      "Without a web password anyone on the same network can control the CNTL from the web. Remove it?" },
 };
 
 void ui_lang_load(void)

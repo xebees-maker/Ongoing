@@ -160,9 +160,10 @@ static uint32_t s_adaptive_response_sec    = ADAPTIVE_RESPONSE_SEC_DEFAULT;
  * interval_sec()가 반환하는 값. #define을 여기서 딱 한 번만 참조(2026-09-18) */
 static uint32_t s_sens_sample_interval_default_sec = SENS_SAMPLE_INTERVAL_SEC_DEFAULT;
 static bool     s_wifi_ap_mode             = false;
-/* 2026-09-08(사용자 설계) — 기본값 false: 기존처럼 대기중 장치는 수동 확인이 필요한 채로
- * 시작(자동연결은 사용자가 설정탭에서 켜야 함) */
-static bool     s_auto_connect_known       = false;
+/* 2026-09-08(사용자 설계) — auto_new 기본값 false: 처음 보는 장치는 수동 확인 필요.
+ * 2026-11-22(사용자 지시) — auto_known 기본값 true: 새 콘에서 꺼진 채라 재부팅 뒤 연결했던
+ * 센스·캠이 모두 대기로 돌아감. 설정 파일이 없을 때만 쓰이는 값(있으면 저장값) */
+static bool     s_auto_connect_known       = true;
 static bool     s_auto_connect_new         = false;
 
 /* 2026-08-29(사용자 지시: "PSRAM도 133KB밖에 안남았지만, 최대한 몰아 넣어") — 내부 RAM이

@@ -21,3 +21,7 @@ dependencies:
 
   waveshare/pcf85063a:
     version: "^2.0.0"
+
+  # 2026-11-22(사용자 결정 — 셀룰러 원격 접속은 관리형 MQTT 브로커 + 정적 웹). IDF 6에서 mqtt가 본체에서 빠져 레지스트리로 옮겨짐
+  espressif/mqtt:
+    version: "^1"

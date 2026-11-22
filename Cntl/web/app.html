@@ -251,6 +251,25 @@
   <div id="loginMsg" class="msg"></div>
 </form>
 
+<!-- 2026-11-22(3단계 읽기 터널) — 밖(정적 호스팅)에서 연 웹앱만: 브로커 접속 정보. 브라우저(localStorage)에 저장 -->
+<form id="remoteView" class="center hidden" autocomplete="on">
+  <div data-w="RM_SETUP"></div>
+  <input id="rmUrl" type="text" data-w-ph="RM_BROKER" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <input id="rmSite" type="text" data-w-ph="RM_SITE" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <input id="rmUser" type="text" name="username" autocomplete="username" data-w-ph="RM_USER" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <div class="pwwrap">
+    <input id="rmPw" type="password" name="password" autocomplete="current-password" data-w-ph="PASSWORD">
+    <button id="rmPwEye" type="button" class="eye" aria-label="show password">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>
+        <line id="rmPwEyeSlash" x1="3" y1="21" x2="21" y2="3"/>
+      </svg>
+    </button>
+  </div>
+  <button type="submit" class="primary" data-w="RM_CONNECT"></button>
+  <div id="rmMsg" class="msg"></div>
+</form>
+
 <!-- 콘에서 넘겨받음 -->
 <div id="localView" class="center hidden">
   <div data-w="LOCAL_IN_USE"></div>
@@ -323,7 +342,13 @@
     PW_FAIL: ['비밀번호를 바꾸지 못했습니다', 'Password not changed'], LOGOUT_ALL: ['모든 기기 로그아웃', 'Log out all devices'],
     LOGOUT_ALL_CONFIRM: ['모든 기기에서 로그아웃합니다. 이 기기도 다시 로그인해야 합니다.', 'All devices will be logged out, including this one.'],
     RESTARTING: ['재시작합니다', 'Restarting'], PHOTO_ARRIVED: ['새 사진이 도착했습니다', 'New photo arrived'],
-    NOT_PUSHED: ['보내지 않음(꺼진 종류)', 'Not sent (type off)'], NO_ALARMS: ['알림이 없습니다', 'No notifications']
+    NOT_PUSHED: ['보내지 않음(꺼진 종류)', 'Not sent (type off)'], NO_ALARMS: ['알림이 없습니다', 'No notifications'],
+    RM_SETUP: ['원격 접속', 'Remote access'], RM_BROKER: ['브로커 주소(wss://...)', 'Broker URL (wss://...)'], RM_SITE: ['현장 이름', 'Site name'],
+    RM_USER: ['사용자', 'User'], RM_CONNECT: ['연결', 'Connect'], RM_FAILED: ['브로커에 연결하지 못했습니다', 'Could not connect to the broker'],
+    RM_READONLY: ['원격 접속에서는 볼 수만 있습니다', 'Remote access is view-only'],
+    RM_NO_BROKER: ['브로커에 연결되지 않음', 'Broker not reachable'], RM_NO_SITE: ['이 현장 이름의 제어기가 없음', 'No CNTL with this site name'],
+    RM_CNTL_OFF: ['제어기가 브로커에 연결되어 있지 않음', 'CNTL is not connected to the broker'], RM_NO_REPLY: ['제어기 응답 없음', 'No reply from CNTL'],
+    RM_CONNECTING: ['브로커에 연결 중', 'Connecting to broker'], RM_CHECKING: ['제어기 확인 중', 'Checking CNTL'], RM_WAITING: ['제어기 응답 기다리는 중', 'Waiting for CNTL']
   };
   /* 센서 채널 종류(esp_now_link.h SENSOR_CHAN_*) → 콘 주화면과 같은 글자·단위 */
   var CHAN = { 1: ['T', 'STR_CHAN_UNIT_TEMP_C'], 2: ['H', 'STR_CHAN_UNIT_HUMI_PCT'], 3: ['C', 'STR_CHAN_UNIT_CO2_PPM'], 4: ['A', 'STR_CHAN_UNIT_NH3_PPM'] };
@@ -369,6 +394,7 @@
   function show(v) {
     view = v;
     $('loginView').classList.toggle('hidden', v !== 'login');
+    $('remoteView').classList.toggle('hidden', v !== 'remote');
     $('localView').classList.toggle('hidden', v !== 'local');
     $('restoreView').classList.toggle('hidden', v !== 'restore');
     $('mainView').classList.toggle('hidden', v !== 'main');
@@ -392,13 +418,171 @@
     }).catch(function (e) { if (!(e && e.handled) && view === 'restore') restoreTimer = setTimeout(restoreCheck, 5000); });
   }
 
+  /* ── 2026-11-22(사용자 결정 — 3단계 읽기 터널) — 정적 호스팅(GitHub Pages)에서 연 웹앱은 현장 콘에 직접 갈 수 없어서(셀룰러
+   *    CGNAT) 같은 요청을 MQTT(브로커 WebSocket)로 보냄. 콘은 받은 요청을 자기 웹 서버에 그대로 넘기고 응답을 돌려줌(콘 cloud_link.c).
+   *    REMOTE는 build_web.py가 GitHub Pages용 파일에서만 true로 바꿈 — 콘이 내보내는 웹앱은 예전처럼 fetch.
+   *    요청 = "<id>\n<METHOD> /<경로>\n<Cookie>\n<Content-Type>\n<본문>", 응답 = 조각마다 JSON 머리 한 줄 + "\n" + 본문 조각.
+   *    로그인 쿠키는 브라우저 쿠키 대신 localStorage에 두고 요청마다 보냄. 3단계는 읽기만(콘이 쓰기 요청에 403) ── */
+  var REMOTE = /*@REMOTE@*/false;
+  var RM_KEY = 'ffRemote', CK_KEY = 'ffCookie';
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function rmCfg() { try { return JSON.parse(lsGet(RM_KEY) || 'null'); } catch (e) { return null; } }
+  var tun = null;
+  function tunClose() {
+    if (!tun) return;
+    var t = tun;
+    tun = null;
+    Object.keys(t.pend).forEach(function (id) { clearTimeout(t.pend[id].tm); t.pend[id].rej(new Error('closed')); });
+    t.waiters.forEach(function (w) { clearTimeout(w.tm); w.rej(new Error('closed')); });
+    try { t.cli.end(true); } catch (e) {}
+  }
+  function tunOpen(c) {
+    var cid = ('0000000' + Math.floor(Math.random() * 0xffffffff).toString(16)).slice(-8);
+    var t = { pend: {}, seq: 0, ok: false, waiters: [], reqT: 'ff/' + c.site + '/req/' + cid, resT: 'ff/' + c.site + '/res/' + cid,
+             stT: 'ff/' + c.site + '/status', status: '', stKnown: false };
+    t.cli = mqtt.connect(c.url, { username: c.user, password: c.pass, clientId: 'ffw-' + cid, clean: true, protocolVersion: 4,
+                                  reconnectPeriod: 3000, connectTimeout: 10000 });
+    t.cli.on('connect', function () {
+      if (!t.stKnown) rmStage('RM_CHECKING');
+      t.cli.subscribe([t.resT, t.stT], { qos: 1 }, function (err) {
+        if (err) return;
+        /* 11-22 — 콘 상태(retained)는 구독 직후 바로 옴. 3초 안에 안 오면 그 현장 이름의 콘이 없는 것 — 응답을 30초 기다리지 않고 바로 알림 */
+        var go = function () {
+          t.stKnown = true;
+          if (t.ok) return;
+          t.ok = true;
+          var ws = t.waiters; t.waiters = [];
+          ws.forEach(function (w) { clearTimeout(w.tm); w.res(); });
+        };
+        if (t.status) go(); else { t.stGo = go; setTimeout(go, 3000); }
+      });
+    });
+    t.cli.on('close', function () { t.ok = false; });
+    t.cli.on('error', function (e) {   /* 계정이 틀리면(접속 거부) 다시 시도하지 않고 설정 화면으로 */
+      if (e && (e.code === 4 || e.code === 5 || e.code === 134 || e.code === 135)) {
+        tunClose();
+        show('remote');
+        $('rmMsg').textContent = Wt('RM_FAILED');
+      }
+    });
+    /* 콘 상태(콘이 남긴 retained "online", 끊기면 브로커가 "offline") — 응답이 없을 때 이유를 보여 주려고. 없으면 그 현장 이름의 콘이 없음 */
+    t.cli.on('message', function (topic, m) {
+      if (topic === t.stT) { t.status = new TextDecoder().decode(m); if (t.stGo) { var g = t.stGo; t.stGo = null; g(); } return; }
+      tunMsg(t, m);
+    });
+    return t;
+  }
+  function tunReady(t, ms) {
+    if (t.ok) return Promise.resolve();
+    return new Promise(function (res, rej) {
+      var w = { res: res, rej: rej };
+      w.tm = setTimeout(function () { t.waiters = t.waiters.filter(function (x) { return x !== w; }); rej(new Error('broker')); }, ms);
+      t.waiters.push(w);
+    });
+  }
+  function tunMsg(t, m) {
+    var nl = m.indexOf(10);
+    if (nl < 0) return;
+    var h;
+    try { h = JSON.parse(new TextDecoder().decode(m.subarray(0, nl))); } catch (e) { return; }
+    var p = t.pend[h.id];
+    if (!p) return;
+    if (h.i === 0) p.h = h;
+    if (!p.parts[h.i]) { p.parts[h.i] = m.slice(nl + 1); p.got++; }
+    if (p.h && p.got === h.n) { clearTimeout(p.tm); delete t.pend[h.id]; p.res(tunResp(p.h, p.parts, h.n)); }
+  }
+  function tunResp(h, parts, n) {
+    var len = 0, i, o = 0;
+    for (i = 0; i < n; i++) len += parts[i].length;
+    var u = new Uint8Array(len);
+    for (i = 0; i < n; i++) { u.set(parts[i], o); o += parts[i].length; }
+    if (h.sc) lsSet(CK_KEY, h.sc.split(';')[0]);   /* 로그인 토큰(이름=값) */
+    var hd = { 'content-type': h.ct || '', 'content-length': String(len), 'x-cntl-restoring': h.rs ? '1' : null };
+    function txt() { return new TextDecoder().decode(u); }
+    return { status: h.s, ok: h.s >= 200 && h.s < 300, body: null,
+             headers: { get: function (k) { var v = hd[String(k).toLowerCase()]; return v === undefined ? null : v; } },
+             text: function () { return Promise.resolve(txt()); },
+             json: function () { return Promise.resolve(JSON.parse(txt())); },
+             arrayBuffer: function () { return Promise.resolve(u.buffer); },
+             blob: function () { return Promise.resolve(new Blob([u], { type: h.ct || '' })); } };
+  }
+  /* fetch 대신 — 콘에서 열었으면 fetch 그대로, 밖에서 열었으면 터널. 돌려주는 것은 fetch 응답과 같은 모양(쓰는 부분만) */
+  function xfetch(path, opts) {
+    if (!REMOTE) return fetch(path, opts);
+    opts = opts || {};
+    if (!tun) {
+      var c = rmCfg();
+      if (!c || !c.url || !c.site) { show('remote'); return Promise.reject({ handled: true }); }
+      tun = tunOpen(c);
+    }
+    var t = tun;
+    return tunReady(t, 15000).then(function () {
+      if (!t.status) throw new Error('nosite');
+      if (t.status === 'offline') throw new Error('cntloff');
+      if (view !== 'main' || $('conn').textContent) rmStage('RM_WAITING');
+      return new Promise(function (res, rej) {
+        var id = ++t.seq, ct = (opts.headers && opts.headers['Content-Type']) || '', b = opts.body;
+        var head = id + '\n' + (opts.method || 'GET') + ' /' + String(path).replace(/^\//, '') + '\n' + (lsGet(CK_KEY) || '') + '\n' + ct + '\n';
+        var msg;
+        if (b == null || typeof b === 'string') msg = head + (b || '');
+        else {
+          var hb = new TextEncoder().encode(head), bb = new Uint8Array(b);
+          msg = new Uint8Array(hb.length + bb.length); msg.set(hb); msg.set(bb, hb.length);
+        }
+        var ms = /^api\/sd\//.test(path) ? 130000 : /^api\/cam\/photo\?/.test(path) ? 90000 : 30000;
+        t.pend[id] = { res: res, rej: rej, parts: {}, got: 0, h: null,
+                       tm: setTimeout(function () { delete t.pend[id]; rej(new Error('timeout')); }, ms) };
+        t.cli.publish(t.reqT, msg, { qos: 1 });
+      });
+    });
+  }
+  /* 원격에서 요청이 실패한 이유(연결 표시 글자) — 브로커 / 현장 이름 / 콘 꺼짐 / 콘 응답 없음 */
+  function rmWhy(e) {
+    var k = { broker: 'RM_NO_BROKER', nosite: 'RM_NO_SITE', cntloff: 'RM_CNTL_OFF', timeout: 'RM_NO_REPLY' }[REMOTE && e && e.message];
+    return Wt(k || 'OFFLINE');
+  }
+  /* 원격 — 첫 응답 전까지 어느 단계인지(회색 글자). 처음 열면 상단바만 남고 최대 45초 아무 표시가 없었음(11-22 아이폰) */
+  function rmStage(k) {
+    if (!REMOTE || (last && $('conn').textContent === '' && view === 'main')) return;   /* 이미 받는 중이면 그대로 */
+    $('conn').textContent = Wt(k);
+    $('conn').className = '';
+  }
+  if (REMOTE) {
+    $('rmPwEye').addEventListener('click', function () {
+      var shown = $('rmPw').type === 'password';
+      $('rmPw').type = shown ? 'text' : 'password';
+      $('rmPwEyeSlash').style.display = shown ? 'none' : '';
+    });
+    $('remoteView').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      $('rmMsg').textContent = '';
+      lsSet(RM_KEY, JSON.stringify({ url: $('rmUrl').value.trim(), site: $('rmSite').value.trim(), user: $('rmUser').value.trim(), pass: $('rmPw').value }));
+      tunClose();
+      show('main');
+      poll();
+    });
+    (function () {   /* 처음 한 번 — 주소 뒤 #b=..&s=..&u=..&p=..로 받은 값을 칸에 채우고 주소에서는 지움 */
+      var c = rmCfg() || {}, q = {};
+      location.hash.replace(/^#/, '').split('&').forEach(function (kv) { var i = kv.indexOf('='); if (i > 0) q[kv.slice(0, i)] = decodeURIComponent(kv.slice(i + 1)); });
+      if (q.b || q.s || q.u || q.p) {
+        c = { url: q.b || c.url || '', site: q.s || c.site || '', user: q.u || c.user || '', pass: q.p || c.pass || '' };
+        lsSet(RM_KEY, JSON.stringify(c));
+        try { history.replaceState(null, '', location.pathname); } catch (e) {}
+      }
+      $('rmUrl').value = c.url || ''; $('rmSite').value = c.site || ''; $('rmUser').value = c.user || ''; $('rmPw').value = c.pass || '';
+    })();
+    $('conn').addEventListener('click', function () { if ($('conn').className === 'bad') show('remote'); });   /* 끊겼으면 눌러서 설정 */
+  }
+
   /* 공통 요청 — 401이면 로그인, 409(local)면 넘겨받음 화면, 503(restoring)이면 복원 중 화면 */
   function api(path, opts) {
     opts = opts || {};
     opts.cache = 'no-store';
     opts.credentials = 'same-origin';
-    return fetch(path, opts).then(function (r) {
+    return xfetch(path, opts).then(function (r) {
       if (r.status === 401) { show('login'); throw { handled: true }; }
+      if (r.status === 403 && REMOTE) { toast(Wt('RM_READONLY')); throw { handled: true }; }
       if (r.status === 409) { show('local'); throw { handled: true }; }
       if (r.status === 503 && r.headers.get('X-Cntl-Restoring')) { show('restore'); throw { handled: true }; }
       if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -675,7 +859,7 @@
   }
   function backupNow() {
     busyStart('LOADING');
-    return fetch('api/stats/backup', { credentials: 'same-origin', cache: 'no-store' }).then(function (r) {
+    return xfetch('api/stats/backup', { credentials: 'same-origin', cache: 'no-store' }).then(function (r) {
       if (r.status === 401) { show('login'); throw { handled: true }; }
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.arrayBuffer();
@@ -698,7 +882,7 @@
     return bkGet(id).then(function (b) {
       if (!b || !bkCheck(b.data)) { alert(S('STR_MSG_BACKUP_BAD_FILE')); return; }
       busyStart('LOADING');
-      return fetch('api/stats/restore', { method: 'POST', body: b.data, credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream' } })
+      return xfetch('api/stats/restore', { method: 'POST', body: b.data, credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream' } })
         .then(function (r) { return r.json(); })
         .then(restorePoll)
         .catch(function () { busyEnd(); alert(S('STR_MSG_RESTORE_FAIL').replace('%s', 'upload')); });
@@ -825,8 +1009,9 @@
       })
       .catch(function (e) {
         if (e && e.handled) return;
-        $('conn').textContent = Wt('OFFLINE');
+        $('conn').textContent = rmWhy(e);
         $('conn').className = 'bad';
+        if (REMOTE && view !== 'main') show('main');   /* 원격 — 틀만 있는 빈 화면 대신 주화면과 이유를 보여 줌 */
         schedule();
       });
   }
@@ -843,7 +1028,7 @@
     return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + location.pathname.replace(/[^\/]*$/, '') + 'ws';
   }
   function wsStart() {
-    if (ws || document.hidden || view !== 'main' || Date.now() < wsNextTry || !window.WebSocket) return;
+    if (REMOTE || ws || document.hidden || view !== 'main' || Date.now() < wsNextTry || !window.WebSocket) return;   /* 원격은 5초 조회 */
     wsNextTry = Date.now() + 10000;
     try { ws = new WebSocket(wsUrl()); } catch (e) { ws = null; return; }
     ws.onopen = function () {
@@ -880,7 +1065,7 @@
   $('loginView').addEventListener('submit', function (ev) {
     ev.preventDefault();
     $('loginMsg').textContent = '';
-    fetch('api/login', { method: 'POST', body: $('pw').value, credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'text/plain' } })
+    xfetch('api/login', { method: 'POST', body: $('pw').value, credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'text/plain' } })
       .then(function (r) {
         if (r.status === 429) throw new Error('locked');
         if (!r.ok) throw new Error('login');
@@ -1437,7 +1622,7 @@
   function loadPhoto(url) {
     if (photoBlobs[url]) return Promise.resolve(photoBlobs[url]);
     busyStart('LOADING');
-    return fetch(url, { credentials: 'same-origin' }).then(function (r) {
+    return xfetch(url, { credentials: 'same-origin' }).then(function (r) {
       if (r.status === 401) { show('login'); throw { handled: true }; }
       if (r.status === 409) { show('local'); throw { handled: true }; }
       if (r.status === 503 && r.headers.get('X-Cntl-Restoring')) { show('restore'); throw { handled: true }; }
@@ -1761,7 +1946,7 @@
     return '<label class="tg"><input type="checkbox" id="' + id + '"' + (on ? ' checked' : '') + (dis ? ' disabled' : '') + (attr || '') + '><span></span></label>';
   }
   function apiText(path) {
-    return fetch(path, { cache: 'no-store', credentials: 'same-origin' }).then(function (r) {
+    return xfetch(path, { cache: 'no-store', credentials: 'same-origin' }).then(function (r) {
       if (r.status === 401) { show('login'); throw { handled: true }; }
       if (r.status === 409) { show('local'); throw { handled: true }; }
       if (r.status === 503 && r.headers.get('X-Cntl-Restoring')) { show('restore'); throw { handled: true }; }
@@ -1806,7 +1991,8 @@
     h += '<div class="field"><label>' + esc(Wt('CLICK')) + '</label><input type="text" id="stClick" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="159" value="' + esc(n.click) + '"></div>';
     h += '<div class="sfoot"><button id="stNtTest">' + esc(Wt('TEST_SEND')) + '</button><button id="stNtApply" class="primary">' + esc(S('STR_BTN_APPLY')) + '</button></div>';
     h += gsub(Wt('SECURITY'));
-    h += '<div class="field"><label>' + esc(Wt('PW_OLD')) + '</label><input type="password" id="stPwOld" autocomplete="current-password"></div>';
+    /* 11-22 — 비밀번호가 아직 없으면(cfg.pw false) "지금 비밀번호" 칸 없이 새 비밀번호만 — 예전엔 빈 칸이면 버튼이 아무 일도 안 했음 */
+    if (cfg.pw) h += '<div class="field"><label>' + esc(Wt('PW_OLD')) + '</label><input type="password" id="stPwOld" autocomplete="current-password"></div>';
     h += '<div class="field"><label>' + esc(Wt('PW_NEW')) + '</label><input type="password" id="stPwNew" autocomplete="new-password"></div>';
     h += '<div class="sfoot"><button id="stPwBtn" class="primary">' + esc(Wt('PW_CHANGE')) + '</button></div>';
     h += '<div class="sfoot" style="border-top:1px solid var(--line)"><button id="stLogoutAll" class="danger">' + esc(Wt('LOGOUT_ALL')) + '</button></div>';
@@ -1870,9 +2056,12 @@
       post('api/notify/test').then(function () { toast(Wt('SENT')); }).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
     });
     on('stPwBtn', 'click', function () {
-      var o = $('stPwOld').value, nw = $('stPwNew').value;
-      if (!o || !nw) return;
-      post('api/password', o + '\n' + nw).then(function () { $('stPwOld').value = ''; $('stPwNew').value = ''; toast(Wt('PW_CHANGED')); })
+      var o = cfg.pw ? $('stPwOld').value : '', nw = $('stPwNew').value;
+      if ((cfg.pw && !o) || !nw) return;
+      post('api/password', cfg.pw ? o + '\n' + nw : nw).then(function () {
+        toast(Wt('PW_CHANGED'));
+        if (!cfg.pw) { cfg.pw = true; renderSettings(); } else { $('stPwOld').value = ''; $('stPwNew').value = ''; }
+      })
         .catch(function (e) { if (!(e && e.handled)) toast(Wt('PW_FAIL')); });
     });
     on('stLogoutAll', 'click', function () {
@@ -2393,6 +2582,7 @@
   window.addEventListener('pageshow', function () { setTimeout(fixZoom, 300); });
 
   applyTexts();
+  if (REMOTE) { show('main'); rmStage('RM_CONNECTING'); }   /* 원격 — 열자마자 판넬 틀과 연결 단계 */
   poll();
   setTimeout(fixZoom, 500);
 })();

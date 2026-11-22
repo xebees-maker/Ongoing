@@ -28,6 +28,7 @@ idf_component_register(
         "sens_kind_store.c"
         "can_bridge.c"
         "notify.c"
+        "cloud_link.c"
         "alarm.c"
         "romanize.c"
         "web_auth.c"

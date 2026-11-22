@@ -95,3 +95,15 @@ CONFIG_FATFS_TIMEOUT_MS=60000
 # 2026-10-26 — LVGL 9.6으로 올리며 기본값이 꺼짐으로 바뀜. 9.5 때 동작(NULL·할당 실패 시 멈춤) 유지
 CONFIG_LV_USE_ASSERT_NULL=y
 CONFIG_LV_USE_ASSERT_MALLOC=y
+
+# 2026-11-22(사용자 결정 — 셀룰러 원격 접속: 콘이 관리형 MQTT 브로커로 TLS 연결) — MQTT 버퍼·송신 대기함·태스크 스택은 PSRAM
+# (feedback_prefer_psram_for_buffers). 스택이 PSRAM이라 MQTT 이벤트 처리기에서 플래시 쓰기 금지 — 처리기는 큐에 넣기만 함(cloud_link.c).
+# 기기 쪽은 TLS만 씀(WebSocket 전송은 브라우저 쪽에서만)
+CONFIG_MQTT_USE_CUSTOM_CONFIG=y
+CONFIG_MQTT_OUTBOX_DATA_ON_EXTERNAL_MEMORY=y
+CONFIG_MQTT_BUFFERS_ON_EXTERNAL_MEMORY=y
+CONFIG_MQTT_TASK_STACK_ON_EXTERNAL_MEMORY=y
+# CONFIG_MQTT_TRANSPORT_WEBSOCKET is not set
+# 2026-11-22(사용자 지시 2.a — 측정: 내부 RAM 할당이면 연결 뒤 평상시 139K → 114K, 핸드셰이크 최저 98K) — mbedTLS 할당을 PSRAM으로.
+# mbedTLS 전체에 적용됨(Wi-Fi 접속 과정의 mbedTLS 할당 포함 — 결과가 나쁘면 2.c: 큰 할당만 PSRAM으로 보내는 CUSTOM_MEM_ALLOC)
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y

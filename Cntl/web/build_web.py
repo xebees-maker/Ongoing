@@ -4,7 +4,7 @@
 app.html의 /*@STRINGS@*/ 자리에 콘 ui_strings.c의 한/영 문구 표 전체를 넣고 gzip해서 out/app.html.gz를 만듦.
 문구를 손으로 옮기지 않으므로 콘 문구가 바뀌어도 웹이 그대로 따라감(설계: 문구 키 = 콘 STR_ 이름).
 
-사용: python build_web.py            → out/app.html, out/app.html.gz
+사용: python build_web.py            → out/app.html, out/app.html.gz, out/pages/(GitHub Pages용 — 11-22)
 배포: curl -b <쿠키> -X POST --data-binary @out/app.html.gz "http://<콘>/admin/upload?file=app.html.gz"
 """
 import gzip
@@ -139,6 +139,33 @@ def main():
         f.write(gz)
     print('strings=%d html=%dB gz=%dB' % (len(table), len(html.encode('utf-8')), len(gz)))
     build_login(table)
+    build_pages(html)
+
+
+# 2026-11-22(사용자 결정 — 3단계 읽기 터널, 정적 호스팅은 GitHub Pages) — 밖에서 여는 웹앱. 콘 웹앱과 같은 파일에서 REMOTE만 true,
+# mqtt.js(CDN, 버전 고정)를 붙임. out/pages/를 GitHub Pages 저장소에 그대로 올림(index.html·manifest·아이콘)
+REMOTE_MARKER = '/*@REMOTE@*/false'
+MQTTJS = '<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>' + '\n'
+
+
+def build_pages(html):
+    if html.count(REMOTE_MARKER) != 1:
+        sys.exit('marker %s not found once in app.html' % REMOTE_MARKER)
+    page = html.replace(REMOTE_MARKER, 'true')
+    i = page.index('<script>')
+    page = page[:i] + MQTTJS + page[i:]
+    out = os.path.join(OUT_DIR, 'pages')
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, 'index.html'), 'w', encoding='utf-8') as f:
+        f.write(page)
+    man = json.load(open(os.path.join(HERE, 'app.webmanifest'), encoding='utf-8'))
+    man['start_url'] = './'
+    with open(os.path.join(out, 'app.webmanifest'), 'w', encoding='utf-8') as f:
+        json.dump(man, f, ensure_ascii=False, indent=2)
+    import shutil
+    shutil.copyfile(os.path.join(HERE, 'app_icon.png'), os.path.join(out, 'app_icon.png'))
+    open(os.path.join(out, '.nojekyll'), 'w').close()
+    print('pages index.html=%dB -> %s' % (len(page.encode('utf-8')), out))
 
 
 def build_login(table):
