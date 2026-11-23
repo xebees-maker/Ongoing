@@ -606,6 +606,24 @@ static esp_err_t api_hittest_get_handler(httpd_req_t *req)
         httpd_resp_set_type(req, "text/plain");
         return httpd_resp_sendstr(req, ui_main_debug_pin_seq(seq));
     }
+    /* 11-23 — ?cam=1 카메라 팝업 열기, ?cam=0 닫기, ?mem=1 — 응답 앞에 내부 RAM 여유·가장 큰 덩어리·부팅 뒤 최저(메모리 A/B) */
+    if (q[0] && httpd_query_key_value(q, "cam", v, sizeof(v)) == ESP_OK) {
+        static char out[160];
+        const char *r = ui_main_debug_cam_popup(v[0] == '1');
+        snprintf(out, sizeof(out), "i=%u lb=%u min=%u %s", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL), r);
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, out);
+    }
+    if (q[0] && httpd_query_key_value(q, "mem", v, sizeof(v)) == ESP_OK) {
+        static char out[96];
+        snprintf(out, sizeof(out), "i=%u lb=%u min=%u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, out);
+    }
     if (q[0]) {
         if (httpd_query_key_value(q, "click", v, sizeof(v)) == ESP_OK) mode = 1;
         else if (httpd_query_key_value(q, "close", v, sizeof(v)) == ESP_OK) mode = 2;

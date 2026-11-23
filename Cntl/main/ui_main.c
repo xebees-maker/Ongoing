@@ -7023,7 +7023,11 @@ static void refresh_dashboard(lv_timer_t *t)
      * 안 건드림(5초 캐싱도 여전히 폴링이라 부적절 — 팝업 닫혀있는 동안은 호출 자체가 0) */
     uint8_t known_cam_macs[NODE_HUB_MAX_NODES][6];
     int known_cam_count_raw = 0;
-    if (s_camera_popup) {
+    /* 2026-11-23 임시(카메라 팝업 메모리 A/B — 사용자 09-22 방법) — 1이면 SD 기록 캠 검색만 끔(한 가지 변수). 시험 뒤 지움 */
+#ifndef DBG_NO_KNOWN_CAM_SCAN
+#define DBG_NO_KNOWN_CAM_SCAN 0
+#endif
+    if (s_camera_popup && !DBG_NO_KNOWN_CAM_SCAN) {
         /* 2026-09-22(사용자 지시 — "팝업 열 때마다 말하지 않아도 측정해야되") — 팝업이
          * 열려있는 동안 이 블록은 계속 매 틱 실행됨(폴링 자체를 없앤 게 아니라 "언제"만
          * 옮긴 것 — 사용자 지적). 열려있는 매 틱마다 실제로 메모리가 또 줄어드는지 직접
@@ -8664,6 +8668,22 @@ const char *ui_main_debug_pin_seq(const char *seq)
 {
     s_pin_seq = seq;
     if (!run_on_lvgl_task(inject_fn_pin_seq, NULL, 2000)) return "timeout\n";
+    return s_hittest_buf;
+}
+
+/* 2026-11-23 임시 — 카메라 팝업 열기(1)·닫기(0) 합성(메모리 A/B 시험). 출시 전 지움 */
+static bool inject_fn_cam_popup(void *arg)
+{
+    int open = *(int *)arg;
+    if (open) build_camera_tab(); else if (s_camera_popup) teardown_camera_tab();
+    snprintf(s_hittest_buf, sizeof(s_hittest_buf), "cam popup %s\n", s_camera_popup ? "open" : "closed");
+    return true;
+}
+const char *ui_main_debug_cam_popup(int open)
+{
+    static int s_open;
+    s_open = open;
+    if (!run_on_lvgl_task(inject_fn_cam_popup, &s_open, 2000)) return "timeout\n";
     return s_hittest_buf;
 }
 

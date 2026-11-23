@@ -182,7 +182,8 @@ bool ui_main_inject_connect(const uint8_t *mac);
 /* 2026-09-27(3002 조사) — 카메라 선택 + "지금 촬영" 탭 합성 */
 bool ui_main_inject_capture_now(const uint8_t *mac);
 const char *ui_main_debug_hittest(int mode);
-const char *ui_main_debug_pin_seq(const char *seq);   /* 2026-11-23 임시 — /api/hittest?pin=. 출시 전 지움 */   /* 2026-11-23 임시 — /api/hittest. 출시 전 지움 */
+const char *ui_main_debug_pin_seq(const char *seq);
+const char *ui_main_debug_cam_popup(int open);   /* 2026-11-23 임시 — /api/hittest?cam=. 출시 전 지움 */   /* 2026-11-23 임시 — /api/hittest?pin=. 출시 전 지움 */   /* 2026-11-23 임시 — /api/hittest. 출시 전 지움 */
 bool ui_main_inject_disconnect(const uint8_t *mac);
 /* 2026-09-06(야간 자동 테스트용) — 센스 행은 카메라 행과 별도 리스트라 연결 합성도 별도 */
 bool ui_main_inject_connect_sensor(const uint8_t *mac);
