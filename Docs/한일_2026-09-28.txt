@@ -2,6 +2,10 @@
    + W6002 원인 확인 + 4시간 무인 로그 (원래 PC, 사용자 부재 중 진행) ==
 
 [ PC 이동 기록 ] (가장 최근이 위 — 세션 시작 때 Claude가 확인, CLAUDE.md 참고)
+- 2026-11-23 밤: 이 PC에서 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
+  메모리: project_release_reminder_site_accounts 새로 만듦, project_cntl_test_apis_remove_later에 11-23 임시 API 추가(zip 갱신 안 함 — PC 옮길 때 묶을 것).
+  sdkconfig 변경 없음. git 밖: Cntl/main/dev_key.h + C:\Projects\serial_logs\cntl_devkey.txt(개발용 키 — 둘 다 옮길 것), cntl_pin.txt,
+  콘(COM10) app.html.gz(11-23 밤, QR판), 콘 시험 복구 키 12345678. Pages는 6b1afbc(QR판 아직 안 올림 — 입력 칸 있는 판).
 - 2026-11-23 저녁: 이 PC에서 마무리(PC 이동 아님). 브랜치 cntl-can-bridge, 마지막 커밋 = 이 문서 커밋. 푸시함.
   메모리: project_cam_manual_exposure_tests_2026_10_21.md에 "왜 XCLK 20" 추가(zip 갱신 안 함 — PC 옮길 때 묶을 것). sdkconfig 변경 없음.
   git 밖: 콘(COM10) app.html.gz·login.html.gz(11-23 밤 빌드), 콘 PIN(0874, 시험용), 콘 시험 복구 키(12345678). flexfarm-web(GitHub Pages) 6b1afbc.
@@ -1819,6 +1823,7 @@ C14. 39af070 Wi-Fi 결함 수정 2개 동작 확인 — ① 연결 요청 거절
       이 Wi-Fi를 벗어나면 웹에 접속할 수 없습니다." / AP: "인터넷 없이 콘의 Wi-Fi로 연결됩니다. 콘 근처에서만 접속할 수 있습니다."
       로컬일 때만 주소 글자도 보임. 웹(로컬 주소로 열림) 위쪽 안내 "현장 접속 중입니다. 콘이 서버에 연결되지 않아 이 Wi-Fi 안에서만…",
       콘이 나중에 서버에 붙으면 "콘이 서버에 연결됐습니다. 밖에서도 쓰려면 콘 화면의 QR을 다시 찍으세요."
+  - 사용자(11-23 밤): UI는 전반적으로 손볼 예정(브리지 UI 포함). 원격 웹앱 QR판 Pages 올리기는 사용자 지시 때.
   - [할 일 — 사용자 11-23, 기록만] 사용자가 원격 접속을 끄고 켜는 설정(밖에서 쓸 일 없는 사용자용): 끄면 콘이 EMQX 접속을 끊음 →
     무료 한도(접속 분) 안 씀, QR은 저절로 현장 주소(+ "이 Wi-Fi를 벗어나면…"), 원격 웹앱엔 "콘 꺼짐"과 구별해 "원격 접속이 꺼져 있습니다"
     (끊기 전 상태 값 하나 남김). 꺼 둔 채 밖에 나가면 밖에선 못 켬 → 끌 때 확인 문구. 정할 것: 콘 화면만/집 Wi-Fi 웹에도, 기본값(켬/끔).
