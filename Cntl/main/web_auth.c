@@ -45,6 +45,9 @@ typedef struct {
 } web_auth_file_t;
 
 static web_auth_file_t *s_auth = NULL;    /* 모델(PSRAM) — s_mutex로 보호 */
+/* 2026-11-23(사용자 결정 — 웹 로그인 세션은 하나만) — 토큰을 새로 낼 때(로그인·PIN 변경)와 콘에서 PIN을 정할 때 올림.
+ * 웹 ws는 연결 맺을 때의 값과 다르면 닫음(web_api.c) — 쿠키를 못 보는 ws도 밀려난 세션이면 끊기게 */
+static volatile uint32_t s_login_gen = 0;
 static SemaphoreHandle_t s_mutex = NULL;
 /* 요청 처리용 작업 버퍼(PSRAM) — httpd는 태스크 하나라 요청이 겹치지 않지만, 모델과 같이 s_mutex 안에서만 씀 */
 typedef struct {
@@ -186,12 +189,16 @@ static esp_err_t send_json(httpd_req_t *req, const char *status, const char *jso
     return httpd_resp_sendstr(req, json);
 }
 
-/* 새 토큰을 링에 넣고 Set-Cookie 헤더를 붙임(잠금 안에서, 응답 보내기 전까지 s_work->set_cookie가 살아 있어야 함) */
+/* 새 토큰을 내고 Set-Cookie 헤더를 붙임(잠금 안에서, 응답 보내기 전까지 s_work->set_cookie가 살아 있어야 함).
+ * 2026-11-23(사용자 결정 — 계정당 사용자 하나, 여러 기기를 쓸 이유 없음) — 세션은 하나만: 다른 토큰을 모두 지우고 0번 칸만 씀
+ * (예전: 8칸 링 — 새 기기에서 로그인해도 이전 기기는 그대로). 파일 구조는 그대로(tokens[8]·next_slot은 남겨 둠) */
 static bool issue_token_locked(httpd_req_t *req)
 {
-    uint8_t *slot = s_auth->tokens[s_auth->next_slot % WEB_AUTH_TOKENS];
+    memset(s_auth->tokens, 0, sizeof(s_auth->tokens));
+    s_auth->next_slot = 0;
+    uint8_t *slot = s_auth->tokens[0];
     esp_fill_random(slot, WEB_AUTH_TOKEN_LEN);
-    s_auth->next_slot = (uint8_t)((s_auth->next_slot + 1) % WEB_AUTH_TOKENS);
+    s_login_gen++;
     if (!save_locked()) return false;
     int n = snprintf(s_work->set_cookie, sizeof(s_work->set_cookie), WEB_AUTH_COOKIE "=");
     for (int i = 0; i < WEB_AUTH_TOKEN_LEN; i++) n += snprintf(s_work->set_cookie + n, sizeof(s_work->set_cookie) - n, "%02x", slot[i]);
@@ -283,6 +290,7 @@ bool web_auth_set_pin_local(const char *pin)
         memset(s_auth->tokens, 0, sizeof(s_auth->tokens));
         s_auth->next_slot = 0;
         s_auth->has_password = 1;
+        s_login_gen++;   /* 웹 세션도 끊김 */
         ok = save_locked();
     }
     unlock();
@@ -344,16 +352,11 @@ static esp_err_t api_password_post_handler(httpd_req_t *req)
     return ret;
 }
 
-/* POST /api/logout_all — 모든 기기 로그아웃(토큰 전부 지움). 인증 필요 */
-static esp_err_t api_logout_all_post_handler(httpd_req_t *req)
+/* 2026-11-23(사용자 결정) — POST /api/logout_all(모든 기기 로그아웃) 없앰: 세션이 하나라 필요 없음 */
+
+uint32_t web_auth_login_gen(void)
 {
-    WEB_AUTH_REQUIRE(req);
-    lock();
-    memset(s_auth->tokens, 0, sizeof(s_auth->tokens));
-    s_auth->next_slot = 0;
-    bool ok = save_locked();
-    unlock();
-    return send_json(req, NULL, ok ? "{\"ok\":true}" : "{\"ok\":false}");
+    return s_login_gen;
 }
 
 bool web_restore_gate(httpd_req_t *req)
@@ -378,8 +381,6 @@ void web_auth_register_handlers(httpd_handle_t server)
     httpd_register_uri_handler(server, &restore_state_uri);
     static const httpd_uri_t login_uri = { .uri = "/api/login", .method = HTTP_POST, .handler = api_login_post_handler };
     static const httpd_uri_t password_uri = { .uri = "/api/password", .method = HTTP_POST, .handler = api_password_post_handler };
-    static const httpd_uri_t logout_all_uri = { .uri = "/api/logout_all", .method = HTTP_POST, .handler = api_logout_all_post_handler };
     httpd_register_uri_handler(server, &login_uri);
     httpd_register_uri_handler(server, &password_uri);
-    httpd_register_uri_handler(server, &logout_all_uri);
 }

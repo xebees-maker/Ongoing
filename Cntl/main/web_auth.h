@@ -43,5 +43,8 @@ bool web_restore_gate(httpd_req_t *req);
 bool web_auth_set_pin_local(const char *pin);
 bool web_auth_verify_pin_local(const char *pin);
 
-/* 핸들러 등록 — POST /api/login, POST /api/password, POST /api/logout_all, GET /api/restore_state(2026-10-22) */
+/* 2026-11-23 — 로그인 세대(새 토큰을 낼 때마다 오름, 세션 하나). ws는 연결 맺을 때 값과 다르면 닫음 */
+uint32_t web_auth_login_gen(void);
+
+/* 핸들러 등록 — POST /api/login, POST /api/password, GET /api/restore_state(2026-10-22). logout_all은 11-23에 없앰 */
 void web_auth_register_handlers(httpd_handle_t server);

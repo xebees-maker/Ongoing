@@ -342,8 +342,7 @@
     TIME_PHONE: ['휴대폰 시각으로', 'Use phone time'], PW_OLD: ['지금 PIN', 'Current PIN'], PW_NEW: ['새 PIN(숫자 4자리)', 'New PIN (4 digits)'], PW_NEW2: ['새 PIN 한 번 더', 'New PIN again'],
     PW_CHANGE: ['PIN 변경', 'Change PIN'], PW_CHANGED: ['PIN을 바꿨습니다. 반드시 기억하세요', 'PIN changed. Be sure to remember it'],
     PW_FAIL: ['PIN을 바꾸지 못했습니다(지금 PIN 확인)', 'PIN not changed (check the current PIN)'],
-    PW_FORMAT: ['PIN은 숫자 4자리입니다', 'The PIN is 4 digits'], PW_MISMATCH: ['새 PIN 두 개가 다릅니다', 'The new PINs do not match'], LOGOUT_ALL: ['모든 기기 로그아웃', 'Log out all devices'],
-    LOGOUT_ALL_CONFIRM: ['모든 기기에서 로그아웃합니다. 이 기기도 다시 로그인해야 합니다.', 'All devices will be logged out, including this one.'],
+    PW_FORMAT: ['PIN은 숫자 4자리입니다', 'The PIN is 4 digits'], PW_MISMATCH: ['새 PIN 두 개가 다릅니다', 'The new PINs do not match'],
     RESTARTING: ['재시작합니다', 'Restarting'], PHOTO_ARRIVED: ['새 사진이 도착했습니다', 'New photo arrived'],
     NOT_PUSHED: ['보내지 않음(꺼진 종류)', 'Not sent (type off)'], NO_ALARMS: ['알림이 없습니다', 'No notifications'],
     RM_SETUP: ['원격 접속', 'Remote access'], RM_BROKER: ['브로커 주소(wss://...)', 'Broker URL (wss://...)'], RM_SITE: ['현장 이름', 'Site name'],
@@ -2031,7 +2030,7 @@
     h += '<div class="field"><label>' + esc(Wt('PW_NEW')) + '</label><input type="password" id="stPwNew" autocomplete="new-password"' + pinAttr + '></div>';
     h += '<div class="field"><label>' + esc(Wt('PW_NEW2')) + '</label><input type="password" id="stPwNew2" autocomplete="new-password"' + pinAttr + '></div>';
     h += '<div class="sfoot"><button id="stPwBtn" class="primary">' + esc(Wt('PW_CHANGE')) + '</button></div>';
-    h += '<div class="sfoot" style="border-top:1px solid var(--line)"><button id="stLogoutAll" class="danger">' + esc(Wt('LOGOUT_ALL')) + '</button></div>';
+    /* 2026-11-23(사용자 결정) — "모든 기기 로그아웃" 없앰: 웹 세션은 하나(다른 기기에서 로그인하면 이 기기는 끊김) */
     $('sheetBody').innerHTML = h;
     bindSettings();
   }
@@ -2100,10 +2099,6 @@
         $('stPwOld').value = ''; $('stPwNew').value = ''; $('stPwNew2').value = '';
       })
         .catch(function (e) { if (!(e && e.handled)) toast(Wt('PW_FAIL')); });
-    });
-    on('stLogoutAll', 'click', function () {
-      if (!confirm(Wt('LOGOUT_ALL_CONFIRM'))) return;
-      post('api/logout_all').then(function () { realCloseSheet(); show('login'); }).catch(function () {});
     });
   }
   function pad2(v) { return (v < 10 ? '0' : '') + v; }

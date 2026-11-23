@@ -335,6 +335,11 @@ static uint32_t s_ws_hash = 0;
 static int64_t s_ws_sent_us = 0;
 static jbuf_t s_ws_buf = { 0 };
 static esp_timer_handle_t s_ws_timer = NULL;
+/* 2026-11-23(세션 하나) — 연결 맺을 때(쿠키를 보는 마지막 순간)의 로그인 세대. 다른 기기가 로그인하면 세대가 바뀌어 이 연결을 닫음
+ * (그 기기는 HTTP 조회로 돌아가 401 → 로그인 화면). httpd 태스크에서만 씀 */
+static int s_hs_fd = -1;
+static uint32_t s_hs_gen = 0;
+static uint32_t s_ws_gen = 0;
 
 static uint32_t fnv1a(const char *p, size_t n, uint32_t h)
 {
@@ -367,7 +372,8 @@ static void ws_push_work(void *arg)
     (void)arg;
     int fd = s_ws_fd;
     if (fd < 0) return;
-    if (!ws_fd_alive(fd)) {
+    if (!ws_fd_alive(fd) || s_ws_gen != web_auth_login_gen()) {
+        if (ws_fd_alive(fd)) { ESP_LOGI(TAG, "WS closed - another login (fd %d)", fd); ws_close_current(); }
         s_ws_fd = -1;
         return;
     }
@@ -422,6 +428,8 @@ static esp_err_t ws_pre_handshake(httpd_req_t *req)
     if (!web_auth_check(req)) return ESP_FAIL;
     if (!web_restore_gate(req)) return ESP_FAIL;   /* 2026-10-22 — 복원 중(웹앱은 HTTP 조회로 돌아가 503 → "복원 중" 화면) */
     if (!web_session_gate(req)) return ESP_FAIL;
+    s_hs_fd = httpd_req_to_sockfd(req);   /* 11-23 — 이 연결의 로그인 세대(첫 프레임에서 등록할 때 확인) */
+    s_hs_gen = web_auth_login_gen();
     return ESP_OK;
 }
 
@@ -444,8 +452,11 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (f.type != HTTPD_WS_TYPE_TEXT) return ESP_OK;
     int fd = httpd_req_to_sockfd(req);
     if (fd != s_ws_fd) {
+        /* 11-23 — 맺은 뒤 다른 로그인이 있었거나(세대 다름) 다른 연결이 그 뒤에 맺어졌으면 받지 않음(닫힌 연결의 늦은 프레임 포함) */
+        if (fd != s_hs_fd || s_hs_gen != web_auth_login_gen()) return ESP_FAIL;
         if (s_ws_fd >= 0) ws_close_current();  /* 단일 접속 — 이전 연결은 닫음 */
         s_ws_fd = fd;
+        s_ws_gen = s_hs_gen;
         s_ws_hash = 0;
         s_ws_sent_us = 0;
         ESP_LOGI(TAG, "WS connected (fd %d)", fd);
