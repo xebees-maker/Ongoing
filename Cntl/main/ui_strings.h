@@ -503,6 +503,7 @@ typedef enum {
     STR_MSG_CALIB_RESET_CONFIRM, /* 2026-10-13 — 위 확인 문구 */
     STR_MSG_CALIB_RESET_QUEUED,  /* 2026-10-13 — 요청을 넣은 뒤 안내 */
     STR_LABEL_LIGHT_TEST,        /* 2026-09-29 — 카메라 팝업 조명 시험 스위치: "조명 테스트" / "Light Test" */
+    STR_FMT_LIGHT_OFF_IN,          /* 2026-11-23 — 조명 테스트 남은 시간 */
     /* 2026-11-18(사용자 결정) — 브릿지 번호를 콘이 정함 */
     STR_TITLE_BRIDGE_NEW,        /* 모르는 브릿지 팝업 제목 */
     STR_MSG_BRIDGE_ASK_FMT,      /* %s = MAC */
@@ -518,16 +519,25 @@ typedef enum {
     STR_RELAY_REMOTE_NAME_FMT,   /* 원격 자리 기본 이름, %d = 자리 번호 */
     STR_POWER_LOCAL,
     STR_POWER_REMOTE,
-    /* 2026-11-22(사용자 지시 — 웹 비밀번호를 콘에서 직접) */
-    STR_LABEL_WEB_PASSWORD,
-    STR_WEB_PW_SET,              /* 행 오른쪽 상태 — 정해짐 */
-    STR_WEB_PW_NONE,             /* 행 오른쪽 상태 — 없음 */
-    STR_WEB_PW_PLACEHOLDER,
-    STR_BTN_WEB_PW_REMOVE,
-    STR_MSG_WEB_PW_CHANGED,
-    STR_MSG_WEB_PW_REMOVED,
-    STR_MSG_WEB_PW_BAD_LEN,
-    STR_MSG_WEB_PW_REMOVE_CONFIRM,
+    /* 2026-11-23(사용자 결정 — PIN: 콘 화면 잠금 + 웹 로그인, 숫자 4자리) */
+    STR_LABEL_PIN,               /* 설정 시스템 그룹 PIN 행 */
+    STR_PIN_STATE_SET,           /* 행 오른쪽 상태 — 정해짐 */
+    STR_BTN_PIN_CHANGE,
+    STR_PIN_TITLE_UNLOCK,        /* PIN 입력판 제목 — 잠금 풀기 */
+    STR_PIN_TITLE_SETUP,         /* 처음 등록 */
+    STR_PIN_TITLE_CONFIRM,       /* 같은 PIN 한 번 더 */
+    STR_PIN_TITLE_CURRENT,       /* 바꾸기 — 지금 PIN */
+    STR_PIN_TITLE_NEW,           /* 바꾸기 — 새 PIN */
+    STR_PIN_SETUP_WARN,          /* 처음 등록 — 반드시 기억하라는 경고 */
+    STR_PIN_WRONG,
+    STR_PIN_MISMATCH,
+    STR_PIN_WAIT,                /* 너무 많이 틀림 — 1분 기다림 */
+    STR_PIN_SAVE_FAIL,
+    STR_MSG_PIN_SET,             /* 처음 등록 끝 */
+    STR_MSG_PIN_CHANGED,
+    STR_LOCKED_HINT,             /* 잠긴 화면 아래쪽 안내 */
+    STR_LABEL_AUTO_LOCK,
+    STR_OPT_AUTO_LOCK_LIST,      /* 끄기/1/5/10/30분(ui_main.c s_auto_lock_values와 같은 순서) */
 
     STR_COUNT,
 } ui_str_id_t;

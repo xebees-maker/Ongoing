@@ -307,8 +307,8 @@ static void tunnel_reply(const char *cid, const char *id, size_t idl, int status
     }
 }
 
-/* 2026-11-22(사용자 결정 — 4단계) — 콘에 웹 비밀번호가 있으면 모든 요청을 넘김(쓰기도 콘의 로그인 확인을 그대로 거침).
- * 비밀번호가 없으면 읽기 + 로그인·세션 되찾기·비밀번호 정하기만(사용자 지시 — 원격 웹앱에서도 비밀번호를 정할 수 있어야 함).
+/* 2026-11-22(사용자 결정 — 4단계) — 콘에 PIN이 있으면 모든 요청을 넘김(쓰기도 콘의 로그인 확인을 그대로 거침).
+ * 2026-11-23(사용자 결정) — PIN은 콘 화면에서만 처음 정함. 없으면 읽기(로그인 페이지 — API는 콘이 401) + 로그인(콘이 403 nopin)만.
  * /admin(파일 올리기)·/ws는 늘 막음 */
 static bool tunnel_allowed(const char *m, size_t ml, const char *p, size_t pl)
 {
@@ -317,7 +317,7 @@ static bool tunnel_allowed(const char *m, size_t ml, const char *p, size_t pl)
     if (ml == 3 && strncmp(m, "GET", 3) == 0) return true;
     if (web_auth_enabled()) return true;
     if (ml == 4 && strncmp(m, "POST", 4) == 0) {
-        static const char *ok[] = { "/api/login", "/api/session/claim", "/api/password" };
+        static const char *ok[] = { "/api/login" };
         for (size_t i = 0; i < sizeof(ok) / sizeof(ok[0]); i++) {
             size_t l = strlen(ok[i]);
             if (pl >= l && strncmp(p, ok[i], l) == 0 && (pl == l || p[l] == '?')) return true;

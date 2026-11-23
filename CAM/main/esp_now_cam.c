@@ -567,6 +567,19 @@ static uint32_t s_push_file_id_counter = 0;
 /* 2026-10-20(사용자 결정 — 콘의 조명 테스트 스위치를 실제 상태에 맞춤) — 콘이 켠 시험 조명을 캠이 스스로 끄면(잠들기 직전, 촬영 뒤)
  * 콘에 "꺼짐"을 알림(CAM_LIGHT_STATE on=0 — 응답 메시지와 섞이지 않게 따로 둔 종류) */
 static volatile bool s_light_test_on = false;
+/* 2026-11-23(사용자 결정 — "LED를 켠 동안 안 자게, 상한 30초") — 켠 시각. 예전엔 켜기 명령과 같은 CASK의 SLEEP_NOW로
+ * 곧바로 잠들며 꺼져서(cam_node.c 잠들기 직전 끔) 조명이 사실상 바로 꺼졌음 */
+#define CAM_LIGHT_TEST_MAX_MS (ESP_NOW_CAM_LIGHT_TEST_MAX_SEC * 1000)
+static int64_t s_light_test_on_us = 0;
+bool esp_now_cam_light_test_hold(void)
+{
+    if (!s_light_test_on) return false;
+    if (esp_timer_get_time() - s_light_test_on_us < (int64_t)CAM_LIGHT_TEST_MAX_MS * 1000) return true;
+    cam_light_set(false);
+    ESP_LOGI(TAG_CASK, "Test light on %dms - turned off", CAM_LIGHT_TEST_MAX_MS);
+    esp_now_cam_notify_light_off();
+    return false;
+}
 void esp_now_cam_notify_light_off(void)
 {
     if (!s_light_test_on) return;
@@ -918,6 +931,7 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
         if (!(s_conn_state == CAM_CONN_PAIRED) || len < (int)sizeof(esp_now_cam_light_t)) return;
         const esp_now_cam_light_t *msg = (const esp_now_cam_light_t *)data;
         cam_light_set(msg->on != 0);
+        if (msg->on && !s_light_test_on) s_light_test_on_us = esp_timer_get_time();   /* 2026-11-23 — 30초 상한 기준(이미 켜져 있으면 그대로) */
         s_light_test_on = (msg->on != 0);   /* 2026-10-20 — esp_now_cam_notify_light_off 주석 */
         ESP_LOGI(TAG_CASK, "CAM_LIGHT_SET: %s", msg->on ? "on" : "off");
         esp_now_cam_light_t ack = { .version = ESP_NOW_LINK_VERSION, .msg_type = ESP_NOW_MSG_CAM_LIGHT_ACK,

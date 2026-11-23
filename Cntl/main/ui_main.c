@@ -229,6 +229,9 @@ static bool               s_has_selected_sensor = false;
  * 구조체에 넣어야해" — ui_str_id_t뿐 아니라 이 선언 순서 규칙도 같이 지킬 것). */
 static lv_obj_t *s_capture_interval_dd    = NULL;
 static lv_obj_t *s_light_test_sw          = NULL;   /* 2026-10-20 — 장치 팝업(캠)의 조명 테스트 스위치, 캠 상태 알림으로 맞춤 */
+static lv_obj_t *s_light_left_lbl         = NULL;   /* 2026-11-23 — 스위치 옆 "N초 뒤 꺼짐" */
+static lv_timer_t *s_light_left_timer     = NULL;   /* 팝업이 열려 있는 동안만 1초마다 */
+static void light_left_refresh(void);
 static lv_obj_t *s_capture_interval_label = NULL;
 
 /* 2026-09-27(사용자 지시 — 전체화면 팝업 규칙) — 촬영주기/AGC/AEC/XCLK는 콘에 저장했다가 캠이 깨어날 때 CASK CONFIG로
@@ -356,10 +359,17 @@ static lv_obj_t *s_adaptive_response_label = NULL;
 static lv_obj_t *s_adaptive_help_label     = NULL;
 
 static lv_obj_t *s_restart_label     = NULL;
-static lv_obj_t *s_webpw_label       = NULL;   /* 2026-11-22 — 설정 CNTL 그룹 웹 비밀번호 행(정의부는 cb_webpw_btn 근처) */
-static lv_obj_t *s_webpw_state       = NULL;
-static lv_obj_t *s_webpw_btn_lbl     = NULL;
-static void webpw_refresh_state(void);
+/* 2026-11-23(PIN 잠금) — 설정 시스템 그룹 PIN·자동 잠금 행(정의부는 pin_lock_init 근처) */
+static lv_obj_t *s_pin_state_label   = NULL;
+static lv_obj_t *s_pin_row_label     = NULL;
+static lv_obj_t *s_pin_change_btn_lbl = NULL;
+static lv_obj_t *s_auto_lock_label   = NULL;
+static lv_obj_t *s_auto_lock_dd      = NULL;
+static void pin_refresh_settings_state(void);
+static void pin_restack(void);
+static void pin_face_refresh_clock(void);
+static lv_obj_t *create_lock_icon(lv_obj_t *parent, lv_color_t color);
+static void pin_touch_activity(void);
 static lv_obj_t *s_restart_btn_lbl   = NULL;
 
 /* 수동 시각설정 행(2026-08-09, RTC 부팅 시딩 버그 수정에 이어지는 작업) — [라벨][현재
@@ -1065,6 +1075,7 @@ static void cb_screen_auto_off(lv_timer_t *t)
 static void cb_screen_touch_activity(lv_event_t *e)
 {
     (void)e;
+    pin_touch_activity();   /* 2026-11-23 — 자동 잠금 타이머도 다시 시작 */
     if (!s_screen_off) screen_restart_auto_timer();
 }
 
@@ -1176,6 +1187,7 @@ static void web_lock_apply(void *arg)
     /* 화면이 꺼진 뒤에 웹이 접속한 경우 — 깨우기 막(첫 터치는 화면 켜기만)이 잠금 화면보다 위에 있어야 함. 아니면 꺼진 화면을
      * 눌러도 안 켜지고, 버튼 자리를 누르면 보이지 않는 채로 넘겨받기가 눌림 */
     if (s_screen_wake_overlay) lv_obj_move_foreground(s_screen_wake_overlay);
+    pin_restack();   /* 2026-11-23 — PIN 잠금 막은 웹 잠금 화면보다 위(잠금을 먼저 풀어야 넘겨받기를 누를 수 있음) */
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -1360,9 +1372,15 @@ static void refresh_lang_texts(void)
         lv_label_set_text(s_screen_off_label, ui_str(STR_LABEL_SCREEN_OFF));
         lv_label_set_text(s_restart_label, ui_str(STR_LABEL_RESTART_DEVICE));
         lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
-        lv_label_set_text(s_webpw_label, ui_str(STR_LABEL_WEB_PASSWORD));
-        lv_label_set_text(s_webpw_btn_lbl, ui_str(STR_BTN_SET_TIME));
-        webpw_refresh_state();
+        lv_label_set_text(s_pin_row_label, ui_str(STR_LABEL_PIN));
+        lv_label_set_text(s_pin_change_btn_lbl, ui_str(STR_BTN_PIN_CHANGE));
+        pin_refresh_settings_state();
+        lv_label_set_text(s_auto_lock_label, ui_str(STR_LABEL_AUTO_LOCK));
+        {
+            uint16_t lock_sel = lv_dropdown_get_selected(s_auto_lock_dd);
+            lv_dropdown_set_options(s_auto_lock_dd, ui_str(STR_OPT_AUTO_LOCK_LIST));
+            lv_dropdown_set_selected(s_auto_lock_dd, lock_sel);
+        }
         lv_label_set_text(s_time_label, ui_str(STR_LABEL_TIME));
         lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
         lv_label_set_text(s_network_label, ui_str(STR_LABEL_NETWORK));
@@ -2124,6 +2142,470 @@ static void show_alert_popup(const char *message, modal_kind_t kind)
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
     add_modal_button(btn_row, STR_BTN_CLOSE, cb_modal_close, NULL);
+}
+
+/* ════════════════════════════════════════════════════════════
+ * 2026-11-23(사용자 결정 — PIN 잠금) — 콘 화면 잠금과 웹 로그인이 같은 PIN(숫자 4자리, web_auth).
+ *  - 처음 켤 때(PIN 없음): PIN 등록 화면(취소 없음, 두 번 입력, 반드시 기억하라는 경고). 등록 전엔 웹이 열리지 않음
+ *  - 자동 잠금: 설정 시스템 그룹의 분(0=안 잠금)만큼 터치가 없으면 잠금(화면 자동 꺼짐과 같은 이벤트 방식)
+ *  - 수동 잠금: 상단바 자물쇠 아이콘
+ *  - 잠긴 동안: 화면은 그대로 보이고(투명 막) 터치만 막음. 누르면 PIN 입력판, 맞으면 풀림. 5번 틀리면 1분 막음
+ *  - 부팅: PIN이 있고 자동 잠금이 켜져 있으면 잠긴 채로 시작(정전 뒤 다시 켜진 경우)
+ *  - PIN 바꾸기(설정 PIN 행): 지금 PIN 확인 → 새 PIN 두 번
+ * 막·입력판은 맨 위 레이어(팝업들보다 위). 웹 잠금 화면보다 위, 복원 잠금·깨우기 막보다 아래
+ * ════════════════════════════════════════════════════════════ */
+typedef enum {
+    PIN_MODE_NONE,           /* 입력판 없음(잠겼으면 안내만) */
+    PIN_MODE_UNLOCK,
+    PIN_MODE_SETUP,
+    PIN_MODE_SETUP_CONFIRM,
+    PIN_MODE_CHANGE_CUR,
+    PIN_MODE_CHANGE_NEW,
+    PIN_MODE_CHANGE_CONFIRM,
+} pin_mode_t;
+
+#define PIN_LEN             4
+#define PIN_FAIL_LIMIT      5
+#define PIN_BLOCK_MS        60000U
+
+static const uint32_t s_auto_lock_values[] = { 0, 1, 5, 10, 30 };   /* STR_OPT_AUTO_LOCK_LIST와 같은 순서 */
+
+static bool        s_pin_locked = false;
+static pin_mode_t  s_pin_mode = PIN_MODE_NONE;
+static char        s_pin_buf[PIN_LEN + 1];
+static char        s_pin_first[PIN_LEN + 1];
+static uint8_t     s_pin_fails = 0;
+static uint32_t    s_pin_block_start = 0;
+static bool        s_pin_blocked = false;
+static lv_obj_t   *s_pin_overlay = NULL;    /* 맨 위 레이어 투명 막(터치 막음) */
+static lv_obj_t   *s_pin_hint = NULL;       /* 잠금 화면 내용(자물쇠·시각·날짜·안내) — 입력판이 열리면 숨김 */
+static lv_obj_t   *s_pin_hint_label = NULL;
+static lv_obj_t   *s_pin_clock = NULL;      /* 잠금 화면 시각 HH:MM — refresh_clock이 갱신 */
+static lv_obj_t   *s_pin_date = NULL;
+static lv_obj_t   *s_pin_box = NULL;        /* 입력판 */
+static lv_obj_t   *s_pin_title = NULL;
+static lv_obj_t   *s_pin_info = NULL;
+static lv_obj_t   *s_pin_dots = NULL;
+static lv_obj_t   *s_pin_msg = NULL;
+static lv_obj_t   *s_pin_btnm = NULL;
+static lv_timer_t *s_auto_lock_timer = NULL;
+
+static const char *s_pin_btnm_map[] = { "1", "2", "3", "\n", "4", "5", "6", "\n", "7", "8", "9", "\n",
+                                        LV_SYMBOL_CLOSE, "0", LV_SYMBOL_BACKSPACE, "" };
+#define PIN_BTN_CANCEL      9
+#define PIN_BTN_BACKSPACE   11
+
+static void pin_restack(void)
+{
+    if (!s_pin_overlay || lv_obj_has_flag(s_pin_overlay, LV_OBJ_FLAG_HIDDEN)) return;
+    lv_obj_move_foreground(s_pin_overlay);
+    if (s_restore_lock_overlay && !lv_obj_has_flag(s_restore_lock_overlay, LV_OBJ_FLAG_HIDDEN)) lv_obj_move_foreground(s_restore_lock_overlay);
+    if (s_screen_wake_overlay) lv_obj_move_foreground(s_screen_wake_overlay);
+}
+
+static void pin_update_dots(void)
+{
+    if (!s_pin_dots) return;
+    char t[PIN_LEN * 4 + 1];
+    size_t n = strlen(s_pin_buf), o = 0;
+    for (size_t i = 0; i < PIN_LEN; i++) {
+        const char *g = i < n ? LV_SYMBOL_BULLET : "-";
+        if (i) t[o++] = ' ';
+        size_t gl = strlen(g);
+        memcpy(t + o, g, gl);
+        o += gl;
+    }
+    t[o] = '\0';
+    lv_label_set_text(s_pin_dots, t);
+}
+
+static void pin_set_msg(ui_str_id_t id)
+{
+    if (s_pin_msg) lv_label_set_text(s_pin_msg, id == STR_COUNT ? "" : ui_str(id));
+}
+
+/* 모드에 맞춰 제목·안내·취소 키를 바꾸고 입력을 비움 */
+static void pin_enter_mode(pin_mode_t mode)
+{
+    s_pin_mode = mode;
+    memset(s_pin_buf, 0, sizeof(s_pin_buf));
+    if (!s_pin_box) return;
+    ui_str_id_t title = STR_PIN_TITLE_UNLOCK;
+    switch (mode) {
+        case PIN_MODE_SETUP:          title = STR_PIN_TITLE_SETUP; break;
+        case PIN_MODE_SETUP_CONFIRM:
+        case PIN_MODE_CHANGE_CONFIRM: title = STR_PIN_TITLE_CONFIRM; break;
+        case PIN_MODE_CHANGE_CUR:     title = STR_PIN_TITLE_CURRENT; break;
+        case PIN_MODE_CHANGE_NEW:     title = STR_PIN_TITLE_NEW; break;
+        default: break;
+    }
+    lv_label_set_text(s_pin_title, ui_str(title));
+    bool warn = (mode == PIN_MODE_SETUP || mode == PIN_MODE_SETUP_CONFIRM || mode == PIN_MODE_CHANGE_NEW || mode == PIN_MODE_CHANGE_CONFIRM);
+    lv_label_set_text(s_pin_info, warn ? ui_str(STR_PIN_SETUP_WARN) : "");
+    if (warn) lv_obj_remove_flag(s_pin_info, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_pin_info, LV_OBJ_FLAG_HIDDEN);
+    /* 취소 키 — 바꾸기·잠금 풀기에만(처음 등록은 반드시 끝내야 함). 잠금 풀기 취소 = 입력판 닫고 잠긴 화면으로 */
+    bool can_cancel = !(mode == PIN_MODE_SETUP || mode == PIN_MODE_SETUP_CONFIRM);
+    if (can_cancel) lv_buttonmatrix_clear_button_ctrl(s_pin_btnm, PIN_BTN_CANCEL, LV_BUTTONMATRIX_CTRL_HIDDEN);
+    else lv_buttonmatrix_set_button_ctrl(s_pin_btnm, PIN_BTN_CANCEL, LV_BUTTONMATRIX_CTRL_HIDDEN);
+    pin_update_dots();
+}
+
+static void pin_close_box(void)
+{
+    if (s_pin_box) {
+        lv_obj_delete(s_pin_box);
+        s_pin_box = NULL;
+        s_pin_title = s_pin_info = s_pin_dots = s_pin_msg = s_pin_btnm = NULL;
+    }
+    s_pin_mode = PIN_MODE_NONE;
+    memset(s_pin_buf, 0, sizeof(s_pin_buf));
+    memset(s_pin_first, 0, sizeof(s_pin_first));
+}
+
+/* 잠금 화면 시각·날짜 — 잠금 화면이 보일 때만 바꿈(refresh_clock 타이머가 부름) */
+static void pin_face_refresh_clock(void)
+{
+    if (!s_pin_clock || !s_pin_locked) return;
+    time_t now = time(NULL);
+    struct tm tm_buf;
+    localtime_r(&now, &tm_buf);
+    char b[24];
+    strftime(b, sizeof(b), "%H:%M", &tm_buf);
+    if (strcmp(lv_label_get_text(s_pin_clock), b) != 0) lv_label_set_text(s_pin_clock, b);
+    strftime(b, sizeof(b), "%Y-%m-%d", &tm_buf);
+    if (strcmp(lv_label_get_text(s_pin_date), b) != 0) lv_label_set_text(s_pin_date, b);
+}
+
+/* 막을 보이거나 숨김 — 잠겼거나 입력판이 있으면 보임 */
+static void pin_overlay_refresh(void)
+{
+    if (!s_pin_overlay) return;
+    bool show = s_pin_locked || s_pin_box;
+    if (!show) {
+        lv_obj_add_flag(s_pin_overlay, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_label_set_text(s_pin_hint_label, ui_str(STR_LOCKED_HINT));   /* 언어가 바뀌었을 수 있어 */
+    pin_face_refresh_clock();
+    if (s_pin_locked && !s_pin_box) lv_obj_remove_flag(s_pin_hint, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(s_pin_hint, LV_OBJ_FLAG_HIDDEN);
+    /* 2026-11-23(사용자 결정 — "2번", 불투명 잠금 화면) — 잠겼거나 처음 등록 중이면 검은 화면으로 아래를 가림.
+     * 설정에서 PIN 바꾸기(잠기지 않음)만 투명 그대로 */
+    bool cover = s_pin_locked || s_pin_mode == PIN_MODE_SETUP || s_pin_mode == PIN_MODE_SETUP_CONFIRM;
+    lv_obj_set_style_bg_opa(s_pin_overlay, cover ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_remove_flag(s_pin_overlay, LV_OBJ_FLAG_HIDDEN);
+    pin_restack();
+}
+
+static void pin_restart_auto_timer(void)
+{
+    if (!s_auto_lock_timer) return;
+    uint8_t min = device_config_get_auto_lock_min();
+    if (min == 0 || !web_auth_enabled()) {
+        lv_timer_pause(s_auto_lock_timer);
+        return;
+    }
+    lv_timer_set_period(s_auto_lock_timer, (uint32_t)min * 60000U);
+    lv_timer_reset(s_auto_lock_timer);
+    lv_timer_resume(s_auto_lock_timer);
+}
+
+static void pin_lock_engage(void)
+{
+    if (!web_auth_enabled() || !s_pin_overlay) return;
+    /* 처음 등록 중이면 그대로(등록이 먼저) */
+    if (s_pin_mode == PIN_MODE_SETUP || s_pin_mode == PIN_MODE_SETUP_CONFIRM) return;
+    pin_close_box();   /* PIN 바꾸기 중이었으면 버림 */
+    if (!s_pin_locked) ESP_LOGI(TAG, "Screen locked");
+    s_pin_locked = true;
+    pin_overlay_refresh();
+}
+
+static void pin_unlock(void)
+{
+    s_pin_locked = false;
+    s_pin_fails = 0;
+    pin_close_box();
+    pin_overlay_refresh();
+    pin_restart_auto_timer();
+    ESP_LOGI(TAG, "Screen unlocked");
+}
+
+static bool pin_check_blocked(void)
+{
+    if (s_pin_blocked && lv_tick_elaps(s_pin_block_start) >= PIN_BLOCK_MS) s_pin_blocked = false;
+    return s_pin_blocked;
+}
+
+static void pin_wrong(void)
+{
+    memset(s_pin_buf, 0, sizeof(s_pin_buf));
+    pin_update_dots();
+    if (++s_pin_fails >= PIN_FAIL_LIMIT) {
+        s_pin_fails = 0;
+        s_pin_blocked = true;
+        s_pin_block_start = lv_tick_get();
+        ESP_LOGW(TAG, "PIN wrong %d times - blocked %us", PIN_FAIL_LIMIT, (unsigned)(PIN_BLOCK_MS / 1000));
+        pin_set_msg(STR_PIN_WAIT);
+    } else {
+        pin_set_msg(STR_PIN_WRONG);
+    }
+}
+
+static void pin_refresh_settings_state(void)
+{
+    if (s_pin_state_label) lv_label_set_text(s_pin_state_label, web_auth_enabled() ? ui_str(STR_PIN_STATE_SET) : "-");
+}
+
+/* 4자리가 다 들어왔을 때 */
+static void pin_complete(void)
+{
+    switch (s_pin_mode) {
+        case PIN_MODE_UNLOCK:
+            if (web_auth_verify_pin_local(s_pin_buf)) pin_unlock();
+            else pin_wrong();
+            break;
+        case PIN_MODE_CHANGE_CUR:
+            if (web_auth_verify_pin_local(s_pin_buf)) { s_pin_fails = 0; pin_set_msg(STR_COUNT); pin_enter_mode(PIN_MODE_CHANGE_NEW); }
+            else pin_wrong();
+            break;
+        case PIN_MODE_SETUP:
+        case PIN_MODE_CHANGE_NEW:
+            memcpy(s_pin_first, s_pin_buf, sizeof(s_pin_first));
+            pin_set_msg(STR_COUNT);
+            pin_enter_mode(s_pin_mode == PIN_MODE_SETUP ? PIN_MODE_SETUP_CONFIRM : PIN_MODE_CHANGE_CONFIRM);
+            break;
+        case PIN_MODE_SETUP_CONFIRM:
+        case PIN_MODE_CHANGE_CONFIRM: {
+            bool setup = (s_pin_mode == PIN_MODE_SETUP_CONFIRM);
+            if (strcmp(s_pin_first, s_pin_buf) != 0) {
+                memset(s_pin_first, 0, sizeof(s_pin_first));
+                pin_set_msg(STR_PIN_MISMATCH);
+                pin_enter_mode(setup ? PIN_MODE_SETUP : PIN_MODE_CHANGE_NEW);
+                break;
+            }
+            if (!web_auth_set_pin_local(s_pin_buf)) {
+                memset(s_pin_first, 0, sizeof(s_pin_first));
+                pin_set_msg(STR_PIN_SAVE_FAIL);
+                pin_enter_mode(setup ? PIN_MODE_SETUP : PIN_MODE_CHANGE_NEW);
+                break;
+            }
+            pin_close_box();
+            s_pin_locked = false;
+            pin_overlay_refresh();
+            pin_restart_auto_timer();
+            pin_refresh_settings_state();
+            show_alert_popup(ui_str(setup ? STR_MSG_PIN_SET : STR_MSG_PIN_CHANGED), MODAL_KIND_NORMAL);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+static void cb_pin_btnm(lv_event_t *e)
+{
+    lv_obj_t *m = lv_event_get_target(e);
+    uint32_t id = lv_buttonmatrix_get_selected_button(m);
+    if (id == LV_BUTTONMATRIX_BUTTON_NONE) return;
+    if (id == PIN_BTN_CANCEL) {
+        pin_close_box();
+        pin_overlay_refresh();
+        return;
+    }
+    size_t n = strlen(s_pin_buf);
+    if (id == PIN_BTN_BACKSPACE) {
+        if (n) s_pin_buf[n - 1] = '\0';
+        pin_update_dots();
+        return;
+    }
+    const char *t = lv_buttonmatrix_get_button_text(m, id);
+    if (!t || t[0] < '0' || t[0] > '9' || n >= PIN_LEN) return;
+    bool checks = (s_pin_mode == PIN_MODE_UNLOCK || s_pin_mode == PIN_MODE_CHANGE_CUR);
+    if (checks && pin_check_blocked()) {   /* 막힌 동안은 받지 않음 */
+        pin_set_msg(STR_PIN_WAIT);
+        return;
+    }
+    if (n == 0) pin_set_msg(STR_COUNT);
+    s_pin_buf[n] = t[0];
+    s_pin_buf[n + 1] = '\0';
+    pin_update_dots();
+    if (n + 1 == PIN_LEN) pin_complete();
+}
+
+/* 입력판 — 왼쪽: 제목·안내·입력 칸·메시지, 오른쪽: 숫자 키(Montserrat — 숫자·기호 글리프) */
+static void pin_open_box(pin_mode_t mode)
+{
+    if (!s_pin_overlay) return;
+    if (s_pin_box) pin_close_box();
+    s_pin_box = lv_obj_create(s_pin_overlay);
+    lv_obj_set_size(s_pin_box, LV_PCT(90), LV_SIZE_CONTENT);
+    lv_obj_center(s_pin_box);
+    lv_obj_set_flex_flow(s_pin_box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_pin_box, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(s_pin_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *left = lv_obj_create(s_pin_box);
+    lv_obj_remove_style_all(left);
+    lv_obj_set_size(left, LV_PCT(48), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(left, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(left, 14, 0);
+
+    s_pin_title = lv_label_create(left);
+    lv_obj_set_width(s_pin_title, LV_PCT(100));
+    lv_label_set_long_mode(s_pin_title, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_pin_title, ui_font_get(UI_FONT_SIZE_24), 0);
+
+    s_pin_info = lv_label_create(left);
+    lv_obj_set_width(s_pin_info, LV_PCT(100));
+    lv_label_set_long_mode(s_pin_info, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_pin_info, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_color(s_pin_info, lv_palette_main(LV_PALETTE_ORANGE), 0);
+
+    s_pin_dots = lv_label_create(left);
+    lv_obj_set_style_text_font(s_pin_dots, &lv_font_montserrat_30, 0);
+
+    s_pin_msg = lv_label_create(left);
+    lv_obj_set_width(s_pin_msg, LV_PCT(100));
+    lv_label_set_long_mode(s_pin_msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_pin_msg, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_color(s_pin_msg, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_label_set_text(s_pin_msg, "");
+
+    s_pin_btnm = lv_buttonmatrix_create(s_pin_box);
+    lv_buttonmatrix_set_map(s_pin_btnm, s_pin_btnm_map);
+    lv_obj_set_size(s_pin_btnm, 300, 280);
+    lv_obj_set_style_text_font(s_pin_btnm, &lv_font_montserrat_30, 0);
+    lv_obj_add_event_cb(s_pin_btnm, cb_pin_btnm, LV_EVENT_VALUE_CHANGED, NULL);
+
+    pin_enter_mode(mode);
+    pin_overlay_refresh();
+}
+
+/* 막 자체를 누름(입력판 바깥) — 잠겼으면 입력판을 엶 */
+static void cb_pin_overlay_click(lv_event_t *e)
+{
+    if (lv_event_get_target(e) != s_pin_overlay) return;
+    if (s_pin_locked && !s_pin_box) pin_open_box(PIN_MODE_UNLOCK);
+}
+
+static void cb_auto_lock_timer(lv_timer_t *t)
+{
+    lv_timer_pause(t);
+    pin_lock_engage();
+}
+
+static void cb_lock_icon(lv_event_t *e)
+{
+    (void)e;
+    pin_lock_engage();
+}
+
+static void cb_pin_change_btn(lv_event_t *e)
+{
+    (void)e;
+    if (!web_auth_enabled()) return;
+    pin_open_box(PIN_MODE_CHANGE_CUR);
+}
+
+
+static void cb_auto_lock_changed(lv_event_t *e)
+{
+    (void)e;
+    uint16_t idx = lv_dropdown_get_selected(s_auto_lock_dd);
+    uint32_t min = (idx < (sizeof(s_auto_lock_values) / sizeof(s_auto_lock_values[0]))) ? s_auto_lock_values[idx] : 0;
+    device_config_set_auto_lock_min((uint8_t)min);
+    pin_restart_auto_timer();
+}
+
+/* 터치마다(screen_power_init이 건 입력 이벤트) — 자동 잠금 타이머 다시 시작 */
+static void pin_touch_activity(void)
+{
+    if (!s_pin_locked) pin_restart_auto_timer();
+}
+
+/* ui_init 끝에서 한 번(screen_power_init 뒤) */
+static void pin_lock_init(void)
+{
+    s_pin_overlay = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_pin_overlay);   /* 완전 투명 — 합성 레이어 버퍼가 필요 없음(create_modal 주석) */
+    lv_obj_set_size(s_pin_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(s_pin_overlay, LV_OBJ_FLAG_CLICKABLE);   /* 아래 화면 터치 막음 */
+    lv_obj_remove_flag(s_pin_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_pin_overlay, cb_pin_overlay_click, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_set_style_bg_color(s_pin_overlay, lv_color_black(), 0);   /* 불투명 여부는 pin_overlay_refresh가 정함 */
+    lv_obj_set_style_bg_opa(s_pin_overlay, LV_OPA_TRANSP, 0);
+
+    /* 2026-11-23(사용자 결정 — 불투명 잠금 화면) — 가운데 자물쇠·시각·날짜, 아래 안내. 누르면 막이 받아 입력판을 엶 */
+    s_pin_hint = lv_obj_create(s_pin_overlay);
+    lv_obj_remove_style_all(s_pin_hint);
+    lv_obj_set_size(s_pin_hint, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_flex_flow(s_pin_hint, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_pin_hint, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(s_pin_hint, 18, 0);
+    lv_obj_remove_flag(s_pin_hint, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(s_pin_hint, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *big_lock = create_lock_icon(s_pin_hint, lv_color_white());
+    lv_obj_remove_flag(big_lock, LV_OBJ_FLAG_CLICKABLE);   /* 잠금 화면 자물쇠는 그림만 */
+    s_pin_clock = lv_label_create(s_pin_hint);
+    lv_obj_set_style_text_font(s_pin_clock, &lv_font_montserrat_30, 0);
+    lv_obj_set_style_text_color(s_pin_clock, lv_color_white(), 0);
+    lv_label_set_text(s_pin_clock, "");
+    s_pin_date = lv_label_create(s_pin_hint);
+    lv_obj_set_style_text_font(s_pin_date, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(s_pin_date, lv_palette_lighten(LV_PALETTE_GREY, 1), 0);
+    lv_label_set_text(s_pin_date, "");
+    s_pin_hint_label = lv_label_create(s_pin_hint);
+    lv_obj_set_style_text_font(s_pin_hint_label, ui_font_get(UI_FONT_SIZE_24), 0);
+    lv_obj_set_style_text_color(s_pin_hint_label, lv_color_white(), 0);
+    lv_obj_set_style_pad_top(s_pin_hint_label, 30, 0);
+    lv_obj_add_flag(s_pin_overlay, LV_OBJ_FLAG_HIDDEN);
+
+    s_auto_lock_timer = lv_timer_create(cb_auto_lock_timer, 60000, NULL);
+    lv_timer_pause(s_auto_lock_timer);
+
+    if (!web_auth_enabled()) {
+        ESP_LOGW(TAG, "No PIN - asking for PIN setup");
+        pin_open_box(PIN_MODE_SETUP);
+    } else if (device_config_get_auto_lock_min() > 0) {
+        pin_lock_engage();
+    } else {
+        pin_restart_auto_timer();
+    }
+}
+
+/* 상단바 자물쇠 아이콘(Montserrat 기호에 자물쇠가 없어 도형 두 개로 그림) */
+static lv_obj_t *create_lock_icon(lv_obj_t *parent, lv_color_t color)
+{
+    lv_obj_t *icon = lv_obj_create(parent);
+    lv_obj_remove_style_all(icon);
+    lv_obj_set_size(icon, 36, 36);
+    lv_obj_add_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(icon, 10);
+    lv_obj_add_event_cb(icon, cb_lock_icon, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *shackle = lv_obj_create(icon);
+    lv_obj_remove_style_all(shackle);
+    lv_obj_set_size(shackle, 14, 16);
+    lv_obj_align(shackle, LV_ALIGN_TOP_MID, 0, 4);
+    lv_obj_set_style_border_width(shackle, 3, 0);
+    lv_obj_set_style_border_color(shackle, color, 0);
+    lv_obj_set_style_border_opa(shackle, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_side(shackle, LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_RIGHT, 0);
+    lv_obj_set_style_radius(shackle, 7, 0);
+    lv_obj_remove_flag(shackle, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *body = lv_obj_create(icon);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_size(body, 22, 15);
+    lv_obj_align(body, LV_ALIGN_BOTTOM_MID, 0, -3);
+    lv_obj_set_style_bg_color(body, color, 0);
+    lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(body, 3, 0);
+    lv_obj_remove_flag(body, LV_OBJ_FLAG_CLICKABLE);
+    return icon;
 }
 
 /* 2026-10-23(사용자 지적 — "화면에 아무 반응이 없어서 몰랐네") — 몇 초 걸리는 꺼내기·재연결 동안 "진행 중" 팝업을 먼저 그려 둠.
@@ -6937,6 +7419,7 @@ static void refresh_clock(lv_timer_t *t)
     char time_buf[12];
     strftime(time_buf, sizeof(time_buf), "%H:%M:%S", &tm_buf);
     if (s_time_ctrl_label) lv_label_set_text(s_time_ctrl_label, time_buf);
+    pin_face_refresh_clock();   /* 2026-11-23 — 잠금 화면 시각 */
 
     if (s_network_ctrl_label) {
         char net_buf[48];
@@ -8284,6 +8767,9 @@ void ui_init(void)
     s_sd_eject_normal_color = lv_obj_get_style_text_color(screen_off_icon, LV_PART_MAIN);
     sd_eject_icon_update();
 
+    /* 2026-11-23(사용자 결정 — PIN 잠금) — SD 꺼내기 아이콘 옆 수동 잠금 아이콘 */
+    create_lock_icon(top_bar_left, s_sd_eject_normal_color);
+
     lv_obj_t *top_bar_right = lv_obj_create(s_top_bar);
     lv_obj_set_size(top_bar_right, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(top_bar_right, LV_FLEX_FLOW_ROW);
@@ -8324,6 +8810,7 @@ void ui_init(void)
     refresh_clock(NULL);  /* 첫 타이머 tick 전까지 빈 채로 안 보이게 즉시 한 번 채움 */
     lv_timer_create(refresh_clock_md, 1000, NULL);
     screen_power_init();  /* 2026-09-29 — 화면 자동 꺼짐(터치는 ui_init 전에 이미 등록됨, main.c) */
+    pin_lock_init();      /* 2026-11-23 — PIN 잠금(PIN이 없으면 등록 화면). web_auth_init은 main.c에서 UI보다 먼저 */
     lv_timer_create(refresh_bridge_health_md, 1000, NULL);     /* 2026-09-26(설계 6단계) — 브 응답 없음 경고 */
 
     /* 2026-09-08(사용자 지시 — "상단바 통계 버튼을 없애고, 센서 판넬 Sensor 역상을 누르면
@@ -9911,6 +10398,8 @@ static void teardown_device_popup(void)
     s_capture_interval_dd = NULL;
     s_capture_interval_label = NULL;
     s_light_test_sw = NULL;
+    s_light_left_lbl = NULL;
+    if (s_light_left_timer) { lv_timer_delete(s_light_left_timer); s_light_left_timer = NULL; }
     s_auto_img_switch = NULL;
     s_auto_img_label = NULL;
     s_man_box = NULL;
@@ -9937,6 +10426,20 @@ static void cb_cam_light_test_switch(lv_event_t *e)
     node_hub_set_cam_light(s_device_popup_node.mac, on);
     node_hub_queue_action(s_device_popup_node.mac, &msg, sizeof(msg), s_light_ack_types, 1, 500, 3, "Cam light");
     ESP_LOGI(TAG, "Cam light %s -> %s queued", on ? "on" : "off", s_device_popup_node.name);
+    light_left_refresh();
+}
+
+/* 2026-11-23(사용자 지시 — "30초 후 꺼진다는 표현과 카운팅") — 꺼져 있으면 상한, 켜져 있으면 남은 초(콘이 캠의 켜기 ACK부터 셈) */
+static void light_left_refresh(void)
+{
+    if (!s_light_left_lbl) return;
+    int left = node_hub_get_cam_light_left_s(s_device_popup_node.mac);
+    lv_label_set_text_fmt(s_light_left_lbl, ui_str(STR_FMT_LIGHT_OFF_IN), left < 0 ? ESP_NOW_CAM_LIGHT_TEST_MAX_SEC : left);
+}
+static void cb_light_left_timer(lv_timer_t *t)
+{
+    (void)t;
+    light_left_refresh();
 }
 
 /* 2026-10-20(사용자 결정) — 캠이 알려 온 조명 상태를 열려 있는 장치 팝업의 스위치에 반영(LVGL 태스크에서) */
@@ -9947,6 +10450,7 @@ static void ui_apply_cam_light(void *arg)
     if (s_light_test_sw && memcmp(s_device_popup_node.mac, ev->mac, 6) == 0) {
         if (ev->on) lv_obj_add_state(s_light_test_sw, LV_STATE_CHECKED);
         else lv_obj_remove_state(s_light_test_sw, LV_STATE_CHECKED);
+        light_left_refresh();
     }
     heap_caps_free(ev);
 }
@@ -10216,6 +10720,11 @@ static void build_device_popup(const uint8_t *mac, const char *name, bool is_sen
         if (node_hub_get_cam_light(mac)) lv_obj_add_state(light_sw, LV_STATE_CHECKED);   /* 2026-10-20 — 캠 실제 상태 */
         lv_obj_add_event_cb(light_sw, cb_cam_light_test_switch, LV_EVENT_VALUE_CHANGED, NULL);
         s_light_test_sw = light_sw;
+        s_light_left_lbl = lv_label_create(light_cluster);
+        lv_obj_add_style(s_light_left_lbl, &style_text_muted, 0);
+        lv_obj_set_style_text_font(s_light_left_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+        light_left_refresh();
+        if (!s_light_left_timer) s_light_left_timer = lv_timer_create(cb_light_left_timer, 1000, NULL);
 
         disconnect_parent = bottom_row;
     } else if (sens_kind_store_get(mac) == SENSOR_KIND_SCD41) {
@@ -11697,9 +12206,11 @@ static void teardown_option_tab(void)
     s_screen_off_label = NULL;
     s_screen_off_dd = NULL;
     s_restart_label = NULL;
-    s_webpw_label = NULL;
-    s_webpw_state = NULL;
-    s_webpw_btn_lbl = NULL;
+    s_pin_state_label = NULL;
+    s_pin_row_label = NULL;
+    s_pin_change_btn_lbl = NULL;
+    s_auto_lock_label = NULL;
+    s_auto_lock_dd = NULL;
     s_restart_btn_lbl = NULL;
     s_time_label = NULL;
     s_time_value_label = NULL;
@@ -11714,118 +12225,6 @@ static void teardown_option_tab(void)
     s_auto_connect_new_switch = NULL;
     s_auto_connect_new_label = NULL;
     s_slots_label = NULL;
-}
-
-/* ════════════════════════════════════════════════════════════
- * 2026-11-22(사용자 지시 — "웹 비번을 콘에서 직접 변경하거나, 지금 웹앱에서 할 수 있어야지") — 설정 CNTL 그룹의 웹 비밀번호 행.
- * 콘 앞에 있는 사람 = 주인이라 지금 비밀번호를 묻지 않음(잊었을 때 되살리는 길). 텍스트 입력이라 적용 버튼(전체화면 팝업 규칙).
- * 키보드·입력창 구조는 Wi-Fi 비밀번호 팝업과 같음(눈 단추는 입력창의 형제 — 그 팝업 주석 참고)
- * ════════════════════════════════════════════════════════════ */
-static lv_obj_t *s_webpw_box      = NULL;
-static lv_obj_t *s_webpw_ta       = NULL;
-static lv_obj_t *s_webpw_keyboard = NULL;
-
-static void webpw_refresh_state(void)
-{
-    if (s_webpw_state) lv_label_set_text(s_webpw_state, ui_str(web_auth_enabled() ? STR_WEB_PW_SET : STR_WEB_PW_NONE));
-}
-
-static void webpw_close(void)
-{
-    if (s_webpw_keyboard) { lv_obj_delete(s_webpw_keyboard); s_webpw_keyboard = NULL; }
-    s_webpw_ta = NULL;
-    if (s_webpw_box) { lv_obj_delete(lv_obj_get_parent(s_webpw_box)); s_webpw_box = NULL; }   /* box -> overlay */
-    resume_bg_timers();
-}
-
-static void cb_webpw_cancel(lv_event_t *e) { (void)e; webpw_close(); }
-
-static void cb_webpw_apply(lv_event_t *e)
-{
-    (void)e;
-    if (!s_webpw_ta) return;
-    const char *pw = lv_textarea_get_text(s_webpw_ta);
-    size_t n = strlen(pw);
-    if (n < 4 || n > 32) { show_alert_popup(ui_str(STR_MSG_WEB_PW_BAD_LEN), MODAL_KIND_WARNING); return; }
-    bool ok = web_auth_set_password_local(pw);
-    lv_textarea_set_text(s_webpw_ta, "");
-    webpw_close();
-    webpw_refresh_state();
-    show_alert_popup(ui_str(ok ? STR_MSG_WEB_PW_CHANGED : STR_MSG_WEB_PW_BAD_LEN), ok ? MODAL_KIND_NORMAL : MODAL_KIND_WARNING);
-}
-
-static void webpw_remove_confirmed(void *ctx)
-{
-    (void)ctx;
-    bool ok = web_auth_clear_password_local();
-    webpw_refresh_state();
-    if (ok) show_alert_popup(ui_str(STR_MSG_WEB_PW_REMOVED), MODAL_KIND_NORMAL);
-}
-
-static void cb_webpw_remove(lv_event_t *e)
-{
-    (void)e;
-    webpw_close();
-    show_confirm_popup(ui_str(STR_MSG_WEB_PW_REMOVE_CONFIRM), MODAL_KIND_WARNING, webpw_remove_confirmed, NULL);
-}
-
-static void cb_webpw_toggle_visibility(lv_event_t *e)
-{
-    lv_obj_t *btn = lv_event_get_target(e);
-    bool was_masked = lv_textarea_get_password_mode(s_webpw_ta);
-    lv_textarea_set_password_mode(s_webpw_ta, !was_masked);
-    lv_label_set_text(lv_obj_get_child(btn, 0), was_masked ? LV_SYMBOL_EYE_OPEN : LV_SYMBOL_EYE_CLOSE);
-}
-
-static void cb_webpw_keyboard_hide(lv_event_t *e)
-{
-    (void)e;
-    if (s_webpw_keyboard) lv_obj_add_flag(s_webpw_keyboard, LV_OBJ_FLAG_HIDDEN);
-}
-
-static void cb_webpw_btn(lv_event_t *e)
-{
-    (void)e;
-    if (s_webpw_box) return;
-    lv_obj_t *box = create_modal();
-    s_webpw_box = box;
-    lv_obj_set_width(box, LV_PCT(66));
-    lv_obj_align(box, LV_ALIGN_TOP_MID, 0, 20);   /* 아래쪽 키보드와 안 겹치게(Wi-Fi 비밀번호 팝업과 같음) */
-    create_modal_title(box, STR_LABEL_WEB_PASSWORD, MODAL_KIND_NORMAL);
-
-    lv_obj_t *wrap = lv_obj_create(box);
-    lv_obj_remove_style_all(wrap);
-    lv_obj_set_width(wrap, LV_PCT(100));
-    lv_obj_set_height(wrap, LV_SIZE_CONTENT);
-
-    s_webpw_ta = lv_textarea_create(wrap);
-    lv_textarea_set_one_line(s_webpw_ta, true);
-    lv_textarea_set_password_mode(s_webpw_ta, true);
-    lv_textarea_set_max_length(s_webpw_ta, 32);
-    lv_textarea_set_placeholder_text(s_webpw_ta, ui_str(STR_WEB_PW_PLACEHOLDER));
-    lv_obj_set_width(s_webpw_ta, LV_PCT(100));
-    lv_obj_set_style_text_font(s_webpw_ta, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_set_style_pad_right(s_webpw_ta, 36, 0);
-
-    lv_obj_t *eye = lv_button_create(wrap);
-    lv_obj_remove_style_all(eye);
-    lv_obj_set_size(eye, 28, 28);
-    lv_obj_align(eye, LV_ALIGN_RIGHT_MID, -4, 0);
-    lv_obj_add_flag(eye, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(eye, cb_webpw_toggle_visibility, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *eye_lbl = lv_label_create(eye);
-    lv_label_set_text(eye_lbl, LV_SYMBOL_EYE_CLOSE);
-    lv_obj_center(eye_lbl);
-
-    lv_obj_t *btn_row = create_modal_btn_row(box);
-    if (web_auth_enabled()) add_modal_button(btn_row, STR_BTN_WEB_PW_REMOVE, cb_webpw_remove, NULL);
-    add_modal_button(btn_row, STR_BTN_CANCEL, cb_webpw_cancel, NULL);
-    add_modal_button(btn_row, STR_BTN_APPLY, cb_webpw_apply, NULL);
-
-    s_webpw_keyboard = lv_keyboard_create(lv_screen_active());
-    lv_obj_add_event_cb(s_webpw_keyboard, cb_webpw_keyboard_hide, LV_EVENT_READY, NULL);
-    lv_obj_add_event_cb(s_webpw_keyboard, cb_webpw_keyboard_hide, LV_EVENT_CANCEL, NULL);
-    lv_keyboard_set_textarea(s_webpw_keyboard, s_webpw_ta);
 }
 
 /* 2026-09-08(재설계) — s_option_content(설정 팝업의 헤더 아래 콘텐츠 영역) 안에 설정
@@ -11968,28 +12367,6 @@ static void build_option_tab(void)
     s_restart_btn_lbl = lv_label_create(restart_btn);
     lv_label_set_text(s_restart_btn_lbl, ui_str(STR_BTN_RESTART));
     lv_obj_set_style_text_font(s_restart_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
-
-    /* 2026-11-22(사용자 지시) — 웹 비밀번호 행: [라벨][상태(설정됨/없음)][설정] */
-    lv_obj_t *webpw_row = lv_obj_create(cntl_box);
-    lv_obj_set_size(webpw_row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(webpw_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(webpw_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_border_width(webpw_row, 0, 0);
-    lv_obj_set_style_pad_hor(webpw_row, 12, 0);
-    lv_obj_set_style_pad_ver(webpw_row, 0, 0);
-    s_webpw_label = lv_label_create(webpw_row);
-    lv_label_set_text(s_webpw_label, ui_str(STR_LABEL_WEB_PASSWORD));
-    lv_obj_set_style_text_font(s_webpw_label, ui_font_get(UI_FONT_SIZE_18), 0);
-    lv_obj_t *webpw_right = create_row_right_cluster(webpw_row);
-    s_webpw_state = lv_label_create(webpw_right);
-    lv_obj_add_style(s_webpw_state, &style_text_muted, 0);
-    lv_obj_set_style_text_font(s_webpw_state, ui_font_get(UI_FONT_SIZE_18), 0);
-    webpw_refresh_state();
-    lv_obj_t *webpw_btn = lv_button_create(webpw_right);
-    lv_obj_add_event_cb(webpw_btn, cb_webpw_btn, LV_EVENT_CLICKED, NULL);
-    s_webpw_btn_lbl = lv_label_create(webpw_btn);
-    lv_label_set_text(s_webpw_btn_lbl, ui_str(STR_BTN_SET_TIME));
-    lv_obj_set_style_text_font(s_webpw_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     /* 네트워크 행(2026-08-29 설계, 2026-09-07 재정렬 — 사용자 지시: "레이블-공백-우정렬
      * 값/드랍다운 버튼 형식으로 통일") — [라벨:좌][공백][독립/종속 드롭다운 + IP/SSID/찾기
@@ -12201,6 +12578,49 @@ static void build_option_tab(void)
     lv_label_set_text(s_time_set_btn_lbl, ui_str(STR_BTN_SET_TIME));
     lv_obj_set_style_text_font(s_time_set_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
+    /* 2026-11-23(사용자 결정 — PIN 잠금) — 시스템 그룹 PIN 행 [PIN][설정됨][변경] (예전 CNTL 그룹 웹 비밀번호 행을 옮겨 바꿈) */
+    lv_obj_t *pin_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(pin_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(pin_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(pin_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(pin_row, 0, 0);
+    lv_obj_set_style_pad_hor(pin_row, 12, 0);
+    lv_obj_set_style_pad_ver(pin_row, 0, 0);
+    s_pin_row_label = lv_label_create(pin_row);
+    lv_label_set_text(s_pin_row_label, ui_str(STR_LABEL_PIN));
+    lv_obj_set_style_text_font(s_pin_row_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_t *pin_right = create_row_right_cluster(pin_row);
+    s_pin_state_label = lv_label_create(pin_right);
+    lv_obj_add_style(s_pin_state_label, &style_text_muted, 0);
+    lv_obj_set_style_text_font(s_pin_state_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    pin_refresh_settings_state();
+    lv_obj_t *pin_btn = lv_button_create(pin_right);
+    lv_obj_add_event_cb(pin_btn, cb_pin_change_btn, LV_EVENT_CLICKED, NULL);
+    s_pin_change_btn_lbl = lv_label_create(pin_btn);
+    lv_label_set_text(s_pin_change_btn_lbl, ui_str(STR_BTN_PIN_CHANGE));
+    lv_obj_set_style_text_font(s_pin_change_btn_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+
+    /* 자동 잠금 행 — 화면 자동 꺼짐 행과 같은 구조, 선택 즉시 저장 */
+    lv_obj_t *auto_lock_row = lv_obj_create(system_group_box);
+    lv_obj_set_size(auto_lock_row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(auto_lock_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(auto_lock_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_border_width(auto_lock_row, 0, 0);
+    lv_obj_set_style_pad_hor(auto_lock_row, 12, 0);
+    lv_obj_set_style_pad_ver(auto_lock_row, 0, 0);
+    s_auto_lock_label = lv_label_create(auto_lock_row);
+    lv_label_set_text(s_auto_lock_label, ui_str(STR_LABEL_AUTO_LOCK));
+    lv_obj_set_style_text_font(s_auto_lock_label, ui_font_get(UI_FONT_SIZE_18), 0);
+    s_auto_lock_dd = lv_dropdown_create(auto_lock_row);
+    lv_obj_set_style_pad_ver(s_auto_lock_dd, 7, 0);
+    lv_dropdown_set_options(s_auto_lock_dd, ui_str(STR_OPT_AUTO_LOCK_LIST));
+    int lock_idx = find_value_index(s_auto_lock_values,
+        sizeof(s_auto_lock_values) / sizeof(s_auto_lock_values[0]), device_config_get_auto_lock_min());
+    lv_dropdown_set_selected(s_auto_lock_dd, (uint16_t)(lock_idx >= 0 ? lock_idx : 0));
+    lv_obj_set_style_text_font(s_auto_lock_dd, ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(s_auto_lock_dd), ui_font_get(UI_FONT_SIZE_18), 0);
+    lv_obj_add_event_cb(s_auto_lock_dd, cb_auto_lock_changed, LV_EVENT_VALUE_CHANGED, NULL);
+
     /* 2026-09-18(사용자 지시 — "로그를 시스템 판넬에... Log 공백 View 단추 형식으로") —
      * 예전엔 페이지 맨 끝에 눈에 덜 띄는 작은 버튼 하나였는데, 다른 시스템 행들과 동일한
      * [라벨][버튼] 구조로 통일. 진입 동작(팝업 안 콘텐츠 바꿔치기)은 그대로
@@ -12233,7 +12653,7 @@ static void build_option_tab(void)
      * 버튼도 같은 이유로 개별설정 팝업(카메라)으로 옮겨가면서 여기선 항상 NULL이 됨. 위와
      * 동일하게 배열에서 제거 — 두 버튼도 이제 개별설정 팝업 안에서 자연폭으로 그려짐 */
     lv_obj_t *option_action_buttons[] = {
-        restart_btn, time_set_btn, log_view_btn, webpw_btn,
+        restart_btn, time_set_btn, log_view_btn, pin_btn,
     };
     lv_obj_update_layout(lv_screen_active());
     for (size_t i = 0; i < sizeof(option_action_buttons) / sizeof(option_action_buttons[0]); i++) {

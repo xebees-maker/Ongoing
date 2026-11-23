@@ -269,6 +269,8 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
             jb_printf(&b, ",\"auto_img\":%s,\"capture_s\":%lu",   /* 2026-10-21 — 요약 Automatic/Manual */
                       device_config_get_cam_auto_image(nd->mac) ? "true" : "false",
                       (unsigned long)device_config_get_cam_capture_interval_sec(nd->mac));
+            /* 2026-11-23(사용자 지시 — "웹 스위치도 꺼야 돼") — 조명 테스트 실제 상태. 바뀌면 내용 해시가 달라져 웹소켓이 밀어 줌 */
+            jb_printf(&b, ",\"light\":%s,\"light_left\":%d", nd->light_on ? "true" : "false", node_hub_get_cam_light_left_s(nd->mac));
         } else {
             jb_printf(&b, ",\"interval_s\":%lu", (unsigned long)device_config_get_sens_sample_interval_sec(nd->mac));
             if (nd->has_sensor_data) {
@@ -560,6 +562,7 @@ static esp_err_t api_device_get_handler(httpd_req_t *req)
                       (unsigned)mv[0], (unsigned)mv[1], (unsigned)mv[2], (unsigned)mv[3], (unsigned)mv[4]);
         }
         jb_printf(&b, ",\"light\":%s", node_hub_get_cam_light(nd->mac) ? "true" : "false");   /* 2026-10-20 — 조명 테스트 실제 상태 */
+        jb_printf(&b, ",\"light_left\":%d,\"light_max\":%d", node_hub_get_cam_light_left_s(nd->mac), ESP_NOW_CAM_LIGHT_TEST_MAX_SEC);   /* 2026-11-23 */
     } else {
         jb_printf(&b, ",\"interval_s\":%lu,\"opt_interval\":", (unsigned long)device_config_get_sens_sample_interval_sec(nd->mac));
         jb_values(&b, 0);

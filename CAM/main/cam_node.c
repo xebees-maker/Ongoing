@@ -1156,6 +1156,15 @@ void app_main(void)
             }
         }
 
+        /* 2026-11-23(사용자 결정) — 시험 조명이 켜져 있으면(최대 30초) 잠들지 않고 Live 루프처럼 1초마다 체크인 —
+         * 콘의 끄기 명령(CASK 할일)도 이렇게 받음. 30초가 지나면 esp_now_cam_light_test_hold가 끄고 콘에 알림 */
+        if (esp_now_cam_light_test_hold()) {
+            uint32_t hold_elapsed_ms = (uint32_t)(esp_timer_get_time() / 1000) - cask_start_ms;
+            if (hold_elapsed_ms < CASK_LIVE_PACE_MS) vTaskDelay(pdMS_TO_TICKS(CASK_LIVE_PACE_MS - hold_elapsed_ms));
+            paired_now = esp_now_cam_reconnect();
+            continue;
+        }
+
         if (s_sleep_sec_from_cntl != 0) {
             sleep_sec = s_sleep_sec_from_cntl;
             /* 2026-09-19 — 촬영주기가 응답성보다 짧으면, 다음 체크인까지 기다리지 않고

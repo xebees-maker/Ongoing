@@ -1,11 +1,11 @@
 /**
  * @file    web_auth.h
- * @brief   웹 로그인 — 비밀번호(해시) + 오래 가는 로그인 토큰(쿠키)
+ * @brief   웹 로그인 — PIN(해시) + 오래 가는 로그인 토큰(쿠키). 콘 화면 잠금도 같은 PIN
  *
  * 2026-10-03(할 일 AD — SPA 설계, 사용자 결정) — 바깥에 열리는 웹이라 로그인을 넣음. HTTP 그대로(HTTPS는 3단계).
  * - 비밀번호는 원문을 저장하지 않음: SHA-256(salt || 비밀번호)만 LittleFS web_auth.bin에(설정은 파일로).
- *   원문은 git에도 안 넣음 — 그래서 펌웨어에 기본 비밀번호가 없고, 파일이 없으면(처음) 인증 없이 열려 있다가
- *   POST /api/password로 처음 정하는 순간부터 모든 API에 인증이 걸림.
+ *   원문은 git에도 안 넣음 — 그래서 펌웨어에 기본값이 없음. 2026-11-23(사용자 결정) — 비밀번호 대신 PIN(숫자 4자리),
+ *   파일이 없으면(처음) 콘 화면이 PIN 등록을 요구하고 그때까지 웹은 닫혀 있음(같은 공유기 안이든 원격이든 구분 없이 로그인).
  * - 로그인에 성공하면 무작위 토큰(16바이트)을 발급해 쿠키(1년)로 줌 — 다음 접속부터 비밀번호 생략(사용자 결정).
  *   토큰은 최대 8개(기기별), 넘치면 가장 오래된 것부터 밀어냄. 모든 기기 로그아웃 = 토큰 전부 지움.
  */
@@ -18,10 +18,10 @@
 /* 부팅 때 한 번(LittleFS 마운트 뒤) — web_auth.bin을 읽어 둠 */
 void web_auth_init(void);
 
-/* 비밀번호가 정해져 있는지(=인증을 요구하는지) */
+/* PIN이 정해져 있는지. 2026-11-23 — 없으면 웹은 모두 401(로그인은 403 nopin) */
 bool web_auth_enabled(void);
 
-/* 요청의 쿠키 토큰이 유효한지. 비밀번호가 아직 없으면 항상 true */
+/* 요청의 쿠키 토큰이 유효한지. PIN이 아직 없으면 항상 false */
 bool web_auth_check(httpd_req_t *req);
 
 /* 401 + {"error":"auth"} 응답(호출부는 이 반환값을 그대로 돌려주면 됨) */
@@ -37,11 +37,11 @@ bool web_restore_gate(httpd_req_t *req);
         if (!web_restore_gate(req)) return ESP_OK; \
     } while (0)
 
-/* 2026-11-22(사용자 지시 — 웹 비밀번호를 콘에서 직접) — 콘 화면(LVGL 태스크)에서. 콘 앞에 있는 사람 = 주인이라 지금
- * 비밀번호를 묻지 않음(잊었을 때 되살리는 길). 바꾸거나 없애면 로그인 토큰을 모두 지움(모든 기기 다시 로그인).
- * set: 길이(4-32자)가 맞지 않거나 저장 실패면 false */
-bool web_auth_set_password_local(const char *pw);
-bool web_auth_clear_password_local(void);
+/* 2026-11-23(사용자 결정 — PIN) — 콘 화면 잠금과 웹 로그인이 같은 PIN(숫자 4자리)을 씀. 콘 화면(LVGL 태스크)에서 부름.
+ * PIN은 콘을 처음 켤 때 콘 화면에서만 정함(정하기 전엔 웹이 열리지 않음). 그 뒤엔 콘(지금 PIN 확인 뒤)이나 웹에서 바꿈.
+ * 없애는 길은 없음. set: 숫자 4자리가 아니거나 저장 실패면 false. 바꾸면 웹 로그인 토큰을 모두 지움(모든 기기 다시 로그인) */
+bool web_auth_set_pin_local(const char *pin);
+bool web_auth_verify_pin_local(const char *pin);
 
 /* 핸들러 등록 — POST /api/login, POST /api/password, POST /api/logout_all, GET /api/restore_state(2026-10-22) */
 void web_auth_register_handlers(httpd_handle_t server);

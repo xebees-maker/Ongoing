@@ -15,6 +15,8 @@ static const char *TAG = "SYS";
 #define DEVICE_CONFIG_PATH    FS_MOUNT_POINT "/device_config.bin"
 #define SCREEN_CFG_PATH       FS_MOUNT_POINT "/screen.cfg"   /* 2026-09-29 — 화면 자동 꺼짐(분) 1바이트 */
 #define SCREEN_OFF_MIN_DEFAULT 5
+#define AUTOLOCK_CFG_PATH     FS_MOUNT_POINT "/autolock.cfg"  /* 2026-11-23 — 콘 화면 자동 잠금(분, 0=안 잠금) 1바이트 */
+#define AUTOLOCK_MIN_DEFAULT  5
 #define DEVICE_CONFIG_VERSION 11 /* 2026-10-21(사용자 설계 — AI 학습용 고정 촬영): 카메라별 슬롯에 수동 노출·게인·AWB 추가
                                     (v9·v10 파일은 읽어서 옮김 — 10은 같은 날 잠깐 쓴 wb_mode 칸, 버림) */
 #define DEVICE_CONFIG_VERSION_V9 9  /* 2026-09-18: 촬영주기/AGC/AEC/XCLK를 전역 스칼라 필드에서
@@ -84,7 +86,8 @@ typedef struct __attribute__((packed)) {
     uint8_t  xclk_mhz;
 } cam_settings_entry_v9_t;
 
-#define CAM_CAPTURE_INTERVAL_SEC_DEFAULT 1800  /* CAM Kconfig 기본(30분)과 동일 */
+#define CAM_CAPTURE_INTERVAL_SEC_DEFAULT 3600  /* 2026-11-23(사용자 결정) — 1시간. 예전 1800(30분)은 10-19 선택지(끄기/30초/1시간/3시간/8시간/12시간)에
+                                                  없어 화면·웹에 "끄기"로 보였음(실제로는 30분마다 찍음). 기본값은 늘 선택지 안의 값이어야 함 */
 /* 2026-09-17(모델-뷰-Dirty 원칙 감사 — "파일/디폴트/Dirty/model/view가 원칙대로") — 예전
  * 값(2)이 실제 드랍다운 프리셋 목록(ui_main.c의 s_response_interval_values = {0,3,10,30,60})에
  * 없어서, 한 번도 설정 안 한 상태에서 팝업을 열면 드랍다운은 0으로 보이는데 applied_idx는
@@ -100,7 +103,12 @@ typedef struct __attribute__((packed)) {
 #define MAN_EXPOSURE_DEFAULT 885
 #define MAN_GAIN_DEFAULT     16
 static const uint16_t s_man_awb_default[3] = { 0x5E0, 0x410, 0x540 };
-#define XCLK_MHZ_DEFAULT 10  /* 2026-08-21 — 24MHz에서 10MHz로 변경. 카메라 고정+동일 밝기
+/* 2026-11-23(사용자 결정) — 기본 20MHz. 왜 20인가: ① 두 센서 드라이버의 JPEG PLL 배수가 XCLK 20MHz 기준(설계 클럭) — 24MHz는
+ * 센서 클럭 20% 초과로 TOP(OV3660) JPEG 깨짐(10-21). ② 10-21 밤 시험(수동 노출·게인 1.0·AWB Sunny)에서 20MHz로 찍은
+ * Side 112·113, TOP 172~174를 사용자가 가장 좋다고 고름. ③ 11-23 — 20MHz에서 자동(AEC/AGC/AWB)이면 세로 줄무늬가 생겨
+ * JPEG이 커지지만(83KB → 240KB, 사진 버퍼 초과 E3002), 수동 설정에서는 줄무늬가 없음(사용자 확인). 아래 08-21의
+ * "20MHz부터 노이즈"도 자동 모드였을 가능성(추측, 확인 안 함) */
+#define XCLK_MHZ_DEFAULT 20  /* 2026-08-21 — 24MHz에서 10MHz로 변경. 카메라 고정+동일 밝기
                                  still-cut 비교 테스트에서 10MHz가 화질 최적점으로 확인됨
                                  (20MHz부터 노이즈 심해짐). UI 드롭다운은 그대로 5/10/20/24MHz
                                  유지, 빌드 시 기본값만 변경(사용자 지시).
@@ -382,6 +390,37 @@ void device_config_set_screen_off_min(uint8_t min)
     FILE *f = fopen(SCREEN_CFG_PATH, "wb");
     if (!f) {
         ESP_LOGW(TAG, "Save failed (fopen): %s", SCREEN_CFG_PATH);
+        return;
+    }
+    fwrite(&min, 1, 1, f);
+    fclose(f);
+}
+
+/* 2026-11-23(사용자 결정 — PIN 잠금) — 화면 자동 꺼짐과 같은 방식(1바이트 파일, 처음 읽을 때 불러옴) */
+static uint8_t s_auto_lock_min = AUTOLOCK_MIN_DEFAULT;
+static bool    s_auto_lock_loaded = false;
+
+uint8_t device_config_get_auto_lock_min(void)
+{
+    if (!s_auto_lock_loaded) {
+        s_auto_lock_loaded = true;
+        FILE *f = fopen(AUTOLOCK_CFG_PATH, "rb");
+        if (f) {
+            uint8_t v = 0;
+            if (fread(&v, 1, 1, f) == 1) s_auto_lock_min = v;
+            fclose(f);
+        }
+    }
+    return s_auto_lock_min;
+}
+
+void device_config_set_auto_lock_min(uint8_t min)
+{
+    s_auto_lock_min = min;
+    s_auto_lock_loaded = true;
+    FILE *f = fopen(AUTOLOCK_CFG_PATH, "wb");
+    if (!f) {
+        ESP_LOGW(TAG, "Save failed (fopen): %s", AUTOLOCK_CFG_PATH);
         return;
     }
     fwrite(&min, 1, 1, f);

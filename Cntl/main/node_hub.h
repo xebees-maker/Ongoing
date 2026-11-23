@@ -166,6 +166,7 @@ typedef struct {
      * 센서값이 같은 메시지에 실려오지만 개념상 분리해둠) */
     bool            has_sensor_data;
     bool            light_on;        /* 2026-10-20 — 캠 조명 테스트 상태(켜기 요청 시 켜짐, 캠이 "꺼짐"을 알려 오면 꺼짐) */
+    int64_t         light_on_ms;     /* 2026-11-23 — 캠의 켜기 ACK를 받은 때(uptime ms), 0 = 아직 안 받음 — 남은 시간 표시 기준 */
     uint8_t         sensor_kind;                      /* sensor_kind_t */
     uint8_t         chan_count;
     uint8_t         chan_type[ESP_NOW_MAX_CHANNELS];
@@ -359,3 +360,5 @@ bool node_hub_get_boril(const uint8_t *mac, node_hub_node_t *out);   /* 2026-11-
  * 켜짐/꺼짐을 알려 오면(요청 응답이든, 잠들기 직전·촬영 뒤 스스로 끈 알림이든) 그 값으로 바뀜 */
 void node_hub_set_cam_light(const uint8_t *mac, bool on);
 bool node_hub_get_cam_light(const uint8_t *mac);
+/* 2026-11-23 — 조명 테스트 남은 초(꺼져 있으면 -1). 켜기 ACK 전이면 상한 그대로(ESP_NOW_CAM_LIGHT_TEST_MAX_SEC) */
+int  node_hub_get_cam_light_left_s(const uint8_t *mac);

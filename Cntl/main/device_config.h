@@ -35,6 +35,9 @@ void     device_config_set_cam_capture_interval_sec(const uint8_t *mac, uint32_t
  * device_config.bin 구조를 바꾸면 버전 불일치로 다른 설정까지 기본값으로 돌아가므로 별도 파일(screen.cfg)에 저장 */
 uint8_t device_config_get_screen_off_min(void);
 void    device_config_set_screen_off_min(uint8_t min);
+/* 2026-11-23 — 콘 화면 자동 잠금(터치 없이 이 분이 지나면 PIN 잠금, 0=안 잠금) */
+uint8_t device_config_get_auto_lock_min(void);
+void    device_config_set_auto_lock_min(uint8_t min);
 
 uint32_t device_config_get_response_interval_sec(void);
 void     device_config_set_response_interval_sec(uint32_t sec);

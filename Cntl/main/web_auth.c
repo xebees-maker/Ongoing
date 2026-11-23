@@ -18,12 +18,14 @@ static const char *TAG = "WEBAUTH";
 
 #define WEB_AUTH_PATH        FS_MOUNT_POINT "/web_auth.bin"
 #define WEB_AUTH_MAGIC       0x57415554u  /* "WAUT" */
-#define WEB_AUTH_VERSION     1u           /* 구조체를 바꾸면 반드시 올림(power_relay 패딩 사고 교훈) */
+/* 구조체를 바꾸면 반드시 올림(power_relay 패딩 사고 교훈). 2026-11-23 2 — 비밀번호(4-32자) → PIN(숫자 4자리). 구조체는 같지만
+ * 예전 비밀번호 파일은 버려야 콘이 처음 PIN 등록을 요구함(PIN이 아닌 비밀번호로는 콘 잠금을 풀 수 없음) */
+#define WEB_AUTH_VERSION     2u
 #define WEB_AUTH_TOKENS      8
 #define WEB_AUTH_TOKEN_LEN   16
 #define WEB_AUTH_COOKIE      "cntl_t"
-#define WEB_AUTH_PW_MIN      4
-#define WEB_AUTH_PW_MAX      32
+#define WEB_AUTH_PIN_LEN     4
+#define WEB_AUTH_PW_MAX      32           /* 본문·해시 버퍼 크기(PIN은 4자리지만 받는 쪽 버퍼는 그대로) */
 #define WEB_AUTH_BODY_MAX    (WEB_AUTH_PW_MAX * 2 + 2)
 /* 2026-10-17(A 목록 4) — 로그인 시도 제한: 같은 IP에서 연속 LIMIT_FAILS번 틀리면 그 IP를 LIMIT_LOCK_SEC 동안 막음(비밀번호 확인 없이 바로 429).
  * 예전엔 실패마다 vTaskDelay 1초 — httpd가 태스크 하나라 그동안 웹 전체가 멈췄음. IP는 최근 LIMIT_SLOTS개만 기억(가장 오래된 것부터 교체) */
@@ -87,6 +89,14 @@ static bool hash_password_locked(const uint8_t salt[16], const char *pw, size_t 
     return st == PSA_SUCCESS && out_len == 32;
 }
 
+/* 2026-11-23(사용자 결정) — PIN = 숫자 정확히 4자리 */
+static bool pin_ok(const char *pin, size_t len)
+{
+    if (len != WEB_AUTH_PIN_LEN) return false;
+    for (size_t i = 0; i < len; i++) if (pin[i] < '0' || pin[i] > '9') return false;
+    return true;
+}
+
 static bool hex_decode(const char *hex, uint8_t *out, size_t out_len)
 {
     if (strlen(hex) != out_len * 2) return false;
@@ -114,11 +124,11 @@ void web_auth_init(void)
         bool ok = fread(s_auth, sizeof(*s_auth), 1, f) == 1;
         fclose(f);
         if (!ok || s_auth->magic != WEB_AUTH_MAGIC || s_auth->version != WEB_AUTH_VERSION) {
-            ESP_LOGW(TAG, "web_auth.bin format mismatch - ignored (web open until a password is set)");
+            ESP_LOGW(TAG, "web_auth.bin format mismatch - ignored (PIN must be set on the CNTL screen)");
             memset(s_auth, 0, sizeof(*s_auth));
         }
     }
-    ESP_LOGI(TAG, "Web login %s", s_auth->has_password ? "enabled" : "not set (web open)");
+    ESP_LOGI(TAG, "PIN %s", s_auth->has_password ? "set" : "not set (web closed until set on the CNTL screen)");
 }
 
 bool web_auth_enabled(void)
@@ -130,8 +140,8 @@ bool web_auth_check(httpd_req_t *req)
 {
     if (!s_auth) return false;
     lock();
-    bool ok = !s_auth->has_password;
-    if (!ok) {
+    bool ok = false;   /* 2026-11-23(사용자 결정) — PIN이 없으면 웹은 열리지 않음(예전: 비밀번호 없으면 누구나) */
+    if (s_auth->has_password) {
         size_t len = sizeof(s_work->cookie);
         uint8_t *tok = s_work->tok;
         if (httpd_req_get_cookie_val(req, WEB_AUTH_COOKIE, s_work->cookie, &len) == ESP_OK &&
@@ -225,10 +235,14 @@ static esp_err_t api_login_post_handler(httpd_req_t *req)
         return send_json(req, "429 Too Many Requests", "{\"ok\":false,\"error\":\"locked\"}");
     }
     if (li >= 0) s_work->limit[li].last_s = now;
-    bool ok = s_auth->has_password && read_body_locked(req);
+    if (!s_auth->has_password) {   /* 콘에서 PIN을 아직 안 정함 — 웹앱은 "콘에서 PIN을 먼저 등록" 안내 */
+        unlock();
+        return send_json(req, "403 Forbidden", "{\"ok\":false,\"error\":\"nopin\"}");
+    }
+    bool ok = read_body_locked(req);
     if (ok) {
         size_t pw_len = strlen(s_work->body);
-        ok = pw_len >= WEB_AUTH_PW_MIN && pw_len <= WEB_AUTH_PW_MAX &&
+        ok = pin_ok(s_work->body, pw_len) &&
              hash_password_locked(s_auth->salt, s_work->body, pw_len) &&
              memcmp(s_work->digest, s_auth->hash, 32) == 0;
     }
@@ -254,17 +268,13 @@ static esp_err_t api_login_post_handler(httpd_req_t *req)
     return ret;
 }
 
-/* POST /api/password — 처음(비밀번호 없음): 본문 = 새 비밀번호, 바로 로그인 토큰도 줌.
- * 이미 있으면: 인증 필요 + 본문 = "기존\n새것" */
-bool web_auth_set_password_local(const char *pw)
+bool web_auth_set_pin_local(const char *pin)
 {
-    if (!s_auth || !pw) return false;
-    size_t len = strlen(pw);
-    if (len < WEB_AUTH_PW_MIN || len > WEB_AUTH_PW_MAX) return false;
+    if (!s_auth || !pin || !pin_ok(pin, strlen(pin))) return false;
     lock();
     uint8_t *salt = s_work->salt;
     esp_fill_random(salt, 16);
-    bool ok = hash_password_locked(salt, pw, len);
+    bool ok = hash_password_locked(salt, pin, WEB_AUTH_PIN_LEN);
     if (ok) {
         s_auth->magic = WEB_AUTH_MAGIC;
         s_auth->version = WEB_AUTH_VERSION;
@@ -276,52 +286,41 @@ bool web_auth_set_password_local(const char *pw)
         ok = save_locked();
     }
     unlock();
-    if (ok) ESP_LOGI(TAG, "Web password set (CNTL screen)");
+    if (ok) ESP_LOGI(TAG, "PIN set (CNTL screen)");
     return ok;
 }
 
-bool web_auth_clear_password_local(void)
+bool web_auth_verify_pin_local(const char *pin)
 {
-    if (!s_auth) return false;
+    if (!s_auth || !pin || !pin_ok(pin, strlen(pin))) return false;
     lock();
-    s_auth->magic = WEB_AUTH_MAGIC;
-    s_auth->version = WEB_AUTH_VERSION;
-    memset(s_auth->salt, 0, sizeof(s_auth->salt));
-    memset(s_auth->hash, 0, sizeof(s_auth->hash));
-    memset(s_auth->tokens, 0, sizeof(s_auth->tokens));
-    s_auth->next_slot = 0;
-    s_auth->has_password = 0;
-    bool ok = save_locked();
+    bool ok = s_auth->has_password && hash_password_locked(s_auth->salt, pin, WEB_AUTH_PIN_LEN) &&
+              memcmp(s_work->digest, s_auth->hash, 32) == 0;
     unlock();
-    if (ok) ESP_LOGI(TAG, "Web password removed (CNTL screen)");
     return ok;
 }
 
+/* POST /api/password — PIN 바꾸기. 인증 필요 + 본문 = "지금PIN\n새PIN"(2026-11-23: 처음 정하기는 콘 화면에서만) */
 static esp_err_t api_password_post_handler(httpd_req_t *req)
 {
     if (!s_auth) return send_json(req, "500 Internal Server Error", "{\"ok\":false}");
-    if (web_auth_enabled() && !web_auth_check(req)) return web_auth_reject(req);
+    if (!web_auth_check(req)) return web_auth_reject(req);
     lock();
     bool ok = read_body_locked(req);
     const char *new_pw = s_work->body;
-    /* 2026-11-22 버그수정 — 비밀번호가 없을 때 웹앱이 "지금 비밀번호(빈 칸) + 줄바꿈 + 새 비밀번호"로 보내면 줄바꿈까지
-     * 비밀번호로 저장돼 로그인이 안 됐음(웹앱은 아예 빈 "지금" 칸이면 보내지도 않았음). 없을 때는 줄바꿈 뒤만 새 비밀번호로 봄 */
-    if (ok && !s_auth->has_password) {
-        char *nl = strchr(s_work->body, '\n');
-        if (nl) new_pw = nl + 1;
-    }
-    if (ok && s_auth->has_password) {
+    if (ok) {
         char *nl = strchr(s_work->body, '\n');
         ok = nl != NULL;
         if (ok) {
             *nl = '\0';
             new_pw = nl + 1;
             size_t old_len = strlen(s_work->body);
-            ok = hash_password_locked(s_auth->salt, s_work->body, old_len) && memcmp(s_work->digest, s_auth->hash, 32) == 0;
+            ok = pin_ok(s_work->body, old_len) && hash_password_locked(s_auth->salt, s_work->body, old_len) &&
+                 memcmp(s_work->digest, s_auth->hash, 32) == 0;
         }
     }
     size_t new_len = ok ? strlen(new_pw) : 0;
-    ok = ok && new_len >= WEB_AUTH_PW_MIN && new_len <= WEB_AUTH_PW_MAX;
+    ok = ok && pin_ok(new_pw, new_len);
     if (ok) {
         uint8_t *salt = s_work->salt;
         esp_fill_random(salt, 16);
@@ -331,7 +330,7 @@ static esp_err_t api_password_post_handler(httpd_req_t *req)
             s_auth->version = WEB_AUTH_VERSION;
             memcpy(s_auth->salt, salt, 16);
             memcpy(s_auth->hash, s_work->digest, 32);
-            memset(s_auth->tokens, 0, sizeof(s_auth->tokens));  /* 비밀번호가 바뀌면 다른 기기는 다시 로그인 */
+            memset(s_auth->tokens, 0, sizeof(s_auth->tokens));  /* PIN이 바뀌면 다른 기기는 다시 로그인 */
             s_auth->next_slot = 0;
             s_auth->has_password = 1;
             ok = issue_token_locked(req);  /* save_locked 포함 */
@@ -341,7 +340,7 @@ static esp_err_t api_password_post_handler(httpd_req_t *req)
     esp_err_t ret = ok ? send_json(req, NULL, "{\"ok\":true}")
                        : send_json(req, "400 Bad Request", "{\"ok\":false}");
     unlock();
-    if (ok) ESP_LOGI(TAG, "Web password set");
+    if (ok) ESP_LOGI(TAG, "PIN changed (web)");
     return ret;
 }
 

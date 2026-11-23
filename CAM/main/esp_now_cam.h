@@ -63,6 +63,9 @@ void esp_now_cam_set_status_led(gpio_num_t pin);
  */
 /* 2026-10-20 — 시험 조명을 캠이 스스로 끌 때 부름(콘 스위치 동기화, esp_now_cam.c 주석) */
 void esp_now_cam_notify_light_off(void);
+/* 2026-11-23(사용자 결정) — 콘이 켠 시험 조명이 켜져 있으면 true(그동안 캠은 잠들지 않고 Live처럼 체크인).
+ * 켠 지 30초가 지났으면 여기서 끄고 콘에 알린 뒤 false */
+bool esp_now_cam_light_test_hold(void);
 bool esp_now_cam_push_captured_photo(const uint8_t *buf, size_t len, cam_capture_kind_t kind);
 
 /**

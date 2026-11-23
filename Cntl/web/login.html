@@ -38,7 +38,7 @@
 <form id="f" autocomplete="on">
   <input type="text" name="username" autocomplete="username" value="cntl" class="hidden" readonly>
   <div class="pwwrap">
-    <input id="pw" type="password" name="password" autocomplete="current-password">
+    <input id="pw" type="password" name="password" autocomplete="current-password" inputmode="numeric" pattern="[0-9]*" maxlength="4">
     <button id="eye" type="button" class="eye" aria-label="show password">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>
@@ -52,7 +52,9 @@
 <script>
 (function () {
   var T = /*@LOGIN_TITLE@*/;
-  var W = { PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'], LOGIN_LOCKED: ['로그인 시도가 너무 많습니다. 5분 뒤 다시 시도하세요', 'Too many attempts. Try again in 5 minutes'] };
+  /* 2026-11-23(사용자 결정) — 비밀번호 대신 콘 PIN(숫자 4자리). 콘에서 PIN을 아직 안 정했으면 403 nopin */
+  var W = { PASSWORD: ['PIN(숫자 4자리)', 'PIN (4 digits)'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['PIN이 맞지 않습니다', 'Wrong PIN'], LOGIN_LOCKED: ['로그인 시도가 너무 많습니다. 5분 뒤 다시 시도하세요', 'Too many attempts. Try again in 5 minutes'],
+            NOPIN: ['콘 화면에서 PIN을 먼저 등록하세요', 'Set up the PIN on the controller screen first'] };
   var lang = 'ko';
   try { lang = localStorage.getItem('lang') || ((navigator.language || '').toLowerCase().indexOf('ko') === 0 ? 'ko' : 'en'); } catch (e) {}
   var li = lang === 'ko' ? 0 : 1;
@@ -73,10 +75,11 @@
     fetch('api/login', { method: 'POST', body: $('pw').value, credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'text/plain' } })
       .then(function (r) {
         if (r.status === 429) throw new Error('locked');
+        if (r.status === 403) throw new Error('nopin');
         if (!r.ok) throw new Error('login');
         location.replace('app');
       })
-      .catch(function (e) { $('msg').textContent = W[e.message === 'locked' ? 'LOGIN_LOCKED' : 'LOGIN_FAILED'][li]; });
+      .catch(function (e) { $('msg').textContent = W[e.message === 'locked' ? 'LOGIN_LOCKED' : e.message === 'nopin' ? 'NOPIN' : 'LOGIN_FAILED'][li]; });
   });
 })();
 </script>

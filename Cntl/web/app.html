@@ -239,7 +239,7 @@
 <form id="loginView" class="center hidden" autocomplete="on">
   <input type="text" name="username" autocomplete="username" value="cntl" class="hidden" readonly>
   <div class="pwwrap">
-    <input id="pw" type="password" name="password" autocomplete="current-password" data-w-ph="PASSWORD">
+    <input id="pw" type="password" name="password" autocomplete="current-password" data-w-ph="PIN_PH" inputmode="numeric" pattern="[0-9]*" maxlength="4">
     <button id="pwEye" type="button" class="eye" aria-label="show password">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>
@@ -325,7 +325,9 @@
   var ERRDESC = /*@ERRDESC@*/;
   /* 웹 전용 문구 */
   var W = {
-    PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['비밀번호가 맞지 않습니다', 'Wrong password'], LOGIN_LOCKED: ['로그인 시도가 너무 많습니다. 5분 뒤 다시 시도하세요', 'Too many attempts. Try again in 5 minutes'],
+    PASSWORD: ['비밀번호', 'Password'], LOGIN: ['로그인', 'Log in'], LOGIN_FAILED: ['PIN이 맞지 않습니다', 'Wrong PIN'],
+    /* 2026-11-23(사용자 결정) — 웹 로그인 = 콘 PIN(숫자 4자리). PASSWORD는 원격 브로커 접속 칸에 그대로 씀 */
+    PIN_PH: ['PIN(숫자 4자리)', 'PIN (4 digits)'], NOPIN: ['콘 화면에서 PIN을 먼저 등록하세요', 'Set up the PIN on the controller screen first'], LOGIN_LOCKED: ['로그인 시도가 너무 많습니다. 5분 뒤 다시 시도하세요', 'Too many attempts. Try again in 5 minutes'],
     LOCAL_IN_USE: ['제어기 화면에서 사용 중입니다', 'CNTL is being used on its screen'], RECONNECT: ['다시 연결', 'Reconnect'],
     RESTORING: ['측정 기록을 SD로 복원하는 중입니다. 몇 분 걸리며, 끝나면 자동으로 돌아갑니다',
                 'Restoring measurement records to SD. This takes a few minutes and returns automatically'],
@@ -337,9 +339,10 @@
               ['SD 오류', 'SD error'], ['배터리 부족', 'Low battery'], ['CAN 버스 이상', 'CAN bus fault']],
     TOPIC: ['ntfy 토픽', 'ntfy topic'], CLICK: ['알림을 누르면 열 주소', 'Click URL'], TEST_SEND: ['시험 알림 보내기', 'Send test'],
     SENT: ['보냈습니다', 'Sent'], SAVED: ['저장했습니다', 'Saved'], INVALID: ['형식이 맞지 않습니다', 'Invalid format'],
-    TIME_PHONE: ['휴대폰 시각으로', 'Use phone time'], PW_OLD: ['지금 비밀번호', 'Current password'], PW_NEW: ['새 비밀번호', 'New password'],
-    PW_CHANGE: ['비밀번호 변경', 'Change password'], PW_CHANGED: ['비밀번호를 바꿨습니다', 'Password changed'],
-    PW_FAIL: ['비밀번호를 바꾸지 못했습니다', 'Password not changed'], LOGOUT_ALL: ['모든 기기 로그아웃', 'Log out all devices'],
+    TIME_PHONE: ['휴대폰 시각으로', 'Use phone time'], PW_OLD: ['지금 PIN', 'Current PIN'], PW_NEW: ['새 PIN(숫자 4자리)', 'New PIN (4 digits)'], PW_NEW2: ['새 PIN 한 번 더', 'New PIN again'],
+    PW_CHANGE: ['PIN 변경', 'Change PIN'], PW_CHANGED: ['PIN을 바꿨습니다. 반드시 기억하세요', 'PIN changed. Be sure to remember it'],
+    PW_FAIL: ['PIN을 바꾸지 못했습니다(지금 PIN 확인)', 'PIN not changed (check the current PIN)'],
+    PW_FORMAT: ['PIN은 숫자 4자리입니다', 'The PIN is 4 digits'], PW_MISMATCH: ['새 PIN 두 개가 다릅니다', 'The new PINs do not match'], LOGOUT_ALL: ['모든 기기 로그아웃', 'Log out all devices'],
     LOGOUT_ALL_CONFIRM: ['모든 기기에서 로그아웃합니다. 이 기기도 다시 로그인해야 합니다.', 'All devices will be logged out, including this one.'],
     RESTARTING: ['재시작합니다', 'Restarting'], PHOTO_ARRIVED: ['새 사진이 도착했습니다', 'New photo arrived'],
     NOT_PUSHED: ['보내지 않음(꺼진 종류)', 'Not sent (type off)'], NO_ALARMS: ['알림이 없습니다', 'No notifications'],
@@ -399,11 +402,12 @@
     $('restoreView').classList.toggle('hidden', v !== 'restore');
     $('mainView').classList.toggle('hidden', v !== 'main');
     if (v !== 'main') { clearTimeout(timer); wsStop(); }
+    /* 2026-11-23(사용자 — 하위 페이지에서 콘이 웹을 끊으면 "연결 끊어짐"이 안 나옴) — 하위 페이지(#sheet)는 화면 전체를 덮는 맨 위 층이라
+     * 주화면이 아닌 화면(넘겨받음·로그인·원격 설정·복원 중)이 그 뒤에 가려졌음. 바꾸기 전에 닫음(콘에 다시 묻지 않고 닫기만).
+     * 주화면 위의 확인창(#modal)·전체 화면 보기(#viewer)도 같은 덮개라 realCloseSheet가 같이 닫음 */
+    if (v !== 'main') realCloseSheet(true);
     clearTimeout(restoreTimer);
-    if (v === 'restore') {   /* 2026-10-22 — 열린 팝업은 닫고 5초마다 끝났는지 물어봄 */
-      if (!$('sheet').classList.contains('hidden')) realCloseSheet();
-      restoreTimer = setTimeout(restoreCheck, 5000);
-    }
+    if (v === 'restore') restoreTimer = setTimeout(restoreCheck, 5000);   /* 2026-10-22 — 5초마다 끝났는지 물어봄 */
     if (v === 'login') setTimeout(function () { $('pw').focus(); }, 0);
   }
 
@@ -702,7 +706,7 @@
   }
 
   /* 촬영 주기 — 콘 format_capture_interval과 같게(값 목록 = ui_main.c s_capture_interval_values, 문구 = STR_OPT_CAPTURE_INTERVAL_LIST) */
-  var CAPTURE_VALUES = [0, 60, 600, 3600, 10800, 43200];   /* 10-09 — 콘 상용 주기와 같게 */
+  var CAPTURE_VALUES = [0, 30, 3600, 10800, 28800, 43200];   /* 2026-11-23 — 콘 s_capture_interval_values(10-19)와 같게. 예전 10-09 목록이 남아 있었음 */
   function captureText(sec) {
     var i = CAPTURE_VALUES.indexOf(sec);
     if (i < 0) return sec + 's';
@@ -995,6 +999,7 @@
     if (view !== 'main') show('main');
     last = d;
     render(d);
+    syncDevLight(d);
     $('conn').textContent = '';
     $('conn').className = '';
   }
@@ -1068,6 +1073,7 @@
     xfetch('api/login', { method: 'POST', body: $('pw').value, credentials: 'same-origin', cache: 'no-store', headers: { 'Content-Type': 'text/plain' } })
       .then(function (r) {
         if (r.status === 429) throw new Error('locked');
+        if (r.status === 403) throw new Error('nopin');
         if (!r.ok) throw new Error('login');
         $('pw').value = '';
         $('pw').type = 'password';
@@ -1075,7 +1081,7 @@
         show('main');
         poll();
       })
-      .catch(function (e) { $('loginMsg').textContent = Wt(e.message === 'locked' ? 'LOGIN_LOCKED' : 'LOGIN_FAILED'); });
+      .catch(function (e) { $('loginMsg').textContent = Wt(e.message === 'locked' ? 'LOGIN_LOCKED' : e.message === 'nopin' ? 'NOPIN' : 'LOGIN_FAILED'); });
   });
 
   /* 비밀번호 보기/숨기기(눈 아이콘) — 사선이 있으면 숨김 상태 */
@@ -1132,7 +1138,7 @@
     $('sheet').classList.remove('hidden');
     renderFn();
   }
-  function realCloseSheet() {
+  function realCloseSheet(noPoll) {   /* noPoll — show()가 주화면 아닌 화면으로 바꾸며 닫을 때(11-23) */
     sheetRender = null;
     $('sheet').classList.add('hidden');
     $('sheetBody').innerHTML = '';
@@ -1143,7 +1149,7 @@
     clearInterval(statsTimer);
     clearInterval(setTimer);
     clearInterval(logTimer);
-    poll();
+    if (!noPoll) poll();
     setTimeout(fixZoom, 100);
   }
   function closeSheet() { realCloseSheet(); }
@@ -1171,6 +1177,32 @@
 
   /* ── 장치 팝업(콘 build_device_popup과 같은 항목). 선택지는 바꾸는 즉시 저장, 별명만 Apply(콘 규칙) ── */
   var dev = null;
+  /* 2026-11-23(사용자 지시) — 캠이 조명을 스스로 끄면(30초 상한·촬영 뒤·잠들기 전) 열려 있는 장치 팝업의 스위치도 끔. 주화면 내용의 light로 맞춤 */
+  function syncDevLight(d) {
+    if (!dev || sheetRender !== renderDevice || !d || !d.nodes) return;
+    d.nodes.forEach(function (n) {
+      if (n.mac !== dev.mac || n.light === undefined) return;
+      dev.light = n.light;
+      var sw = $('dLight');
+      if (sw && sw.checked !== n.light) sw.checked = n.light;
+      setLightLeft(n.light ? n.light_left : -1);
+    });
+  }
+  /* 2026-11-23(사용자 지시 — 30초 뒤 꺼짐 표현 + 카운팅) — 콘이 준 남은 초를 기준으로 웹이 1초마다 셈(원격은 5초 조회라 그 사이를 채움).
+   * 끝 시각만 기억하고 그때그때 계산 */
+  var lightEnd = 0, lightTick = null;
+  function lightLeftText() {
+    var el = $('dLightLeft');
+    if (!el || sheetRender !== renderDevice) { clearInterval(lightTick); lightTick = null; return; }
+    var max = (dev && dev.light_max) || 30;
+    var left = lightEnd ? Math.max(0, Math.ceil((lightEnd - Date.now()) / 1000)) : max;
+    el.textContent = fmt(S('STR_FMT_LIGHT_OFF_IN'), left);
+  }
+  function setLightLeft(left) {
+    lightEnd = (left != null && left >= 0) ? Date.now() + left * 1000 : 0;
+    lightLeftText();
+    if (lightEnd && !lightTick) lightTick = setInterval(lightLeftText, 1000);
+  }
   function openDevice(mac) {
     api('api/device?mac=' + mac).then(function (d) { dev = d; openSheet(renderDevice); }).catch(function () {});
   }
@@ -1197,7 +1229,8 @@
            '<label>' + esc(S('STR_LABEL_MAN_GAIN')) + '</label>' + mb(1) + '</div>' +
            '<div class="field"><label>' + esc(S('STR_LABEL_MAN_AWB')) + '</label>' +
            esc(S('STR_LABEL_MAN_AWB_R')) + mb(2) + esc(S('STR_LABEL_MAN_AWB_G')) + mb(3) + esc(S('STR_LABEL_MAN_AWB_B')) + mb(4) + '</div></div>';
-      h += '<div class="field"><label>' + esc(S('STR_LABEL_LIGHT_TEST')) + '</label>' + toggleHtml('dLight', !!d.light) + '</div>';
+      h += '<div class="field"><label>' + esc(S('STR_LABEL_LIGHT_TEST')) + '</label>' + toggleHtml('dLight', !!d.light) +
+           ' <span class="sub" id="dLightLeft"></span></div>';   /* 2026-11-23(사용자 지시) — "N초 뒤 꺼짐" */
     } else {
       h += '<div class="field"><label>' + esc(S('STR_LABEL_SENS_MEASURE_INTERVAL')) + '</label><select id="dInterval">' +
            optionsHtml('STR_OPT_SENS_MEASURE_INTERVAL_LIST', d.opt_interval, d.interval_s) + '</select></div>';
@@ -1246,7 +1279,8 @@
         });
       });
       $('dXclk').addEventListener('change', function () { d.xclk = +this.value; setKey('xclk', this.value); });
-      $('dLight').addEventListener('change', function () { setKey('light', this.checked ? 1 : 0); });
+      $('dLight').addEventListener('change', function () { setKey('light', this.checked ? 1 : 0); setLightLeft(this.checked ? ((dev && dev.light_max) || 30) : -1); });
+      setLightLeft(d.light ? d.light_left : -1);
     } else {
       $('dInterval').addEventListener('change', function () { d.interval_s = +this.value; setKey('interval', this.value); });
       if ($('dCalib')) $('dCalib').addEventListener('click', function () {   /* 10-13 — 콘 cb_sens_calib_reset_clicked와 같음 */
@@ -1991,9 +2025,11 @@
     h += '<div class="field"><label>' + esc(Wt('CLICK')) + '</label><input type="text" id="stClick" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="159" value="' + esc(n.click) + '"></div>';
     h += '<div class="sfoot"><button id="stNtTest">' + esc(Wt('TEST_SEND')) + '</button><button id="stNtApply" class="primary">' + esc(S('STR_BTN_APPLY')) + '</button></div>';
     h += gsub(Wt('SECURITY'));
-    /* 11-22 — 비밀번호가 아직 없으면(cfg.pw false) "지금 비밀번호" 칸 없이 새 비밀번호만 — 예전엔 빈 칸이면 버튼이 아무 일도 안 했음 */
-    if (cfg.pw) h += '<div class="field"><label>' + esc(Wt('PW_OLD')) + '</label><input type="password" id="stPwOld" autocomplete="current-password"></div>';
-    h += '<div class="field"><label>' + esc(Wt('PW_NEW')) + '</label><input type="password" id="stPwNew" autocomplete="new-password"></div>';
+    /* 2026-11-23(사용자 결정) — PIN 바꾸기(처음 등록은 콘 화면에서만이라 로그인했으면 PIN은 늘 있음). 지금 PIN + 새 PIN 두 번 */
+    var pinAttr = ' inputmode="numeric" pattern="[0-9]*" maxlength="4"';
+    h += '<div class="field"><label>' + esc(Wt('PW_OLD')) + '</label><input type="password" id="stPwOld" autocomplete="current-password"' + pinAttr + '></div>';
+    h += '<div class="field"><label>' + esc(Wt('PW_NEW')) + '</label><input type="password" id="stPwNew" autocomplete="new-password"' + pinAttr + '></div>';
+    h += '<div class="field"><label>' + esc(Wt('PW_NEW2')) + '</label><input type="password" id="stPwNew2" autocomplete="new-password"' + pinAttr + '></div>';
     h += '<div class="sfoot"><button id="stPwBtn" class="primary">' + esc(Wt('PW_CHANGE')) + '</button></div>';
     h += '<div class="sfoot" style="border-top:1px solid var(--line)"><button id="stLogoutAll" class="danger">' + esc(Wt('LOGOUT_ALL')) + '</button></div>';
     $('sheetBody').innerHTML = h;
@@ -2056,11 +2092,12 @@
       post('api/notify/test').then(function () { toast(Wt('SENT')); }).catch(function (e) { if (!(e && e.handled)) toast('Error'); });
     });
     on('stPwBtn', 'click', function () {
-      var o = cfg.pw ? $('stPwOld').value : '', nw = $('stPwNew').value;
-      if ((cfg.pw && !o) || !nw) return;
-      post('api/password', cfg.pw ? o + '\n' + nw : nw).then(function () {
+      var o = $('stPwOld').value, nw = $('stPwNew').value, nw2 = $('stPwNew2').value;
+      if (!/^[0-9]{4}$/.test(o) || !/^[0-9]{4}$/.test(nw)) { toast(Wt('PW_FORMAT')); return; }
+      if (nw !== nw2) { toast(Wt('PW_MISMATCH')); return; }
+      post('api/password', o + '\n' + nw).then(function () {
         toast(Wt('PW_CHANGED'));
-        if (!cfg.pw) { cfg.pw = true; renderSettings(); } else { $('stPwOld').value = ''; $('stPwNew').value = ''; }
+        $('stPwOld').value = ''; $('stPwNew').value = ''; $('stPwNew2').value = '';
       })
         .catch(function (e) { if (!(e && e.handled)) toast(Wt('PW_FAIL')); });
     });

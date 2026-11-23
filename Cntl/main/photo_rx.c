@@ -75,7 +75,7 @@ static sr_session_t s_sessions[SR_SESSIONS];
  * 이제 캠마다 버퍼를 하나 미리 잡고 받는 동안은 할당이 없음. 크기는 해상도로 정함:
  *   해상도 단계(UXGA → SXGA → XGA → SVGA) 중 모든 캠이 같은 단계(센서 최대를 넘지 않게)일 때 버퍼 합이 PSRAM에 들어가는
  *   가장 높은 단계. 남길 PSRAM(CAMBUF_PSRAM_RESERVE)은 사진 보기·통계·웹이 최악에 쓰는 양.
- *   버퍼 = 가로×세로×2바이트 ÷ 16(q=12 최악 실측 약 1/19에 여유) — UXGA 약 240KB.
+ *   버퍼 = 가로×세로×2바이트 ÷ 10(11-23에 ÷16에서 바꿈 — res_buf_bytes 주석) — UXGA 약 376KB.
  * 캠은 PAIR_ACK로 센서 PID·최대 해상도를 알려 주고, 콘은 정한 해상도를 CAM_CONFIG_SET.frame_size로 보냄. 정보를 안 보내는 옛
  * 펌웨어 캠은 해상도를 정해 줄 수 없어 UXGA 크기 버퍼만 잡음(그 캠이 더 크게 찍으면 거절됨). 버퍼보다 큰 사진은 받지 않음 */
 #define CAMBUF_MAX            4
@@ -100,7 +100,9 @@ static const struct { uint8_t fs; uint16_t w, h; } s_res_ladder[] = {
 
 static size_t res_buf_bytes(int level)
 {
-    size_t b = (size_t)s_res_ladder[level].w * s_res_ladder[level].h * 2 / 16;
+    /* 2026-11-23(사용자 결정 — 버퍼 키움) — ÷16에서 ÷10으로(UXGA 약 236KB → 376KB). XCLK 20MHz 자동 모드의 세로 줄무늬로
+     * 같은 장면 UXGA가 240KB를 넘어 E3002·4005가 났음(위 주석의 1/19 실측은 줄무늬 없는 사진) */
+    size_t b = (size_t)s_res_ladder[level].w * s_res_ladder[level].h * 2 / 10;
     return (b + 4095) & ~(size_t)4095;
 }
 

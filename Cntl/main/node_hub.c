@@ -1378,6 +1378,17 @@ static void recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, int le
          * photo_rx.c로 넘김(2026-09-26 — 캠 SD 제거로 목록/삭제 메시지는 삭제) */
         photo_rx_on_recv(msg_type, info ? info->src_addr : NULL, data, len);
 
+    } else if (msg_type == ESP_NOW_MSG_CAM_LIGHT_ACK) {
+        /* 2026-11-23(사용자 지시 — 남은 시간 표시) — 캠이 켜기를 받은 때부터 셈(재시도로 ACK가 또 와도 처음 것 기준) */
+        if (len < (int)sizeof(esp_now_cam_light_t) || !info) return;
+        const esp_now_cam_light_t *lm = (const esp_now_cam_light_t *)data;
+        if (lm->on) {
+            xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+            node_hub_node_t *ln = find_node(info->src_addr);
+            if (ln && ln->light_on && ln->light_on_ms == 0) ln->light_on_ms = esp_timer_get_time() / 1000;
+            xSemaphoreGive(s_nodes_mutex);
+        }
+
     } else if (msg_type == ESP_NOW_MSG_CAM_LIGHT_STATE) {
         /* 2026-10-20(사용자 결정) — 캠이 시험 조명을 스스로 끈 알림(node_hub.h 주석) */
         if (len < (int)sizeof(esp_now_cam_light_t) || !info) return;
@@ -1710,8 +1721,28 @@ void node_hub_set_cam_light(const uint8_t *mac, bool on)
 {
     xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
     node_hub_node_t *n = find_node(mac);
-    if (n) n->light_on = on;
+    if (n) {
+        if (!on || !n->light_on) n->light_on_ms = 0;   /* 새로 켬 = ACK 기다림 */
+        n->light_on = on;
+    }
     xSemaphoreGive(s_nodes_mutex);
+}
+
+int node_hub_get_cam_light_left_s(const uint8_t *mac)
+{
+    xSemaphoreTake(s_nodes_mutex, portMAX_DELAY);
+    node_hub_node_t *n = find_node(mac);
+    int left = -1;
+    if (n && n->light_on) {
+        left = ESP_NOW_CAM_LIGHT_TEST_MAX_SEC;
+        if (n->light_on_ms) {
+            int64_t el = esp_timer_get_time() / 1000 - n->light_on_ms;
+            left = ESP_NOW_CAM_LIGHT_TEST_MAX_SEC - (int)(el / 1000);
+            if (left < 0) left = 0;
+        }
+    }
+    xSemaphoreGive(s_nodes_mutex);
+    return left;
 }
 
 bool node_hub_get_cam_light(const uint8_t *mac)

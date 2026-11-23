@@ -454,6 +454,9 @@ typedef struct __attribute__((packed)) {
     uint8_t msg_type;
     uint8_t on;   /* 1 = 켬, 0 = 끔 */
 } esp_now_cam_light_t;
+/* 2026-11-23(사용자 결정) — 시험 조명은 캠이 켠 뒤 이 시간이 지나면 스스로 끔(그동안 캠은 잠들지 않음). 콘은 켜기 ACK를 받은
+ * 때부터 같은 값으로 남은 시간을 보여 줌 */
+#define ESP_NOW_CAM_LIGHT_TEST_MAX_SEC 30
 
 /* 채널 종류 — 노드가 실제로 붙인 센서가 무엇을 재는지에 대응.
  * 새 센서가 새로운 물리량을 재면 여기에 하나 추가하면 됨(프로토콜 구조 자체는 안 바뀜). */
