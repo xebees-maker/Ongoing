@@ -79,6 +79,11 @@
   .pwwrap input { padding-right:44px; }
   .eye { position:absolute; right:4px; top:50%; transform:translateY(-50%); border:none; padding:6px; color:var(--muted); line-height:0; }
   .msg { font-size:13px; color:var(--red); min-height:18px; }
+  .sitenote { display:flex; align-items:flex-start; gap:8px; margin:8px 12px 0; padding:8px 10px; border-radius:8px; font-size:13px;
+              background:var(--card); border:1px solid var(--line); }
+  .sitenote span { flex:1; }
+  .sitenote.warn { border-color:var(--amber); color:#b45309; }
+  .sitenote .xbtn { font-size:16px; padding:0 4px; }
   .hidden { display:none !important; }
   /* 팝업 = 전체 화면 시트(콘 규칙: 닫기는 오른쪽 위 X, 선택지는 아래 버튼) */
   .sheet { position:fixed; inset:0; z-index:20; background:var(--bg); overflow-y:auto; -webkit-overflow-scrolling:touch;
@@ -251,24 +256,12 @@
   <div id="loginMsg" class="msg"></div>
 </form>
 
-<!-- 2026-11-22(3단계 읽기 터널) — 밖(정적 호스팅)에서 연 웹앱만: 브로커 접속 정보. 브라우저(localStorage)에 저장 -->
-<form id="remoteView" class="center hidden" autocomplete="on">
+<!-- 2026-11-22(3단계 읽기 터널) — 밖(정적 호스팅)에서 연 웹앱만. 2026-11-23(사용자 결정) — 접속 정보 입력 칸 없앰:
+     콘 화면 QR(주소 뒤 #b,s,u,p)로만 받음. 저장된 정보가 없거나 틀리면 이 안내 -->
+<div id="remoteView" class="center hidden">
   <div data-w="RM_SETUP"></div>
-  <input id="rmUrl" type="text" data-w-ph="RM_BROKER" autocapitalize="off" autocorrect="off" spellcheck="false">
-  <input id="rmSite" type="text" data-w-ph="RM_SITE" autocapitalize="off" autocorrect="off" spellcheck="false">
-  <input id="rmUser" type="text" name="username" autocomplete="username" data-w-ph="RM_USER" autocapitalize="off" autocorrect="off" spellcheck="false">
-  <div class="pwwrap">
-    <input id="rmPw" type="password" name="password" autocomplete="current-password" data-w-ph="PASSWORD">
-    <button id="rmPwEye" type="button" class="eye" aria-label="show password">
-      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>
-        <line id="rmPwEyeSlash" x1="3" y1="21" x2="21" y2="3"/>
-      </svg>
-    </button>
-  </div>
-  <button type="submit" class="primary" data-w="RM_CONNECT"></button>
   <div id="rmMsg" class="msg"></div>
-</form>
+</div>
 
 <!-- 콘에서 넘겨받음 -->
 <div id="localView" class="center hidden">
@@ -284,6 +277,7 @@
 <!-- 주화면 — 콘 판넬 순서: Summary → Power Control → Sensor → Camera -->
 <div id="mainView" class="hidden">
   <div id="conn"></div>
+  <div id="siteNote" class="sitenote hidden"><span id="siteNoteTxt"></span><button id="siteNoteX" class="xbtn" aria-label="close">&#x2715;</button></div>
   <main>
     <section>
       <h2 data-s="STR_PANEL_SUMMARY"></h2>
@@ -345,8 +339,13 @@
     PW_FORMAT: ['PIN은 숫자 4자리입니다', 'The PIN is 4 digits'], PW_MISMATCH: ['새 PIN 두 개가 다릅니다', 'The new PINs do not match'],
     RESTARTING: ['재시작합니다', 'Restarting'], PHOTO_ARRIVED: ['새 사진이 도착했습니다', 'New photo arrived'],
     NOT_PUSHED: ['보내지 않음(꺼진 종류)', 'Not sent (type off)'], NO_ALARMS: ['알림이 없습니다', 'No notifications'],
-    RM_SETUP: ['원격 접속', 'Remote access'], RM_BROKER: ['브로커 주소(wss://...)', 'Broker URL (wss://...)'], RM_SITE: ['현장 이름', 'Site name'],
-    RM_USER: ['사용자', 'User'], RM_CONNECT: ['연결', 'Connect'], RM_FAILED: ['브로커에 연결하지 못했습니다', 'Could not connect to the broker'],
+    /* 2026-11-23(사용자 결정) — 원격 접속 정보는 콘 화면 QR로만 */
+    RM_SETUP: ['콘 화면 요약의 웹 주소를 누르면 나오는 QR을 휴대폰 카메라로 찍으세요.', 'On the controller, tap the web address in the summary and scan the QR code with your phone camera.'],
+    RM_FAILED: ['접속 정보가 맞지 않습니다. 콘 화면의 QR을 다시 찍으세요.', 'The connection details are not valid. Scan the QR code on the controller again.'],
+    SITE_LOCAL: ['현장 접속 중입니다. 콘이 서버에 연결되지 않아 이 Wi-Fi 안에서만 쓸 수 있고, 밖에서는 접속되지 않습니다.',
+                 'On-site connection. The controller is not connected to the server, so this works only on this Wi-Fi, not from outside.'],
+    SITE_CLOUD: ['콘이 서버에 연결됐습니다. 밖에서도 쓰려면 콘 화면의 QR을 다시 찍으세요.',
+                 'The controller is now connected to the server. To use it from outside, scan the QR code on the controller again.'],
     RM_READONLY: ['원격 접속에서는 볼 수만 있습니다', 'Remote access is view-only'],
     RM_NO_BROKER: ['브로커에 연결되지 않음', 'Broker not reachable'], RM_NO_SITE: ['이 현장 이름의 제어기가 없음', 'No CNTL with this site name'],
     RM_CNTL_OFF: ['제어기가 브로커에 연결되어 있지 않음', 'CNTL is not connected to the broker'], RM_NO_REPLY: ['제어기 응답 없음', 'No reply from CNTL'],
@@ -552,28 +551,15 @@
     $('conn').className = '';
   }
   if (REMOTE) {
-    $('rmPwEye').addEventListener('click', function () {
-      var shown = $('rmPw').type === 'password';
-      $('rmPw').type = shown ? 'text' : 'password';
-      $('rmPwEyeSlash').style.display = shown ? 'none' : '';
-    });
-    $('remoteView').addEventListener('submit', function (ev) {
-      ev.preventDefault();
-      $('rmMsg').textContent = '';
-      lsSet(RM_KEY, JSON.stringify({ url: $('rmUrl').value.trim(), site: $('rmSite').value.trim(), user: $('rmUser').value.trim(), pass: $('rmPw').value }));
-      tunClose();
-      show('main');
-      poll();
-    });
-    (function () {   /* 처음 한 번 — 주소 뒤 #b=..&s=..&u=..&p=..로 받은 값을 칸에 채우고 주소에서는 지움 */
-      var c = rmCfg() || {}, q = {};
+    (function () {   /* 처음 한 번 — 콘 화면 QR 주소 뒤 #b=..&s=..&u=..&p=..로 받은 값을 저장하고 주소에서는 지움(11-23 — 입력 칸 없음) */
+      var q = {};
       location.hash.replace(/^#/, '').split('&').forEach(function (kv) { var i = kv.indexOf('='); if (i > 0) q[kv.slice(0, i)] = decodeURIComponent(kv.slice(i + 1)); });
-      if (q.b || q.s || q.u || q.p) {
-        c = { url: q.b || c.url || '', site: q.s || c.site || '', user: q.u || c.user || '', pass: q.p || c.pass || '' };
-        lsSet(RM_KEY, JSON.stringify(c));
+      if (q.b && q.s) {
+        var old = rmCfg();
+        lsSet(RM_KEY, JSON.stringify({ url: q.b, site: q.s, user: q.u || '', pass: q.p || '' }));
+        if (old && old.site !== q.s) lsSet(CK_KEY, '');   /* 다른 콘이면 예전 로그인 쿠키는 버림 */
         try { history.replaceState(null, '', location.pathname); } catch (e) {}
       }
-      $('rmUrl').value = c.url || ''; $('rmSite').value = c.site || ''; $('rmUser').value = c.user || ''; $('rmPw').value = c.pass || '';
     })();
     $('conn').addEventListener('click', function () { if ($('conn').className === 'bad') show('remote'); });   /* 끊겼으면 눌러서 설정 */
   }
@@ -994,10 +980,26 @@
     };
   }
 
+  /* 2026-11-23(사용자 결정) — 현장 주소로 연 웹(REMOTE 아님): 콘이 서버에 안 붙어 있으면 "이 Wi-Fi 안에서만",
+   * 붙어 있으면 "밖에서도 쓰려면 QR을 다시 찍으세요"(닫으면 이 브라우저에선 다시 안 보임 — 서버가 끊겼다 붙으면 다시) */
+  var NOTE_OFF = 'ffCloudNoteOff';
+  function siteNote(d) {
+    var el = $('siteNote');
+    if (REMOTE || d.cloud === undefined) { el.classList.add('hidden'); return; }
+    if (!d.cloud) lsSet(NOTE_OFF, '');
+    var key = d.cloud ? 'SITE_CLOUD' : 'SITE_LOCAL';
+    var off = d.cloud && lsGet(NOTE_OFF) === '1';
+    el.classList.toggle('hidden', off);
+    el.classList.toggle('warn', !d.cloud);
+    $('siteNoteTxt').textContent = Wt(key);
+    $('siteNoteX').classList.toggle('hidden', !d.cloud);
+  }
+  $('siteNoteX').addEventListener('click', function () { lsSet(NOTE_OFF, '1'); $('siteNote').classList.add('hidden'); });
   function onDash(d) {
     if (view !== 'main') show('main');
     last = d;
     render(d);
+    siteNote(d);
     syncDevLight(d);
     $('conn').textContent = '';
     $('conn').className = '';

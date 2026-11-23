@@ -5,6 +5,7 @@
 #include "node_hub.h"
 #include "can_bridge.h"
 #include "wifi_sta.h"
+#include "cloud_link.h"
 #include "device_config.h"
 #include "stats_store.h"
 #include "sd_storage.h"
@@ -1253,11 +1254,26 @@ void ui_main_on_web_session_lock(bool locked)
     }
 }
 
+/* 2026-11-23 임시(사용자 — Summary 웹 주소를 눌러도 QR 팝업이 안 뜸. 합성 클릭으로는 뜸) — 실제 터치의 누름·뗌 좌표, 받은 객체,
+ * 스크롤로 넘어갔는지를 경고 로그로(devlog_dump?lvl=we). 원인 찾으면 지움 */
+static const char *hittest_name(lv_obj_t *o);
+static void cb_touch_debug(lv_event_t *e)
+{
+    lv_indev_t *indev = lv_event_get_target(e);
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    lv_obj_t *act = lv_indev_get_active_obj();
+    ESP_LOGW("TOUCHDBG", "%s %d,%d obj=%s(%p) scroll=%p", lv_event_get_code(e) == LV_EVENT_PRESSED ? "press" : "release",
+             (int)p.x, (int)p.y, hittest_name(act), (void *)act, (void *)lv_indev_get_scroll_obj(indev));
+}
+
 /* ui 초기화 끝에서 한 번 — 터치 입력마다 자동 꺼짐 타이머를 다시 시작하도록 걸고 타이머 생성 */
 static void screen_power_init(void)
 {
     for (lv_indev_t *indev = lv_indev_get_next(NULL); indev; indev = lv_indev_get_next(indev)) {
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_POINTER) {
+            lv_indev_add_event_cb(indev, cb_touch_debug, LV_EVENT_PRESSED, NULL);    /* 11-23 임시 */
+            lv_indev_add_event_cb(indev, cb_touch_debug, LV_EVENT_RELEASED, NULL);
             lv_indev_add_event_cb(indev, cb_screen_touch_activity, LV_EVENT_PRESSED, NULL);
         }
     }
@@ -1815,16 +1831,26 @@ static void cb_logo_warning_tap(lv_event_t *e)
     }
 }
 
-/* 2026-10-03(사용자 지시) — 콘 화면이 보여 줄 웹 주소: 바깥 주소(웹 전용 설정 = notify.cfg click=)가 있으면 그것, 없으면 예전처럼
- * 내부 IP(http://<IP>:80). IP도 없으면 빈 문자열. Summary의 Web 주소와 웹 접속 QR이 같은 값을 씀. LVGL 태스크 전용 버퍼 */
-static const char *web_public_url(void)
+/* 2026-11-23(사용자 결정 — 원격 접속 QR) — QR 하나가 상태에 따라: 서버(EMQX) 연결 → 원격 웹앱(Pages + 접속 정보),
+ * 아니면 현장 주소(AP면 콘 AP 주소, 아니면 공유기에서 받은 IP). base_len = 화면 글자로 보일 앞부분 길이(원격은 웹앱 주소까지).
+ * Summary 웹 주소 글자와 QR 팝업이 같이 씀. LVGL 태스크 전용 버퍼.
+ * 예전 바깥 주소(notify.cfg click=, 포트 포워딩 — 10-03)는 원격 웹앱으로 바뀌어 여기엔 안 씀(알림 링크에는 그대로) */
+typedef enum { WEB_QR_REMOTE, WEB_QR_LOCAL_STA, WEB_QR_LOCAL_AP } web_qr_kind_t;
+static const char *web_qr_url(web_qr_kind_t *kind, size_t *base_len)
 {
-    static char s_url[160];
-    if (notify_copy_public_url(s_url, sizeof(s_url))) return s_url;
+    static char s_qr[400];
+    size_t bl = 0;
+    if (cloud_link_is_connected() && cloud_link_web_qr_url(s_qr, sizeof(s_qr), &bl)) {
+        if (kind) *kind = WEB_QR_REMOTE;
+        if (base_len) *base_len = bl;
+        return s_qr;
+    }
+    if (kind) *kind = device_config_get_wifi_ap_mode() ? WEB_QR_LOCAL_AP : WEB_QR_LOCAL_STA;
     const char *ip = wifi_sta_get_own_ip_str();
-    if (ip[0] == '\0') s_url[0] = '\0';
-    else snprintf(s_url, sizeof(s_url), "http://%s:80", ip);
-    return s_url;
+    if (ip[0] == '\0') s_qr[0] = '\0';
+    else snprintf(s_qr, sizeof(s_qr), "http://%s:80", ip);
+    if (base_len) *base_len = strlen(s_qr);
+    return s_qr;
 }
 
 /* 2026-08-30(사용자 지시: "상단 로고(플렉스팜)을 눌렀을 때 URL QR 팝업 띄워줘", "아이콘 말고,
@@ -1837,23 +1863,57 @@ static void cb_logo_title_tap(lv_event_t *e)
     lv_obj_t *box = create_modal();
     create_modal_title(box, STR_TITLE_WEB_QR, MODAL_KIND_NORMAL);
 
-    const char *url = web_public_url();
+    /* 2026-11-23(사용자 결정) — 콘이 서버(EMQX)에 붙어 있으면 원격 웹앱(접속 정보를 주소에 숨김 — 사용자는 PIN만),
+     * 아니면 현장 주소(공유기 IP 또는 콘 AP). 왜 그 QR인지·밖에서 되는지를 문장으로 알림. 현장 주소만 글자로도 보임 */
+    web_qr_kind_t kind;
+    const char *url = web_qr_url(&kind, NULL);
     if (url[0] == '\0') {
         lv_obj_t *lbl = lv_label_create(box);
         lv_label_set_text(lbl, ui_str(STR_MSG_WEB_QR_NO_IP));
         lv_obj_set_style_text_font(lbl, ui_font_get(UI_FONT_SIZE_18), 0);
     } else {
+        lv_obj_t *how = lv_label_create(box);
+        lv_obj_set_width(how, LV_PCT(100));
+        lv_label_set_long_mode(how, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(how, ui_str(STR_QR_HOW));
+        lv_obj_set_style_text_font(how, ui_font_get(UI_FONT_SIZE_18), 0);
 
-        lv_obj_t *qr = lv_qrcode_create(box);
-        lv_qrcode_set_size(qr, 220);
+        /* 화면이 가로(480 높이)라 위아래로 쌓으면 넘침(11-23 실기 — 제목이 잘림) → QR 왼쪽, 설명 오른쪽 */
+        lv_obj_t *row = lv_obj_create(box);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(row, 16, 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *qr = lv_qrcode_create(row);
+        lv_qrcode_set_size(qr, 200);
         lv_qrcode_set_dark_color(qr, lv_color_black());
         lv_qrcode_set_light_color(qr, lv_color_white());
         lv_qrcode_update(qr, url, strlen(url));
-        lv_obj_center(qr);
 
-        lv_obj_t *url_lbl = lv_label_create(box);
-        lv_label_set_text(url_lbl, url);
-        lv_obj_set_style_text_font(url_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+        lv_obj_t *col = lv_obj_create(row);
+        lv_obj_remove_style_all(col);
+        lv_obj_set_height(col, LV_SIZE_CONTENT);
+        lv_obj_set_flex_grow(col, 1);
+        lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(col, 10, 0);
+
+        lv_obj_t *why = lv_label_create(col);
+        lv_obj_set_width(why, LV_PCT(100));
+        lv_label_set_long_mode(why, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(why, ui_str(kind == WEB_QR_REMOTE ? STR_QR_REMOTE : kind == WEB_QR_LOCAL_AP ? STR_QR_LOCAL_AP : STR_QR_LOCAL_STA));
+        lv_obj_set_style_text_font(why, ui_font_get(UI_FONT_SIZE_18), 0);
+        if (kind != WEB_QR_REMOTE) lv_obj_set_style_text_color(why, lv_palette_main(LV_PALETTE_ORANGE), 0);
+
+        if (kind != WEB_QR_REMOTE) {   /* 원격 주소는 접속 정보가 들어 있어 글자로는 안 보임 */
+            lv_obj_t *url_lbl = lv_label_create(col);
+            lv_obj_set_width(url_lbl, LV_PCT(100));
+            lv_label_set_long_mode(url_lbl, LV_LABEL_LONG_WRAP);
+            lv_label_set_text(url_lbl, url);
+            lv_obj_set_style_text_font(url_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
+        }
     }
 
     lv_obj_t *btn_row = create_modal_btn_row(box);
@@ -2162,6 +2222,7 @@ typedef enum {
     PIN_MODE_CHANGE_CUR,
     PIN_MODE_CHANGE_NEW,
     PIN_MODE_CHANGE_CONFIRM,
+    PIN_MODE_RECOVER,        /* 2026-11-23 — 복구 키 8자리(잠금 풀기 입력판의 "PIN을 잊으셨나요?") */
 } pin_mode_t;
 
 #define PIN_LEN             4
@@ -2172,7 +2233,7 @@ static const uint32_t s_auto_lock_values[] = { 0, 1, 5, 10, 30 };   /* STR_OPT_A
 
 static bool        s_pin_locked = false;
 static pin_mode_t  s_pin_mode = PIN_MODE_NONE;
-static char        s_pin_buf[PIN_LEN + 1];
+static char        s_pin_buf[WEB_AUTH_RECOVERY_LEN + 1];   /* PIN 4자리 또는 복구 키 8자리 */
 static char        s_pin_first[PIN_LEN + 1];
 static uint8_t     s_pin_fails = 0;
 static uint32_t    s_pin_block_start = 0;
@@ -2188,7 +2249,14 @@ static lv_obj_t   *s_pin_info = NULL;
 static lv_obj_t   *s_pin_dots = NULL;
 static lv_obj_t   *s_pin_msg = NULL;
 static lv_obj_t   *s_pin_btnm = NULL;
+static lv_obj_t   *s_pin_forgot_btn = NULL; /* 2026-11-23 — 잠금 풀기 때만 보임 */
 static lv_timer_t *s_auto_lock_timer = NULL;
+
+/* 지금 모드에서 받을 자리 수 */
+static size_t pin_cur_len(void)
+{
+    return s_pin_mode == PIN_MODE_RECOVER ? WEB_AUTH_RECOVERY_LEN : PIN_LEN;
+}
 
 static const char *s_pin_btnm_map[] = { "1", "2", "3", "\n", "4", "5", "6", "\n", "7", "8", "9", "\n",
                                         LV_SYMBOL_CLOSE, "0", LV_SYMBOL_BACKSPACE, "" };
@@ -2206,9 +2274,9 @@ static void pin_restack(void)
 static void pin_update_dots(void)
 {
     if (!s_pin_dots) return;
-    char t[PIN_LEN * 4 + 1];
-    size_t n = strlen(s_pin_buf), o = 0;
-    for (size_t i = 0; i < PIN_LEN; i++) {
+    char t[WEB_AUTH_RECOVERY_LEN * 4 + 1];
+    size_t n = strlen(s_pin_buf), o = 0, len = pin_cur_len();
+    for (size_t i = 0; i < len; i++) {
         const char *g = i < n ? LV_SYMBOL_BULLET : "-";
         if (i) t[o++] = ' ';
         size_t gl = strlen(g);
@@ -2224,6 +2292,15 @@ static void pin_set_msg(ui_str_id_t id)
     if (s_pin_msg) lv_label_set_text(s_pin_msg, id == STR_COUNT ? "" : ui_str(id));
 }
 
+/* 복구 키를 너무 많이 틀려 기다리는 중이면 남은 분을 보이고 true */
+static bool pin_recover_show_wait(void)
+{
+    int w = web_auth_recovery_wait_s();
+    if (w <= 0) return false;
+    if (s_pin_msg) lv_label_set_text_fmt(s_pin_msg, ui_str(STR_FMT_PIN_RECOVER_WAIT), (w + 59) / 60);
+    return true;
+}
+
 /* 모드에 맞춰 제목·안내·취소 키를 바꾸고 입력을 비움 */
 static void pin_enter_mode(pin_mode_t mode)
 {
@@ -2237,13 +2314,20 @@ static void pin_enter_mode(pin_mode_t mode)
         case PIN_MODE_CHANGE_CONFIRM: title = STR_PIN_TITLE_CONFIRM; break;
         case PIN_MODE_CHANGE_CUR:     title = STR_PIN_TITLE_CURRENT; break;
         case PIN_MODE_CHANGE_NEW:     title = STR_PIN_TITLE_NEW; break;
+        case PIN_MODE_RECOVER:        title = STR_PIN_TITLE_RECOVER; break;
         default: break;
     }
     lv_label_set_text(s_pin_title, ui_str(title));
     bool warn = (mode == PIN_MODE_SETUP || mode == PIN_MODE_SETUP_CONFIRM || mode == PIN_MODE_CHANGE_NEW || mode == PIN_MODE_CHANGE_CONFIRM);
-    lv_label_set_text(s_pin_info, warn ? ui_str(STR_PIN_SETUP_WARN) : "");
-    if (warn) lv_obj_remove_flag(s_pin_info, LV_OBJ_FLAG_HIDDEN);
+    bool info = warn || mode == PIN_MODE_RECOVER;
+    lv_label_set_text(s_pin_info, warn ? ui_str(STR_PIN_SETUP_WARN) : mode == PIN_MODE_RECOVER ? ui_str(STR_PIN_RECOVER_INFO) : "");
+    if (info) lv_obj_remove_flag(s_pin_info, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(s_pin_info, LV_OBJ_FLAG_HIDDEN);
+    /* 11-23 — "PIN을 잊으셨나요?"는 잠금 풀기 때만 */
+    if (s_pin_forgot_btn) {
+        if (mode == PIN_MODE_UNLOCK) lv_obj_remove_flag(s_pin_forgot_btn, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_pin_forgot_btn, LV_OBJ_FLAG_HIDDEN);
+    }
     /* 취소 키 — 바꾸기·잠금 풀기에만(처음 등록은 반드시 끝내야 함). 잠금 풀기 취소 = 입력판 닫고 잠긴 화면으로 */
     bool can_cancel = !(mode == PIN_MODE_SETUP || mode == PIN_MODE_SETUP_CONFIRM);
     if (can_cancel) lv_buttonmatrix_clear_button_ctrl(s_pin_btnm, PIN_BTN_CANCEL, LV_BUTTONMATRIX_CTRL_HIDDEN);
@@ -2256,7 +2340,7 @@ static void pin_close_box(void)
     if (s_pin_box) {
         lv_obj_delete(s_pin_box);
         s_pin_box = NULL;
-        s_pin_title = s_pin_info = s_pin_dots = s_pin_msg = s_pin_btnm = NULL;
+        s_pin_title = s_pin_info = s_pin_dots = s_pin_msg = s_pin_btnm = s_pin_forgot_btn = NULL;
     }
     s_pin_mode = PIN_MODE_NONE;
     memset(s_pin_buf, 0, sizeof(s_pin_buf));
@@ -2358,10 +2442,35 @@ static void pin_refresh_settings_state(void)
     if (s_pin_state_label) lv_label_set_text(s_pin_state_label, web_auth_enabled() ? ui_str(STR_PIN_STATE_SET) : "-");
 }
 
-/* 4자리가 다 들어왔을 때 */
+/* 자리가 다 들어왔을 때(PIN 4, 복구 키 8) */
 static void pin_complete(void)
 {
     switch (s_pin_mode) {
+        case PIN_MODE_RECOVER:
+            switch (web_auth_recovery_try(s_pin_buf)) {
+                case WEB_AUTH_RECOVERY_OK:
+                    /* PIN·웹 로그인을 지웠음 — 잠금을 풀고 처음 등록(불투명 막, 취소 없음) */
+                    s_pin_locked = false;
+                    s_pin_fails = 0;
+                    s_pin_blocked = false;
+                    pin_enter_mode(PIN_MODE_SETUP);
+                    pin_set_msg(STR_PIN_RECOVER_DONE);
+                    pin_overlay_refresh();
+                    pin_restart_auto_timer();
+                    pin_refresh_settings_state();
+                    break;
+                case WEB_AUTH_RECOVERY_NONE:
+                    pin_set_msg(STR_PIN_RECOVER_NONE);
+                    memset(s_pin_buf, 0, sizeof(s_pin_buf));
+                    pin_update_dots();
+                    break;
+                default:   /* 틀림·기다림 */
+                    memset(s_pin_buf, 0, sizeof(s_pin_buf));
+                    pin_update_dots();
+                    if (!pin_recover_show_wait()) pin_set_msg(STR_PIN_RECOVER_WRONG);
+                    break;
+            }
+            break;
         case PIN_MODE_UNLOCK:
             if (web_auth_verify_pin_local(s_pin_buf)) pin_unlock();
             else pin_wrong();
@@ -2421,7 +2530,8 @@ static void cb_pin_btnm(lv_event_t *e)
         return;
     }
     const char *t = lv_buttonmatrix_get_button_text(m, id);
-    if (!t || t[0] < '0' || t[0] > '9' || n >= PIN_LEN) return;
+    if (!t || t[0] < '0' || t[0] > '9' || n >= pin_cur_len()) return;
+    if (s_pin_mode == PIN_MODE_RECOVER && pin_recover_show_wait()) return;   /* 11-23 — 복구 키는 기다리는 동안 받지 않음 */
     bool checks = (s_pin_mode == PIN_MODE_UNLOCK || s_pin_mode == PIN_MODE_CHANGE_CUR);
     if (checks && pin_check_blocked()) {   /* 막힌 동안은 받지 않음 */
         pin_set_msg(STR_PIN_WAIT);
@@ -2431,7 +2541,17 @@ static void cb_pin_btnm(lv_event_t *e)
     s_pin_buf[n] = t[0];
     s_pin_buf[n + 1] = '\0';
     pin_update_dots();
-    if (n + 1 == PIN_LEN) pin_complete();
+    if (n + 1 == pin_cur_len()) pin_complete();
+}
+
+/* 2026-11-23(사용자 결정) — "PIN을 잊으셨나요?" → 복구 키 8자리 */
+static void cb_pin_forgot(lv_event_t *e)
+{
+    (void)e;
+    if (!web_auth_recovery_present()) { pin_set_msg(STR_PIN_RECOVER_NONE); return; }
+    pin_set_msg(STR_COUNT);
+    pin_enter_mode(PIN_MODE_RECOVER);
+    pin_recover_show_wait();
 }
 
 /* 입력판 — 왼쪽: 제목·안내·입력 칸·메시지, 오른쪽: 숫자 키(Montserrat — 숫자·기호 글리프) */
@@ -2472,6 +2592,12 @@ static void pin_open_box(pin_mode_t mode)
     lv_obj_set_style_text_font(s_pin_msg, ui_font_get(UI_FONT_SIZE_18), 0);
     lv_obj_set_style_text_color(s_pin_msg, lv_palette_main(LV_PALETTE_RED), 0);
     lv_label_set_text(s_pin_msg, "");
+
+    s_pin_forgot_btn = lv_button_create(left);   /* 11-23 — 잠금 풀기 때만 보임(pin_enter_mode) */
+    lv_obj_add_event_cb(s_pin_forgot_btn, cb_pin_forgot, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *forgot_lbl = lv_label_create(s_pin_forgot_btn);
+    lv_label_set_text(forgot_lbl, ui_str(STR_PIN_FORGOT));
+    lv_obj_set_style_text_font(forgot_lbl, ui_font_get(UI_FONT_SIZE_18), 0);
 
     s_pin_btnm = lv_buttonmatrix_create(s_pin_box);
     lv_buttonmatrix_set_map(s_pin_btnm, s_pin_btnm_map);
@@ -6612,7 +6738,11 @@ static void refresh_dashboard(lv_timer_t *t)
 
     /* 2026-08-21 — 웹 대시보드 URL(사용자 지시). IP는 WiFi 재연결 등으로 바뀔 수 있어서
      * 매 틱 다시 읽음(가벼운 문자열 비교라 비용 무시 가능) — 없으면(빈 문자열) 숨김 */
-    const char *web_url = web_public_url();  /* 10-03 — 바깥 주소 우선(QR과 같은 값) */
+    /* 2026-11-23 — QR과 같은 판단(원격이면 웹앱 주소까지만 — 뒤의 접속 정보는 안 보임) */
+    size_t web_base_len = 0;
+    const char *web_url_full = web_qr_url(NULL, &web_base_len);
+    char web_url[128];
+    snprintf(web_url, sizeof(web_url), "%.*s", (int)web_base_len, web_url_full);
     if (web_url[0] != '\0') {
         if (strcmp(lv_label_get_text(s_web_url_label), web_url) != 0) lv_label_set_text(s_web_url_label, web_url);
         lv_obj_remove_flag(s_web_row, LV_OBJ_FLAG_HIDDEN);
@@ -8442,6 +8572,107 @@ static bool inject_fn_capture_now(void *arg)
     select_camera(mac);
     cb_capture_now(NULL);
     return true;
+}
+
+/* 2026-11-23 임시(사용자 — "Summary 웹 주소를 눌러도 QR 팝업이 안 뜸") — 웹 주소 글자 가운데를 누르면 어느 객체가 받는지
+ * (LVGL 입력과 같은 순서: 시스템 층 → 위 층 → 화면). 출시 전 지움(임시 API 목록) */
+static char s_hittest_buf[768];
+static const char *hittest_name(lv_obj_t *o)
+{
+    if (!o) return "none";
+    if (o == s_web_url_label) return "web_url";
+    if (o == s_web_prefix_label) return "web_prefix";
+    if (o == s_web_row) return "web_row";
+    if (o == s_mem_status_label) return "mem";
+    for (int b = 0; b < CAN_BRIDGE_MAX_BRIDGES; b++) if (o == s_bridge_status_label[b]) return b ? "bridge1" : "bridge0";
+    if (o == lv_layer_top()) return "layer_top";
+    if (o == lv_layer_sys()) return "layer_sys";
+    if (o == lv_screen_active()) return "screen";
+    return "?";
+}
+static int hittest_put(int n, const char *tag, lv_obj_t *o)
+{
+    lv_area_t a = { 0 };
+    if (o) lv_obj_get_coords(o, &a);
+    return n + snprintf(s_hittest_buf + n, sizeof(s_hittest_buf) - n, "%s=%s(%p) [%d,%d-%d,%d] click=%d hidden=%d\n", tag,
+                        hittest_name(o), (void *)o, (int)a.x1, (int)a.y1, (int)a.x2, (int)a.y2,
+                        o ? lv_obj_has_flag(o, LV_OBJ_FLAG_CLICKABLE) : -1, o ? lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN) : -1);
+}
+static bool inject_fn_hittest(void *arg)
+{
+    int mode = *(int *)arg;   /* 0 = 판정만, 1 = 웹 주소에 CLICKED 보냄, 2 = 방금 뜬 팝업 닫기 */
+    int n = 0;
+    if (mode == 2) {
+        if (s_last_modal) { lv_obj_delete(lv_obj_get_parent(s_last_modal)); s_last_modal = NULL; resume_bg_timers(); }
+        snprintf(s_hittest_buf, sizeof(s_hittest_buf), "closed\n");
+        return true;
+    }
+    if (mode == 1) {
+        lv_obj_t *before = s_last_modal;
+        if (s_web_url_label) lv_obj_send_event(s_web_url_label, LV_EVENT_CLICKED, NULL);
+        snprintf(s_hittest_buf, sizeof(s_hittest_buf), "clicked: modal %s\n", s_last_modal != before ? "created" : "NOT created");
+        return true;
+    }
+    if (!s_web_url_label) { snprintf(s_hittest_buf, sizeof(s_hittest_buf), "no web_url label\n"); return true; }
+    lv_area_t a;
+    lv_obj_get_coords(s_web_url_label, &a);
+    lv_point_t p = { (a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2 };
+    n = snprintf(s_hittest_buf, sizeof(s_hittest_buf), "point %d,%d\n", (int)p.x, (int)p.y);
+    n = hittest_put(n, "url", s_web_url_label);
+    n = hittest_put(n, "row", s_web_row);
+    for (int b = 0; b < CAN_BRIDGE_MAX_BRIDGES; b++) n = hittest_put(n, b ? "br1" : "br0", s_bridge_status_label[b]);
+    lv_obj_t *hit = lv_indev_search_obj(lv_layer_sys(), &p);
+    if (!hit) hit = lv_indev_search_obj(lv_layer_top(), &p);
+    if (!hit) hit = lv_indev_search_obj(lv_screen_active(), &p);
+    n = hittest_put(n, "HIT", hit);
+    for (lv_obj_t *o = hit ? lv_obj_get_parent(hit) : NULL; o && n < (int)sizeof(s_hittest_buf) - 120; o = lv_obj_get_parent(o))
+        n = hittest_put(n, " parent", o);
+    return true;
+}
+/* 2026-11-23 임시 — PIN 입력판 조작 합성(복구 키 시험): L 잠금, O 잠금 풀기 입력판 열기, F "PIN을 잊으셨나요?", 0-9 숫자 키,
+ * X 취소, B 지우기. 끝나면 제목·안내·메시지·점 표시를 돌려줌. 출시 전 지움 */
+static const char *s_pin_seq;
+static void pin_press_key(char c)
+{
+    if (!s_pin_btnm) return;
+    uint32_t id;
+    if (c == 'X') id = PIN_BTN_CANCEL;
+    else if (c == 'B') id = PIN_BTN_BACKSPACE;
+    else if (c == '0') id = 10;
+    else id = (uint32_t)(c - '1');   /* 1..9 → 0..8 (줄바꿈은 번호에 안 셈) */
+    lv_buttonmatrix_set_selected_button(s_pin_btnm, id);
+    lv_obj_send_event(s_pin_btnm, LV_EVENT_VALUE_CHANGED, NULL);
+}
+static bool inject_fn_pin_seq(void *arg)
+{
+    (void)arg;
+    for (const char *c = s_pin_seq; *c; c++) {
+        if (*c == 'L') pin_lock_engage();
+        else if (*c == 'O') { if (s_pin_locked && !s_pin_box) pin_open_box(PIN_MODE_UNLOCK); }
+        else if (*c == 'F') { if (s_pin_forgot_btn) lv_obj_send_event(s_pin_forgot_btn, LV_EVENT_CLICKED, NULL); }
+        else if ((*c >= '0' && *c <= '9') || *c == 'X' || *c == 'B') pin_press_key(*c);
+    }
+    snprintf(s_hittest_buf, sizeof(s_hittest_buf), "locked=%d mode=%d title=%s\ninfo=%s\nmsg=%s\ndots=%s\nforgot=%s pin_set=%d\n",
+             s_pin_locked, (int)s_pin_mode, s_pin_title ? lv_label_get_text(s_pin_title) : "-",
+             s_pin_info ? lv_label_get_text(s_pin_info) : "-", s_pin_msg ? lv_label_get_text(s_pin_msg) : "-",
+             s_pin_dots ? lv_label_get_text(s_pin_dots) : "-",
+             !s_pin_forgot_btn ? "none" : lv_obj_has_flag(s_pin_forgot_btn, LV_OBJ_FLAG_HIDDEN) ? "hidden" : "shown",
+             web_auth_enabled());
+    return true;
+}
+const char *ui_main_debug_pin_seq(const char *seq)
+{
+    s_pin_seq = seq;
+    if (!run_on_lvgl_task(inject_fn_pin_seq, NULL, 2000)) return "timeout\n";
+    return s_hittest_buf;
+}
+
+const char *ui_main_debug_hittest(int mode)
+{
+    static int s_mode;
+    s_mode = mode;
+    if (!run_on_lvgl_task(inject_fn_hittest, &s_mode, 1000)) return "timeout\n";
+    return s_hittest_buf;
 }
 
 bool ui_main_inject_capture_now(const uint8_t *mac)

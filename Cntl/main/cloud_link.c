@@ -25,6 +25,12 @@ typedef struct {
     char user[64];
     char pass[64];
     char site[32];
+    /* 2026-11-23(사용자 결정 — 원격 접속 QR) — 웹앱(GitHub Pages)이 쓸 값. 없으면 기본값(아래 cloud_link_web_qr_url).
+     * 현장별 웹 계정(출시 전 할 일)이 생기면 web_user/web_pass를 cloud.cfg에 넣음 */
+    char web_uri[128];
+    char web_user[64];
+    char web_pass[64];
+    char web_app[96];
     char topic_status[CLOUD_TOPIC_LEN];
     char topic_req_sub[CLOUD_TOPIC_LEN];   /* ff/<site>/req/+ */
 } cloud_cfg_t;
@@ -54,6 +60,10 @@ static bool load_cfg(void)
         else if (strncmp(s_line, "user=", 5) == 0) snprintf(s_cfg->user, sizeof(s_cfg->user), "%s", s_line + 5);
         else if (strncmp(s_line, "pass=", 5) == 0) snprintf(s_cfg->pass, sizeof(s_cfg->pass), "%s", s_line + 5);
         else if (strncmp(s_line, "site=", 5) == 0) snprintf(s_cfg->site, sizeof(s_cfg->site), "%s", s_line + 5);
+        else if (strncmp(s_line, "web_uri=", 8) == 0) snprintf(s_cfg->web_uri, sizeof(s_cfg->web_uri), "%s", s_line + 8);
+        else if (strncmp(s_line, "web_user=", 9) == 0) snprintf(s_cfg->web_user, sizeof(s_cfg->web_user), "%s", s_line + 9);
+        else if (strncmp(s_line, "web_pass=", 9) == 0) snprintf(s_cfg->web_pass, sizeof(s_cfg->web_pass), "%s", s_line + 9);
+        else if (strncmp(s_line, "web_app=", 8) == 0) snprintf(s_cfg->web_app, sizeof(s_cfg->web_app), "%s", s_line + 8);
     }
     fclose(f);
     if (!s_cfg->site[0]) snprintf(s_cfg->site, sizeof(s_cfg->site), "unnamed");
@@ -489,6 +499,51 @@ void cloud_link_network_ready(void)
 bool cloud_link_is_connected(void)
 {
     return s_connected;
+}
+
+/* 주소에 넣을 값 — 영숫자와 -_.~ 말고는 %XX */
+static size_t url_enc(char *out, size_t n, const char *s)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t o = 0;
+    for (; *s && o + 4 < n; s++) {
+        unsigned char c = (unsigned char)*s;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') out[o++] = (char)c;
+        else { out[o++] = '%'; out[o++] = hex[c >> 4]; out[o++] = hex[c & 15]; }
+    }
+    out[o] = '\0';
+    return o;
+}
+
+/* 2026-11-23(사용자 결정 — 원격 접속 QR) — 웹앱 주소 + #b=<브로커 wss>&s=<현장>&u=<계정>&p=<비밀번호>(웹앱이 받아 저장하고 주소에서 지움).
+ * 기본값: 웹앱 = GitHub Pages(flexfarm-web), 브로커 = 콘 주소의 호스트로 wss://<호스트>:8084/mqtt(EMQX 웹소켓 TLS), 계정 = 콘과 같음.
+ * 사용자에게 보이는 곳은 PIN으로 잠긴 콘 화면 QR뿐. cloud.cfg를 아직 못 읽었으면 false */
+bool cloud_link_web_qr_url(char *out, size_t n, size_t *base_len)
+{
+    if (!s_cfg || !s_cfg->uri[0] || !out || n < 64) return false;
+    char wss[160];
+    if (s_cfg->web_uri[0]) snprintf(wss, sizeof(wss), "%s", s_cfg->web_uri);
+    else {
+        const char *h = strstr(s_cfg->uri, "://");
+        h = h ? h + 3 : s_cfg->uri;
+        size_t hl = strcspn(h, ":/");
+        snprintf(wss, sizeof(wss), "wss://%.*s:8084/mqtt", (int)hl, h);
+    }
+    const char *app = s_cfg->web_app[0] ? s_cfg->web_app : "https://xebees-maker.github.io/flexfarm-web/";
+    const char *user = s_cfg->web_user[0] ? s_cfg->web_user : s_cfg->user;
+    const char *pass = s_cfg->web_user[0] ? s_cfg->web_pass : s_cfg->pass;
+    size_t o = (size_t)snprintf(out, n, "%s", app);
+    if (base_len) *base_len = o;
+    if (o + 4 >= n) return false;
+    o += (size_t)snprintf(out + o, n - o, "#b=");
+    o += url_enc(out + o, n - o, wss);
+    o += (size_t)snprintf(out + o, n - o, "&s=");
+    o += url_enc(out + o, n - o, s_cfg->site);
+    o += (size_t)snprintf(out + o, n - o, "&u=");
+    o += url_enc(out + o, n - o, user);
+    o += (size_t)snprintf(out + o, n - o, "&p=");
+    o += url_enc(out + o, n - o, pass);
+    return o + 1 < n;
 }
 
 void cloud_link_init(void)

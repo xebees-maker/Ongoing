@@ -538,6 +538,17 @@ typedef enum {
     STR_LOCKED_HINT,             /* 잠긴 화면 아래쪽 안내 */
     STR_LABEL_AUTO_LOCK,
     STR_OPT_AUTO_LOCK_LIST,      /* 끄기/1/5/10/30분(ui_main.c s_auto_lock_values와 같은 순서) */
+    STR_PIN_FORGOT,              /* 2026-11-23 — PIN 복구 키 */
+    STR_PIN_TITLE_RECOVER,
+    STR_PIN_RECOVER_INFO,
+    STR_PIN_RECOVER_NONE,
+    STR_PIN_RECOVER_WRONG,
+    STR_FMT_PIN_RECOVER_WAIT,
+    STR_PIN_RECOVER_DONE,
+    STR_QR_HOW,                  /* 2026-11-23 — 웹 접속 QR 팝업: 맨 위 안내 */
+    STR_QR_REMOTE,               /* QR 아래 — 서버 연결(원격 웹앱) */
+    STR_QR_LOCAL_STA,            /* 공유기 O, 서버 X(현장 주소) */
+    STR_QR_LOCAL_AP,             /* 콘 AP(현장 주소) */
 
     STR_COUNT,
 } ui_str_id_t;

@@ -32,3 +32,6 @@ flash_log.txt
 
 # 웹앱 빌드 결과(Cntl/web/build_web.py)
 Cntl/web/out/
+
+# 2026-11-23 — 콘 개발용 키(덤프 도구용, 출시 전 지움)
+Cntl/main/dev_key.h

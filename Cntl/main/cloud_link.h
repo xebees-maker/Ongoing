@@ -17,6 +17,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /* 연결 태스크 시작 — 부팅 때 한 번(LittleFS 마운트 뒤). 네트워크 준비는 cloud_link_network_ready()로 알림 */
 void cloud_link_init(void);
@@ -26,3 +27,6 @@ void cloud_link_network_ready(void);
 
 /* 브로커에 연결돼 있는지 */
 bool cloud_link_is_connected(void);
+
+/* 2026-11-23 — 원격 접속 QR 주소(웹앱 + 접속 정보). base_len = 앞의 웹앱 주소 길이(화면 글자엔 이것만). cloud.cfg가 없으면 false */
+bool cloud_link_web_qr_url(char *out, size_t n, size_t *base_len);

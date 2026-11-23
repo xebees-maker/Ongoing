@@ -332,7 +332,7 @@ static esp_err_t api_devlog_get_handler(httpd_req_t *req)
  * 텍스트로 돌려줌. SD 에러 등이 났을 때 재부팅/플래시 전에 먼저 받아 둠(조건부 할 일 C5) */
 static esp_err_t api_devlog_dump_get_handler(httpd_req_t *req)
 {
-    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
+    WEB_AUTH_REQUIRE_OR_DEV(req);   /* 11-23 — 덤프 도구는 개발용 키 */  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
     /* 2026-10-09 — ?lvl=we 면 경고·에러 링(2000줄) */
     char q[24] = "", lvl[8] = "";
     bool have_lvl = httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
@@ -594,9 +594,29 @@ static esp_err_t api_statsfile_get_handler(httpd_req_t *req)
 /* 2026-10-28(임시 — 출시 전 제거, 메모리 project_cntl_test_apis_remove_later) — GET /api/screen: 지금 패널에 나가는 프레임
  * 버퍼를 PSRAM에 한 번 복사해서 16비트 BMP(RGB565, 위→아래)로 내려줌. Claude가 콘 화면을 직접 보려고(그래프 점선 확인) */
 extern void *esp_lv_adapter_cntl_front_fb(void);   /* components/esp_lvgl_adapter 로컬 패치 */
+/* 2026-11-23 임시 — GET /api/hittest: Summary 웹 주소 자리를 누르면 어느 객체가 받는지(QR 팝업 안 뜸 조사). 출시 전 지움 */
+static esp_err_t api_hittest_get_handler(httpd_req_t *req)
+{
+    WEB_AUTH_REQUIRE_OR_DEV(req);
+    static char q[64], v[4], seq[48];   /* httpd 태스크 하나 — 정적 */
+    q[0] = v[0] = '\0';
+    int mode = 0;   /* ?click=1 → 웹 주소에 클릭 보냄, ?close=1 → 방금 뜬 팝업 닫기, ?pin=<순서> → PIN 입력판 조작(11-23) */
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+        httpd_query_key_value(q, "pin", seq, sizeof(seq)) == ESP_OK) {
+        httpd_resp_set_type(req, "text/plain");
+        return httpd_resp_sendstr(req, ui_main_debug_pin_seq(seq));
+    }
+    if (q[0]) {
+        if (httpd_query_key_value(q, "click", v, sizeof(v)) == ESP_OK) mode = 1;
+        else if (httpd_query_key_value(q, "close", v, sizeof(v)) == ESP_OK) mode = 2;
+    }
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, ui_main_debug_hittest(mode));
+}
+
 static esp_err_t api_screen_get_handler(httpd_req_t *req)
 {
-    WEB_AUTH_REQUIRE(req);
+    WEB_AUTH_REQUIRE_OR_DEV(req);   /* 11-23 */
     const int w = EXAMPLE_LCD_H_RES, h = EXAMPLE_LCD_V_RES;
     const size_t img = (size_t)w * h * 2;
     const void *fb = esp_lv_adapter_cntl_front_fb();
@@ -1116,6 +1136,8 @@ void web_dashboard_start(void)
     static const httpd_uri_t api_screen_uri = { .uri = "/api/screen", .method = HTTP_GET,
                                                 .handler = api_screen_get_handler };   /* 10-28 임시 */
     httpd_register_uri_handler(server, &api_screen_uri);
+    static const httpd_uri_t api_hittest_uri = { .uri = "/api/hittest", .method = HTTP_GET, .handler = api_hittest_get_handler };   /* 11-23 임시 */
+    httpd_register_uri_handler(server, &api_hittest_uri);
     static const httpd_uri_t api_delete_stats_uri = { .uri = "/api/delete_stats", .method = HTTP_GET,
                                                         .handler = api_delete_stats_get_handler };
     httpd_register_uri_handler(server, &api_delete_stats_uri);

@@ -527,8 +527,8 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_PIN_TITLE_CONFIRM]       = { "같은 PIN을 한 번 더 입력하세요", "Enter the same PIN again" },
     [STR_PIN_TITLE_CURRENT]       = { "지금 PIN",      "Current PIN" },
     [STR_PIN_TITLE_NEW]           = { "새 PIN",        "New PIN" },
-    [STR_PIN_SETUP_WARN]          = { "콘 화면 잠금을 풀 때와 웹에 접속할 때 쓰는 숫자 4자리입니다. 잊으면 콘과 웹을 쓸 수 없으니 반드시 기억하세요.",
-                                      "A 4-digit number to unlock this screen and to log in from the web. If you forget it you cannot use the controller or the web, so be sure to remember it." },
+    [STR_PIN_SETUP_WARN]          = { "콘 화면 잠금을 풀 때와 웹에 접속할 때 쓰는 숫자 4자리입니다. 잊으면 공급 때 받은 복구 키로만 다시 정할 수 있으니 반드시 기억하세요.",
+                                      "A 4-digit number to unlock this screen and to log in from the web. If you forget it, only the recovery key you received can reset it, so be sure to remember it." },
     [STR_PIN_WRONG]               = { "PIN이 맞지 않습니다",  "Wrong PIN" },
     [STR_PIN_MISMATCH]            = { "두 PIN이 다릅니다. 처음부터 다시 입력하세요", "The PINs do not match. Start again" },
     [STR_PIN_WAIT]                = { "너무 많이 틀렸습니다. 1분 뒤 다시 하세요", "Too many attempts. Try again in 1 minute" },
@@ -539,6 +539,24 @@ static const char *s_table[STR_COUNT][UI_LANG_COUNT] = {
     [STR_LOCKED_HINT]             = { "잠김 - 누르면 PIN 입력", "Locked - tap to enter PIN" },
     [STR_LABEL_AUTO_LOCK]         = { "자동 잠금",     "Auto lock" },
     [STR_OPT_AUTO_LOCK_LIST]      = { "끄기\n1분\n5분\n10분\n30분", "Off\n1 min\n5 min\n10 min\n30 min" },
+    /* 2026-11-23(사용자 결정) — PIN 복구 키(공급 때 받은 숫자 8자리) */
+    [STR_PIN_FORGOT]              = { "PIN을 잊으셨나요?", "Forgot PIN?" },
+    [STR_PIN_TITLE_RECOVER]       = { "복구 키 8자리",  "8-digit recovery key" },
+    [STR_PIN_RECOVER_INFO]        = { "공급 때 받은 복구 키를 넣으세요. 키를 잃어버렸으면 FlexFarm에 문의하세요.",
+                                      "Enter the recovery key you received with the controller. If you lost it, contact FlexFarm." },
+    [STR_PIN_RECOVER_NONE]        = { "이 콘에는 복구 키가 없습니다. FlexFarm에 문의하세요.", "This controller has no recovery key. Contact FlexFarm." },
+    [STR_PIN_RECOVER_WRONG]       = { "복구 키가 맞지 않습니다", "Wrong recovery key" },
+    [STR_FMT_PIN_RECOVER_WAIT]    = { "너무 많이 틀렸습니다. %d분 뒤 다시 하세요", "Too many attempts. Try again in %d min" },
+    [STR_PIN_RECOVER_DONE]        = { "PIN을 초기화했습니다. 새 PIN을 정하세요.", "PIN reset. Set a new PIN." },
+    /* 2026-11-23(사용자 결정 — 원격 접속 QR: 서버에 붙어 있으면 원격 웹앱, 아니면 현장 주소. 왜 그 QR인지와 밖에서 되는지를 알림) */
+    [STR_QR_HOW]                  = { "휴대폰 카메라로 QR을 찍으면 웹페이지가 열립니다. 콘 화면에서는 열 수 없습니다.",
+                                      "Scan the QR code with your phone camera to open the web page. It cannot be opened on this screen." },
+    [STR_QR_REMOTE]               = { "인터넷 서버로 연결됩니다. 현장 밖에서도 접속할 수 있습니다.",
+                                      "Connects through the internet server. You can use it away from the site too." },
+    [STR_QR_LOCAL_STA]            = { "서버에 연결되지 않아 현장 접속용 QR입니다. 이 Wi-Fi를 벗어나면 웹에 접속할 수 없습니다.",
+                                      "Not connected to the server, so this QR is for on-site use. The web will not work once you leave this Wi-Fi." },
+    [STR_QR_LOCAL_AP]             = { "인터넷 없이 콘의 Wi-Fi로 연결됩니다. 콘 근처에서만 접속할 수 있습니다.",
+                                      "Connects through the controller's own Wi-Fi without internet. Works only near the controller." },
 };
 
 void ui_lang_load(void)

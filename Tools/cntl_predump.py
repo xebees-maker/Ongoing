@@ -14,6 +14,10 @@
 (<로그 폴더>/cntl_pin.txt, git 밖 — 숫자 4자리 한 줄)로 /api/login 해서 받은 쿠키를 쿠키 파일에 저장하고 한 번 더 시도.
 로그인은 401일 때만(콘은 로그인마다 토큰 8칸을 돌려 쓰므로 매번 로그인하면 사용자 기기의 로그인이 밀려남).
 PIN이 틀리면 다시 시도하지 않음(5번 틀리면 콘이 5분 막음).
+
+2026-11-23 밤(사용자 결정) — 웹 로그인 세션이 하나가 되어 도구가 로그인하면 사용자 기기가 로그아웃됨 → 개발용 키를 먼저 씀
+(<로그 폴더>/cntl_devkey.txt, git 밖 — 콘 쪽은 Cntl/main/dev_key.h, 같은 값). 개발용 키 요청은 로그인·웹 사용권을 건드리지 않음.
+키 파일이 없거나 콘이 키를 모르면(옛 펌웨어) 예전처럼 쿠키 → 401이면 PIN 로그인.
 """
 import os, sys, time, datetime, shutil, http.cookiejar, urllib.request, urllib.error
 
@@ -21,6 +25,7 @@ LOG_ROOT = r'C:/Projects/serial_logs'
 BASE = sys.argv[1] if len(sys.argv) > 1 else 'http://192.168.0.19'
 COOKIES = sys.argv[2] if len(sys.argv) > 2 else os.path.join(LOG_ROOT, 'cntl_cookies.txt')
 PIN_FILE = os.path.join(LOG_ROOT, 'cntl_pin.txt')
+DEVKEY_FILE = os.path.join(LOG_ROOT, 'cntl_devkey.txt')
 ITEMS = [('devlog.txt', '/api/devlog_dump'), ('devlog_we.txt', '/api/devlog_dump?lvl=we'), ('alarms.json', '/api/alarms')]
 
 
@@ -58,6 +63,10 @@ def main():
     if os.path.exists(COOKIES):
         cj.load(COOKIES, ignore_discard=True, ignore_expires=True)
     op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+    try:
+        op.addheaders = [('X-Dev-Key', open(DEVKEY_FILE, encoding='utf-8').read().strip())]
+    except OSError:
+        pass
     out_dir = os.path.join(LOG_ROOT, 'cntl_dumps', datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
     os.makedirs(out_dir, exist_ok=True)
     logged_in = False

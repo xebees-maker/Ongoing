@@ -1,5 +1,6 @@
 #include "web_api.h"
 #include "web_auth.h"
+#include "cloud_link.h"
 #include "web_session.h"
 #include "node_hub.h"
 #include "sens_kind_store.h"
@@ -130,6 +131,9 @@ static bool build_dashboard(jbuf_t *bp, size_t *mem_from, size_t *mem_to)
     jb_str(&b, ssid ? ssid : "");
     jb_printf(&b, ",\"ip\":%s},\"status\":\"%s\"", wifi_sta_get_own_ip_str()[0] ? "true" : "false",
               (err || sd_fail) ? "error" : warn ? "warning" : "normal");
+    /* 2026-11-23(사용자 결정 — 원격 접속 QR) — 콘이 서버(EMQX)에 붙어 있는지. 현장 주소로 연 웹이 "이 Wi-Fi 안에서만" /
+     * "밖에서도 쓰려면 QR을 다시 찍으세요" 안내를 고름 */
+    jb_printf(&b, ",\"cloud\":%s", cloud_link_is_connected() ? "true" : "false");
     jb_printf(&b, ",\"rec\":%lu", (unsigned long)stats_store_get_append_seq());  /* 2026-10-09 — 웹 기록 표 자동 갱신 */
     jb_printf(&b, ",\"ph\":%lu", (unsigned long)photo_storage_list_gen());   /* 2026-10-21 — 웹 사진 목록 자동 갱신 */
     jb_printf(&b, ",\"held\":%lu", (unsigned long)stats_store_get_unsynced());   /* 2026-10-15(SD 개선 4단계) — SD 조치 안내 */
@@ -1445,7 +1449,10 @@ static esp_err_t api_notify_test_post_handler(httpd_req_t *req)
 #define WEB_ALARM_PAGE 50
 static esp_err_t api_alarms_get_handler(httpd_req_t *req)
 {
-    WEB_SCREEN_API_BEGIN(req);
+    /* 11-23 — 개발용 키(덤프 도구)면 로그인·웹 사용권 없이 읽기만(웹 사용권을 가져가면 콘 화면에 웹 사용 중 덮개가 생기고,
+     * 콘이 사용 중이면 409로 덤프가 실패했음) */
+    if (!web_auth_dev_key_ok(req)) WEB_SCREEN_API_BEGIN(req);
+    else if (!web_restore_gate(req)) return ESP_OK;
     if (!work_ready(req)) return ESP_FAIL;
     int page = query_int(s_w->query, "page", 0);
     if (page < 0) page = 0;

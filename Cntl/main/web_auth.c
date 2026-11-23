@@ -13,6 +13,11 @@
 #include "freertos/semphr.h"
 #include "esp_timer.h"
 #include "lwip/sockets.h"
+/* 2026-11-23(사용자 결정 — 덤프 도구 로그인 충돌) — 개발용 키: git 밖 Cntl/main/dev_key.h에 #define CNTL_DEV_KEY "<32자>".
+ * 없으면 개발용 키 경로는 꺼짐(다른 PC에서 파일이 없어도 빌드됨). 출시 전 임시 API와 같이 지움 */
+#if __has_include("dev_key.h")
+#include "dev_key.h"
+#endif
 
 static const char *TAG = "WEBAUTH";
 
@@ -48,6 +53,24 @@ static web_auth_file_t *s_auth = NULL;    /* 모델(PSRAM) — s_mutex로 보호
 /* 2026-11-23(사용자 결정 — 웹 로그인 세션은 하나만) — 토큰을 새로 낼 때(로그인·PIN 변경)와 콘에서 PIN을 정할 때 올림.
  * 웹 ws는 연결 맺을 때의 값과 다르면 닫음(web_api.c) — 쿠키를 못 보는 ws도 밀려난 세션이면 끊기게 */
 static volatile uint32_t s_login_gen = 0;
+/* 2026-11-23 — PIN 복구 키(설명은 아래 web_auth_recovery_* 앞) */
+#define RECOVERY_PATH        FS_MOUNT_POINT "/recovery_key.bin"
+#define RECOVERY_FAIL_PATH   FS_MOUNT_POINT "/recovery_fail.bin"
+#define RECOVERY_MAGIC       0x52454359u  /* "RECY" */
+#define RECOVERY_VERSION     1u
+#define RECOVERY_FREE_FAILS  3
+#define RECOVERY_WAIT_MAX_S  (24 * 3600)
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint8_t  salt[16];
+    uint8_t  hash[32];
+} recovery_file_t;
+
+static uint32_t s_recovery_fails = 0;        /* 파일에서 읽은 값(web_auth_init) */
+static int64_t  s_recovery_last_fail_s = 0;  /* 마지막으로 틀린 때(부팅 후 초) — 부팅 땐 0(부팅부터 셈) */
+
 static SemaphoreHandle_t s_mutex = NULL;
 /* 요청 처리용 작업 버퍼(PSRAM) — httpd는 태스크 하나라 요청이 겹치지 않지만, 모델과 같이 s_mutex 안에서만 씀 */
 typedef struct {
@@ -132,6 +155,12 @@ void web_auth_init(void)
         }
     }
     ESP_LOGI(TAG, "PIN %s", s_auth->has_password ? "set" : "not set (web closed until set on the CNTL screen)");
+    /* 11-23 — 복구 키 틀린 횟수(껐다 켜도 남음) */
+    FILE *rf = fopen(RECOVERY_FAIL_PATH, "rb");
+    if (rf) {
+        if (fread(&s_recovery_fails, sizeof(s_recovery_fails), 1, rf) != 1) s_recovery_fails = 0;
+        fclose(rf);
+    }
 }
 
 bool web_auth_enabled(void)
@@ -354,6 +383,145 @@ static esp_err_t api_password_post_handler(httpd_req_t *req)
 
 /* 2026-11-23(사용자 결정) — POST /api/logout_all(모든 기기 로그아웃) 없앰: 세션이 하나라 필요 없음 */
 
+/* ════════════════════════════════════════════════════════════
+ * 2026-11-23(사용자 결정) — PIN 복구 키. 공급할 때 콘마다 다른 숫자 8자리를 넣고 사용자에게 줌(우리도 보관).
+ * PIN을 잊으면 콘 화면 "PIN을 잊으셨나요?" → 키 → 맞으면 PIN·웹 로그인만 지우고 새 PIN 등록.
+ *  - 키 파일(recovery_key.bin): 해시만(salt + SHA-256). PIN 파일과 따로 — PIN 파일은 형식이 바뀌면 버려지게 되어 있어서.
+ *    펌웨어 화면은 읽기만, 쓰는 것은 공급 경로(지금은 개발용 키 API — 정식 공급 도구는 3.e 때)
+ *  - 틀린 횟수(recovery_fail.bin): 콘을 껐다 켜도 남음. 3번까지는 바로 다시, 그 뒤 1분부터 틀릴 때마다 두 배(최대 24시간).
+ *    기다리는 시간은 마지막으로 틀린 때(또는 부팅) 부터 셈 — 껐다 켜면 처음부터 다시 기다림(줄지 않음)
+ * ════════════════════════════════════════════════════════════ */
+static bool recovery_key_ok(const char *key)
+{
+    if (!key || strlen(key) != WEB_AUTH_RECOVERY_LEN) return false;
+    for (int i = 0; i < WEB_AUTH_RECOVERY_LEN; i++) if (key[i] < '0' || key[i] > '9') return false;
+    return true;
+}
+
+static bool recovery_read_locked(recovery_file_t *r)
+{
+    FILE *f = fopen(RECOVERY_PATH, "rb");
+    if (!f) return false;
+    bool ok = fread(r, sizeof(*r), 1, f) == 1;
+    fclose(f);
+    return ok && r->magic == RECOVERY_MAGIC && r->version == RECOVERY_VERSION;
+}
+
+static void recovery_save_fails_locked(void)
+{
+    FILE *f = fopen(RECOVERY_FAIL_PATH, "wb");
+    if (!f) return;
+    fwrite(&s_recovery_fails, sizeof(s_recovery_fails), 1, f);
+    fclose(f);
+}
+
+static int recovery_wait_total_s(uint32_t fails)
+{
+    if (fails < RECOVERY_FREE_FAILS) return 0;
+    uint32_t steps = fails - RECOVERY_FREE_FAILS;   /* 0 → 60초, 1 → 120초 ... */
+    if (steps > 11) return RECOVERY_WAIT_MAX_S;
+    int64_t w = 60LL << steps;
+    return w > RECOVERY_WAIT_MAX_S ? RECOVERY_WAIT_MAX_S : (int)w;
+}
+
+bool web_auth_recovery_present(void)
+{
+    if (!s_auth) return false;
+    lock();
+    static recovery_file_t s_r;   /* 잠금 안에서만 씀 */
+    bool ok = recovery_read_locked(&s_r);
+    memset(&s_r, 0, sizeof(s_r));
+    unlock();
+    return ok;
+}
+
+int web_auth_recovery_wait_s(void)
+{
+    if (!s_auth) return 0;
+    lock();
+    int64_t left = recovery_wait_total_s(s_recovery_fails) - (esp_timer_get_time() / 1000000 - s_recovery_last_fail_s);
+    unlock();
+    return left > 0 ? (int)left : 0;
+}
+
+web_auth_recovery_result_t web_auth_recovery_try(const char *key)
+{
+    if (!s_auth || !recovery_key_ok(key)) return WEB_AUTH_RECOVERY_WRONG;
+    lock();
+    int64_t now = esp_timer_get_time() / 1000000;
+    if (recovery_wait_total_s(s_recovery_fails) - (now - s_recovery_last_fail_s) > 0) { unlock(); return WEB_AUTH_RECOVERY_WAIT; }
+    static recovery_file_t s_r;
+    if (!recovery_read_locked(&s_r)) { unlock(); return WEB_AUTH_RECOVERY_NONE; }
+    bool ok = hash_password_locked(s_r.salt, key, WEB_AUTH_RECOVERY_LEN) && memcmp(s_work->digest, s_r.hash, 32) == 0;
+    memset(&s_r, 0, sizeof(s_r));
+    if (!ok) {
+        s_recovery_fails++;
+        s_recovery_last_fail_s = now;
+        recovery_save_fails_locked();
+        ESP_LOGW(TAG, "Recovery key wrong (%u)", (unsigned)s_recovery_fails);
+        unlock();
+        return WEB_AUTH_RECOVERY_WRONG;
+    }
+    /* 맞음 — PIN·웹 로그인만 지움(콘은 PIN 등록 화면으로) */
+    s_recovery_fails = 0;
+    recovery_save_fails_locked();
+    memset(s_auth->hash, 0, sizeof(s_auth->hash));
+    memset(s_auth->tokens, 0, sizeof(s_auth->tokens));
+    s_auth->next_slot = 0;
+    s_auth->has_password = 0;
+    s_login_gen++;
+    bool saved = save_locked();
+    unlock();
+    ESP_LOGW(TAG, "PIN reset with recovery key%s", saved ? "" : " (save failed)");
+    return WEB_AUTH_RECOVERY_OK;
+}
+
+/* POST /api/dev/recovery_key — 본문 = 숫자 8자리. 개발용 키만(로그인한 웹도 안 됨). 공급 도구가 생기면 그쪽으로(3.e). 출시 전 지움 */
+static esp_err_t api_dev_recovery_key_post_handler(httpd_req_t *req)
+{
+    if (!s_auth) return send_json(req, "500 Internal Server Error", "{\"ok\":false}");
+    if (!web_auth_dev_key_ok(req)) return web_auth_reject(req);
+    lock();
+    bool ok = read_body_locked(req) && recovery_key_ok(s_work->body);
+    if (ok) {
+        static recovery_file_t s_r;
+        s_r.magic = RECOVERY_MAGIC;
+        s_r.version = RECOVERY_VERSION;
+        esp_fill_random(s_r.salt, sizeof(s_r.salt));
+        ok = hash_password_locked(s_r.salt, s_work->body, WEB_AUTH_RECOVERY_LEN);
+        if (ok) {
+            memcpy(s_r.hash, s_work->digest, 32);
+            FILE *f = fopen(RECOVERY_PATH, "wb");
+            ok = f && fwrite(&s_r, sizeof(s_r), 1, f) == 1;
+            if (f) fclose(f);
+        }
+        memset(&s_r, 0, sizeof(s_r));
+        if (ok) { s_recovery_fails = 0; recovery_save_fails_locked(); }
+    }
+    memset(s_work->body, 0, sizeof(s_work->body));
+    unlock();
+    if (ok) ESP_LOGI(TAG, "Recovery key written (dev)");
+    return ok ? send_json(req, NULL, "{\"ok\":true}") : send_json(req, "400 Bad Request", "{\"ok\":false}");
+}
+
+/* 2026-11-23 — 개발용 키(머리말 X-Dev-Key). 집 안 HTTP로만 옴 — 원격 터널(cloud_link)은 Cookie·Content-Type만 넘김 */
+bool web_auth_dev_key_ok(httpd_req_t *req)
+{
+#ifdef CNTL_DEV_KEY
+    static const char key[] = CNTL_DEV_KEY;
+    _Static_assert(sizeof(key) - 1 >= 16, "CNTL_DEV_KEY too short");
+    char v[sizeof(key) + 1];
+    if (httpd_req_get_hdr_value_str(req, "X-Dev-Key", v, sizeof(v)) != ESP_OK) return false;
+    if (strlen(v) != sizeof(key) - 1) return false;
+    uint8_t diff = 0;
+    for (size_t i = 0; i < sizeof(key) - 1; i++) diff |= (uint8_t)(v[i] ^ key[i]);
+    return diff == 0;
+#else
+    (void)req;
+    return false;
+#endif
+}
+
 uint32_t web_auth_login_gen(void)
 {
     return s_login_gen;
@@ -383,4 +551,7 @@ void web_auth_register_handlers(httpd_handle_t server)
     static const httpd_uri_t password_uri = { .uri = "/api/password", .method = HTTP_POST, .handler = api_password_post_handler };
     httpd_register_uri_handler(server, &login_uri);
     httpd_register_uri_handler(server, &password_uri);
+    static const httpd_uri_t dev_recovery_uri = { .uri = "/api/dev/recovery_key", .method = HTTP_POST,
+                                                  .handler = api_dev_recovery_key_post_handler };   /* 11-23 — 개발용 키만, 출시 전 지움 */
+    httpd_register_uri_handler(server, &dev_recovery_uri);
 }
