@@ -34,6 +34,7 @@ idf_component_register(
         "web_auth.c"
         "web_session.c"
         "web_api.c"
+        "diary_api.c"
 
         "../components/waveshare_rgb_lcd_port.c"
         "../components/ch422g.c"

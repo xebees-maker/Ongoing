@@ -84,7 +84,8 @@ static bool load_cfg(void)
  *    막힌 요청은 403 {"error":"remote_readonly"}. /admin·/ws는 늘 막음.
  *  - MQTT 이벤트 처리기는 PSRAM 스택 MQTT 태스크에서 불리므로 복사해서 큐에 넣기만 함 — 실제 요청은 tunnel 태스크.
  * ════════════════════════════════════════════════════════════ */
-#define TUN_REQ_MAX     (16 * 1024)   /* 요청(머리+본문) 최대 — 3단계는 로그인 정도 */
+#define TUN_REQ_MAX     (64 * 1024)   /* 요청(머리+본문) 최대. 11-26 16KB → 64KB: 영농일지 저장(파일 하나 최대 60KB, diary_api.c)을 밖에서도.
+                                       * 요청마다 PSRAM에 받아 큐(TUN_QUEUE_LEN)로 — 내부 RAM 안 씀 */
 #define TUN_RESP_MAX    (512 * 1024)  /* 응답 최대 — 사진(지금 최대 약 170KB)·통계 여유 */
 #define TUN_CHUNK       (8 * 1024)
 #define TUN_QUEUE_LEN   4

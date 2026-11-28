@@ -9373,6 +9373,9 @@ void ui_init(void)
 
     lv_obj_t *camera_box = create_dashboard_panel(dashboard_page, STR_GROUP_CAMERA, 2);
     s_camera_box = camera_box;
+    /* 2026-11-26(사용자 지시 — 웹과 같게) — 요약(개발용 시스템 상태)은 맨 아래. 만드는 순서는 그대로 두고(요약 위젯을 다른 판넬이
+     * 참조할 수 있음) 자리만 옮김. 주화면 판넬은 이 카메라 판넬이 마지막 */
+    lv_obj_move_to_index(summary_box, -1);
     /* 2026-09-08(카메라 팝업 추출), 2026-09-22(사용자 지시로 회색/탭불가 로직 제거) —
      * 센서판넬 제목(s_dash_title[1])과 동일 원칙: 연결 대수와 무관하게 항상 클릭 가능 */
     style_inverted_control(s_dash_title[2]);

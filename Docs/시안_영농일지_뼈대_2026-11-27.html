@@ -1,0 +1,795 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>영농일지 뼈대 시안</title>
+<style>
+  :root { --bg:#e5e7eb; --card:#fff; --text:#1c1e21; --muted:#6b7280; --line:rgba(127,127,127,.18);
+          --acc:#2563eb; --warn:#d97706; --bad:#dc2626; --ok:#16a34a; --chip:#f3f4f6; --frame:#cbd5e1; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1115; --card:#1b1e24; --text:#e5e7eb; --muted:#9ca3af; --chip:#262a33; --frame:#374151; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.45 -apple-system, system-ui, "Malgun Gothic", sans-serif; background:var(--frame); color:var(--text); }
+  .dev { max-width:420px; margin:0 auto; padding:10px 16px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:13px; }
+  .dev button { font:inherit; padding:6px 10px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--text); cursor:pointer; }
+  .dev .depth { margin-left:auto; font-weight:600; }
+  .phone { max-width:420px; margin:0 auto 24px; min-height:760px; background:var(--bg); position:relative; overflow:hidden; border-radius:14px; }
+  .scr { position:absolute; inset:0; overflow-y:auto; background:var(--bg); }
+  .bar { position:sticky; top:0; z-index:2; display:flex; align-items:center; gap:8px; padding:12px 14px; background:var(--card); border-bottom:1px solid var(--line); }
+  .bar h1 { font-size:17px; margin:0; flex:1; }
+  .bar .b { font-size:20px; cursor:pointer; padding:0 6px; color:var(--acc); background:none; border:0; }
+  .dbadge { font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:10px; padding:1px 7px; }
+  .body { padding:12px; display:flex; flex-direction:column; gap:10px; }
+  section { background:var(--card); border-radius:10px; padding:10px 12px; }
+  section h2 { font-size:15px; margin:0 0 6px; display:flex; align-items:center; gap:6px; }
+  section h3 { font-size:14px; margin:10px 0 2px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .ph { color:var(--muted); font-size:13px; border:1px dashed var(--line); border-radius:8px; padding:14px; text-align:center; }
+  .row { display:flex; align-items:center; gap:8px; padding:8px 0; border-top:1px solid var(--line); }
+  .row:first-of-type { border-top:0; }
+  .row .t { flex:1; min-width:0; }
+  .row .s { font-size:12px; color:var(--muted); }
+  .tap { cursor:pointer; }
+  .chev { color:var(--muted); }
+  .must { font-size:11px; color:var(--bad); border:1px solid var(--bad); border-radius:4px; padding:0 4px; margin-left:4px; }
+  .late { color:var(--bad); }
+  .chk { width:22px; height:22px; border:2px solid var(--muted); border-radius:6px; flex:none; cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:14px; }
+  .chk.on { background:var(--ok); border-color:var(--ok); color:#fff; }
+  .done .t { text-decoration:line-through; color:var(--muted); }
+  .btn { font:inherit; padding:11px 14px; border-radius:9px; border:0; background:var(--acc); color:#fff; cursor:pointer; width:100%; }
+  .btn.sec { background:var(--chip); color:var(--text); }
+  .btns { display:flex; gap:8px; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .chip { padding:6px 11px; border-radius:16px; background:var(--chip); cursor:pointer; font-size:14px; border:1px solid transparent; }
+  .chip.on { border-color:var(--acc); color:var(--acc); font-weight:600; }
+  .chip.dis { opacity:.45; cursor:default; }
+  label.f { display:block; font-size:13px; color:var(--muted); margin:8px 0 4px; }
+  input, select { font:inherit; padding:8px 10px; border-radius:8px; border:1px solid rgba(127,127,127,.4); background:var(--card); color:var(--text); }
+  input.w { width:100%; }
+  input.n { width:80px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 10px; }
+  .stepper { display:flex; align-items:center; gap:10px; }
+  .stepper button { width:34px; height:34px; border-radius:8px; border:1px solid var(--line); background:var(--chip); color:var(--text); font-size:18px; cursor:pointer; }
+  .steps { display:flex; gap:4px; padding:8px 12px 0; }
+  .steps i { flex:1; height:4px; border-radius:2px; background:var(--line); }
+  .steps i.on { background:var(--acc); }
+  .note { font-size:13px; padding:8px 10px; border-radius:8px; background:var(--chip); margin-top:6px; }
+  .note.warn { border-left:3px solid var(--warn); }
+  .note.bad { border-left:3px solid var(--bad); }
+  .note.ok { border-left:3px solid var(--ok); }
+  .why { font-size:12px; color:var(--muted); margin-top:4px; }
+  details.src { font-size:12px; margin-top:4px; }
+  details.src summary { color:var(--acc); cursor:pointer; }
+  details.src .srow { padding:4px 0 4px 8px; border-left:2px solid var(--chip); margin-top:4px; }
+  details.src a { color:inherit; }
+  .week { display:flex; gap:4px; }
+  .day { flex:1; text-align:center; padding:6px 0; border-radius:8px; background:var(--chip); cursor:pointer; font-size:12px; }
+  .day b { display:block; font-size:15px; }
+  .day .dots { height:8px; margin-top:3px; display:flex; justify-content:center; gap:2px; }
+  .day .dots span { width:6px; height:6px; border-radius:3px; background:var(--acc); }
+  .day.free { outline:2px solid var(--ok); }
+  .day.today { background:var(--acc); color:#fff; }
+  .day.today .dots span { background:#fff; }
+  .hhead { display:flex; align-items:center; gap:8px; cursor:pointer; }
+  .hhead .n { font-weight:700; }
+  .stage { font-size:13px; color:var(--muted); flex:1; }
+  .card0 { cursor:pointer; }
+  .big { font-size:28px; font-weight:700; }
+  .modal { position:absolute; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:flex-end; z-index:5; }
+  .mbox { background:var(--card); width:100%; border-radius:14px 14px 0 0; max-height:88%; overflow-y:auto; }
+  .tl .row .t b { font-weight:600; }
+  .tag { font-size:11px; padding:1px 6px; border-radius:4px; background:var(--chip); color:var(--muted); }
+  .tag.act { background:var(--ok); color:#fff; } .tag.fix { background:var(--acc); color:#fff; }
+  .scope .chip { flex:1; text-align:center; }
+  .calc { font-size:13px; margin-top:6px; }
+  .calc b { font-size:15px; }
+  .circ { display:flex; align-items:center; gap:6px; padding:4px 0; font-size:13px; }
+  .circ span.l { flex:1; }
+</style>
+</head>
+<body>
+<div class="dev">
+  <button id="devReset">처음 설치부터</button>
+  <button id="devDone">설치 끝난 상태로</button>
+  <span class="depth" id="devDepth">깊이 0</span>
+</div>
+<div class="phone" id="phone"></div>
+
+<script>
+/* 영농일지 화면 뼈대 시안(2026-11-27, 11-28 개정, 11-28 오후 개정: 최초 노드 = 농장, 여러 작물, 신령버섯, 패시브, 순환팬 단계별).
+   기능 없음: 화면, 이동, 기본값이 채워진 모습만.
+   설계: Docs/설계_영농일지_2026-11-26.md, 문제 ID 출처: Docs/FMEA_양송이_2026-11-27.md(신령버섯은 14장 S1-S9)
+   깊이: 주화면 0, 열고 들어가 닫고 나와야 하는 화면이나 창마다 +1. 마법사 단계는 옆으로 이동(같은 깊이).
+   농장 설정 마법사는 처음 설치(깊이 1)와 설정에서 다시 열기(깊이 2)에 같은 화면을 쓴다.
+   계층: 농장 → 시설 → 설비 → 키우는 작물 → 작기(재배사 + 작물) → 배지, 재배법, 단계. */
+
+/* ---------- 농장 쪽 상수(작물과 무관) ---------- */
+var STD_KGM2 = 58.5;     // 표준 두께(약 15cm)의 1㎡당 kg — 사용자 재배사: 18m, 10톤, 7단
+var THIN_KGM2 = 45;      // 이보다 적으면 배지량 부족 경고(제주 자료 평당 150kg)
+var THICK_KGM2 = 60;     // 이보다 많으면 두꺼움 → 1-3주기 예상 수량을 높임(4주기 안내는 하지 않음)
+var HEAT_PEAK = 1.65;    // 균사 생장 중 배지 1톤당 최대 발열 kW(접종 뒤 9일 무렵)
+var HEAT_VENT = 0.1;     // 1톤당 환기 부하 kW
+var INSUL = { panel:{ name:'판넬 10cm', u:0.37, leak:1 }, urethane:{ name:'판넬 + 우레탄 코팅', u:0.22, leak:1 },
+              passive:{ name:'패시브(고단열·기밀·열회수)', u:0.12, leak:0, hrv:0.75 } };   // 패시브 값은 패시브 하우스 기준을 옮긴 추정
+var MAT = { rice:'볏짚', wheat:'밀짚', mix:'볏짚·밀짚 혼용', cotton:'폐면 포함' };
+var STATE = { 1:'1차 배지(후발효 전)', 2:'2차 배지(후발효 끝)', 3:'3차 배지(접종 끝)' };
+var CIRC_STAGES = ['후발효', '균사 생장', '복토 뒤', '발이', '생육'];
+
+/* ---------- 기본값의 근거(논문, 공공기관 자료만. 업체 자료, 위키는 넣지 않음) ---------- */
+var SRC = {
+  rda:     { who:'농촌진흥청', kind:'기관', title:'품목별 농업소득 향상 운영 매뉴얼: 양송이(2011)', url:'https://www.nongsaro.go.kr/cms_contents/937/100218_MF_ATTACH_01.pdf' },
+  rdaTech: { who:'농촌진흥청 농업과학기술원', kind:'기관', title:'양송이 재배기술', url:'https://agri.jeju.go.kr/files/board/%EC%96%91%EC%86%A1%EC%9D%B4%20%EC%9E%AC%EB%B0%B0%20%EA%B8%B0%EC%88%A0.pdf' },
+  nongsaro:{ who:'농사로(농촌진흥청)', kind:'기관', title:'양송이 퇴비 영상', url:'http://www.nongsaro.go.kr/portal/ps/psb/psby/vodPlay.ps?mvpNo=1571&mvpClipNo=&menuId=PS65512' },
+  uc:      { who:'UC ANR(캘리포니아대)', kind:'기관', title:'Commercial Production of Button Mushrooms in California', url:'https://ucanr.edu/sites/default/files/2017-02/256745.pdf' },
+  kms1981: { who:'한국균학회지', kind:'논문', title:'후발효 터널 연구(1981)', url:'https://koreascience.or.kr/article/JAKO198103040053632.do' },
+  zied18:  { who:'Zied 외, Frontiers in Sustainable Food Systems', kind:'논문', title:'Using of Appropriated Strains in the Practice of Compost Supplementation for A. subrufescens Production(2018)', url:'https://www.frontiersin.org/journals/sustainable-food-systems/articles/10.3389/fsufs.2018.00026/full' },
+  zied17:  { who:'Zied 외, BioMed Research International', kind:'논문', title:'Mycochemical Characterization of A. subrufescens(2017)', url:'https://pmc.ncbi.nlm.nih.gov/articles/PMC5610804/' },
+  pardo20: { who:'Pardo-Giménez 외, Scientific Reports', kind:'논문', title:'Optimization of cultivation techniques improves the agronomic behavior of A. subrufescens(2020)', url:'https://www.nature.com/articles/s41598-020-65081-2' },
+  kaku26:  { who:'Kakumyan 외, Studies in Fungi', kind:'논문', title:'Enzymatic dynamics during cultivation cycle of A. subrufescens on commercial compost(2026)', url:'https://www.maxapress.com/article/doi/10.48130/sif-0026-0012' }
+};
+
+/* ---------- 작물 템플릿 ---------- */
+/* rows: [항목, 기본값, 근거 목록[[SRC 키, 그 자료가 말하는 값]]]. 근거가 없는 값은 현장 경험 값 */
+var CROPS = {
+  mushroom: { name:'양송이', obj:'를', std:58.5, thin:45, thick:60, store:'1-2°C', dry:false,
+    rows:[ ['단계', '입상 → 후발효 → 접종 → 복토 → 후토 → 1·2·3주기 → 폐상', [['rda', '재배 순서'], ['rdaTech', '재배 순서']]],
+           ['후발효', '58-62°C 5일 → 3일에 40°C → 접종 전 25°C · 68°C 절대 한계',
+             [['rda', '정열 60°C 6-8시간 → 55-58°C 1-2일 → 50-55°C 2-3일 → 48-50°C 1-2일 → 45°C 내외 종료'], ['kms1981', '배지와 공기 온도 차 2°C 이내'], ['uc', '종료: 암모니아 냄새 없음, 10 ppm 미만']]],
+           ['발이 전', '배지 23-25°C · 습도 90-95% · CO2 1,500-3,000 ppm(환기 최소)',
+             [['uc', '배지 27°C를 넘으면 피해'], ['rdaTech', '균사 생장 온도, 습도'], ['rda', '접종 뒤 23°C 이하(괴균병 예방)']]],
+           ['발이 뒤', '관수 안 함(갓 변형) · 습도 80%대 · 16-18°C · CO2 1,000 ppm 이하',
+             [['uc', 'CO2 0.08% 이하'], ['rda', '시간당 3-4회 이상 환기, 습도 80% 이하(갈반병 방지)'], ['rdaTech', '1주기 16-17°C, 2-3주기 15-16°C']]],
+           ['관수', '복토 후, 후토 후, 각 주기 시작에 하루 600 L씩 3일(60평 기준)'],
+           ['배지와 저장', '약 15cm(1㎡당 58.5 kg) · 생물 저장 1-2°C',
+             [['rdaTech', '평당 150 kg'], ['nongsaro', '1㎡당 50-60 kg'], ['rda', '수확 직후 4°C 이하 예냉']]],
+           ['할 일', '31가지 + 예방 할 일 32가지'] ] },
+  sinryeong: { name:'신령버섯', obj:'을', std:78, thin:60, thick:85, store:'5-10°C', dry:true,
+    rows:[ ['단계', '양송이와 같은 순서: 입상 → 후발효 → 접종 → 균사 생장(약 20일) → 복토 → 발이 → 1·2·3주기 → 폐상'],
+           ['발이 전', '양송이와 거의 같음 · 배지 23-26°C 변온(하루에도 여러 번) · CO2 1,500-3,000 ppm(양송이와 같음)',
+             [['zied18', '균사 생장 26°C, 습도 80%, CO2 3,000 ppm'], ['zied17', '균사 생장 28°C, 습도 95%, 외부 환기 없이 20일'], ['pardo20', '복토 뒤 7일 배지 28°C']]],
+           ['발이 뒤', '관수함 · 습도 90% 이상 · 배지 23-26°C 그대로 · CO2 1,000 ppm 이하(양송이와 같음)',
+             [['kaku26', '발이 22-25°C, 습도 95-97%, CO2 1,500 mg/㎥(약 800 ppm) 아래'], ['zied17', '발이 유도 CO2 800 ppm 미만(19°C, 빛 150 lux)'], ['pardo20', '수확 중 배지 26°C, CO2 700 ppm']]],
+           ['관수', '양송이와 같은 600 L × 3일 + 그 사이 배지 상태 보고 하루 1-2회 300 L(선택) → 건조 환기(기본 6시간)'],
+           ['배지와 저장', '양송이와 같은 배지를 약 20cm로(1㎡당 약 78 kg) · 생물 저장 5-10°C'],
+           ['손질과 건조', '다듬기 → 세척 → 물기 빼기 10분 → (썰기) → 40°C에서 1시간에 1°C씩 45°C → 45°C 유지(통째 40시간, 반 약 20시간, 슬라이스 약 8시간) → 포장할 때만 60°C 2-3시간'],
+           ['할 일', '양송이 할 일 + 배지 상태 확인, 건조 환기, 손질, 건조기'] ],
+    note:'20°C 아래면 죽기보다 자라지 않습니다. 매일 관수는 하지 않는 농가도 있어 선택 항목입니다. 외국 연구는 배지를 26-28°C로 운영하기도 합니다(참고).' }
+};
+/* 형태별 건조 시간: 45°C 유지만 줄어듦(사용자: 반으로 자르면 절반, 슬라이스는 1/5). 올리는 5시간은 같음 */
+var DRY_FORMS = { whole:{ name:'통째(원형 보존)', hold:40 }, half:{ name:'반으로 자름', hold:20 }, slice:{ name:'슬라이스(티백, 추출물)', hold:8 } };
+function dryHours(f) { return 5 + DRY_FORMS[f].hold; }
+function srcBlock(list) {
+  if (!list || !list.length) return '';
+  return '<details class="src"><summary>근거 ' + list.length + '</summary>' + list.map(function (x) {
+    var s = SRC[x[0]];
+    return '<div class="srow"><span class="tag">' + s.kind + '</span> <b>' + s.who + '</b>: ' + x[1] +
+      '<div class="muted">' + s.title + ' · <a href="' + s.url + '" target="_blank" rel="noopener">원문</a></div></div>';
+  }).join('') + '</details>';
+}
+var CROP_ORDER = ['mushroom', 'sinryeong'];
+function cropDefaults() {
+  var circ = {}; CIRC_STAGES.forEach(function (s) { circ[s] = s !== '후발효'; });
+  return { mat:'rice', state:1, circ:circ };
+}
+
+var S;            // 상태
+var stack = [];   // 화면 쌓기: {id, arg}
+function fresh() {
+  return { installed:false, step:1, mode:'new',
+    farmName:'', loc:null,
+    houses:3, nameStyle:'num', names:[],
+    bld:{ floor:50, height:4.5, insul:'panel', doors:2, facing:'모름' },
+    bed:{ rows:2, tiers:4, gap:0.6, width:1.35, length:18 },
+    shared:{ storage:false, fridge:true, warehouse:true, dryer:false }, dryerN:1, dryerKg:100, dform:'whole',
+    fridges:[ { crop:'mushroom', setC:2 } ],
+    equip:{ boiler:'move', boilerN:1, ac:true, acCool:23, acHeat:20, humid:true,
+            supply:true, supplyN:1, roofVent:'passive', circ:true, circN:2, steam:true, hrv:true, hrvBypass:true },
+    crops:['mushroom'], byCrop:{ mushroom:cropDefaults(), sinryeong:cropDefaults() },
+    remove:{},               // 마법사에서 동 수를 줄일 때: 줄이는 재배사와 처리
+    cycles:[], done:{}, saved:null };
+}
+function namesFor(style, n) {
+  var a = [];
+  for (var i = 0; i < n; i++) {
+    if (style === 'num') a.push((i + 1) + '동');
+    else if (style === 'abc') a.push(String.fromCharCode(65 + i) + '동');
+    else if (style === 'kor') a.push('가나다라마바사아자차'.charAt(i) + '동');
+    else a.push(S.names[i] || ('재배사 ' + (i + 1)));
+  }
+  return a;
+}
+function demoInstalled() {
+  S = fresh(); S.installed = true; S.names = namesFor('num', 3); S.farmName = '우리 농장';
+  S.crops = ['mushroom', 'sinryeong'];
+  S.cycles = [
+    { h:0, crop:'mushroom', stage:'복토', day:5, media:1, mat:'rice', ton:10, filled:7, next:'후토 2일 뒤' },
+    { h:1, crop:'mushroom', stage:'후발효', day:3, media:1, mat:'wheat', ton:10, filled:7, next:'접종 6일 뒤(예정)' },
+    { h:2, crop:'sinryeong', stage:'2주기 수확', day:9, media:1, mat:'rice', ton:5, filled:4, next:'3주기 약 12일 뒤' } ];
+}
+
+/* ---------- 계산 ---------- */
+function tierArea() { return S.bed.width * S.bed.length; }                       // 한 단 ㎡
+function bedTiers() { return S.bed.rows * S.bed.tiers; }                         // 재배사 전체 단 수
+function growArea() { return tierArea() * bedTiers(); }                          // 재배 면적 ㎡
+function pyeong(m2) { return Math.round(m2 / 3.3058); }
+function tiersFor(ton, crop) { return ton * 1000 / (tierArea() * (crop ? CROPS[crop].std : STD_KGM2)); }   // 그 작물의 표준 두께로 채울 수 있는 단
+function isPassive() { return S.bld.insul === 'passive'; }
+function envLoad(dT) {                                                           // 바깥과 dT°C 차이일 때 외피와 문틈 kW(첫 작기 기본값)
+  dT = dT || 10;
+  var ins = INSUL[S.bld.insul];
+  var floorM2 = S.bld.floor * 3.3058, len = S.bed.length + 2, wid = floorM2 / len;
+  var arch = Math.PI * wid / 2 * len, walls = 2 * len * S.bld.height * 0.6 + 2 * wid * S.bld.height;
+  var cond = ins.u * (arch + walls) * dT / 1000;
+  var gapM2 = S.bld.doors * 0.062, q = 0.6 * gapM2 * Math.sqrt(2 * 3 / 1.2);    // m3/s, 압력 차 3Pa
+  var leak = q * 1.2 * 1.005 * dT * ins.leak;                                    // kW(패시브는 거의 0)
+  return cond + leak;
+}
+function ventFactor() { return isPassive() && S.equip.hrv ? 1 - INSUL.passive.hrv : 1; }
+function heatNeed(ton) { return ton * (HEAT_PEAK + HEAT_VENT * ventFactor()) + envLoad(10); }
+function f1(x) { return (Math.round(x * 10) / 10).toFixed(1); }
+
+/* 작기 시작의 배지 블록: (작물) → 총 무게 → 몇 단 분량, 채운 단 수 → 경고 */
+function mediaBlock(c, idx) {
+  var cap = tiersFor(c.ton, c.crop), kgm2 = c.ton * 1000 / (tierArea() * c.filled), cd = S.byCrop[c.crop], cr = CROPS[c.crop];
+  var out = '';
+  if (S.crops.length > 1) out += '<label class="f">작물</label><div class="chips">' +
+    S.crops.map(function (k) { return '<span class="chip ' + (c.crop === k ? 'on' : '') + '" data-cm="' + idx + '" data-k="crop" data-v="' + k + '">' + CROPS[k].name + '</span>'; }).join('') + '</div>' +
+    '<div class="why">작물을 바꾸면 배지 기본값, 재배법, 단계 날짜가 그 작물 것으로 바뀝니다.</div>';
+  out += '<label class="f">배지 재료</label><div class="chips">' +
+    Object.keys(MAT).map(function (k) { return '<span class="chip ' + (c.mat === k ? 'on' : '') + '" data-cm="' + idx + '" data-k="mat" data-v="' + k + '">' + MAT[k] + '</span>'; }).join('') + '</div>' +
+    '<div class="why">기본값은 농장 설정의 ' + CROPS[c.crop].name + ' "주로 쓰는 배지"(' + MAT[cd.mat] + ')입니다. 재료에 따라 후발효부터 1주기까지의 관리 값이 조금씩 달라집니다.</div>' +
+    '<label class="f">입상하는 배지 총 무게</label><div class="stepper"><button data-act="tonm" data-i="' + idx + '">−</button><b>' + c.ton + '톤</b><button data-act="tonp" data-i="' + idx + '">+</button>' +
+    '<span class="muted">→ 약 <b>' + f1(cap) + '단</b> 분량</span></div>' +
+    '<label class="f">채우는 단 수(설비 ' + bedTiers() + '단)</label><div class="stepper"><button data-act="film" data-i="' + idx + '">−</button><b>' + c.filled + '단</b><button data-act="filp" data-i="' + idx + '">+</button></div>';
+  if (kgm2 < cr.thin) out += '<div class="note bad">' + c.filled + '단을 채우면 배지가 얇습니다. ' + Math.max(1, Math.floor(cap)) + '단 정도가 맞습니다' + (c.crop === 'sinryeong' ? '(신령버섯은 약 20cm 권고)' : '') + '.</div>';
+  else if (kgm2 > cr.thick) out += '<div class="note ok">배지가 두꺼워 1-3주기 예상 수량을 그만큼 높게 잡습니다.</div>';
+  var need = heatNeed(c.ton), fm = c.crop === 'sinryeong' ? 'S8 배지 얇음, A7 공조 용량 부족' : 'A3 배지량 부족, A7 공조 용량 부족';
+  if (S.equip.ac && need > S.equip.acCool) out += '<div class="note warn">이 배지량은 공조 냉방(' + S.equip.acCool + ' kW)에 비해 많아 균사 생장 9일 무렵 배지 온도가 오를 수 있습니다(필요 약 ' + Math.round(need) + ' kW). 예보를 보고 그 기간 냉방과 환기를 미리 계획하세요.</div>';
+  if (isPassive()) out += '<div class="note">패시브 재배사는 배지 열이 벽으로 덜 빠집니다. 바깥이 시원할 때는 열교환기를 우회해 바깥 공기로 식힙니다.</div>';
+  if (c.crop === 'sinryeong') {                                                  // 겨울(바깥 -5°C, 안 25°C) 난방
+    var win = envLoad(30) + c.ton * HEAT_VENT * 3 * ventFactor();
+    out += (S.equip.ac && win > S.equip.acHeat)
+      ? '<div class="note warn">신령버섯은 배지가 20°C 아래면 자라지 않습니다. 한겨울에는 공조 난방(' + S.equip.acHeat + ' kW)이 모자랄 수 있습니다(필요 약 ' + Math.round(win) + ' kW). 보조 난방을 계획하세요.</div>'
+      : '<div class="note ok">신령버섯 배지 23-26°C: 한겨울 필요 난방 약 ' + Math.round(win) + ' kW로 공조 난방(' + S.equip.acHeat + ' kW) 안입니다.</div>';
+    fm += ', S5 저온';
+  }
+  out += '<div class="why">문제 해결: ' + fm + '. 측정이 쌓이면 이 재배사의 실제 값으로 계산합니다.</div>';
+  return out;
+}
+
+/* ---------- 데모 할 일(오늘) ---------- */
+function todayTasks() {
+  var e = S.equip, c2 = S.cycles[2], sr = c2 && c2.crop === 'sinryeong';
+  return [
+    { g:'late', h:1, k:'buy_spawn', name:'종균 주문', s:'2일 밀림 · 접종 7일 전', input:false, fm:'C5 접종 지연' },
+    { g:0, k:'water', name:'관수 600 L(농약)', s:'복토 후 3일 중 3일째 · 배합 계산', input:true, fm:'H1 관수량 부족, E5 복토 건조, H2 관수 뒤 환기' },
+    { g:0, k:'top_dry', name:'4단 · 문 쪽 복토 마름 확인', s:'덥고 마르기 쉬운 곳', input:false, fm:'D11 4단과 문 쪽 건조' },
+    { g:0, k:'scratch', name:'균긁기', s:'복토 후 또는 후토 후', input:false, opt:true, fm:'E9 균덩이' },
+    !isPassive() && e.roofVent !== 'none' ? { g:0, k:'vent_note', name:'천장 환기구 연 정도 기록', s:'바꿀 때만', input:true, fm:'K10 환기구 상태 모름' } : null,
+    { g:1, k:'curve', name:'후발효 온도 확인', s:'배지 61°C · 정상 범위' + (e.circ ? ' · 순환팬 꺼짐' : ''), input:false, dev:true, fm:'B1-B3, B2 68°C, B12 후발효 순환팬' },
+    { g:1, k:'inoc_date', name:'접종 업체 연락 · 접종일 받기', s:'접종 7일 전', input:true, fm:'C5' },
+    e.humid ? null : { g:1, k:'floor', name:'바닥 물 뿌리기(오후)', s:'하루 2번', input:false, fm:'D3 배지 건조' },
+    sr ? { g:2, k:'sr_temp', name:'배지 온도 변온', s:'배지 24.6°C · 23-26°C를 오감 · 배지 센서', input:false, dev:true, fm:'K15 배지 온도 기준, S5 저온' } : null,
+    sr ? { g:2, k:'sr_water', name:'배지 상태 확인 → 필요하면 관수', s:'생육 · 하루 1-2회 300 L · 관수하면 건조 환기', input:true, opt:true, fm:'S6 관수량 부족, S1 건조 부족' } : null,
+    c2 && !sr && /수확/.test(c2.stage) ? { g:2, k:'no_water', name:'관수 금지 기간', s:'발이부터 이 주기 수확 끝까지 · 갓 변형', input:false, dev:true, tagTxt:'제약', fm:'F5 발이 뒤 관수' } : null,
+    sr ? { g:2, k:'sr_dry', name:'건조 끝 확인', s:'건조 환기 중 · 6시간 중 4시간 지남 · 캠 사진', input:true, fm:'S1 건조 부족, S2 과건조' } : null,
+    { g:2, k:'harvest', name:'수확', s:sr ? '갓 피기 전 · 인력 2명 · 오전' : '인력 4명 · 오전', input:true, fm:sr ? 'S7 수확 늦음' : 'G12 갓 일찍 핌' },
+    sr ? { g:2, k:'low_wet', name:'1단 건조 확인(캠)', s:'1단은 늦게 마름', input:false, fm:'S3 1단 건조 지연' }
+       : { g:2, k:'low_wet', name:'1단 병해 확인(갈반, 물기)', s:'차고 습한 곳', input:false, fm:'G19 1단 과습' },
+    { g:2, k:'media_order', name:'다음 작기 배지 예약', s:'입상 약 30일 전 · 작물, 무게와 단 수', input:true, fm:'A6 배지 예약 누락, A3 배지량' },
+    { g:2, k:'auction', name:'경매 결과 입력(어제 출하분)', s:'단가 미정', input:true, fm:'J3 손익 왜곡' },
+    sr ? { g:2, k:'sr_prep', name:'손질: 뿌리 다듬기 → 세척 → 물기 빼기(10분)', s:'수확 뒤 바로 · 물기 빼기는 건너뛰면 안 됨', input:false, must:true, fm:'S10 손질 지연, S11 물기 빼기 생략' } : null,
+    sr && S.shared.dryer ? { g:2, k:'sr_dryer', name:'건조기 넣기(건조용 분량)', s:'통째 약 45시간 · 반 약 25시간 · 슬라이스 약 13시간', input:true, fm:'S9 건조 지연, S11' } : null,
+    sr && S.shared.dryer ? { g:2, k:'sr_finish', name:'건조 마무리(그저께 넣은 분)', s:'포장이면 60°C 2시간 · 임시 보관이면 그대로', input:true, fm:'S9 건조 불량' } : null,
+    S.shared.fridge ? { g:2, k:'precool', name:'수확 뒤 예냉(' + (sr ? '5-10°C' : '1-2°C') + ')', s:'냉장고 · ' + (sr ? '신령버섯용' : '양송이용'), input:false, fm:'J1 예냉 미흡, J4 냉장 온도' } : null,
+    isPassive() && e.hrv ? { g:'farm', k:'hrv_clean', name:'열교환기 청소, 점검(2동)', s:'작기 사이', input:false, fm:'P9 열교환기 막힘' } : null,
+    { g:'farm', k:'vat', name:'부가세 환급 신청(3분기)', s:'농협 · 10일까지', input:false, fm:'' }
+  ].filter(Boolean);
+}
+
+/* ---------- 이동 ---------- */
+function go(id, arg) { stack.push({ id:id, arg:arg }); render(); }
+function back() { stack.pop(); render(); }
+function depth() { return stack.length; }
+
+/* ---------- 그리기 ---------- */
+var phone = document.getElementById('phone');
+function render() {
+  document.getElementById('devDepth').textContent = '깊이 ' + depth();
+  var html = scrMain();
+  for (var i = 0; i < stack.length; i++) {
+    var f = stack[i], fn = SCREENS[f.id];
+    var out = fn(f.arg, i + 1);
+    html += out.modal
+      ? '<div class="modal" data-close="1"><div class="mbox">' + out.html + '</div></div>'
+      : '<div class="scr">' + out.html + '</div>';
+  }
+  phone.innerHTML = html;
+}
+function bar(title, d, opts) {
+  opts = opts || {};
+  var left = opts.x ? '' : '<button class="b" data-act="back">‹</button>';
+  var right = opts.x ? '<button class="b" data-act="back">✕</button>' : '';
+  return '<div class="bar">' + left + '<h1>' + title + '</h1><span class="dbadge">깊이 ' + d + '</span>' + right + '</div>';
+}
+
+/* 주화면(깊이 0) */
+function scrMain() {
+  var card;
+  if (!S.installed) {
+    card = '<section class="card0" data-go="setup"><h2>오늘</h2>' +
+      '<div class="muted">농장을 등록하면 재배사마다 오늘 할 일을 알려 드립니다.</div>' +
+      '<div style="margin-top:8px"><button class="btn">농장 등록</button></div></section>';
+  } else {
+    var t = todayTasks(), mine = t.filter(function (x) { return !S.done[x.k] && !x.dev; });
+    var late = t.filter(function (x) { return x.g === 'late' && !S.done[x.k]; }).length;
+    card = '<section class="card0" data-go="today"><h2>오늘 <span class="chev">›</span></h2>' +
+      '<div style="display:flex;gap:16px;align-items:baseline"><span class="big">' + mine.length + '</span><span class="muted">내 할 일</span>' +
+      (late ? '<span class="late">밀린 일 ' + late + '</span>' : '') + '</div>' +
+      mine.slice(0, 3).map(function (x) { return '<div class="muted">· ' + hname(x) + x.name + '</div>'; }).join('') + '</section>';
+  }
+  return '<div class="scr"><div class="bar"><h1>FlexFarm</h1><span class="dbadge">깊이 0</span>' +
+    '<button class="b" data-go="settings">⚙</button></div><div class="body">' + card +
+    '<section><h2>센서</h2><div class="ph">(기존 화면 그대로)</div></section>' +
+    '<section><h2>카메라</h2><div class="ph">(기존 화면 그대로)</div></section>' +
+    '<section><h2>시스템 상태</h2><div class="ph">(기존 요약, 맨 아래로)</div></section></div></div>';
+}
+function hname(x) {
+  if (x.g === 'farm') return '농장 · ';
+  var g = x.g === 'late' ? x.h : x.g, c = S.cycles[g];
+  return (c && S.names[c.h] ? S.names[c.h] + ' · ' : '');
+}
+
+var SCREENS = {};
+
+/* ---------- 농장 설정 마법사(처음 설치 깊이 1 / 설정에서 깊이 2, 단계는 옆으로) ---------- */
+var LAST = 5;
+SCREENS.setup = function (arg, d) {
+  var st = S.step, h = '', edit = S.mode === 'edit';
+  var titles = ['', '농장', '시설', '설비', '작물', edit ? '저장' : '작기 시작'];
+  var steps = '<div class="steps">' + [1,2,3,4,5].map(function (i) { return '<i class="' + (i <= st ? 'on' : '') + '"></i>'; }).join('') + '</div>';
+  if (st === 1) {
+    h = '<section><h2>농장</h2><label class="f">농장 이름</label><input class="w" placeholder="우리 농장" value="' + S.farmName + '">' +
+      '<label class="f">위치</label>' + (S.loc ? '<div>' + S.loc + '</div>' : '<button class="btn sec" data-act="loc">휴대폰 위치로 가져오기</button>') +
+      '<div class="why">이 위치의 기후(기온, 습도, 기압, 바람)를 작기 기록에 붙이고, 냉방이나 난방이 모자랄 날을 예보로 미리 봅니다.</div></section>' +
+      '<div class="muted" style="padding:0 4px">다음에 재배사와 설비를 넣고, 이 농장에서 키우는 작물을 고릅니다. 작물은 여러 개일 수 있습니다.</div>';
+  } else if (st === 2) {
+    var nm = namesFor(S.nameStyle, S.houses), b = S.bld, bd = S.bed;
+    var reduce = edit && S.saved && S.houses < S.saved.houses;
+    if (reduce) nm = S.saved.names.filter(function (n, i) { return !S.remove[i]; }).slice(0, S.houses);
+    h = '<section><h2>재배사</h2>' +
+      '<label class="f">몇 동 운영하세요?</label><div class="stepper"><button data-act="hm">−</button><b>' + S.houses + '동</b><button data-act="hp">+</button></div>' +
+      (reduce ? removeBlock() : '') +
+      '<label class="f">이름은 어떻게 부르세요?</label><div class="chips">' +
+      chip('nameStyle', 'num', '1동, 2동') + chip('nameStyle', 'abc', 'A동, B동') + chip('nameStyle', 'kor', '가동, 나동') + chip('nameStyle', 'free', '직접') + '</div>' +
+      '<div class="note">' + nm.join(' · ') + '</div>' +
+      '<div class="why">재배사마다 다르면 나중에 그 재배사만 바꿉니다.</div></section>' +
+      '<section><h2>건물(한 동)</h2><div class="grid2">' +
+      '<div><label class="f">바닥면적</label><input class="n" type="number" value="' + b.floor + '"> 평</div>' +
+      '<div><label class="f">높이</label><input class="n" type="number" step="0.5" value="' + b.height + '"> m</div></div>' +
+      '<label class="f">단열</label><div class="chips">' + Object.keys(INSUL).map(function (k) { return chipB('insul', k, INSUL[k].name); }).join('') + '</div>' +
+      (isPassive() ? '<div class="note">패시브: 겨울 난방과 후발효 연료가 크게 줄고, 문틈 유입은 거의 없다고 봅니다. 환기는 열회수 환기기로만 합니다(3단계 설비).</div>' : '') +
+      '<label class="f">문(양 끝, 90×220)</label><div class="stepper"><button data-act="dm">−</button><b>' + b.doors + '개</b><button data-act="dp">+</button></div>' +
+      '<label class="f">긴 쪽이 향한 방향(모르면 그대로)</label><div class="chips">' +
+      ['모름','동서','남북','북동-남서','북서-남동'].map(function (v) { return chipB('facing', v, v); }).join('') + '</div>' +
+      '<div class="why">지붕은 아치로 계산합니다. 단열, 문틈, 방향은 열 손실과 바람이 문틈으로 지나가는 정도를 계산하는 데 씁니다.</div></section>' +
+      '<section><h2>균상대</h2><div class="grid2">' +
+      '<div><label class="f">줄</label><input class="n" type="number" value="' + bd.rows + '"> 줄</div>' +
+      '<div><label class="f">단(한 줄)</label><input class="n" type="number" value="' + bd.tiers + '"> 단</div>' +
+      '<div><label class="f">길이</label><input class="n" type="number" value="' + bd.length + '"> m</div>' +
+      '<div><label class="f">폭</label><input class="n" type="number" step="0.05" value="' + bd.width + '"> m</div></div>' +
+      '<div class="calc">재배 면적 <b>' + Math.round(growArea()) + '㎡(' + pyeong(growArea()) + '평)</b> · 설비 ' + bedTiers() + '단 · 단 간격 ' + bd.gap * 100 + 'cm</div>' +
+      '<div class="why">농약 배합, 관수량, 배지량 판단은 재배 면적으로, 열 손실과 틈새는 건물로 계산합니다.</div></section>' +
+      '<section><h2>함께 쓰는 시설</h2><div class="chips">' +
+      tog('storage', '저장고') + tog('fridge', '냉장고') + tog('warehouse', '창고') + tog('dryer', '건조기') + '</div>' +
+      (S.shared.fridge ? fridgeBlock() : '') +
+      (S.shared.dryer ? '<h3>건조기</h3><div class="grid2"><div><label class="f">대수</label><input class="n" type="number" value="' + S.dryerN + '"> 대</div>' +
+        '<div><label class="f">1회 용량(건조 전)</label><input class="n" type="number" value="' + S.dryerKg + '"> kg</div></div>' +
+        '<div class="why">한 번 돌리면 약 2일 동안 찹니다. 수확량이 용량을 넘으면 알려 드립니다.</div>' : '') +
+      '<div class="why">냉장고가 있으면 보관과 출하 할 일이, 창고가 있으면 농약 재고 위치가, 건조기가 있으면 건조 할 일이 생깁니다.</div></section>';
+  } else if (st === 3) {
+    var e = S.equip;
+    h = '<section><h2>재배사 설비</h2><div class="muted">모든 재배사가 같다고 보고 한 번만 고릅니다.</div>' +
+      '<h3>공조기(냉방과 난방)</h3><div class="chips">' + togE('ac', '있음') + '</div>' +
+      (e.ac ? '<div class="grid2"><div><label class="f">냉방 능력</label><input class="n" type="number" value="' + e.acCool + '"> kW</div>' +
+              '<div><label class="f">난방 능력</label><input class="n" type="number" value="' + e.acHeat + '"> kW</div></div>' +
+              '<div class="why">명판의 kW를 넣으세요. 모르면 마력으로 넣으면 환산합니다(추정).</div>' : '') +
+      '<h3>보일러</h3><div class="chips">' + chipE('boiler', 'none', '없음') + chipE('boiler', 'fixed', '고정식(동마다)') + chipE('boiler', 'move', '이동식') + '</div>' +
+      (e.boiler === 'move' ? '<label class="f">이동식 보일러 대수</label><div class="stepper"><button data-act="bm">−</button><b>' + e.boilerN + '대</b><button data-act="bp">+</button></div>' : '') +
+      '<h3>환기와 순환</h3>' +
+      (isPassive()
+        ? '<label class="f">열회수 환기기</label><div class="chips">' + togE('hrv', '있음') + togE('hrvBypass', '우회 가능') + '</div>' +
+          '<div class="why">기밀이 높아 틈새 환기가 없습니다. 환기 용량이 균상 1평당 시간당 10-20㎥에 맞는지 확인하세요(P8).' +
+          (e.hrv && !e.hrvBypass ? ' 우회가 안 되면 습기를 빼야 할 때(건조 환기, 과습) 습기가 되돌아올 수 있습니다(P10).' : '') + '</div>'
+        : '<label class="f">벽 송풍기(짧은 쪽 벽, 밀어 넣음)</label><div class="chips">' + togE('supply', '있음') + '</div>' +
+          '<label class="f">천장 환기구</label><div class="chips">' + chipE('roofVent', 'none', '없음') + chipE('roofVent', 'passive', '자연 환기') + chipE('roofVent', 'exhaust', '음압 팬') + '</div>') +
+      '<label class="f">순환팬(내부 대류)</label><div class="chips">' + togE('circ', '있음') + '</div>' +
+      '<div class="why">켜고 끄는 것은 작물의 재배법에서 단계별로 정합니다(다음 단계).</div>' +
+      '<h3>그 밖</h3><div class="chips">' + togE('humid', '가습기') + togE('steam', '스팀 소독') + '</div>' +
+      '<div style="margin-top:8px" class="muted tap" data-act="nop">› 다른 재배사만 따로 고치기</div></section>' +
+      '<section><h2>센서 위치</h2><div class="muted">연결된 센스마다 높이와 길이 방향을 고릅니다(연결은 나중에도 됨).</div>' +
+      '<div class="row"><div class="t">센스 1<div class="chips" style="margin-top:4px"><span class="chip on">간이</span><span class="chip">배지</span> · <span class="chip on">4단</span><span class="chip">1단</span> · <span class="chip on">문 쪽</span><span class="chip">가운데</span><span class="chip">송풍기 쪽</span></div></div></div>' +
+      '<div class="row"><div class="t">센스 2<div class="chips" style="margin-top:4px"><span class="chip">간이</span><span class="chip on">배지</span> · <span class="chip">4단</span><span class="chip on">1단</span> · <span class="chip">문 쪽</span><span class="chip on">가운데</span><span class="chip">송풍기 쪽</span></div></div></div>' +
+      '<div class="why">온도 목표는 배지 기준입니다. 배지 센서가 있으면 실측으로, 간이 센서뿐이면 실내 온도에 1-2°C를 더해 추정합니다. 두 가지를 함께 달면 이 재배사의 차이를 배웁니다.</div>' +
+      '<div class="why">4단은 덥고 마르고, 1단은 차고 습하고, 문 쪽은 마릅니다. 두 개라면 4단 문 쪽과 1단 가운데를 권합니다. 하나뿐이면 나머지 위치는 추정해서 가장 불리한 곳을 기준으로 알립니다.</div></section>' +
+      (S.shared.fridge ? '<section><h2>냉장고</h2><div class="muted">온도 센서 연결은 나중에 설정에서 합니다.</div></section>' : '');
+  } else if (st === 4) {
+    h = '<section><h2>이 농장에서 키우는 작물</h2><div class="chips">' +
+      CROP_ORDER.map(function (k) { return '<span class="chip ' + (S.crops.indexOf(k) >= 0 ? 'on' : '') + '" data-crop="' + k + '">' + CROPS[k].name + '</span>'; }).join('') +
+      '<span class="chip dis">다른 작물(준비 중)</span></div>' +
+      '<div class="why">여러 개를 고를 수 있습니다. 재배사마다 작기를 시작할 때 이 중에서 고릅니다(같은 재배사에서 번갈아, 다른 재배사에서 함께).</div>' +
+      '<div class="note">재배 환경: <b>재배사</b> · 양송이와 신령버섯은 재배사에서 키웁니다.</div></section>' +
+      S.crops.map(cropBlock).join('') +
+      '<section><h2>앞에서 고른 것에 맞춘 것</h2>' + fitNotes().map(function (n) { return '<div class="note">' + n + '</div>'; }).join('') + '</section>' +
+      '<div class="muted" style="padding:0 4px">바꾸고 싶은 값은 그 일이 오늘 화면에 나왔을 때, 또는 설정 › 농장 항목 › 키우는 작물에서 바꿉니다.</div>';
+  } else if (st === 5 && !edit) {
+    var nm2 = namesFor(S.nameStyle, S.houses);
+    h = '<section><h2>재배사마다 지금 상태</h2><div class="muted">모르면 "나중에"로 두고 시작해도 됩니다.</div>' +
+      nm2.map(function (n, i) {
+        var c = S.setupCycles[i];
+        if (S.crops.indexOf(c.crop) < 0) { c.crop = S.crops[0]; c.mat = S.byCrop[c.crop].mat; }
+        return '<div class="row"><div class="t"><b>' + n + '</b><div class="chips" style="margin-top:6px">' +
+          ['진행 중','입상 예정','비어 있음','나중에'].map(function (v) { return '<span class="chip ' + (c.st === v ? 'on' : '') + '" data-sc="' + i + '" data-v="' + v + '">' + v + '</span>'; }).join('') + '</div>' +
+          (c.st === '진행 중' || c.st === '입상 예정'
+            ? '<div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap"><span class="muted">입상일</span><input type="date" value="2026-11-' + (c.st === '진행 중' ? '05' : '30') + '">' +
+              '<select>' + [1,2,3].map(function (k) { return '<option' + (k === S.byCrop[c.crop].state ? ' selected' : '') + '>' + STATE[k] + '</option>'; }).join('') + '</select></div>' + mediaBlock(c, i)
+            : '') + '</div></div>';
+      }).join('') + '<div class="why">진행 중이면 입상일보다 앞선 일은 "등록 전 완료"로 처리합니다.</div></section>';
+  } else if (st === 5 && edit) {
+    h = impactBlock();
+  }
+  var last = st === LAST;
+  var nav = '<div class="btns">' + (st > 1 ? '<button class="btn sec" data-act="prev">이전</button>' : '') +
+    '<button class="btn" data-act="' + (last ? (edit ? 'saveEdit' : 'finish') : 'next') + '">' + (last ? (edit ? '저장' : '시작하기') : '다음') + '</button></div>';
+  return { html: bar((edit ? '농장 설정 · ' : '농장 등록 · ') + titles[st], d) + steps + '<div class="body">' + h + nav + '</div>' };
+};
+/* 냉장고: 냉장고마다 어느 작물용인지(설정 온도는 작물 값) */
+function fridgeBlock() {
+  var out = '<h3>냉장고</h3>' + S.fridges.map(function (f, i) {
+    return '<div class="row"><div class="t">냉장고 ' + (i + 1) + '<div class="chips" style="margin-top:4px">' +
+      CROP_ORDER.map(function (k) { return '<span class="chip ' + (f.crop === k ? 'on' : '') + '" data-fr="' + i + '" data-v="' + k + '">' + CROPS[k].name + '용</span>'; }).join('') +
+      '</div><div class="s">설정 ' + CROPS[f.crop].store + '</div></div>' +
+      (S.fridges.length > 1 ? '<span class="chev tap" data-act="rmFridge" data-i="' + i + '">빼기</span>' : '') + '</div>';
+  }).join('') + '<div class="muted tap" data-act="addFridge">+ 냉장고 추가</div>';
+  var w = fridgeWarn(); if (w) out += '<div class="note warn">' + w + '</div>';
+  return out;
+}
+function fridgeWarn() {
+  if (!S.shared.fridge || S.crops.length < 2) return '';
+  var miss = S.crops.filter(function (k) { return !S.fridges.some(function (f) { return f.crop === k; }); });
+  return miss.length ? miss.map(function (k) { return CROPS[k].name; }).join(', ') + '용 냉장고가 없습니다. 저장 온도가 달라(양송이 1-2°C, 신령버섯 5-10°C) 두 작물을 함께 수확하는 기간에는 설정이 다른 냉장고가 따로 필요합니다(J4).' : '';
+}
+/* 작물 하나의 기본(배지, 재배법, 순환팬 단계별) */
+function cropBlock(k) {
+  var cd = S.byCrop[k], cr = CROPS[k];
+  var out = '<section><h2>' + cr.name + ' 기본</h2>' +
+    '<label class="f">주로 쓰는 배지 재료</label><div class="chips">' + Object.keys(MAT).map(function (m) { return chipC(k, 'mat', m, MAT[m]); }).join('') + '</div>' +
+    '<label class="f">사 오는 상태</label><div class="chips">' + [1,2,3].map(function (s) { return chipC(k, 'state', s, STATE[s]); }).join('') + '</div>' +
+    '<div class="why">작기를 시작할 때 이 값이 미리 골라져 나오고, 그 작기만 다르게 고를 수 있습니다.</div>' +
+    '<h3>기본 재배법</h3><div class="muted">문제가 생기지 않게 하는 방법으로 미리 채워 두었습니다. 그대로 써도 됩니다.</div>' +
+    cr.rows.map(function (r) { return '<div class="row"><div class="t">' + r[0] + '<div class="s">' + r[1] + '</div>' + srcBlock(r[2]) + '</div></div>'; }).join('') +
+    '<div class="why">근거는 논문과 공공기관 자료만 답니다. 근거가 없는 값은 현장 경험 값입니다. 자료와 다른 값도 있습니다(근거에서 자료 값을 볼 수 있습니다).</div>';
+  if (S.equip.circ) out += '<h3>순환팬</h3>' + CIRC_STAGES.map(function (s) {
+      return '<div class="circ"><span class="l">' + s + '</span><span class="chip ' + (cd.circ[s] ? 'on' : '') + '" data-circ="' + k + '" data-s="' + s + '" data-v="1">켬</span>' +
+        '<span class="chip ' + (cd.circ[s] ? '' : 'on') + '" data-circ="' + k + '" data-s="' + s + '" data-v="0">끔</span></div>';
+    }).join('') + '<div class="why">후발효는 끄는 것이 기본입니다. 꺼 둔 단계에는 1단과 4단 비교 확인이 더 자주 나옵니다.</div>';
+  if (cr.note) out += '<div class="why">' + cr.note + '</div>';
+  return out + '</section>';
+}
+function fitNotes() {
+  var e = S.equip, notes = [];
+  if (e.humid) notes.push('가습기가 있어 "바닥 물 뿌리기"는 빠졌습니다.');
+  else notes.push('가습기가 없어 "바닥 물 뿌리기(하루 2번)"가 들어갑니다.');
+  if (isPassive()) {
+    notes.push('패시브 재배사: 열 부하를 고단열·기밀·열회수 값으로 계산하고, 작기 사이 "열교환기 청소, 점검"을 넣었습니다.');
+    if (e.hrvBypass) notes.push('습기를 빼야 할 때' + (S.crops.indexOf('sinryeong') >= 0 ? '(신령버섯 건조 환기 포함)' : '') + '와 바깥이 시원할 때는 열교환기를 우회합니다.');
+  } else {
+    if (e.roofVent !== 'none') notes.push('천장 환기구 닫기(입상일), 열기(복토일)를 필수 확인으로 넣었습니다.');
+    if (e.roofVent === 'exhaust') notes.push(e.supply ? '음압 팬을 켤 때는 벽 송풍기도 그 이상으로 켭니다. 재배사가 음압이 되면 문틈으로 걸러지지 않은 바깥 공기가 들어옵니다.'
+                                                     : '벽 송풍기 없이 음압 팬만 있어 문틈으로 바깥 공기가 들어옵니다. 외기 유입 확인을 더 자주 합니다.');
+  }
+  if (!e.circ) notes.push('순환팬이 없어 단별 온도·습도 차가 커질 수 있습니다. 1단과 4단 배지 비교 확인을 더 자주 넣었습니다.');
+  if (e.ac) notes.push('공조기 냉방은 공기를 말립니다. 균사 생장과 복토 뒤에는 냉방 시간과 4단 배지 마름을 함께 봅니다.');
+  if (e.boiler === 'move') notes.push('이동식 보일러 ' + e.boilerN + '대: 후발효가 ' + (e.boilerN + 1) + '동 이상 겹치면 입상일 정할 때 알려 드립니다.');
+  if (e.steam) notes.push('폐상 전 스팀 소독(70°C 12시간)을 넣고, 콘 온도 기록으로 확인합니다.');
+  if (S.shared.fridge) notes.push('냉장고가 있어 "수확 뒤 예냉" 할 일이 들어갑니다(양송이 1-2°C, 신령버섯 5-10°C).');
+  if (fridgeWarn()) notes.push(fridgeWarn());
+  if (S.crops.indexOf('sinryeong') >= 0) notes.push(S.shared.dryer ? '건조기가 있어 신령버섯 수확일에 "건조기 돌리기"가 들어가고, 수확 기록을 생물과 건조용으로 나눕니다.' : '신령버섯 건조품을 내려면 건조기가 필요합니다(시설 단계의 함께 쓰는 시설).');
+  notes.push('온도 목표는 배지 기준입니다. 배지 센서가 없으면 실내 온도로 추정하고, 공조로 바꾼 공기 온도를 배지가 늦게 따라오는 것을 감안해 미리 조정합니다.');
+  S.crops.forEach(function (k) {
+    var m = S.byCrop[k].mat;
+    if (m !== 'rice') notes.push(CROPS[k].name + ' ' + MAT[m] + ' 배지의 관리 값은 볏짚 기준에서 시작하고, 고친 값과 작기 기록으로 맞춰 갑니다.');
+  });
+  if (S.crops.length > 1) notes.push('공조 용량이 맞는지는 작기를 시작할 때 재배사와 작물을 함께 보고 판단합니다(양송이는 냉방, 신령버섯은 난방과 가습이 더 중요).');
+  return notes;
+}
+/* 동 수를 줄일 때: 줄일 재배사를 고르고, 진행 중인 작기가 있으면 그 자리에서 처리 */
+function removeBlock() {
+  var n = S.saved.houses - S.houses, names = S.saved.names, out = '<div class="note warn">' + n + '동을 줄입니다. 어느 재배사를 줄일까요?</div><div class="chips" style="margin-top:6px">';
+  out += names.map(function (nm, i) { return '<span class="chip ' + (S.remove[i] ? 'on' : '') + '" data-rm="' + i + '">' + nm + '</span>'; }).join('') + '</div>';
+  Object.keys(S.remove).forEach(function (i) {
+    var c = S.cycles.filter(function (x) { return x.h === +i; })[0];
+    if (!c) return;
+    out += '<div class="note bad">' + names[i] + '에 진행 중인 ' + CROPS[c.crop].name + ' 작기가 있습니다(' + c.stage + ' ' + c.day + '일째). 이 작기는 어떻게 할까요?' +
+      '<div class="chips" style="margin-top:6px"><span class="chip on">작기 중단 · 철거</span><span class="chip">작기 중단 · 합침</span><span class="chip">작기 중단 · 실패</span></div>' +
+      '<div class="why">재배사는 지우지 않고 "사용 안 함"으로 둡니다. 지난 기록과 비교 자료는 남습니다. 다른 재배사를 줄이려면 위에서 바꿔 고르세요.</div></div>';
+  });
+  return out;
+}
+/* 다시 연 마법사의 저장 단계: 진행 중인 작기에 미치는 영향 */
+function impactBlock() {
+  var e = S.equip, o = S.saved.equip, list = [];
+  if (o.humid && !e.humid) list.push('가습기를 빼면 진행 중인 작기에 오늘부터 "바닥 물 뿌리기(하루 2번)"가 생깁니다.');
+  if (!o.humid && e.humid) list.push('가습기를 넣으면 진행 중인 작기의 남은 "바닥 물 뿌리기"가 빠집니다.');
+  if (o.circ && !e.circ) list.push('순환팬을 빼면 1단과 4단 비교 확인이 더 자주 나옵니다.');
+  if (o.roofVent !== e.roofVent) list.push('천장 환기구가 바뀌어 환기구 닫기·열기 확인과 환기 계산이 바뀝니다.');
+  if (S.saved.bld.insul !== S.bld.insul) list.push('단열이 바뀌어 열 부하 계산이 바뀝니다. 진행 중인 작기의 냉방·난방 경고를 다시 계산합니다.');
+  S.saved.crops.forEach(function (k) {
+    if (S.crops.indexOf(k) >= 0) return;
+    var n = S.cycles.filter(function (c) { return c.crop === k && !S.remove[c.h]; }).length;   // 줄이는 재배사의 작기는 중단되므로 빼고 셈
+    list.push(CROPS[k].name + CROPS[k].obj + ' 빼면 새 작기에서 고를 수 없습니다.' + (n ? ' 진행 중인 ' + CROPS[k].name + ' 작기 ' + n + '개는 끝까지 그대로 갑니다.' : '') + ' 지난 기록과 값은 남습니다.');
+  });
+  S.crops.forEach(function (k) {
+    var a = S.saved.byCrop[k], b = S.byCrop[k];
+    if (!a || S.saved.crops.indexOf(k) < 0) return;
+    if (a.mat !== b.mat || a.state !== b.state) list.push(CROPS[k].name + ' 주로 쓰는 배지는 새로 시작하는 작기부터 기본값이 바뀝니다. 이미 시작한 작기의 배지는 그대로입니다.');
+    if (JSON.stringify(a.circ) !== JSON.stringify(b.circ)) list.push(CROPS[k].name + ' 순환팬 단계별 설정이 바뀌면 진행 중인 작기는 다음 단계부터 바뀝니다.');
+  });
+  var rm = Object.keys(S.remove).map(function (i) { return S.saved.names[i]; });
+  if (rm.length) list.push('"사용 안 함"으로 바뀌는 재배사: ' + rm.join(', ') + '. 진행 중이던 작기는 고른 사유로 중단됩니다.');
+  if (!list.length) return '<section><h2>바뀐 것</h2><div class="muted">진행 중인 작기에 영향이 없습니다.</div></section>';
+  return '<section><h2>진행 중인 작기에 미치는 영향</h2>' + list.map(function (x) { return '<div class="note warn">' + x + '</div>'; }).join('') +
+    '<label class="f">진행 중인 작기에도 적용할까요?</label><div class="chips scope"><span class="chip">진행 중인 작기에도</span><span class="chip on">새 작기부터만</span></div>' +
+    '<div class="why">이미 끝낸 일과 기록은 바뀌지 않습니다. 앞으로 할 일만 다시 계산합니다.</div></section>';
+}
+function chip(key, v, label) { return '<span class="chip ' + (S[key] === v ? 'on' : '') + '" data-set="' + key + '" data-v="' + v + '">' + label + '</span>'; }
+function chipB(key, v, label) { return '<span class="chip ' + (S.bld[key] === v ? 'on' : '') + '" data-setb="' + key + '" data-v="' + v + '">' + label + '</span>'; }
+function chipE(key, v, label) { return '<span class="chip ' + (S.equip[key] === v ? 'on' : '') + '" data-sete="' + key + '" data-v="' + v + '">' + label + '</span>'; }
+function chipC(crop, key, v, label) { return '<span class="chip ' + (String(S.byCrop[crop][key]) === String(v) ? 'on' : '') + '" data-cmat="' + crop + '" data-k="' + key + '" data-v="' + v + '">' + label + '</span>'; }
+function tog(key, label) { return '<span class="chip ' + (S.shared[key] ? 'on' : '') + '" data-tog="' + key + '">' + label + '</span>'; }
+function togE(key, label) { return '<span class="chip ' + (S.equip[key] ? 'on' : '') + '" data-toge="' + key + '">' + label + '</span>'; }
+
+/* ---------- 오늘(깊이 1) ---------- */
+SCREENS.today = function (arg, d) {
+  var t = todayTasks();
+  var days = ['토','일','월','화','수','목','금'], load = [5,1,3,0,4,2,3], dates = [28,29,30,1,2,3,4];
+  var week = '<section><div class="week">' + days.map(function (w, i) {
+    var dots = ''; for (var k = 0; k < Math.min(load[i], 4); k++) dots += '<span></span>';
+    return '<div class="day ' + (i === 0 ? 'today' : '') + (load[i] === 0 ? ' free' : '') + '" data-go="day" data-arg="' + i + '">' + w + '<b>' + dates[i] + '</b><div class="dots">' + dots + '</div></div>';
+  }).join('') + '</div><div class="why">점은 내 일의 양(인력, 업체, 장치가 하는 일은 빼고). 초록 테두리는 빈 날.</div></section>';
+  var lateRows = t.filter(function (x) { return x.g === 'late'; });
+  var late = lateRows.length ? '<section><h2 class="late">밀린 일</h2>' + lateRows.map(taskRow).join('') + '</section>' : '';
+  var groups = S.cycles.map(function (c, i) {
+    var rows = t.filter(function (x) { return x.g === i; });
+    return '<section><div class="hhead" data-go="cycle" data-arg="' + i + '"><span class="n">' + S.names[c.h] + '</span><span class="tag">' + CROPS[c.crop].name + '</span>' +
+      '<span class="stage">' + c.stage + ' ' + c.day + '일째 · ' + c.next + '</span><span class="chev">›</span></div>' + rows.map(taskRow).join('') + '</section>';
+  }).join('');
+  var farm = t.filter(function (x) { return x.g === 'farm'; });
+  var farmS = '<section><h2>농장</h2>' + farm.map(taskRow).join('') + '</section>';
+  return { html: bar('오늘 · 11월 28일 토', d) + '<div class="body">' + week + late + groups + farmS +
+    '<button class="btn sec" data-go="record">+ 기록(기름, 전기, 메모)</button></div>' };
+};
+function taskRow(x) {
+  var on = !!S.done[x.k];
+  var left = x.input
+    ? '<span class="chk" data-go="task" data-arg="' + x.k + '">' + (on ? '✓' : '') + '</span>'
+    : '<span class="chk ' + (on ? 'on' : '') + '" data-act="check" data-k="' + x.k + '">' + (on ? '✓' : '') + '</span>';
+  if (on && x.input) left = '<span class="chk on">✓</span>';
+  if (x.dev) left = '<span class="chk" style="border-color:var(--ok);color:var(--ok);cursor:default">●</span>';  // 장치의 일: 상태만
+  return '<div class="row ' + (on ? 'done' : '') + '">' + left +
+    '<div class="t tap" data-go="task" data-arg="' + x.k + '">' + x.name + (x.must ? '<span class="must">필수</span>' : '') + (x.opt ? ' <span class="tag">선택</span>' : '') + (x.dev ? ' <span class="tag">' + (x.tagTxt || '장치') + '</span>' : '') +
+    '<div class="s">' + x.s + '</div></div>' + (x.input ? '<span class="chev">›</span>' : '') + '</div>';
+}
+
+/* ---------- 할 일 창(깊이 2) ---------- */
+SCREENS.task = function (k, d) {
+  var x = todayTasks().filter(function (t) { return t.k === k; })[0];
+  var f = '';
+  var water = Math.round(growArea() * 600 / (60 * 3.3058));                      // 60평에 하루 600 L → 재배 면적에 맞춤
+  var c2 = S.cycles[2], srH = c2 && c2.crop === 'sinryeong';
+  if (k === 'harvest') f = fld('인원', srH ? '2명' : '4명') + fld('타임', '1') + (srH ? fld('생물', '__ kg(냉장 5-10°C)') + fld('건조용', '__ kg(건조기로)') : fld('수확량', '__ kg')) + fld('출하처', '농협 / 도매') + fld('단가', '미정 가능');
+  else if (k === 'sr_dryer') f = '<label class="f">형태</label><div class="chips">' + Object.keys(DRY_FORMS).map(function (m) { return chip('dform', m, DRY_FORMS[m].name); }).join('') + '</div>' +
+    fld('건조 전 무게', '__ kg(건조기 1회 용량 ' + S.dryerKg + ' kg)') +
+    '<div class="note">물기를 뺐는지 확인하세요(약 10분). 물기가 남으면 건조기가 망가집니다.</div>' +
+    '<div class="note">곡선: 40°C 시작 → 1시간마다 1°C 올려 45°C → 45°C ' + DRY_FORMS[S.dform].hold + '시간. 약 ' + dryHours(S.dform) + '시간 뒤 "건조 마무리"가 뜹니다.</div>' +
+    '<div class="why">썰면 빨리 마릅니다(반으로 자르면 유지 시간 절반, 슬라이스는 약 1/5). 건조 기록이 쌓이면 이 농장 값으로 고칩니다.</div>' +
+    '<div class="why">건조 전 무게가 1회 용량을 넘으면 남는 분량은 생물로 냉장(5-10°C)해 다음 회차에 넣습니다.</div>';
+  else if (k === 'sr_finish') f = '<div class="chips"><span class="chip on">포장</span><span class="chip">임시 보관</span></div>' +
+    '<label class="f">60°C 마무리 시간(포장할 때)</label><div class="chips"><span class="chip on">2시간</span><span class="chip">2.5시간</span><span class="chip">3시간</span></div>' +
+    fld('건조 후 무게', '__ kg') + '<div class="why">임시 보관하면 60°C를 하지 않고 건조품 재고(임시)로 둡니다. 나중에 포장할 때 이 마무리가 다시 뜹니다.</div>';
+  else if (k === 'water') f = fld('관수량', water + ' L(하루, 3일 동안 · 재배 면적 ' + pyeong(growArea()) + '평 기본)') + fld('농약', '스포르곤 · 혼용 확인') + '<div class="note">약량: 스포르곤 ' + water + ' mL (1000배) · 재고에서 빠집니다</div>';
+  else if (k === 'sr_water') f = '<div class="chips"><span class="chip">오늘은 안 함</span><span class="chip on">관수 1회</span><span class="chip">관수 2회</span></div>' + fld('1회 관수량', Math.round(water / 2) + ' L(기본)') +
+    '<div class="note">완료하면 건조 환기가 시작됩니다(기본 6시간). 건조 중에는 습도가 90% 아래로 내려가도 알리지 않습니다.</div>' +
+    '<div class="why">관수량은 작기마다 수확량과 맞대어 맞춰 갑니다.</div>';
+  else if (k === 'sr_dry') f = '<div class="ph">캠 사진(3동 · 15분 전)</div>' +
+    '<div class="chips" style="margin-top:8px"><span class="chip on">건조 끝</span><span class="chip">1시간 더</span><span class="chip">2시간 더</span></div>' +
+    '<div class="why">6시간이 지나면 끝난 것으로 봅니다. 사진을 보고 앞당기거나 늘리세요. 끝난 뒤 습도가 90%로 돌아오지 않으면 알립니다.</div>';
+  else if (k === 'inoc_date') f = fld('받은 접종일', '12월 3일') + '<div class="why">완료하면 접종 단계가 "확정"이 되고 딸린 할 일이 함께 움직입니다.</div>';
+  else if (k === 'auction') f = fld('단가', '__ 원/kg');
+  else if (k === 'vent_note') f = '<div class="chips"><span class="chip">닫음</span><span class="chip on">1/4</span><span class="chip">반</span><span class="chip">다 엶</span></div>';
+  else if (k === 'media_order') {
+    if (!S.order) { var cur = S.cycles[2] ? S.cycles[2].crop : S.crops[0]; S.order = { crop:cur, mat:S.byCrop[cur].mat, ton:10, filled:7 }; }
+    f = fld('입상 예정일', '1월 3일') + fld('구매처', '지난번 구매처') + mediaBlock(S.order, 'o');
+  }
+  else f = '<div class="muted">입력할 것이 없는 일입니다. 오늘 화면에서 체크로 끝납니다.</div>';
+  var why = x && x.fm ? '<div class="why">문제 해결: ' + x.fm + '</div>' : '';
+  return { modal:true, html: bar(x ? x.name : '할 일', d, { x:true }) + '<div class="body">' +
+    '<div class="muted">' + (x ? hname(x) + x.s : '') + '</div>' + why + f +
+    '<button class="btn" data-act="complete" data-k="' + k + '">완료</button>' +
+    '<section><h2>바꾸기</h2><div class="chips"><span class="chip">날짜 옮기기</span><span class="chip">이번엔 안 함</span><span class="chip">수행자 바꾸기</span></div>' +
+    '<label class="f">바꾼 것을 어디에 적용할까요?</label><div class="chips scope"><span class="chip on">이번만</span><span class="chip">이 재배사</span><span class="chip">우리 농장 기본</span></div>' +
+    '<div class="why">이번만 = 이 작기 · 이 재배사 = 이 재배사의 다음 작기부터 · 우리 농장 기본 = 모든 재배사의 다음 작기부터(같은 작물)</div></section></div>' };
+};
+function fld(l, v) { return '<label class="f">' + l + '</label><input class="w" placeholder="' + v + '">'; }
+
+/* ---------- 기록 창(깊이 2) ---------- */
+SCREENS.record = function (a, d) {
+  return { modal:true, html: bar('기록', d, { x:true }) + '<div class="body"><div class="chips"><span class="chip on">기름</span><span class="chip">전기요금</span><span class="chip">메모</span></div>' +
+    fld('양', '400 L') + fld('금액', '800,000원') + '<label class="f">재배사</label><div class="chips"><span class="chip on">후발효 중인 동에 나눔</span><span class="chip">직접 고르기</span></div>' +
+    '<button class="btn" data-act="back">저장</button></div>' };
+};
+
+/* ---------- 날 창(깊이 2) ---------- */
+SCREENS.day = function (i, d) {
+  var days = ['11월 28일 토','11월 29일 일','11월 30일 월','12월 1일 화','12월 2일 수','12월 3일 목','12월 4일 금'];
+  var free = +i === 3;
+  return { modal:true, html: bar(days[i], d, { x:true }) + '<div class="body">' +
+    (free ? '<div class="note">확실히 빔. 내 일이 없습니다.</div>'
+      : '<div class="row"><div class="t">수확(3동)<div class="s">옮길 수 없음</div></div></div>' +
+        '<div class="row"><div class="t">배지망 청소(3동)<div class="s">옮길 수 있음</div></div></div>' +
+        '<div class="row"><div class="t">복토 흙 주문(1동)<div class="s">옮길 수 있음</div></div></div>') +
+    '<button class="btn sec" data-act="back">이날 쉬기 → 옮길 수 있는 일을 옮기자고 제안</button></div>' };
+};
+
+/* ---------- 작기(깊이 2) ---------- */
+SCREENS.cycle = function (i, d) {
+  var c = S.cycles[i], sr = c.crop === 'sinryeong';
+  var tl = sr
+    ? [['입상','9월 20일','act'],['후발효','9월 20-28일','act'],['접종','9월 29일','act'],['균사 생장','9월 29일-10월 19일','act'],['복토','10월 19일','act'],['발이','10월 26일(첫 관수)','act'],
+       ['1주기','11월 8일','act'],['2주기','11월 19일-','act'],['3주기','12월 10일','est'],['폐상','1월 초','est'],['다음 입상','1월 중 · 여유 7일','est']]
+    : [['입상','11월 5일','act'],['후발효','11월 5-13일','act'],['접종','11월 14일','act'],['복토','11월 22일','act'],['후토','11월 29일','est'],
+       ['1주기','12월 6일','est'],['2주기','12월 27일','est'],['3주기','1월 17일','est'],['3주기 끝: 4주기 또는 폐상','2월 7일 무렵','est'],['폐상','2월 7일','est'],['다음 입상','2월 14일 · 여유 7일','est']];
+  var cur = sr ? 7 : { '후발효':1, '복토':3, '2주기 수확':6 }[c.stage];
+  var kgm2 = c.ton * 1000 / (tierArea() * c.filled);
+  var media = MAT[c.mat] + ' · ' + STATE[c.media] + ' · ' + c.ton + '톤 ' + c.filled + '단' + (kgm2 > CROPS[c.crop].thick ? ' · 두꺼움(예상 수량 높임)' : kgm2 < CROPS[c.crop].thin ? ' · 얇음' : '');
+  return { html: bar(S.names[c.h] + ' · ' + CROPS[c.crop].name + ' 작기', d) + '<div class="body">' +
+    '<section><h2>배지</h2><div class="muted">' + media + '</div></section>' +
+    '<section class="tl"><h2>단계 <span class="muted">(날짜는 예시)</span></h2>' + tl.map(function (r, k) {
+      var tag = k < cur ? '<span class="tag act">실제</span>' : k === cur ? '<span class="tag fix">진행 중</span>' : '<span class="tag">예상</span>';
+      return '<div class="row tap" data-go="stage" data-arg="' + k + '"><div class="t"><b>' + r[0] + '</b><div class="s">' + r[1] + '</div></div>' +
+        tag + '<span class="chev">›</span></div>';
+    }).join('') + '<div class="why">' + (sr ? '생육 중에는 하루 1-2회 관수 → 건조 환기(기본 6시간) → 습도 회복을 되풀이합니다.'
+                                          : '4주기는 3주기가 끝날 때 그 작기의 수량과 병해 기록을 보고 고릅니다. 고르면 병해 확인과 경보가 더 엄격해집니다(G20).') + '</div></section>' +
+    '<section><h2>환경</h2><div class="ph">온도, 습도, CO2, 배지 온도(센서 위치별) + 바깥 기후 그래프' + (sr ? ' + 관수·건조 구간 표시' : '') + '(기능은 나중에)</div></section>' +
+    '<section><h2>기록</h2><div class="ph">한 일, 수확, 구매, 기름(기능은 나중에)</div></section>' +
+    '<section><h2>손익</h2><div class="ph">매출 − 비용(기능은 나중에)</div></section>' +
+    '<button class="btn sec" data-go="compare" data-arg="' + i + '">비교</button></div>' };
+};
+SCREENS.stage = function (k, d) {
+  return { modal:true, html: bar('단계 날짜', d, { x:true }) + '<div class="body">' + fld('예상 날짜', '날짜 고르기') +
+    '<div class="why">바꾸면 뒤 단계와 할 일이 함께 움직이고, 다음 입상까지 남은 여유를 다시 보여 줍니다.</div>' +
+    '<button class="btn" data-act="back">저장</button></div>' };
+};
+SCREENS.compare = function (i, d) {
+  return { html: bar('비교', d) + '<div class="body"><div class="chips"><span class="chip on">지난 작기</span><span class="chip">다른 재배사</span><span class="chip">작년 같은 철</span></div>' +
+    '<section><div class="ph">단계 기준 날짜로 맞춘 수확량, 손익, 연료, 후발효 곡선, 배지(재료, 무게, 단), 쓴 재배법 값. 같은 작물끼리 비교(기능은 나중에)</div></section></div>' };
+};
+
+/* ---------- 설정(깊이 1) > 농장 설정 마법사(2) / 농장 항목(2) > 항목(3) ---------- */
+SCREENS.settings = function (a, d) {
+  return { html: bar('설정', d) + '<div class="body"><section>' +
+    '<div class="row tap" data-act="openWizard"><div class="t">농장 설정<div class="s">농장, 시설, 설비, 키우는 작물을 처음 등록한 순서대로 다시 보기</div></div><span class="chev">›</span></div>' +
+    '<div class="row tap" data-go="farm"><div class="t">농장 항목별로 고치기<div class="s">값 하나만 빨리 고칠 때</div></div><span class="chev">›</span></div>' +
+    '<div class="row"><div class="t muted">Wi-Fi, 원격 접속, PIN …(기존 설정)</div></div></section></div>' };
+};
+SCREENS.farm = function (a, d) {
+  if (!S.installed) return { html: bar('농장 항목', d) + '<div class="body"><section><div class="muted">아직 등록하지 않았습니다.</div>' +
+    '<div style="margin-top:8px"><button class="btn" data-act="startSetup">농장 등록</button></div></section></div>' };
+  var items = [['농장', (S.farmName || '우리 농장') + ' · 위치'],
+               ['시설','재배사 ' + S.houses + '동 · 재배 면적 ' + pyeong(growArea()) + '평 · ' + INSUL[S.bld.insul].name + ' · ' + ['저장고','냉장고','창고'].filter(function (n, k) { return S.shared[['storage','fridge','warehouse'][k]]; }).join(', ')],
+               ['설비','공조기, 보일러, ' + (isPassive() ? '열회수 환기기' : '송풍기, 천장 환기구') + ', 순환팬, 가습기 …'],
+               ['키우는 작물', S.crops.map(function (k) { return CROPS[k].name + '(주로 ' + MAT[S.byCrop[k].mat] + ')'; }).join(' · ') + ' · 재배법 고친 것 0개'],
+               ['단가','인건비, 자재, 기름']];
+  return { html: bar('농장 항목', d) + '<div class="body"><section>' + items.map(function (it) {
+    return '<div class="row tap" data-go="farmItem" data-arg="' + it[0] + '"><div class="t">' + it[0] + '<div class="s">' + it[1] + '</div></div><span class="chev">›</span></div>';
+  }).join('') + '</section><div class="muted" style="padding:0 4px">항목을 바꾸면 그 아래가 다시 계산됩니다. 진행 중인 작기에 영향이 있으면 농장 설정과 같은 경고를 보여 줍니다.</div></div>' };
+};
+SCREENS.farmItem = function (name, d) {
+  return { html: bar(name, d) + '<div class="body"><section><div class="ph">' + name + ' 값 고치기(농장 설정의 같은 단계 화면과 같음, 기능은 나중에)</div></section>' +
+    '<section><div class="note warn">저장할 때 진행 중인 작기에 영향이 있으면 목록을 보여 주고 "진행 중인 작기에도 / 새 작기부터만"을 고릅니다.</div></section></div>' };
+};
+
+/* ---------- 입력 처리 ---------- */
+function snapshot() { return JSON.parse(JSON.stringify({ houses:S.houses, names:S.names, equip:S.equip, crops:S.crops, byCrop:S.byCrop, bld:S.bld, bed:S.bed, fridges:S.fridges })); }
+function setupCyclesInit() {
+  S.setupCycles = [];
+  for (var i = 0; i < 10; i++) S.setupCycles.push({ st: i === 0 ? '진행 중' : i === 1 ? '입상 예정' : '비어 있음', crop:S.crops[0], mat:S.byCrop[S.crops[0]].mat, ton:10, filled:7 });
+}
+function cycleRef(i) { return i === 'o' ? S.order : S.setupCycles[+i]; }
+phone.addEventListener('click', function (e) {
+  var el = e.target.closest('[data-act],[data-go],[data-set],[data-setb],[data-sete],[data-cmat],[data-crop],[data-circ],[data-tog],[data-toge],[data-cm],[data-sc],[data-fr],[data-rm],[data-close]');
+  if (!el) return;
+  if (el.dataset.close && e.target !== el) return;     // 창 안쪽 클릭은 무시
+  if (el.dataset.close) { back(); return; }             // 창 밖 누르면 닫힘
+  if (el.dataset.go) {
+    if (el.dataset.go === 'setup') { S.step = 1; S.mode = 'new'; setupCyclesInit(); }
+    go(el.dataset.go, el.dataset.arg); return;
+  }
+  if (el.dataset.set) { S[el.dataset.set] = el.dataset.v; render(); return; }
+  if (el.dataset.setb) { S.bld[el.dataset.setb] = el.dataset.v; render(); return; }
+  if (el.dataset.sete) { S.equip[el.dataset.sete] = el.dataset.v; render(); return; }
+  if (el.dataset.cmat) { var bc = S.byCrop[el.dataset.cmat]; bc[el.dataset.k] = el.dataset.k === 'state' ? +el.dataset.v : el.dataset.v; render(); return; }
+  if (el.dataset.crop) {                               // 키우는 작물: 여러 개, 하나는 남김
+    var k = el.dataset.crop, at = S.crops.indexOf(k);
+    if (at >= 0) { if (S.crops.length > 1) S.crops.splice(at, 1); }
+    else S.crops = CROP_ORDER.filter(function (x) { return x === k || S.crops.indexOf(x) >= 0; });
+    render(); return;
+  }
+  if (el.dataset.circ) { S.byCrop[el.dataset.circ].circ[el.dataset.s] = el.dataset.v === '1'; render(); return; }
+  if (el.dataset.tog) { S.shared[el.dataset.tog] = !S.shared[el.dataset.tog]; render(); return; }
+  if (el.dataset.toge) { S.equip[el.dataset.toge] = !S.equip[el.dataset.toge]; render(); return; }
+  if (el.dataset.cm) {
+    var cr = cycleRef(el.dataset.cm); cr[el.dataset.k] = el.dataset.v;
+    if (el.dataset.k === 'crop') cr.mat = S.byCrop[el.dataset.v].mat;   // 작물을 바꾸면 그 작물의 기본 배지로
+    render(); return;
+  }
+  if (el.dataset.fr) { S.fridges[+el.dataset.fr].crop = el.dataset.v; render(); return; }
+  if (el.dataset.sc) { S.setupCycles[+el.dataset.sc].st = el.dataset.v; render(); return; }
+  if (el.dataset.rm) {
+    var need = S.saved.houses - S.houses, i = el.dataset.rm;
+    if (S.remove[i]) delete S.remove[i];
+    else { var ks = Object.keys(S.remove); if (ks.length >= need) delete S.remove[ks[0]]; S.remove[i] = true; }
+    render(); return;
+  }
+  var a = el.dataset.act, c;
+  if (a === 'back') back();
+  else if (a === 'next') { S.step++; render(); }
+  else if (a === 'prev') { S.step--; render(); }
+  else if (a === 'hm') { S.houses = Math.max(1, S.houses - 1); trimRemove(); render(); }
+  else if (a === 'hp') { S.houses = Math.min(10, S.houses + 1); trimRemove(); render(); }
+  else if (a === 'dm') { S.bld.doors = Math.max(1, S.bld.doors - 1); render(); }
+  else if (a === 'dp') { S.bld.doors = Math.min(6, S.bld.doors + 1); render(); }
+  else if (a === 'bm') { S.equip.boilerN = Math.max(1, S.equip.boilerN - 1); render(); }
+  else if (a === 'bp') { S.equip.boilerN = Math.min(10, S.equip.boilerN + 1); render(); }
+  else if (a === 'tonm') { c = cycleRef(el.dataset.i); c.ton = Math.max(1, c.ton - 1); render(); }
+  else if (a === 'tonp') { c = cycleRef(el.dataset.i); c.ton = Math.min(30, c.ton + 1); render(); }
+  else if (a === 'film') { c = cycleRef(el.dataset.i); c.filled = Math.max(1, c.filled - 1); render(); }
+  else if (a === 'filp') { c = cycleRef(el.dataset.i); c.filled = Math.min(bedTiers(), c.filled + 1); render(); }
+  else if (a === 'addFridge') { S.fridges.push({ crop: S.crops[S.crops.length - 1] }); render(); }
+  else if (a === 'rmFridge') { S.fridges.splice(+el.dataset.i, 1); render(); }
+  else if (a === 'loc') { S.loc = '위도 36.48 · 경도 127.09 · 해발 45 m(예시)'; render(); }
+  else if (a === 'check') { S.done[el.dataset.k] = !S.done[el.dataset.k]; render(); }
+  else if (a === 'complete') { S.done[el.dataset.k] = true; S.order = null; back(); }
+  else if (a === 'startSetup') { S.step = 1; S.mode = 'new'; setupCyclesInit(); stack = []; go('setup'); }
+  else if (a === 'openWizard') {
+    if (!S.installed) { S.step = 1; S.mode = 'new'; setupCyclesInit(); stack = []; go('setup'); return; }
+    S.mode = 'edit'; S.step = 1; S.saved = snapshot(); S.remove = {}; go('setup');
+  }
+  else if (a === 'saveEdit') {
+    var rm = Object.keys(S.remove).map(Number);
+    S.cycles = S.cycles.filter(function (x) { return rm.indexOf(x.h) < 0; });
+    var kept = S.saved.names.filter(function (n, i) { return rm.indexOf(i) < 0; });
+    S.names = kept.slice(0, S.houses); S.remove = {}; S.saved = null; S.mode = 'new';
+    back();
+  }
+  else if (a === 'finish') {
+    var keep = S; demoInstalled();
+    ['houses','nameStyle','equip','shared','loc','bld','bed','crops','byCrop','farmName','fridges'].forEach(function (k) { S[k] = keep[k]; });
+    S.names = namesFor(keep.nameStyle, keep.houses);
+    S.cycles = S.cycles.slice(0, Math.min(3, keep.houses));
+    S.cycles.forEach(function (c) { if (S.crops.indexOf(c.crop) < 0) c.crop = S.crops[0]; });   // 데모 작기는 고른 작물 안에서(3동은 신령버섯을 골랐으면 신령버섯)
+    stack = []; go('today');
+  }
+});
+function trimRemove() {
+  if (!S.saved) return;
+  var need = Math.max(0, S.saved.houses - S.houses), ks = Object.keys(S.remove);
+  while (ks.length > need) { delete S.remove[ks.pop()]; }
+}
+document.getElementById('devReset').onclick = function () { S = fresh(); stack = []; render(); };
+document.getElementById('devDone').onclick = function () { demoInstalled(); stack = []; render(); };
+S = fresh(); render();
+</script>
+</body>
+</html>

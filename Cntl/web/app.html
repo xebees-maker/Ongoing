@@ -227,6 +227,23 @@
   .rtable.two th:nth-child(4), .rtable.two td:nth-child(4) { width:22%; padding-left:14px; }
   .rtable.two th:nth-child(3), .rtable.two td.rsep:nth-child(3) { border-right:1px solid var(--line); }
   .tap:active { background:rgba(127,127,127,.12); }
+  /* 2026-11-26 — 영농일지 */
+  .dyrow { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--line); }
+  .dyrow .ck { width:22px; height:22px; border-radius:50%; border:2px solid var(--grey); flex:0 0 22px; display:inline-flex;
+               align-items:center; justify-content:center; font-size:13px; color:#fff; }
+  .dyrow.done .ck { background:var(--green); border-color:var(--green); }
+  .dyrow.done .grow > div:first-child { color:var(--muted); text-decoration:line-through; }
+  .dyrow .must { color:var(--red); font-weight:700; }
+  .dygroup { padding:12px 14px 4px; font-size:13px; font-weight:700; color:var(--muted); border-bottom:1px solid var(--line); }
+  .dygroup.red { color:var(--red); }
+  .dyhouse { padding:12px 14px; border-bottom:1px solid var(--line); }
+  .dyhouse .nm { font-weight:700; }
+  .dyedit { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:8px 14px; border-bottom:1px solid var(--line); }
+  .dyedit input[type=text] { flex:1; min-width:90px; width:auto; }
+  .dyedit input[type=number], .field input[type=number] { width:80px; }
+  .dyedit button { padding:6px 10px; }
+  .mtext label { display:block; margin:10px 0 4px; font-size:13px; color:var(--muted); }
+  .mtext select, .mtext input[type=date], .mtext input[type=number] { width:100%; }
 </style>
 </head>
 <body>
@@ -279,13 +296,10 @@
   <div id="conn"></div>
   <div id="siteNote" class="sitenote hidden"><span id="siteNoteTxt"></span><button id="siteNoteX" class="xbtn" aria-label="close">&#x2715;</button></div>
   <main>
-    <section>
-      <h2 data-s="STR_PANEL_SUMMARY"></h2>
-      <div id="sumMem" class="val"></div>
-      <div id="sumBridge" class="val" style="display:flex;gap:12px"><span id="sumBr0" class="tap" style="flex:1"></span><span id="sumBr1" class="tap" style="flex:1"></span></div>
-      <div id="sumSd" class="val"></div>
-      <div id="sumFlash" class="val"></div>
-      <input type="file" id="restoreFile" accept=".bin,application/octet-stream" style="display:none">
+    <!-- 2026-11-26(사용자 결정) — 영농일지 "오늘 할 일" 카드를 맨 위에. 개발용 요약(Summary)은 맨 아래로(UI 전면 개편 때 다시 정함) -->
+    <section id="diaryCard" class="tap" data-diary="1">
+      <h2 class="tap" data-w="DY_CARD"></h2>
+      <div id="diaryBody" class="val"></div>
     </section>
     <section>
       <h2 data-s="STR_PANEL_POWER_CONTROL"></h2>
@@ -298,6 +312,14 @@
     <section>
       <h2 data-s="STR_GROUP_CAMERA" data-campop="1" class="tap"></h2>
       <div id="cams"></div>
+    </section>
+    <section>
+      <h2 data-w="SYS_STATUS"></h2>   <!-- 2026-11-26(사용자 지시) — 웹에서는 "시스템 상태"(콘은 Summary 그대로) -->
+      <div id="sumMem" class="val"></div>
+      <div id="sumBridge" class="val" style="display:flex;gap:12px"><span id="sumBr0" class="tap" style="flex:1"></span><span id="sumBr1" class="tap" style="flex:1"></span></div>
+      <div id="sumSd" class="val"></div>
+      <div id="sumFlash" class="val"></div>
+      <input type="file" id="restoreFile" accept=".bin,application/octet-stream" style="display:none">
     </section>
   </main>
 </div>
@@ -349,7 +371,46 @@
     RM_READONLY: ['원격 접속에서는 볼 수만 있습니다', 'Remote access is view-only'],
     RM_NO_BROKER: ['브로커에 연결되지 않음', 'Broker not reachable'], RM_NO_SITE: ['이 현장 이름의 제어기가 없음', 'No CNTL with this site name'],
     RM_CNTL_OFF: ['제어기가 브로커에 연결되어 있지 않음', 'CNTL is not connected to the broker'], RM_NO_REPLY: ['제어기 응답 없음', 'No reply from CNTL'],
-    RM_CONNECTING: ['브로커에 연결 중', 'Connecting to broker'], RM_CHECKING: ['제어기 확인 중', 'Checking CNTL'], RM_WAITING: ['제어기 응답 기다리는 중', 'Waiting for CNTL']
+    RM_CONNECTING: ['브로커에 연결 중', 'Connecting to broker'], RM_CHECKING: ['제어기 확인 중', 'Checking CNTL'], RM_WAITING: ['제어기 응답 기다리는 중', 'Waiting for CNTL'],
+    SYS_STATUS: ['시스템 상태', 'System status'],   /* 2026-11-26 — 주화면 맨 아래 요약 판넬 제목(웹만) */
+    /* 2026-11-26 — 영농일지(웹 전용 기능이라 W 표) */
+    DY_TITLE: ['영농일지', 'Farm diary'], DY_CARD: ['오늘 할 일', 'Today'], DY_TAB_TODAY: ['할 일', 'Tasks'], DY_TAB_HOUSE: ['재배사', 'Houses'],
+    DY_TAB_SET: ['설정', 'Settings'], DY_R_TODAY: ['오늘', 'Today'], DY_R_TOMORROW: ['내일', 'Tomorrow'], DY_R_WEEK: ['7일', '7 days'],
+    DY_OVERDUE: ['밀린 일', 'Overdue'], DY_NONE: ['할 일이 없습니다', 'Nothing to do'], DY_CARD_FMT: ['오늘 %d건, 밀린 일 %d건', '%d today, %d overdue'],
+    DY_CARD_EMPTY: ['오늘 내가 할 일이 없습니다', 'Nothing for you today'], DY_NO_HOUSE: ['설정에서 재배사를 먼저 등록하세요', 'Register houses in Settings first'],
+    DY_SD: ['SD 카드가 없어 영농일지를 쓸 수 없습니다', 'No SD card: the diary is unavailable'], DY_LOAD_FAIL: ['영농일지를 받지 못했습니다', 'Could not load the diary'],
+    DY_SAVE_FAIL: ['저장하지 못했습니다', 'Could not save'],
+    DY_WHO_me: ['나', 'Me'], DY_WHO_crew: ['인력', 'Crew'], DY_WHO_vendor: ['업체', 'Vendor'], DY_WHO_device: ['장치', 'Device'],
+    DY_DONE: ['완료', 'Done'], DY_UNDO: ['되돌리기', 'Undo'], DY_SKIP: ['건너뛰기', 'Skip'], DY_SKIPPED: ['건너뜀', 'Skipped'], DY_CANCEL: ['취소', 'Cancel'],
+    DY_MIN: ['걸린 시간(분)', 'Time spent (min)'], DY_MUST: ['확인했습니다', 'Checked'], DY_MUST_NEED: ['확인 표시를 해야 완료됩니다', 'Tick the check box to complete'],
+    DY_WHO: ['수행자', 'Who'], DY_DATE: ['날짜', 'Date'],
+    DY_ST_load: ['입상', 'Loading'], DY_ST_post: ['후발효', 'Pasteurization'], DY_ST_spawn: ['접종', 'Spawning'], DY_ST_case: ['복토', 'Casing'],
+    DY_ST_recase: ['후토', 'Re-casing'], DY_ST_f1: ['1주기', 'Flush 1'], DY_ST_f2: ['2주기', 'Flush 2'], DY_ST_f3: ['3주기', 'Flush 3'], DY_ST_end: ['폐상', 'Clear-out'],
+    DY_DAYN: ['입상 %d일째', 'Day %d'], DY_DAYS_TO: ['입상 %d일 전', '%d days to loading'], DY_NEXT: ['다음: %s %s', 'Next: %s %s'], DY_NOW: ['지금: %s', 'Now: %s'],
+    DY_START_CYCLE: ['작기 시작', 'Start cycle'], DY_LOAD_DATE: ['입상일', 'Loading date'], DY_MEDIA: ['배지', 'Compost'],
+    DY_MEDIA_L: ['1차 배지\n2차 배지\n3차 배지', 'Phase I\nPhase II\nPhase III'], DY_CREATE: ['만들기', 'Create'], DY_BACK: ['재배사 목록', 'Houses'],
+    DY_ACT: ['실제', 'Actual'], DY_FIX: ['확정', 'Confirmed'], DY_PLAN: ['예상', 'Expected'], DY_SET_ACT: ['실제 날짜로', 'Set actual'],
+    DY_SET_FIX: ['예정일 확정', 'Confirm date'], DY_CLEAR: ['지우기', 'Clear'], DY_FINISH: ['작기 마침', 'Finish cycle'],
+    DY_FINISH_Q: ['이 작기를 마칠까요? 할 일 목록에서 빠집니다', 'Finish this cycle? Its tasks leave the list'], DY_NO_CYCLE: ['진행 중인 작기 없음', 'No active cycle'],
+    DY_FARM: ['농가 설정', 'Farm'], DY_AREA: ['재배면적 기본(평)', 'Default growing area (pyeong)'], DY_HUMID: ['가습기 있음', 'Humidifier'],
+    DY_BOILER: ['보일러', 'Boiler'], DY_BOILER_L: ['고정식\n이동식', 'Fixed\nMobile'], DY_BOILER_N: ['보일러 대수', 'Boilers'], DY_MEDIA_DEF: ['기본 배지', 'Default compost'],
+    DY_HOUSES: ['재배사', 'Houses'], DY_ADD: ['재배사 추가', 'Add house'], DY_COUNT: ['재배사 수', 'Number of houses'], DY_SCHEME: ['이름 방식', 'Naming'],
+    DY_SCHEME_L: ['1동, 2동\nA동, B동\n가동, 나동', 'House 1, 2\nHouse A, B\nGa, Na'], DY_AREA_PH: ['기본', 'Default'], DY_DEL: ['삭제', 'Delete'],
+    DY_APPLY: ['저장', 'Save'], DY_NAME_BAD: ['재배사 이름을 넣으세요(20자 이하)', 'Enter a house name (up to 20 characters)'],
+    DY_HAS_CYCLE: ['작기 기록이 있어 지울 수 없습니다', 'This house has cycle records and cannot be deleted'], DY_HOUSE_FMT: ['%s동', 'House %s'],
+    DY_T_MEDIUM_ORDER: ['배지 예약 구매', 'Order compost'], DY_T_LOAD_CREW: ['입상 인력 연락', 'Call loading crew'],
+    DY_T_CLEAN_CHECK: ['재배사 청소·소독 확인', 'Check house cleaned and disinfected'], DY_T_LOAD: ['입상', 'Loading'],
+    DY_T_VENT_CLOSE: ['천장 환풍구 닫기', 'Close ceiling vent'], DY_T_HUMID_SET: ['가습기 습도 설정', 'Set humidifier'],
+    DY_T_MIST: ['바닥 물 뿌리기(하루 2번)', 'Wet the floor (twice a day)'], DY_T_POST_START: ['후발효 시작(보일러 자동 하온 설정)', 'Start pasteurization (boiler program)'],
+    DY_T_SPAWN_ORDER: ['종균 주문', 'Order spawn'], DY_T_SPAWN_CALL: ['접종 업체 연락·접종일 받기', 'Call spawning company, get the date'],
+    DY_T_SPAWN_PREP: ['접종 준비(마실 물 등)', 'Prepare for spawning (drinking water etc.)'], DY_T_SPAWN: ['접종', 'Spawning'],
+    DY_T_CASE_CREW: ['복토 작업자 연락', 'Call casing crew'], DY_T_SOIL_ORDER: ['복토 흙 주문', 'Order casing soil'],
+    DY_T_CASE_EQUIP: ['복토 장비 준비', 'Prepare casing equipment'], DY_T_SOIL_RECV: ['복토 흙·비닐 장판 받기', 'Receive casing soil and plastic sheets'],
+    DY_T_CASE: ['복토', 'Casing'], DY_T_VENT_OPEN: ['천장 환풍구 열기', 'Open ceiling vent'], DY_T_VENT_SET: ['환기 설정(CO2 또는 타이머)', 'Set ventilation (CO2 or timer)'],
+    DY_T_WATER: ['관수(농약 배합)', 'Watering (with pesticide)'], DY_T_RECASE: ['점검 후 후토', 'Inspect and re-case'], DY_T_RUFFLE: ['균긁기', 'Ruffling'],
+    DY_T_HARV_CREW: ['수확 인력 연락', 'Call harvest crew'], DY_T_HARV: ['수확', 'Harvest'], DY_T_TIDY: ['수확 정리', 'Clean up after harvest'],
+    DY_T_WATER_F: ['관수·농약', 'Watering and pesticide'], DY_T_END_CREW: ['폐상 인력 연락', 'Call clear-out crew'], DY_T_END: ['폐상', 'Clear-out'],
+    DY_T_CLEAN_HOUSE: ['재배사 청소', 'Clean the house'], DY_T_CLEAN_NET: ['배지망 청소', 'Clean compost nets'], DY_T_DISINFECT: ['소독', 'Disinfect']
   };
   /* 센서 채널 종류(esp_now_link.h SENSOR_CHAN_*) → 콘 주화면과 같은 글자·단위 */
   var CHAN = { 1: ['T', 'STR_CHAN_UNIT_TEMP_C'], 2: ['H', 'STR_CHAN_UNIT_HUMI_PCT'], 3: ['C', 'STR_CHAN_UNIT_CO2_PPM'], 4: ['A', 'STR_CHAN_UNIT_NH3_PPM'] };
@@ -926,6 +987,7 @@
     renderRelays(d.relays || []);
     renderSensors(d.nodes || []);
     renderCams(d.nodes || []);
+    renderDiaryCard();   /* 2026-11-26 — 언어 바뀜·자정 넘김도 여기서 다시 그려짐 */
   }
 
   /* 2026-11-18(사용자 결정) — 브릿지 번호를 콘이 정함. 모르는 브릿지는 콘과 웹 모두 묻고, 먼저 고른 쪽이 정함(다른 쪽 팝업은 닫힘).
@@ -1001,6 +1063,7 @@
     render(d);
     siteNote(d);
     syncDevLight(d);
+    diaryOnDash();   /* 2026-11-26 — 영농일지 카드(처음 한 번, 날짜가 바뀌면 다시) */
     $('conn').textContent = '';
     $('conn').className = '';
   }
@@ -1065,8 +1128,17 @@
 
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) { clearTimeout(timer); wsStop(); }
-    else if (view === 'main' || view === '') { wsNextTry = 0; poll(); }
+    else if (view === 'main' || view === '' || view === 'local') { wsNextTry = 0; connect(); }   /* 다른 앱에서 돌아옴 = 접속 */
   });
+
+  /* 2026-11-26(사용자 결정 — 마지막으로 접속하거나 가져온 쪽이 제어권) — 웹이 "접속"하면(새로 열기·새로 고침, 로그인, 다른 앱에서
+   * 돌아옴) 콘이 넘겨받은 상태여도 바로 웹이 가져옴(api/session/claim — 콘은 어떤 화면이든 잠금 화면). 열려 있는 동안의 주기 조회는
+   * 접속으로 치지 않음 — 콘에서 가져가면 웹은 어떤 화면이든 "제어기에서 사용 중"으로 남음(그래야 콘을 쓸 수 있음) */
+  function connect() {
+    api('api/session/claim', { method: 'POST' })
+      .then(function () { if (view !== 'main') show('main'); poll(); })
+      .catch(function (e) { if (!(e && e.handled)) poll(); });   /* 401이면 api가 로그인 화면으로. 연결 안 됨은 poll이 이유를 보여 줌 */
+  }
 
   $('loginView').addEventListener('submit', function (ev) {
     ev.preventDefault();
@@ -1080,7 +1152,7 @@
         $('pw').type = 'password';
         $('pwEyeSlash').style.display = '';
         show('main');
-        poll();
+        connect();   /* 로그인 = 접속 */
       })
       .catch(function (e) { $('loginMsg').textContent = Wt(e.message === 'locked' ? 'LOGIN_LOCKED' : e.message === 'nopin' ? 'NOPIN' : 'LOGIN_FAILED'); });
   });
@@ -1094,7 +1166,7 @@
   });
 
   $('reclaimBtn').addEventListener('click', function () {
-    api('api/session/claim', { method: 'POST' }).then(function () { show('main'); poll(); }).catch(function () {});
+    connect();
   });
 
   $('setBtn').addEventListener('click', function () { if (view === 'main') openSettings(); });
@@ -2587,12 +2659,450 @@
     v.addEventListener('touchend', function (e) { if (e.touches.length === 0) t0 = null; }, { passive: true });
   })();
 
+  /* ══ 2026-11-26(사용자 설계 — 영농일지 1단계) — 설계: Docs/설계_영농일지_2026-11-26.md ══
+   * 콘은 JSON 파일을 이름별로 저장만 함(GET/POST api/diary?f=<이름>, Cntl/main/diary_api.c). 일정표·날짜 계산은 여기.
+   *  farm      = { v, farm:{area, humid, boiler:{type,count}, media}, houses:[{id,name,area}](배열 순서 = 표시 순서),
+   *                cycles:[{id, house, start, active}] }
+   *  <작기 id> = { v, id, house, media, start, stages:[{k, gap, fix, act}],
+   *                tasks:[{id, k, st, off, who, must, opt, rep:[st,off], done:{d,m}, dd:{날짜:{m}}, skip}] }
+   *  날짜 = 'YYYY-MM-DD'(휴대폰 현지). 단계 날짜 = 실제(act) > 확정 예정(fix) > 앞 단계 날짜 + gap. 할 일 날짜 = 단계 날짜 + off.
+   *  ID는 이름과 무관한 임의 값(재배사 이름을 바꿔도 기록이 이어짐). 수행자 "나"인 일만 오늘 할 일·카드에 셈 */
+  /* 단계 순서와 앞 단계에서의 기본 간격(일) — 배지 종류별(1차 = 후발효, 3차 = 접종 끝남). 간격은 Claude가 잡은 기본값이라
+   * 실제 날짜를 넣으면 뒤가 다시 계산됨(설계 문서 — 사용자 확인 필요) */
+  var DY_SEQ = {
+    1: [['load', 0], ['post', 0], ['spawn', 9], ['case', 14], ['recase', 7], ['f1', 7], ['f2', 21], ['f3', 21], ['end', 21]],
+    2: [['load', 0], ['spawn', 1], ['case', 14], ['recase', 7], ['f1', 7], ['f2', 21], ['f3', 21], ['end', 21]],
+    3: [['load', 0], ['case', 10], ['recase', 7], ['f1', 7], ['f2', 21], ['f3', 21], ['end', 21]]
+  };
+  /* 기본 일정표 — [키, 단계(F = 1·2·3주기 각각), 단계 날짜에서 며칠, 수행자, 선택]. must = 확인 표시해야 완료, opt = 하지 않아도 됨,
+   * humid = 가습기 있을 때만(1)/없을 때만(0), rep = [끝 단계, off] 까지 매일 */
+  var DY_TPL = [
+    ['MEDIUM_ORDER', 'load', -30, 'me'], ['LOAD_CREW', 'load', -7, 'me'], ['CLEAN_CHECK', 'load', -1, 'me', { must: 1 }],
+    ['LOAD', 'load', 0, 'crew'], ['VENT_CLOSE', 'load', 0, 'me', { must: 1 }], ['HUMID_SET', 'load', 0, 'me', { humid: 1 }],
+    ['MIST', 'load', 0, 'me', { humid: 0, rep: ['case', -1] }],
+    ['POST_START', 'post', 0, 'me'],
+    ['SPAWN_ORDER', 'spawn', -7, 'me'], ['SPAWN_CALL', 'spawn', -7, 'me'], ['SPAWN_PREP', 'spawn', -1, 'me'], ['SPAWN', 'spawn', 0, 'vendor'],
+    ['CASE_CREW', 'case', -7, 'me'], ['SOIL_ORDER', 'case', -5, 'me'], ['CASE_EQUIP', 'case', -1, 'me'], ['SOIL_RECV', 'case', -1, 'me', { must: 1 }],
+    ['CASE', 'case', 0, 'crew'], ['VENT_OPEN', 'case', 0, 'me', { must: 1 }], ['VENT_SET', 'case', 0, 'me'], ['WATER', 'case', 1, 'me'],
+    ['RECASE', 'recase', 0, 'me'], ['RUFFLE', 'recase', 1, 'me', { opt: 1 }],
+    ['HARV_CREW', 'F', 4, 'me'], ['HARV', 'F', 7, 'crew', { rep: ['F', 13] }], ['TIDY', 'F', 14, 'me'], ['WATER_F', 'F', 15, 'me'],
+    ['END_CREW', 'end', -7, 'me'], ['END', 'end', 0, 'crew'], ['CLEAN_HOUSE', 'end', 1, 'me'], ['CLEAN_NET', 'end', 2, 'me'], ['DISINFECT', 'end', 3, 'me']
+  ];
+  var DY_WHOS = ['me', 'crew', 'vendor', 'device'];
+  /* 2026-11-26(사용자 지시 — 버섯 위주로 설명했지만 나중에 일반화 가능해야 함) — 작목별 일정표 묶음. 작목을 더하려면 여기에 한 줄
+   * (단계 순서 seq[변형], 할 일 tpl, 변형 이름 목록 문구 키). 작기 파일은 만들 때 단계·할 일을 복사해 두므로 일정표를 바꿔도
+   * 예전 작기는 그대로. 단계·할 일 이름은 문구 키(DY_ST_/DY_T_)가 기본이고, 농부가 직접 만든 것은 name 칸(나중 단계) */
+  var DY_CROPS = { mushroom: { seq: DY_SEQ, tpl: DY_TPL, variants: 'DY_MEDIA_L' } };
+  function dyStName(s) { return s.name || Wt('DY_ST_' + s.k); }
+  function dyStK(c, k) { return dyStName(c.stages.filter(function (s) { return s.k === k; })[0] || { k: k }); }
+
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function dStr(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+  function dParse(s) { var p = s.split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); }
+  function dAdd(s, n) { var d = dParse(s); d.setDate(d.getDate() + n); return dStr(d); }
+  function dDiff(a, b) { return Math.round((dParse(a) - dParse(b)) / 86400000); }
+  function dToday() { return dStr(new Date()); }
+  function dShow(s) { var d = dParse(s); return (d.getMonth() + 1) + '/' + d.getDate(); }
+  function dyId(p) { return p + '-' + Math.random().toString(36).slice(2, 10); }
+
+  var dl = { farm: null, cyc: {}, loaded: false, loading: false, err: '', day: '' };
+  var dy = { tab: 'today', range: 0, house: null, ed: null };
+  function dyDefaultFarm() { return { v: 1, farm: { crop: 'mushroom', area: 60, humid: true, boiler: { type: 'mobile', count: 1 }, media: 2 }, houses: [], cycles: [] }; }
+  function dyGet(name) { return api('api/diary?f=' + name); }
+  function dySave(name, obj) {
+    return api('api/diary?f=' + name, { method: 'POST', body: JSON.stringify(obj), headers: { 'Content-Type': 'application/json' } })
+      .catch(function (e) { if (!(e && e.handled)) toast(Wt('DY_SAVE_FAIL')); throw e; });
+  }
+  function dyLoad() {
+    if (dl.loading) return Promise.resolve();
+    dl.loading = true;
+    return dyGet('farm').then(function (f) {
+      var farm = f || dyDefaultFarm();
+      var act = farm.cycles.filter(function (c) { return c.active; });
+      return Promise.all(act.map(function (c) { return dyGet(c.id); })).then(function (list) {
+        dl.farm = farm;
+        dl.cyc = {};
+        list.forEach(function (c) { if (c) dl.cyc[c.id] = c; });
+        dl.loaded = true; dl.err = ''; dl.day = dToday();
+      });
+    }).catch(function (e) {
+      if (e && e.handled) return;
+      dl.err = /503/.test(e && e.message) ? 'DY_SD' : 'DY_LOAD_FAIL';
+    }).then(function () {
+      dl.loading = false;
+      renderDiaryCard();
+      if (sheetRender === renderDiary) renderDiary();
+    });
+  }
+  function dyHouse(id) { return (dl.farm.houses.filter(function (h) { return h.id === id; })[0]) || { name: '?' }; }
+  function dyActiveOf(hid) { var c = dl.farm.cycles.filter(function (x) { return x.active && x.house === hid; })[0]; return c && dl.cyc[c.id]; }
+
+  /* 단계별 날짜와 어느 값인지(act/fix/plan) */
+  function dyStages(c) {
+    var m = {}, prev = null;
+    c.stages.forEach(function (s, i) {
+      var d = s.act || s.fix || (i === 0 ? c.start : dAdd(prev, s.gap));
+      m[s.k] = { d: d, how: s.act ? 'act' : (s.fix || i === 0) ? 'fix' : 'plan' };
+      prev = d;
+    });
+    return m;
+  }
+  function dyNewCycle(hid, start, media) {
+    var crop = dl.farm.farm.crop || 'mushroom', cp = DY_CROPS[crop];
+    var seq = cp.seq[media], has = {}, humid = dl.farm.farm.humid, tasks = [], n = 0;
+    seq.forEach(function (s) { has[s[0]] = 1; });
+    cp.tpl.forEach(function (t) {
+      var o = t[4] || {};
+      if (o.humid !== undefined && !!o.humid !== !!humid) return;
+      (t[1] === 'F' ? ['f1', 'f2', 'f3'] : [t[1]]).forEach(function (st) {
+        if (!has[st]) return;
+        var rep = o.rep ? [o.rep[0] === 'F' ? st : o.rep[0], o.rep[1]] : null;
+        if (rep && !has[rep[0]]) rep = null;
+        tasks.push({ id: 't' + (++n), k: t[0], st: st, off: t[2], who: t[3], must: !!o.must, opt: !!o.opt, rep: rep });
+      });
+    });
+    var c = { v: 1, id: dyId('c'), crop: crop, house: hid, media: media, start: start,
+              stages: seq.map(function (s, i) { return { k: s[0], gap: s[1], fix: i === 0 ? start : null, act: null }; }), tasks: tasks };
+    /* 이미 입상한 작기를 등록하면(입상일 ≤ 오늘) 오늘 전 날짜의 일은 한 것으로 봄(pre = 등록 전). 입상 전 작기는 그대로 둠 —
+     * 배지 예약처럼 지난 일이 정말 밀린 일일 수 있음 */
+    var today = dToday();
+    if (start <= today) {
+      var sd = dyStages(c);
+      tasks.forEach(function (t) { if (!t.rep && sd[t.st] && dAdd(sd[t.st].d, t.off) < today) t.done = { d: null, pre: 1 }; });
+    }
+    return c;
+  }
+  /* from~to(포함) 날짜에 걸리는 할 일 — 활성 작기 전부. rep는 날마다 한 칸 */
+  function dyItems(from, to) {
+    var out = [];
+    Object.keys(dl.cyc).forEach(function (id) {
+      var c = dl.cyc[id], sd = dyStages(c);
+      c.tasks.forEach(function (t) {
+        if (!sd[t.st]) return;
+        var d0 = dAdd(sd[t.st].d, t.off);
+        if (t.rep) {
+          var d1 = sd[t.rep[0]] ? dAdd(sd[t.rep[0]].d, t.rep[1]) : d0;
+          for (var d = d0 > from ? d0 : from; d <= d1 && d <= to; d = dAdd(d, 1)) out.push({ c: c, t: t, d: d, done: !!(t.dd && t.dd[d]) });
+        } else if (d0 >= from && d0 <= to) out.push({ c: c, t: t, d: d0, done: !!t.done || !!t.skip });
+      });
+    });
+    return out.sort(function (a, b) { return a.d < b.d ? -1 : a.d > b.d ? 1 : 0; });
+  }
+  function dyOverdue() {   /* 지난 날짜인데 안 한 일(매일 하는 일은 지난 날을 묻지 않음) */
+    var today = dToday(), out = [];
+    Object.keys(dl.cyc).forEach(function (id) {
+      var c = dl.cyc[id], sd = dyStages(c);
+      c.tasks.forEach(function (t) {
+        if (t.rep || t.done || t.skip || !sd[t.st]) return;
+        var d = dAdd(sd[t.st].d, t.off);
+        if (d < today) out.push({ c: c, t: t, d: d, done: false });
+      });
+    });
+    return out.sort(function (a, b) { return a.d < b.d ? -1 : 1; });
+  }
+  function dyMine(list) { return list.filter(function (x) { return x.t.who === 'me'; }); }
+  function dyDayText(c, sd) {   /* 입상 전이면 "입상 n일 전", 지나면 "입상 n일째"(입상일 = 1일째) */
+    var n = dDiff(dToday(), sd.load.d);
+    return n < 0 ? fmt(Wt('DY_DAYS_TO'), -n) : fmt(Wt('DY_DAYN'), n + 1);
+  }
+  function dyTaskName(t) { return t.name || Wt('DY_T_' + t.k); }
+
+  function renderDiaryCard() {
+    var el = $('diaryBody');
+    if (!el) return;
+    if (dl.err) { el.textContent = Wt(dl.err); return; }
+    if (!dl.loaded) { el.textContent = Wt('LOADING'); return; }
+    if (!dl.farm.houses.length) { el.textContent = Wt('DY_NO_HOUSE'); return; }
+    var today = dToday(), td = dyMine(dyItems(today, today)).filter(function (x) { return !x.done; }), od = dyMine(dyOverdue());
+    if (!td.length && !od.length) { el.textContent = Wt('DY_CARD_EMPTY'); return; }
+    var lines = od.concat(td).slice(0, 3).map(function (x) {
+      return '<div' + (x.d < today ? ' class="red"' : '') + '>' + esc(dyHouse(x.c.house).name + ' · ' + dyTaskName(x.t)) + '</div>';
+    });
+    el.innerHTML = '<div>' + esc(fmt(Wt('DY_CARD_FMT'), td.length, od.length)) + '</div>' + lines.join('');
+  }
+  function diaryOnDash() {   /* 주화면을 받을 때마다 — 처음 한 번 받고, 날짜가 바뀌면 다시 */
+    if (!dl.loading && (!dl.loaded && !dl.err || dl.day && dl.day !== dToday())) dyLoad();
+  }
+  function openDiary() {
+    dy.house = null;
+    openSheet(renderDiary);
+    if (!dl.loaded) dyLoad();
+  }
+  function dyHead() {
+    return '<div class="shead"><h3>' + esc(Wt('DY_TITLE')) + '</h3><button class="xbtn" data-act="close" aria-label="close">&#x2715;</button></div>' +
+      '<div class="grp seg">' + ['today', 'house', 'set'].map(function (k) {
+        return '<button data-dtab="' + k + '"' + (dy.tab === k ? ' class="on"' : '') + '>' + esc(Wt(k === 'today' ? 'DY_TAB_TODAY' : k === 'house' ? 'DY_TAB_HOUSE' : 'DY_TAB_SET')) + '</button>';
+      }).join('') + '</div>';
+  }
+  function renderDiary() {
+    var h = dyHead();
+    if (dl.err) h += '<div class="empty" style="padding:14px">' + esc(Wt(dl.err)) + '</div>';
+    else if (!dl.loaded) h += '<div class="empty" style="padding:14px">' + esc(Wt('LOADING')) + '</div>';
+    else if (dy.tab === 'today') h += dyTodayHtml();
+    else if (dy.tab === 'house') h += dy.house ? dyCycleHtml() : dyHousesHtml();
+    else h += dySetHtml();
+    $('sheetBody').innerHTML = h;
+    if (dl.loaded && dy.tab === 'set') dySetWire();
+  }
+
+  /* ── 할 일 ── */
+  function dyRow(x, showDate) {
+    var t = x.t, sub = [dyHouse(x.c.house).name];
+    if (t.who !== 'me') sub.push(Wt('DY_WHO_' + t.who));   /* "나"는 기본이라 안 씀("나동 · 나"처럼 헷갈림) */
+    if (showDate) sub.push(dShow(x.d));
+    if (t.skip) sub.push(Wt('DY_SKIPPED'));
+    return '<div class="dyrow tap' + (x.done ? ' done' : '') + '" data-dtask="' + x.c.id + '|' + t.id + '|' + x.d + '">' +
+      '<span class="ck">' + (x.done ? '&#x2713;' : '') + '</span><div class="grow"><div>' + (t.must ? '<span class="must">! </span>' : '') +
+      esc(dyTaskName(t)) + '</div><div class="sub">' + esc(sub.join(' · ')) + '</div></div></div>';
+  }
+  function dyTodayHtml() {
+    if (!dl.farm.houses.length) return '<div class="empty" style="padding:14px">' + esc(Wt('DY_NO_HOUSE')) + '</div>';
+    var today = dToday(), h = '<div class="grp seg">' + ['DY_R_TODAY', 'DY_R_TOMORROW', 'DY_R_WEEK'].map(function (k, i) {
+      return '<button data-drange="' + i + '"' + (dy.range === i ? ' class="on"' : '') + '>' + esc(Wt(k)) + '</button>';
+    }).join('') + '</div>';
+    var from = dy.range === 1 ? dAdd(today, 1) : today, to = dy.range === 0 ? today : dy.range === 1 ? from : dAdd(today, 6);
+    if (dy.range === 0) {
+      var od = dyOverdue();
+      if (od.length) h += '<div class="dygroup red">' + esc(Wt('DY_OVERDUE')) + '</div>' + od.map(function (x) { return dyRow(x, true); }).join('');
+    }
+    var items = dyItems(from, to);
+    if (!items.length) return h + '<div class="empty" style="padding:14px">' + esc(Wt('DY_NONE')) + '</div>';
+    var cur = '';
+    items.forEach(function (x) {
+      if (dy.range === 2 && x.d !== cur) { cur = x.d; h += '<div class="dygroup">' + esc(dShow(x.d)) + '</div>'; }
+      h += dyRow(x, false);
+    });
+    return h;
+  }
+  function dyFind(cid, tid) { var c = dl.cyc[cid]; return c && { c: c, t: c.tasks.filter(function (t) { return t.id === tid; })[0] }; }
+  function dyTaskModal(key) {
+    var p = key.split('|'), f = dyFind(p[0], p[1]);
+    if (!f || !f.t) return;
+    var c = f.c, t = f.t, d = p[2], done = t.rep ? !!(t.dd && t.dd[d]) : !!t.done;
+    var rec = t.rep ? (t.dd && t.dd[d]) : t.done;
+    var h = '<div class="mtitle" style="background:var(--blue);color:#fff">' + esc(dyTaskName(t)) + '</div><div class="mtext">' +
+      '<div>' + esc(dyHouse(c.house).name + ' · ' + dyStK(c, t.st) + ' · ' + dShow(d)) + '</div>' +
+      '<label>' + esc(Wt('DY_WHO')) + '</label><select id="dyWho">' + DY_WHOS.map(function (w) {
+        return '<option value="' + w + '"' + (w === t.who ? ' selected' : '') + '>' + esc(Wt('DY_WHO_' + w)) + '</option>';
+      }).join('') + '</select>' +
+      '<div id="dyMinBox"><label>' + esc(Wt('DY_MIN')) + '</label><input id="dyMin" type="number" min="0" inputmode="numeric" value="' + (rec && rec.m ? rec.m : '') + '"></div>' +
+      (t.must && !done ? '<label style="display:flex;align-items:center;gap:8px;color:var(--text)"><input id="dyMust" type="checkbox" style="width:22px;height:22px"> ' + esc(Wt('DY_MUST')) + '</label>' : '') +
+      '</div><div class="sfoot" style="flex-wrap:wrap"><button data-m="no">' + esc(Wt('DY_CANCEL')) + '</button>' +
+      (t.opt && !done && !t.skip && !t.rep ? '<button data-m="skip">' + esc(Wt('DY_SKIP')) + '</button>' : '') +
+      (done || t.skip ? '<button data-m="undo">' + esc(Wt('DY_UNDO')) + '</button>' : '') +
+      '<button data-m="ok" class="primary">' + esc(Wt(done ? 'DY_APPLY' : 'DY_DONE')) + '</button></div>';
+    $('modalBox').innerHTML = h;
+    $('modal').classList.remove('hidden');
+    var minBox = function () { $('dyMinBox').classList.toggle('hidden', $('dyWho').value !== 'me'); };
+    minBox();
+    $('dyWho').onchange = minBox;
+    $('modal').onclick = function (ev) {
+      var m = ev.target.closest('[data-m]');
+      if (!m) return;
+      var a = m.getAttribute('data-m');
+      if (a === 'ok' && t.must && !done && !$('dyMust').checked) { toast(Wt('DY_MUST_NEED')); return; }
+      var old = JSON.stringify(t);
+      if (a !== 'no') {
+        var who = $('dyWho').value, min = Math.max(0, parseInt($('dyMin').value, 10) || 0), r = who === 'me' && min ? { m: min } : {};
+        t.who = who;
+        if (a === 'ok') {
+          if (t.rep) { t.dd = t.dd || {}; t.dd[d] = r; }
+          else { r.d = (done && t.done && t.done.d) || dToday(); t.done = r; }
+        } else if (a === 'skip') t.skip = true;
+        else if (a === 'undo') { if (t.rep) { if (t.dd) delete t.dd[d]; } else { t.done = null; t.skip = false; } }
+      }
+      $('modal').classList.add('hidden');
+      $('modal').onclick = null;
+      if (a === 'no' || JSON.stringify(t) === old) return;
+      dySave(c.id, c).then(function () { renderDiary(); renderDiaryCard(); })
+        .catch(function () { var o = JSON.parse(old); Object.keys(t).forEach(function (k) { delete t[k]; }); Object.assign(t, o); renderDiary(); });
+    };
+  }
+
+  /* ── 재배사·작기 ── */
+  function dyHousesHtml() {
+    if (!dl.farm.houses.length) return '<div class="empty" style="padding:14px">' + esc(Wt('DY_NO_HOUSE')) + '</div>';
+    var today = dToday();
+    return dl.farm.houses.map(function (hs) {
+      var c = dyActiveOf(hs.id), h = '<div class="dyhouse' + (c ? ' tap" data-dhouse="' + hs.id : '') + '"><div class="nm">' + esc(hs.name) + (c ? ' <span class="chev">&gt;</span>' : '') + '</div>';
+      if (!c) return h + '<div class="sub">' + esc(Wt('DY_NO_CYCLE')) + '</div><div style="padding-top:8px"><button data-dnew="' + hs.id + '">' + esc(Wt('DY_START_CYCLE')) + '</button></div></div>';
+      var sd = dyStages(c), now = null, next = null;
+      c.stages.forEach(function (s) { if (sd[s.k].d <= today) now = s.k; else if (!next) next = s.k; });
+      h += '<div class="sub">' + esc(Wt('DY_MEDIA_L').split('\n')[c.media - 1] + ' · ' + dyDayText(c, sd)) + '</div>';
+      if (now) h += '<div>' + esc(fmt(Wt('DY_NOW'), dyStK(c, now))) + '</div>';
+      if (next) h += '<div class="sub">' + esc(fmt(Wt('DY_NEXT'), dyStK(c, next), dShow(sd[next].d) + ' (' + Wt(sd[next].how === 'act' ? 'DY_ACT' : sd[next].how === 'fix' ? 'DY_FIX' : 'DY_PLAN') + ')')) + '</div>';
+      return h + '</div>';
+    }).join('');
+  }
+  function dyCycleHtml() {
+    var c = dyActiveOf(dy.house);
+    if (!c) { dy.house = null; return dyHousesHtml(); }
+    var sd = dyStages(c), today = dToday();
+    var h = '<div class="btnrow"><button data-dback="1">&lt; ' + esc(Wt('DY_BACK')) + '</button></div>' +
+      '<div class="dyhouse"><div class="nm">' + esc(dyHouse(c.house).name) + '</div><div class="sub">' +
+      esc(Wt('DY_MEDIA_L').split('\n')[c.media - 1] + ' · ' + dyDayText(c, sd)) + '</div></div>';
+    c.stages.forEach(function (s) {
+      var x = sd[s.k];
+      h += '<div class="dyrow tap" data-dstage="' + s.k + '"><div class="grow"><div>' + esc(dyStName(s)) + '</div></div><div class="val">' +
+        esc(dShow(x.d)) + '</div><div class="sub" style="width:3.5em;text-align:right">' + esc(Wt(x.how === 'act' ? 'DY_ACT' : x.how === 'fix' ? 'DY_FIX' : 'DY_PLAN')) + '</div></div>';
+    });
+    return h + '<div class="sfoot"><button class="danger" data-dfinish="1">' + esc(Wt('DY_FINISH')) + '</button></div>';
+  }
+  function dyStageModal(k) {
+    var c = dyActiveOf(dy.house);
+    if (!c) return;
+    var s = c.stages.filter(function (x) { return x.k === k; })[0], sd = dyStages(c);
+    $('modalBox').innerHTML = '<div class="mtitle" style="background:var(--blue);color:#fff">' + esc(dyStName(s)) + '</div><div class="mtext">' +
+      '<label>' + esc(Wt('DY_DATE')) + '</label><input id="dyDate" type="date" value="' + sd[k].d + '"></div>' +
+      '<div class="sfoot" style="flex-wrap:wrap"><button data-m="no">' + esc(Wt('DY_CANCEL')) + '</button>' +
+      ((s.act || (s.fix && k !== 'load')) ? '<button data-m="clr">' + esc(Wt('DY_CLEAR')) + '</button>' : '') +
+      '<button data-m="fix">' + esc(Wt('DY_SET_FIX')) + '</button><button data-m="act" class="primary">' + esc(Wt('DY_SET_ACT')) + '</button></div>';
+    $('modal').classList.remove('hidden');
+    $('modal').onclick = function (ev) {
+      var m = ev.target.closest('[data-m]');
+      if (!m) return;
+      var a = m.getAttribute('data-m'), v = $('dyDate').value, old = JSON.stringify(s);
+      if ((a === 'fix' || a === 'act') && !/^\d{4}-\d\d-\d\d$/.test(v)) return;
+      $('modal').classList.add('hidden');
+      $('modal').onclick = null;
+      if (a === 'no') return;
+      if (a === 'act') s.act = v;
+      else if (a === 'fix') { s.fix = v; if (k === 'load') c.start = v; }
+      else { s.act = null; if (k !== 'load') s.fix = null; }
+      if (JSON.stringify(s) === old) return;
+      dySave(c.id, c).then(function () { renderDiary(); renderDiaryCard(); })
+        .catch(function () { Object.assign(s, JSON.parse(old)); renderDiary(); });
+    };
+  }
+  function dyNewModal(hid) {
+    $('modalBox').innerHTML = '<div class="mtitle" style="background:var(--blue);color:#fff">' + esc(dyHouse(hid).name + ' · ' + Wt('DY_START_CYCLE')) + '</div><div class="mtext">' +
+      '<label>' + esc(Wt('DY_LOAD_DATE')) + '</label><input id="dyDate" type="date" value="' + dToday() + '">' +
+      '<label>' + esc(Wt('DY_MEDIA')) + '</label><select id="dyMedia">' + Wt('DY_MEDIA_L').split('\n').map(function (l, i) {
+        return '<option value="' + (i + 1) + '"' + (i + 1 === dl.farm.farm.media ? ' selected' : '') + '>' + esc(l) + '</option>';
+      }).join('') + '</select></div><div class="sfoot"><button data-m="no">' + esc(Wt('DY_CANCEL')) + '</button><button data-m="ok" class="primary">' +
+      esc(Wt('DY_CREATE')) + '</button></div>';
+    $('modal').classList.remove('hidden');
+    $('modal').onclick = function (ev) {
+      var m = ev.target.closest('[data-m]');
+      if (!m) return;
+      var v = $('dyDate').value, media = +$('dyMedia').value;
+      if (m.getAttribute('data-m') === 'ok' && !/^\d{4}-\d\d-\d\d$/.test(v)) return;
+      $('modal').classList.add('hidden');
+      $('modal').onclick = null;
+      if (m.getAttribute('data-m') !== 'ok') return;
+      var c = dyNewCycle(hid, v, media), farm = JSON.parse(JSON.stringify(dl.farm));
+      farm.cycles.push({ id: c.id, house: hid, start: v, active: true });
+      dySave(c.id, c).then(function () { return dySave('farm', farm); }).then(function () {
+        dl.farm = farm; dl.cyc[c.id] = c; dy.house = hid; renderDiary(); renderDiaryCard();
+      }).catch(function () {});
+    };
+  }
+  function dyFinish() {
+    var c = dyActiveOf(dy.house);
+    if (!c || !confirm(Wt('DY_FINISH_Q'))) return;
+    var farm = JSON.parse(JSON.stringify(dl.farm));
+    farm.cycles.forEach(function (x) { if (x.id === c.id) x.active = false; });
+    dySave('farm', farm).then(function () { dl.farm = farm; delete dl.cyc[c.id]; dy.house = null; renderDiary(); renderDiaryCard(); }).catch(function () {});
+  }
+
+  /* ── 설정(모델 복사본 dy.ed를 고치고, 바뀌었으면 저장 단추 — 글자 입력이 있어서 저장 단추 방식) ── */
+  function dySetHtml() {
+    if (!dy.ed) dy.ed = JSON.parse(JSON.stringify({ farm: dl.farm.farm, houses: dl.farm.houses }));
+    var e = dy.ed, f = e.farm;
+    var sel = function (id, listKey, cur, base) {
+      return '<select id="' + id + '">' + Wt(listKey).split('\n').map(function (l, i) {
+        return '<option value="' + (i + base) + '"' + (i + base === cur ? ' selected' : '') + '>' + esc(l) + '</option>';
+      }).join('') + '</select>';
+    };
+    var h = '<div class="gtitle">' + esc(Wt('DY_FARM')) + '</div>' +
+      '<div class="field"><label>' + esc(Wt('DY_AREA')) + '</label><input id="dyArea" type="number" min="1" inputmode="numeric" value="' + f.area + '"></div>' +
+      '<div class="field"><label>' + esc(Wt('DY_HUMID')) + '</label>' + toggleHtml('dyHumid', f.humid) + '</div>' +
+      '<div class="field"><label>' + esc(Wt('DY_BOILER')) + '</label>' + sel('dyBoiler', 'DY_BOILER_L', f.boiler.type === 'mobile' ? 1 : 0, 0) + '</div>' +
+      '<div class="field"><label>' + esc(Wt('DY_BOILER_N')) + '</label><input id="dyBoilerN" type="number" min="1" inputmode="numeric" value="' + f.boiler.count + '"></div>' +
+      '<div class="field"><label>' + esc(Wt('DY_MEDIA_DEF')) + '</label>' + sel('dyMediaDef', 'DY_MEDIA_L', f.media, 1) + '</div>' +
+      '<div class="gtitle">' + esc(Wt('DY_HOUSES')) + '</div>';
+    e.houses.forEach(function (hs, i) {
+      h += '<div class="dyedit"><input type="text" maxlength="20" data-dname="' + i + '" value="' + esc(hs.name) + '">' +
+        '<input type="number" min="1" inputmode="numeric" data-darea="' + i + '" placeholder="' + esc(Wt('DY_AREA_PH')) + '" value="' + (hs.area || '') + '">' +
+        '<button data-dup="' + i + '"' + (i ? '' : ' disabled') + '>&#x2191;</button><button data-ddown="' + i + '"' + (i < e.houses.length - 1 ? '' : ' disabled') + '>&#x2193;</button>' +
+        '<button class="danger" data-ddel="' + i + '">' + esc(Wt('DY_DEL')) + '</button></div>';
+    });
+    if (!e.houses.length) {
+      h += '<div class="field"><label>' + esc(Wt('DY_COUNT')) + '</label><input id="dyCount" type="number" min="1" max="30" inputmode="numeric" value="3"></div>' +
+        '<div class="field"><label>' + esc(Wt('DY_SCHEME')) + '</label>' + sel('dyScheme', 'DY_SCHEME_L', 0, 0) + '</div>' +
+        '<div class="btnrow"><button data-dmake="1">' + esc(Wt('DY_CREATE')) + '</button></div>';
+    } else h += '<div class="btnrow"><button data-dadd="1">' + esc(Wt('DY_ADD')) + '</button></div>';
+    return h + '<div class="sfoot"><button id="dyApply" class="primary" disabled>' + esc(Wt('DY_APPLY')) + '</button></div>';
+  }
+  function dyDirty() {
+    var b = $('dyApply');
+    if (b) b.disabled = JSON.stringify(dy.ed) === JSON.stringify({ farm: dl.farm.farm, houses: dl.farm.houses });
+  }
+  function dySetWire() {
+    var e = dy.ed, f = e.farm, body = $('sheetBody');
+    var num = function (v, def) { var n = parseInt(v, 10); return n > 0 ? n : def; };
+    $('dyArea').oninput = function () { f.area = num(this.value, f.area); dyDirty(); };
+    $('dyHumid').onchange = function () { f.humid = this.checked; dyDirty(); };
+    $('dyBoiler').onchange = function () { f.boiler.type = this.value === '1' ? 'mobile' : 'fixed'; dyDirty(); };
+    $('dyBoilerN').oninput = function () { f.boiler.count = num(this.value, f.boiler.count); dyDirty(); };
+    $('dyMediaDef').onchange = function () { f.media = +this.value; dyDirty(); };
+    body.querySelectorAll('[data-dname]').forEach(function (el) { el.oninput = function () { e.houses[+el.getAttribute('data-dname')].name = el.value; dyDirty(); }; });
+    body.querySelectorAll('[data-darea]').forEach(function (el) { el.oninput = function () { e.houses[+el.getAttribute('data-darea')].area = num(el.value, null); dyDirty(); }; });
+    dyDirty();
+  }
+  function dySchemeName(s, i) {
+    var v = s === 1 ? String.fromCharCode(65 + i) : s === 2 ? '가나다라마바사아자차카타파하'.charAt(i) || String(i + 1) : String(i + 1);
+    return fmt(Wt('DY_HOUSE_FMT'), v);
+  }
+  function dySetClick(t) {
+    var e = dy.ed, i;
+    if (t.hasAttribute('data-dmake')) {
+      var n = Math.min(30, Math.max(1, parseInt($('dyCount').value, 10) || 1)), s = +$('dyScheme').value;
+      for (i = 0; i < n; i++) e.houses.push({ id: dyId('h'), name: dySchemeName(s, i), area: null });
+    } else if (t.hasAttribute('data-dadd')) e.houses.push({ id: dyId('h'), name: dySchemeName(0, e.houses.length), area: null });
+    else if (t.hasAttribute('data-dup')) { i = +t.getAttribute('data-dup'); e.houses.splice(i - 1, 0, e.houses.splice(i, 1)[0]); }
+    else if (t.hasAttribute('data-ddown')) { i = +t.getAttribute('data-ddown'); e.houses.splice(i + 1, 0, e.houses.splice(i, 1)[0]); }
+    else if (t.hasAttribute('data-ddel')) {
+      i = +t.getAttribute('data-ddel');
+      if (dl.farm.cycles.some(function (c) { return c.house === e.houses[i].id; })) { toast(Wt('DY_HAS_CYCLE')); return; }
+      e.houses.splice(i, 1);
+    } else if (t.id === 'dyApply') {
+      if (e.houses.some(function (h) { return !h.name.trim() || h.name.length > 20; })) { toast(Wt('DY_NAME_BAD')); return; }
+      e.houses.forEach(function (h) { h.name = h.name.trim(); });
+      var farm = JSON.parse(JSON.stringify(dl.farm));
+      farm.farm = JSON.parse(JSON.stringify(e.farm));
+      farm.houses = JSON.parse(JSON.stringify(e.houses));
+      dySave('farm', farm).then(function () { dl.farm = farm; dy.ed = null; toast(Wt('SAVED')); renderDiary(); renderDiaryCard(); }).catch(function () {});
+      return;
+    } else return;
+    renderDiary();
+  }
+  $('sheet').addEventListener('click', function (ev) {
+    if (sheetRender !== renderDiary) return;
+    var t = ev.target.closest('[data-dtab],[data-drange],[data-dtask],[data-dhouse],[data-dnew],[data-dback],[data-dstage],[data-dfinish],[data-dmake],[data-dadd],[data-dup],[data-ddown],[data-ddel],#dyApply');
+    if (!t) return;
+    if (t.hasAttribute('data-dtab')) {
+      var k = t.getAttribute('data-dtab');
+      if (dy.tab === 'set' && k !== 'set') dy.ed = null;   /* 저장 안 한 설정은 버림(다른 팝업과 같음) */
+      dy.tab = k; dy.house = null; renderDiary();
+    }
+    else if (t.hasAttribute('data-drange')) { dy.range = +t.getAttribute('data-drange'); renderDiary(); }
+    else if (t.hasAttribute('data-dtask')) dyTaskModal(t.getAttribute('data-dtask'));
+    else if (t.hasAttribute('data-dnew')) dyNewModal(t.getAttribute('data-dnew'));
+    else if (t.hasAttribute('data-dhouse')) { dy.house = t.getAttribute('data-dhouse'); renderDiary(); }
+    else if (t.hasAttribute('data-dback')) { dy.house = null; renderDiary(); }
+    else if (t.hasAttribute('data-dstage')) dyStageModal(t.getAttribute('data-dstage'));
+    else if (t.hasAttribute('data-dfinish')) dyFinish();
+    else dySetClick(t);
+  });
+
   /* 시트 닫기(X), 행 탭 → 장치 팝업 */
   $('sheet').addEventListener('click', function (ev) {
     var t = ev.target.closest('[data-act]');
     if (t && t.getAttribute('data-act') === 'close') closeSheet();
   });
   $('mainView').addEventListener('click', function (ev) {
+    if (ev.target.closest('[data-diary]')) { openDiary(); return; }   /* 2026-11-26 — 영농일지 카드 */
     if (ev.target.closest('[data-campop]')) { openCamera(); return; }
     if (ev.target.closest('[data-statspop]')) { openStats(); return; }     /* 센서 판넬 제목 → 통계 팝업(콘과 같음) */   /* 카메라 판넬 제목 → 카메라 팝업(콘과 같음) */
     var rrow = ev.target.closest('[data-relay]');
@@ -2617,7 +3127,7 @@
 
   applyTexts();
   if (REMOTE) { show('main'); rmStage('RM_CONNECTING'); }   /* 원격 — 열자마자 판넬 틀과 연결 단계 */
-  poll();
+  connect();   /* 새로 열기·새로 고침 = 접속 */
   setTimeout(fixZoom, 500);
 })();
 </script>

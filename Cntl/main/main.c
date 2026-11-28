@@ -42,6 +42,7 @@
 #include "web_auth.h"
 #include "web_session.h"
 #include "web_api.h"
+#include "diary_api.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -963,7 +964,9 @@ static bool is_safe_asset_filename(const char *name)
 
 static esp_err_t admin_upload_post_handler(httpd_req_t *req)
 {
-    WEB_AUTH_REQUIRE(req);  /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요 */
+    /* 2026-10-03(할 일 AD) — 바깥에 열리는 웹이라 로그인 필요. 2026-11-26 — 개발용 키도 받음(웹 로그인이 하나뿐이라 도구가 로그인하면
+     * 사용자 휴대폰이 로그아웃됨. 키는 LAN에서만 — 원격 터널은 이 머리글을 안 넘김). 출시 때 개발용 키와 함께 지울 것 */
+    WEB_AUTH_REQUIRE_OR_DEV(req);
     char query[64] = { 0 };
     char filename[64] = { 0 };
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
@@ -1182,6 +1185,7 @@ void web_dashboard_start(void)
     web_auth_register_handlers(server);
     web_session_register_handlers(server);
     web_api_register_handlers(server);
+    diary_api_register_handlers(server);   /* 2026-11-26 — 영농일지 저장(GET/POST /api/diary) */
     /* 2026-08-21 — 성공할 때도 같은 여유메모리를 남김(사용자 지시) — 실패할 때만 찍으면
      * "언제부터 빠듯해지기 시작했는지" 추세를 못 봄. 5005는 이 시점 내부RAM이 간당간당할
      * 때만 뜨는 경계선 증상이라, 성공한 부팅들의 수치도 같이 쌓여야 나중에 진짜 임계점을
